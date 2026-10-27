@@ -1,0 +1,180 @@
+diff --git a/chrome/browser/speech/extension_api/tts_engine_extension_api.cc b/chrome/browser/speech/extension_api/tts_engine_extension_api.cc
+--- a/chrome/browser/speech/extension_api/tts_engine_extension_api.cc
++++ b/chrome/browser/speech/extension_api/tts_engine_extension_api.cc
+@@ -13,10 +13,13 @@
+ #include "ash/constants/ash_extension_constants.h"
+ #include "ash/webui/settings/public/constants/routes_util.h"
+ #include "base/compiler_specific.h"
++#include "base/functional/bind.h"
+ #include "base/i18n/language_tag.h"
+ #include "base/i18n/tag_converters.h"
++#include "base/location.h"
+ #include "base/no_destructor.h"
+ #include "base/strings/utf_string_conversions.h"
++#include "base/task/single_thread_task_runner.h"
+ #include "base/values.h"
+ #include "build/build_config.h"
+ #include "chrome/browser/profiles/profile.h"
+@@ -32,6 +35,7 @@
+ #include "extensions/browser/extension_prefs.h"
+ #include "extensions/browser/extension_registry.h"
+ #include "extensions/browser/extension_system.h"
++#include "extensions/browser/extension_util.h"
+ #include "extensions/browser/process_manager.h"
+ #include "extensions/common/api/speech/tts_engine_manifest_handler.h"
+ #include "extensions/common/extension.h"
+@@ -82,6 +86,12 @@
+   extensions::ExtensionHost* host =
+       extensions::ProcessManager::Get(profile)->GetBackgroundHostForExtension(
+           extension_id);
++#if BUILDFLAG(IS_ANDROID)
++  // MV3 service workers do not have a background page to receive this warning.
++  if (!host || !host->host_contents()) {
++    return;
++  }
++#endif
+   host->host_contents()->GetPrimaryMainFrame()->AddMessageToConsole(
+       blink::mojom::ConsoleMessageLevel::kWarning,
+       constants::kErrorMissingPauseOrResume);
+@@ -273,6 +283,11 @@
+     content::BrowserContext* browser_context,
+     const GURL& source_url,
+     std::vector<content::VoiceData>* out_voices) {
++#if BUILDFLAG(IS_ANDROID)
++  if (!browser_context || browser_context->ShutdownStarted()) {
++    return;
++  }
++#endif
+   Profile* profile = Profile::FromBrowserContext(browser_context);
+   EventRouter* event_router = EventRouter::Get(profile);
+   DCHECK(event_router);
+@@ -285,6 +300,12 @@
+   extensions::ExtensionSet::const_iterator iter;
+   for (iter = extensions.begin(); iter != extensions.end(); ++iter) {
+     const Extension* extension = iter->get();
++#if BUILDFLAG(IS_ANDROID)
++    if (profile->IsOffTheRecord() &&
++        !extensions::util::IsIncognitoEnabled(extension->id(), profile)) {
++      continue;
++    }
++#endif
+ 
+     // A valid tts engine should have a speak and a stop listener. Either speak
+     // variant is acceptable.
+@@ -342,21 +363,43 @@
+ 
+ void TtsExtensionEngine::Speak(content::TtsUtterance* utterance,
+                                const content::VoiceData& voice) {
++#if BUILDFLAG(IS_ANDROID)
++  auto on_failure = base::BindRepeating(
++      [](int utterance_id) {
++        content::TtsController::GetInstance()->OnTtsEvent(
++            utterance_id, content::TTS_EVENT_ERROR, -1, -1,
++            "The speech extension is unavailable.");
++      },
++      utterance->GetId());
++  content::BrowserContext* context = utterance->GetBrowserContext();
++  if (!context || context->ShutdownStarted()) {
++    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
++        FROM_HERE, base::BindOnce(on_failure));
++    return;
++  }
++#endif
+   base::ListValue args = BuildSpeakArgs(utterance, voice);
+   Profile* profile =
+       Profile::FromBrowserContext(utterance->GetBrowserContext());
+   extensions::EventRouter* event_router = EventRouter::Get(profile);
+   const auto& engine_id = utterance->GetEngineId();
++#if !BUILDFLAG(IS_ANDROID)
+   if (!event_router->ExtensionHasEventListener(engine_id,
+                                                tts_engine_events::kOnSpeak)) {
+     // The extension removed its event listener after we processed the speak
+     // call matching its voice.
+     return;
+   }
+-
++#endif
+   auto event = std::make_unique<extensions::Event>(
+       extensions::events::TTS_ENGINE_ON_SPEAK, tts_engine_events::kOnSpeak,
+       std::move(args), profile);
++#if BUILDFLAG(IS_ANDROID)
++  // Includes service-worker startup failure and a listener removed since voice
++  // enumeration. The router posts failures, so the controller can finish its
++  // current SpeakNow call before completing the utterance.
++  event->cannot_dispatch_callback = std::move(on_failure);
++#endif
+   event_router->DispatchEventToExtension(engine_id, std::move(event));
+ }
+ 
+@@ -366,6 +409,11 @@
+ 
+ void TtsExtensionEngine::Stop(content::BrowserContext* browser_context,
+                               const std::string& engine_id) {
++#if BUILDFLAG(IS_ANDROID)
++  if (!browser_context || browser_context->ShutdownStarted()) {
++    return;
++  }
++#endif
+   Profile* profile = Profile::FromBrowserContext(browser_context);
+   auto event = std::make_unique<extensions::Event>(
+       extensions::events::TTS_ENGINE_ON_STOP, tts_engine_events::kOnStop,
+@@ -380,6 +428,11 @@
+ 
+ void TtsExtensionEngine::Pause(content::BrowserContext* browser_context,
+                                const std::string& engine_id) {
++#if BUILDFLAG(IS_ANDROID)
++  if (!browser_context || browser_context->ShutdownStarted()) {
++    return;
++  }
++#endif
+   Profile* profile = Profile::FromBrowserContext(browser_context);
+   auto event = std::make_unique<extensions::Event>(
+       extensions::events::TTS_ENGINE_ON_PAUSE, tts_engine_events::kOnPause,
+@@ -395,6 +448,11 @@
+ 
+ void TtsExtensionEngine::Resume(content::BrowserContext* browser_context,
+                                 const std::string& engine_id) {
++#if BUILDFLAG(IS_ANDROID)
++  if (!browser_context || browser_context->ShutdownStarted()) {
++    return;
++  }
++#endif
+   Profile* profile = Profile::FromBrowserContext(browser_context);
+   auto event = std::make_unique<extensions::Event>(
+       extensions::events::TTS_ENGINE_ON_RESUME, tts_engine_events::kOnResume,
+@@ -419,6 +477,11 @@
+       constants::kUninstallImmediatelyKey, uninstall_immediately);
+   args.Append((std::move(removal_options)));
+ 
++#if BUILDFLAG(IS_ANDROID)
++  if (!browser_context || browser_context->ShutdownStarted()) {
++    return;
++  }
++#endif
+   Profile* profile = Profile::FromBrowserContext(browser_context);
+   auto event = std::make_unique<extensions::Event>(
+       extensions::events::TTS_ENGINE_ON_UNINSTALL_LANGUAGE_REQUEST,
+@@ -438,6 +501,11 @@
+   base::ListValue args =
+       BuildLanguagePackArgs(lang, client_id, tts_client_source);
+ 
++#if BUILDFLAG(IS_ANDROID)
++  if (!browser_context || browser_context->ShutdownStarted()) {
++    return;
++  }
++#endif
+   Profile* profile = Profile::FromBrowserContext(browser_context);
+   auto event = std::make_unique<extensions::Event>(
+       extensions::events::TTS_ENGINE_ON_INSTALL_LANGUAGE_REQUEST,
+@@ -458,6 +526,11 @@
+   base::ListValue args =
+       BuildLanguagePackArgs(lang, client_id, tts_client_source);
+ 
++#if BUILDFLAG(IS_ANDROID)
++  if (!browser_context || browser_context->ShutdownStarted()) {
++    return;
++  }
++#endif
+   Profile* profile = Profile::FromBrowserContext(browser_context);
+   auto event = std::make_unique<extensions::Event>(
+       extensions::events::TTS_ENGINE_ON_LANGUAGE_STATUS_REQUEST,

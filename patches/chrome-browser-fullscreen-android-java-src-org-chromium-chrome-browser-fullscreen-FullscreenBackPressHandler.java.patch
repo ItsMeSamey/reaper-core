@@ -1,0 +1,109 @@
+diff --git a/chrome/browser/fullscreen/android/java/src/org/chromium/chrome/browser/fullscreen/FullscreenBackPressHandler.java b/chrome/browser/fullscreen/android/java/src/org/chromium/chrome/browser/fullscreen/FullscreenBackPressHandler.java
+index 71f433d98b7ba3f83f0e9e5d90d50a1a0354b0a0..53f2515ea06b6a525960f98f0350851e40b360d5 100644
+--- a/chrome/browser/fullscreen/android/java/src/org/chromium/chrome/browser/fullscreen/FullscreenBackPressHandler.java
++++ b/chrome/browser/fullscreen/android/java/src/org/chromium/chrome/browser/fullscreen/FullscreenBackPressHandler.java
+@@ -4,34 +4,93 @@
+ 
+ package org.chromium.chrome.browser.fullscreen;
+ 
++import org.chromium.base.Callback;
+ import org.chromium.base.supplier.NonNullObservableSupplier;
++import org.chromium.base.supplier.ObservableSuppliers;
++import org.chromium.base.supplier.SettableNonNullObservableSupplier;
+ import org.chromium.build.annotations.NullMarked;
++import org.chromium.build.annotations.Nullable;
+ import org.chromium.components.browser_ui.widget.gesture.BackPressHandler;
+ 
+-/**
+- * A {@link BackPressHandler} which observes fullscreen mode and exits fullscreen mode if back
+- * press is performed.
+- */
++/** Exits browser fullscreen while preserving the ordinary tab/exclusive-access Back handler. */
+ @NullMarked
+ public class FullscreenBackPressHandler implements BackPressHandler {
+     private final FullscreenManager mFullscreenManager;
++    private boolean mDestroyed;
++    private final @Nullable BackPressHandler mTabHandler;
++    private final NonNullObservableSupplier<Boolean> mUiModeSupplier;
++    private final @Nullable NonNullObservableSupplier<Boolean> mTabHandlerSupplier;
++    private final SettableNonNullObservableSupplier<Boolean> mHandleBackPressSupplier =
++            ObservableSuppliers.createNonNull(false);
++    private final Callback<Boolean> mStateChanged = ignored -> updateState();
+ 
+     public FullscreenBackPressHandler(FullscreenManager fullscreenManager) {
++        this(fullscreenManager, null);
++    }
++
++    public FullscreenBackPressHandler(
++            FullscreenManager fullscreenManager, @Nullable BackPressHandler tabHandler) {
+         mFullscreenManager = fullscreenManager;
++        mTabHandler = tabHandler;
++        mUiModeSupplier = fullscreenManager.getFullscreenUiModeSupplier();
++        mTabHandlerSupplier =
++                tabHandler == null ? null : tabHandler.getHandleBackPressChangedSupplier();
++        mUiModeSupplier.addSyncObserverAndPostIfNonNull(mStateChanged);
++        if (mTabHandlerSupplier != null) {
++            mTabHandlerSupplier.addSyncObserverAndPostIfNonNull(mStateChanged);
++        }
++        updateState();
++    }
++
++    private void updateState() {
++        if (mDestroyed) return;
++        mHandleBackPressSupplier.set(
++                mUiModeSupplier.get()
++                        || (mTabHandlerSupplier != null && mTabHandlerSupplier.get()));
+     }
+ 
+     @Override
+     public @BackPressResult int handleBackPress() {
+-        int res =
+-                mFullscreenManager.getPersistentFullscreenMode()
+-                        ? BackPressResult.SUCCESS
+-                        : BackPressResult.FAILURE;
+-        mFullscreenManager.exitPersistentFullscreenMode();
+-        return res;
++        if (mDestroyed) return BackPressResult.FAILURE;
++        boolean browserFullscreen = mFullscreenManager.getBrowserFullscreenMode();
++        if (browserFullscreen) mFullscreenManager.setBrowserFullscreenMode(false);
++        if (mTabHandler != null) {
++            if (mTabHandlerSupplier != null && mTabHandlerSupplier.get()) {
++                return mTabHandler.handleBackPress();
++            }
++            return browserFullscreen ? BackPressResult.SUCCESS : BackPressResult.FAILURE;
++        }
++        boolean tabFullscreen = mFullscreenManager.getPersistentFullscreenMode();
++        if (tabFullscreen) mFullscreenManager.exitPersistentFullscreenMode();
++        return browserFullscreen || tabFullscreen
++                ? BackPressResult.SUCCESS
++                : BackPressResult.FAILURE;
++    }
++
++    @Override
++    public boolean invokeBackActionOnEscape() {
++        return mFullscreenManager.getBrowserFullscreenMode()
++                || mTabHandler == null
++                || mTabHandler.invokeBackActionOnEscape();
++    }
++
++    @Override
++    public @Nullable Boolean handleEscPress() {
++        if (mFullscreenManager.getBrowserFullscreenMode()) {
++            return handleBackPress() == BackPressResult.SUCCESS;
++        }
++        return mTabHandler == null ? null : mTabHandler.handleEscPress();
+     }
+ 
+     @Override
+     public NonNullObservableSupplier<Boolean> getHandleBackPressChangedSupplier() {
+-        return mFullscreenManager.getPersistentFullscreenModeSupplier();
++        return mHandleBackPressSupplier;
++    }
++
++    /** Detaches only this wrapper's suppliers; its tab delegate remains owned by the caller. */
++    public void destroy() {
++        mDestroyed = true;
++        mUiModeSupplier.removeObserver(mStateChanged);
++        if (mTabHandlerSupplier != null) mTabHandlerSupplier.removeObserver(mStateChanged);
+     }
+ }

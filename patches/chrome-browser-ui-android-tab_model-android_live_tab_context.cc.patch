@@ -1,0 +1,162 @@
+diff --git a/chrome/browser/ui/android/tab_model/android_live_tab_context.cc b/chrome/browser/ui/android/tab_model/android_live_tab_context.cc
+index 44a4ea78a21ad9c0321f22e1ca09cc31988ddb87..65e7d8e373347cfd902807dd250d91ccdbac47bc 100644
+--- a/chrome/browser/ui/android/tab_model/android_live_tab_context.cc
++++ b/chrome/browser/ui/android/tab_model/android_live_tab_context.cc
+@@ -4,16 +4,22 @@
+ 
+ #include "chrome/browser/ui/android/tab_model/android_live_tab_context.h"
+ 
++#include <algorithm>
+ #include <memory>
+ #include <optional>
+ 
++#include "brave/browser/containers/android/containers_tab_lifecycle.h"
++#include "base/android/jni_android.h"
++#include "base/android/jni_array.h"
++#include "base/android/jni_string.h"
++#include "base/android/token_android.h"
+ #include "base/notimplemented.h"
+ #include "base/uuid.h"
+ #include "chrome/browser/android/tab_android.h"
+-#include "chrome/browser/glic/glic_tab_restore_helper.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/sessions/session_restore.h"
+ #include "chrome/browser/ui/android/tab_model/tab_model.h"
++#include "chrome/browser/ui/android/tab_model/tab_model_jni_bridge.h"
+ #include "chrome/browser/ui/android/tab_model/tab_model_list.h"
+ #include "components/sessions/content/content_live_tab.h"
+ #include "components/sessions/content/content_serialized_navigation_builder.h"
+@@ -21,14 +27,20 @@
+ #include "components/sessions/core/session_types.h"
+ #include "components/sessions/core/tab_restore_types.h"
+ #include "components/split_tabs/split_tab_id.h"
++#include "components/split_tabs/split_tab_visual_data.h"
+ #include "components/tab_groups/tab_group_id.h"
+ #include "components/tab_groups/tab_group_visual_data.h"
++#include "components/tabs/public/android/jni_conversion.h"
++#include "components/tabs/public/split_tab_collection.h"
++#include "components/tabs/public/split_tab_data.h"
+ #include "content/public/browser/browser_context.h"
+ #include "content/public/browser/navigation_controller.h"
+ #include "content/public/browser/navigation_entry.h"
+ #include "content/public/browser/restore_type.h"
++#include "content/public/browser/web_contents.h"
+ #include "ui/base/mojom/window_show_state.mojom.h"
+ #include "ui/base/window_open_disposition.h"
++#include "url/android/gurl_android.h"
+ 
+ AndroidLiveTabContext::AndroidLiveTabContext(TabModel* tab_model)
+     : tab_model_(tab_model) {}
+@@ -85,10 +97,6 @@
+ std::map<std::string, std::string> AndroidLiveTabContext::GetExtraDataForTab(
+     int index) const {
+   std::map<std::string, std::string> extra_data;
+-  TabAndroid* tab_android = tab_model_->GetTabAt(index);
+-  if (tab_android) {
+-    glic::PopulateGlicExtraData(tab_android, &extra_data);
+-  }
+   return extra_data;
+ }
+ 
+@@ -105,9 +113,11 @@
+ 
+ std::optional<split_tabs::SplitTabId> AndroidLiveTabContext::GetSplitForTab(
+     int index) const {
+-  // Split views are not currently supported on the Android platform. This
+-  // function would get the SplitTabId implementation of a given tab.
+-  return std::nullopt;
++  if (index < 0 || index >= tab_model_->GetTabCount()) {
++    return std::nullopt;
++  }
++  const TabAndroid* tab = tab_model_->GetTabAt(index);
++  return tab ? tab->GetSplit() : std::nullopt;
+ }
+ 
+ const tab_groups::TabGroupVisualData*
+@@ -123,8 +133,20 @@
+ const split_tabs::SplitTabVisualData*
+ AndroidLiveTabContext::GetVisualDataForSplit(
+     const split_tabs::SplitTabId& split_id) const {
+-  // Split views are not currently supported on the Android platform. This
+-  // function would return the visual data of the split (orientation and ratio).
++  for (int i = 0; i < tab_model_->GetTabCount(); ++i) {
++    const TabAndroid* tab = tab_model_->GetTabAt(i);
++    if (!tab || tab->GetSplit() != split_id) {
++      continue;
++    }
++    for (const tabs::TabCollection* collection = tab->GetParentCollection();
++         collection; collection = collection->GetParentCollection()) {
++      if (collection->type() == tabs::TabCollection::Type::SPLIT) {
++        return static_cast<const tabs::SplitTabCollection*>(collection)
++            ->data()
++            ->visual_data();
++      }
++    }
++  }
+   return nullptr;
+ }
+ 
+@@ -206,13 +228,15 @@
+   // Restore web contents with navigation history. This is used for background
+   // restore so start without a renderer.
+   auto params = content::WebContents::CreateParams(profile);
++  auto container_id = containers::android::ConfigureContainerRestore(
++      profile, tab.navigations, tab.normalized_navigation_index(), &params);
++  if (!container_id) return nullptr;
+   params.desired_renderer_state =
+       content::WebContents::CreateParams::kNoRendererProcess;
+   params.initially_hidden = true;
+   std::unique_ptr<content::WebContents> web_contents =
+       content::WebContents::Create(params);
+   content::WebContents* raw_web_contents = web_contents.get();
+-  glic::RestoreGlicStateFromExtraData(raw_web_contents, tab.extra_data);
+   web_contents->GetController().Restore(tab.normalized_navigation_index(),
+                                         content::RestoreType::kRestored,
+                                         &nav_entries);
+@@ -251,6 +275,7 @@
+   content::WebContents* web_contents = tab_model_->GetActiveWebContents();
+   web_contents = SessionRestore::RestoreForeignSessionTab(
+       web_contents, session_tab, WindowOpenDisposition::CURRENT_TAB);
++  if (!web_contents) return nullptr;
+   web_contents->GetController().LoadIfNecessary();
+   return sessions::ContentLiveTab::GetOrCreateForWebContents(web_contents);
+ }
+@@ -260,10 +285,34 @@
+     sessions::LiveTab* trailing_tab,
+     split_tabs::SplitTabId split_id,
+     const split_tabs::SplitTabVisualData& visual_data) {
+-  // Split views are currently not supported on the Android platform.
+-  // This function serves as a placeholder to store the logic that would combine
+-  // two tabs into a singular SplitView object.
+-  NOTIMPLEMENTED();
++  if (!leading_tab || !trailing_tab) {
++    return;
++  }
++  auto* leading = TabAndroid::FromWebContents(
++      &static_cast<sessions::ContentLiveTab*>(leading_tab)->GetWebContents());
++  auto* trailing = TabAndroid::FromWebContents(
++      &static_cast<sessions::ContentLiveTab*>(trailing_tab)->GetWebContents());
++  if (leading && trailing) {
++    RestoreSplitByTabIds({leading->GetAndroidId(), trailing->GetAndroidId()},
++                         split_id, visual_data);
++  }
++}
++
++bool AndroidLiveTabContext::RestoreSplitByTabIds(
++    const std::vector<int>& tab_ids,
++    split_tabs::SplitTabId split_id,
++    const split_tabs::SplitTabVisualData& visual_data) {
++  const auto& models = TabModelList::models();
++  if (std::ranges::find(models, tab_model_) == models.end()) {
++    return false;
++  }
++  JNIEnv* env = base::android::AttachCurrentThread();
++  auto model = tab_model_->GetJavaObject();
++  if (!model)
++    return false;
++  return TabModelJniBridge::RestoreSplit(
++      env, model, split_id.token(), tab_ids,
++      static_cast<int>(visual_data.split_layout()), visual_data.split_ratio());
+ }
+ 
+ // Currently does nothing.

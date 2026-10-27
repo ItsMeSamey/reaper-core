@@ -73,23 +73,58 @@ public class BraveMediaSessionHelperTest {
 
     @Test
     @SmallTest
-    public void isBraveTalk_recognizesProductionHost() {
+    public void talkClassesAbsentAndCoreMediaConstructorsRetained()
+            throws ReflectiveOperationException {
+        ClassLoader loader = getClass().getClassLoader();
+        Class.forName(
+                        "org.chromium.components.browser_ui.notifications.ForegroundServiceUtils",
+                        false, loader)
+                .getDeclaredConstructor();
+        Class.forName(
+                        "org.chromium.chrome.browser.media.ui.ChromeMediaNotificationControllerDelegate",
+                        false, loader)
+                .getDeclaredConstructor(int.class, int.class);
+        Class.forName(
+                        "org.chromium.chrome.browser.media.ui.MediaSessionTabHelper", false, loader)
+                .getDeclaredConstructor(
+                        Class.forName("org.chromium.chrome.browser.tab.Tab", false, loader));
+        for (String name : new String[] {
+                "org.chromium.components.browser_ui.notifications.BraveForegroundServiceUtils",
+                "org.chromium.chrome.browser.media.ui.BraveMediaNotificationControllerDelegate",
+                "org.chromium.chrome.browser.media.ui.BraveMediaSessionTabHelper",
+                "org.chromium.chrome.browser.media.ui.BraveMediaNotificationControllerServices$PlaybackListenerMicService",
+        }) {
+            try {
+                Class.forName(name, false, loader);
+                throw new AssertionError("Removed Talk class is packaged: " + name);
+            } catch (ClassNotFoundException expected) {
+                // Only the Talk integration is absent; ordinary media constructors above exist.
+            }
+        }
+    }
+
+    @Test
+    @SmallTest
+    public void formerTalkHost_hasNoPlaybackPrivilege() {
         mockUrl("https://talk.brave.com/room");
-        assertTrue(BraveMediaSessionHelper.isBraveTalk(mWebContents));
+        assertFalse(mHelper.shouldSuppressMediaPause(mWebContents));
+        assertFalse(mHelper.shouldForcePlayingState(mWebContents));
     }
 
     @Test
     @SmallTest
-    public void isBraveTalk_rejectsHttpScheme() {
+    public void formerTalkHttpHost_hasNoPlaybackPrivilege() {
         mockUrl("http://talk.brave.com/room");
-        assertFalse(BraveMediaSessionHelper.isBraveTalk(mWebContents));
+        assertFalse(mHelper.shouldSuppressMediaPause(mWebContents));
+        assertFalse(mHelper.shouldForcePlayingState(mWebContents));
     }
 
     @Test
     @SmallTest
-    public void isBraveTalk_rejectsUnrelatedHost() {
+    public void ordinaryHost_hasNoPlaybackPrivilege() {
         mockUrl("https://www.example.com/");
-        assertFalse(BraveMediaSessionHelper.isBraveTalk(mWebContents));
+        assertFalse(mHelper.shouldSuppressMediaPause(mWebContents));
+        assertFalse(mHelper.shouldForcePlayingState(mWebContents));
     }
 
     @Test
@@ -177,10 +212,11 @@ public class BraveMediaSessionHelperTest {
 
     @Test
     @SmallTest
-    public void shouldForcePlayingState_trueForBraveTalk() {
+    public void shouldForcePlayingState_falseForFormerTalkWithBackgroundPlayback() {
         mockUrl("https://talk.brave.com/room");
+        CommandLine.getInstance().appendSwitch(DISABLE_BACKGROUND_MEDIA_SUSPEND);
 
-        assertTrue(mHelper.shouldForcePlayingState(mWebContents));
+        assertFalse(mHelper.shouldForcePlayingState(mWebContents));
     }
 
     @Test
@@ -277,11 +313,11 @@ public class BraveMediaSessionHelperTest {
 
     @Test
     @SmallTest
-    public void reloadKeepsBraveTalkMediaNotification() {
+    public void formerTalkReloadDoesNotCreateUncontrollableMediaNotification() {
         NativeLibraryTestUtils.loadNativeLibraryNoBrowserProcess();
         ThreadUtils.runOnUiThreadBlocking(
                 () -> {
-                    // Brave Talk keeps controls even with background playback disabled.
+                    // A former Talk host follows the ordinary Chromium media-session lifecycle.
                     CommandLine.getInstance().removeSwitch(DISABLE_BACKGROUND_MEDIA_SUSPEND);
                     MediaSessionHelper.Delegate delegate = mock(MediaSessionHelper.Delegate.class);
                     MediaSessionHelper helper =
@@ -292,19 +328,16 @@ public class BraveMediaSessionHelperTest {
                         helper.mWebContentsObserver.didFinishNavigationInPrimaryMainFrame(
                                 navigation);
 
-                        // Talk does not require a prior controllable session to keep controls.
+                        // An uncontrollable session must not synthesize playback controls.
                         helper.mMediaSessionObserver.mediaSessionStateChanged(false, true);
-                        assertFalse(helper.mNotificationInfoBuilder.build().isPaused);
+                        assertNull(helper.mNotificationInfoBuilder);
                         clearInvocations(delegate);
 
-                        // Reloading Talk must keep its controls, unlike the YouTube case.
                         helper.mWebContentsObserver.didFinishNavigationInPrimaryMainFrame(
                                 navigation);
-                        assertFalse(helper.mNotificationInfoBuilder.build().isPaused);
-
                         helper.mMediaSessionObserver.mediaSessionStateChanged(false, true);
-                        assertFalse(helper.mNotificationInfoBuilder.build().isPaused);
-                        verify(delegate, never()).hideMediaNotification();
+                        assertNull(helper.mNotificationInfoBuilder);
+                        verify(delegate, never()).showMediaNotification(any());
                     } finally {
                         helper.destroy();
                         MediaSessionHelper.setOverriddenMediaSessionForTesting(null);

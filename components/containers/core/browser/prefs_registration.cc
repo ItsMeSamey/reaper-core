@@ -7,6 +7,7 @@
 
 #include "base/metrics/field_trial_params.h"
 #include "base/version_info/channel.h"
+#include "build/build_config.h"
 #include "brave/components/containers/core/browser/default_containers_list.h"
 #include "brave/components/containers/core/browser/pref_names.h"
 #include "brave/components/containers/core/browser/prefs.h"
@@ -18,9 +19,13 @@ namespace containers {
 namespace {
 
 bool GetContainersEnabledPrefDefault(version_info::Channel channel) {
+#if BUILDFLAG(IS_ANDROID)
+  return true;
+#else
   const bool enabled_by_default = channel != version_info::Channel::STABLE;
   return base::GetFieldTrialParamByFeatureAsBool(
       features::kContainers, "enabled_by_default", enabled_by_default);
+#endif
 }
 
 }  // namespace

@@ -1,0 +1,101 @@
+diff --git a/chrome/android/features/keyboard_accessory/internal/java/src/org/chromium/chrome/browser/keyboard_accessory/ManualFillingMediator.java b/chrome/android/features/keyboard_accessory/internal/java/src/org/chromium/chrome/browser/keyboard_accessory/ManualFillingMediator.java
+--- a/chrome/android/features/keyboard_accessory/internal/java/src/org/chromium/chrome/browser/keyboard_accessory/ManualFillingMediator.java
++++ b/chrome/android/features/keyboard_accessory/internal/java/src/org/chromium/chrome/browser/keyboard_accessory/ManualFillingMediator.java
+@@ -64,7 +64,6 @@
+ import org.chromium.chrome.browser.keyboard_accessory.sheet_tabs.AddressAccessorySheetCoordinator;
+ import org.chromium.chrome.browser.keyboard_accessory.sheet_tabs.CreditCardAccessorySheetCoordinator;
+ import org.chromium.chrome.browser.keyboard_accessory.sheet_tabs.PasswordAccessorySheetCoordinator;
+-import org.chromium.chrome.browser.keyboard_accessory.utils.ManualFillingMetricsRecorder;
+ import org.chromium.chrome.browser.profiles.Profile;
+ import org.chromium.chrome.browser.tab.Tab;
+ import org.chromium.chrome.browser.tab.TabHidingType;
+@@ -134,7 +133,6 @@
+     private final HashSet<Tab> mObservedTabs = new HashSet<>();
+     private KeyboardAccessoryCoordinator mKeyboardAccessory;
+     private AccessorySheetCoordinator mAccessorySheet;
+-    private boolean mWaitingForFetch;
+     private ChromeActivity mActivity; // Used to control the keyboard.
+     private TabModelSelectorTabModelObserver mTabModelObserver;
+     private BottomSheetController mBottomSheetController;
+@@ -240,7 +238,6 @@
+         assert mActivity != null;
+         mWindowAndroid = windowAndroid;
+         mKeyboardAccessory = keyboardAccessory;
+-        mKeyboardAccessory.setAtMemoryCallback(this::onAtMemoryClicked);
+         mBottomSheetController = sheetController;
+         mIsContextualSearchOpened = isContextualSearchOpened;
+         mSoftKeyboardDelegate = keyboardDelegate;
+@@ -468,6 +465,10 @@
+             boolean isContentEditable) {
+         mModel.set(SHOULD_SHOW_ON_LARGE_FORM_FACTOR, shouldShowOnLargeFormFactor);
+         mModel.set(IS_CONTENT_EDITABLE, isContentEditable);
++        if (isContentEditable) {
++            hide();
++            return;
++        }
+         showWithKeyboardExtensionState(waitForKeyboard);
+     }
+ 
+@@ -510,34 +511,6 @@
+         // Autofill suggestions are invalidated on rotation. Dismissing all filling UI forces
+         // the user to interact with the field they want to edit. This refreshes Autofill.
+         hideSoftKeyboard();
+-    }
+-
+-    private void onAtMemoryClicked() {
+-        WebContents webContents = mActivity.getCurrentWebContents();
+-        if (webContents != null && !webContents.isDestroyed()) {
+-            ManualFillingMetricsRecorder.recordActionSelected(
+-                    AccessoryAction.SHOW_AT_MEMORY_BOTTOMSHEET);
+-            ManualFillingComponentBridge.onOptionSelectedForWebContents(
+-                    webContents, AccessoryAction.SHOW_AT_MEMORY_BOTTOMSHEET);
+-        }
+-    }
+-
+-    private void updateAtMemoryEnablement() {
+-        WebContents webContents = mActivity != null ? mActivity.getCurrentWebContents() : null;
+-        boolean enabled = false;
+-        if (webContents != null && !webContents.isDestroyed()) {
+-            enabled = ManualFillingComponentBridge.isAtMemoryEnabled(webContents);
+-            if (!enabled) {
+-                // Hide the AtMemory bottom sheet if not enabled.
+-                ManualFillingComponentBridge.hideAtMemoryBottomSheet(webContents);
+-            }
+-        }
+-        mKeyboardAccessory.setAtMemoryEnabled(enabled);
+-        // If AtMemory becomes disabled while focused on a contenteditable element, hide the
+-        // accessory to avoid displaying an empty bar.
+-        if (mModel.get(IS_CONTENT_EDITABLE) && !enabled) {
+-            hide();
+-        }
+     }
+ 
+     void resume() {
+@@ -1228,9 +1201,9 @@
+         TraceEvent.begin("ManualFillingMediator#refreshTabs");
+         ManualFillingState state = mStateCache.getStateFor(mActivity.getCurrentWebContents());
+         state.notifyObservers();
+-        updateAtMemoryEnablement();
+-        // For contenteditable fields, provide empty tabs so that only the AtMemory
+-        // button is displayed without clearing cached tabs in ManualFillingState.
++        // Contenteditable fields have no supported fallback sheet. Keep their cached tabs
++        // intact for the next ordinary form field, and avoid displaying an empty accessory.
++        if (mModel.get(IS_CONTENT_EDITABLE)) hide();
+         KeyboardAccessoryData.Tab[] tabs =
+                 mModel.get(IS_CONTENT_EDITABLE)
+                         ? new KeyboardAccessoryData.Tab[0]
+@@ -1418,14 +1391,4 @@
+         return mKeyboardAccessory;
+     }
+ 
+-    void setWaitingForFetch(boolean waiting) {
+-        mWaitingForFetch = waiting;
+-    }
+-
+-    void dismissIfWaitingForFetch() {
+-        if (mWaitingForFetch) {
+-            mWaitingForFetch = false;
+-            dismiss();
+-        }
+-    }
+ }

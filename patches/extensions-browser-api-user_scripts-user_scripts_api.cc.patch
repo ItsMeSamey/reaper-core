@@ -1,0 +1,280 @@
+diff --git a/extensions/browser/api/user_scripts/user_scripts_api.cc b/extensions/browser/api/user_scripts/user_scripts_api.cc
+index 0cdebf13660c161e925dd688354b4623e4c1c427..9b6cbdfdb1d7d3232a82db6844d72ec61310aa62 100644
+--- a/extensions/browser/api/user_scripts/user_scripts_api.cc
++++ b/extensions/browser/api/user_scripts/user_scripts_api.cc
+@@ -4,6 +4,7 @@
+ 
+ #include "extensions/browser/api/user_scripts/user_scripts_api.h"
+ 
++#include <algorithm>
+ #include <memory>
+ #include <optional>
+ #include <string>
+@@ -16,6 +17,7 @@
+ #include "base/strings/stringprintf.h"
+ #include "base/strings/utf_string_conversions.h"
+ #include "base/types/optional_util.h"
++#include "build/build_config.h"
+ #include "extensions/browser/extension_file_task_runner.h"
+ #include "extensions/browser/extension_system.h"
+ #include "extensions/browser/extension_user_script_loader.h"
+@@ -310,7 +312,11 @@
+ 
+   // Add new script IDs now in case another call with the same script IDs is
+   // made immediately following this one.
++#if BUILDFLAG(IS_ANDROID)
++  const auto operation = loader->BeginDynamicScriptOperation(new_script_ids);
++#else
+   loader->AddPendingDynamicScriptIDs(std::move(new_script_ids));
++#endif
+ 
+   GetExtensionFileTaskRunner()->PostTaskAndReplyWithResult(
+       FROM_HERE,
+@@ -318,7 +324,11 @@
+                      script_parsing::GetSymlinkPolicy(extension()),
+                      std::move(parsed_scripts)),
+       base::BindOnce(&UserScriptsRegisterFunction::OnUserScriptFilesValidated,
++#if BUILDFLAG(IS_ANDROID)
++                     this, loader->GetWeakPtr(), operation));
++#else
+                      this));
++#endif
+ 
+   // Balanced in `OnUserScriptFilesValidated()` or `OnUserScriptsRegistered()`.
+   AddRef();
+@@ -328,10 +338,19 @@
+ UserScriptsRegisterFunction::~UserScriptsRegisterFunction() = default;
+ 
+ void UserScriptsRegisterFunction::OnUserScriptFilesValidated(
++#if BUILDFLAG(IS_ANDROID)
++    base::WeakPtr<ExtensionUserScriptLoader> validation_loader,
++    base::UnguessableToken operation,
++#endif
+     scripting::ValidateScriptsResult result) {
+   // We cannot proceed if the `browser_context` is not valid as the
+   // `ExtensionSystem` will not exist.
+   if (!browser_context()) {
++#if BUILDFLAG(IS_ANDROID)
++    if (validation_loader) {
++      validation_loader->FinishDynamicScriptOperation(operation);
++    }
++#endif
+     Release();  // Matches the `AddRef()` in `Run()`.
+     return;
+   }
+@@ -339,6 +358,18 @@
+   // We cannot proceed if the extension is uninstalled or unloaded in the middle
+   // of validating its script files.
+   ExtensionRegistry* registry = ExtensionRegistry::Get(browser_context());
++#if BUILDFLAG(IS_ANDROID)
++  if (!validation_loader || !extension() ||
++      registry->enabled_extensions().GetByID(extension_id()) != extension()) {
++    if (validation_loader) {
++      validation_loader->FinishDynamicScriptOperation(operation);
++    }
++    Respond(Error(
++        "The extension was unloaded before script validation finished."));
++    Release();  // Matches the AddRef() in Run().
++    return;
++  }
++#else
+   if (!extension() ||
+       !registry->enabled_extensions().Contains(extension_id())) {
+     // Note: a Respond() is not needed if the system is shutting down or if the
+@@ -346,6 +377,7 @@
+     Release();  // Matches the `AddRef()` in `Run()`.
+     return;
+   }
++#endif
+ 
+   auto error = std::move(result.second);
+   auto scripts = std::move(result.first);
+@@ -354,20 +386,32 @@
+   for (const auto& script : scripts) {
+     script_ids.insert(script->id());
+   }
++#if BUILDFLAG(IS_ANDROID)
++  ExtensionUserScriptLoader* loader = validation_loader.get();
++#else
+   ExtensionUserScriptLoader* loader =
+       ExtensionSystem::Get(browser_context())
+           ->user_script_manager()
+           ->GetUserScriptLoaderForExtension(extension()->id());
++#endif
+ 
+   if (error.has_value()) {
++#if BUILDFLAG(IS_ANDROID)
++    loader->FinishDynamicScriptOperation(operation);
++#else
+     loader->RemovePendingDynamicScriptIDs(std::move(script_ids));
++#endif
+     Respond(Error(std::move(*error)));
+     Release();  // Matches the `AddRef()` in `Run()`.
+     return;
+   }
+ 
+   // User scripts are always persisted across sessions.
++#if BUILDFLAG(IS_ANDROID)
++  loader->AddOwnedDynamicScripts(operation,
++#else
+   loader->AddDynamicScripts(
++#endif
+       std::move(scripts), /*persistent_script_ids=*/std::move(script_ids),
+       base::BindOnce(&UserScriptsRegisterFunction::OnUserScriptsRegistered,
+                      this));
+@@ -497,9 +541,24 @@
+     return RespondNow(Error(std::move(error)));
+   }
+ 
++#if BUILDFLAG(IS_ANDROID)
++  // Metadata awaiting a native removal callback no longer owns a registration.
++  for (const auto& id : ids_to_update) {
++    if (!loader->IsDynamicScriptRegistrationCurrent(id)) {
++      return RespondNow(
++          Error("The script registration was removed before the update."));
++    }
++  }
++#endif
++
+   // Add new script IDs now in case another call with the same script IDs is
+   // made immediately following this one.
++#if BUILDFLAG(IS_ANDROID)
++  const auto operation = loader->BeginDynamicScriptOperation(
++      ids_to_update, /*for_update=*/true);
++#else
+   loader->AddPendingDynamicScriptIDs(std::move(ids_to_update));
++#endif
+ 
+   GetExtensionFileTaskRunner()->PostTaskAndReplyWithResult(
+       FROM_HERE,
+@@ -507,7 +566,11 @@
+                      script_parsing::GetSymlinkPolicy(extension()),
+                      std::move(parsed_scripts)),
+       base::BindOnce(&UserScriptsUpdateFunction::OnUserScriptFilesValidated,
++#if BUILDFLAG(IS_ANDROID)
++                     this, loader->GetWeakPtr(), operation));
++#else
+                      this));
++#endif
+ 
+   // Balanced in `OnUserScriptFilesValidated()`.
+   AddRef();
+@@ -534,6 +597,16 @@
+     original_script.exclude_matches = std::move(new_script.exclude_matches);
+   }
+ 
++#if BUILDFLAG(IS_ANDROID)
++  if (new_script.include_globs) {
++    original_script.include_globs = std::move(new_script.include_globs);
++  }
++
++  if (new_script.exclude_globs) {
++    original_script.exclude_globs = std::move(new_script.exclude_globs);
++  }
++#endif
++
+   if (new_script.js) {
+     original_script.js = std::move(new_script.js);
+   }
+@@ -557,10 +630,19 @@
+ }
+ 
+ void UserScriptsUpdateFunction::OnUserScriptFilesValidated(
++#if BUILDFLAG(IS_ANDROID)
++    base::WeakPtr<ExtensionUserScriptLoader> validation_loader,
++    base::UnguessableToken operation,
++#endif
+     scripting::ValidateScriptsResult result) {
+   // We cannot proceed if the `browser_context` is not valid as the
+   // `ExtensionSystem` will not exist.
+   if (!browser_context()) {
++#if BUILDFLAG(IS_ANDROID)
++    if (validation_loader) {
++      validation_loader->FinishDynamicScriptOperation(operation);
++    }
++#endif
+     Release();  // Matches the `AddRef()` in `Run()`.
+     return;
+   }
+@@ -568,6 +650,18 @@
+   // We cannot proceed if the extension is uninstalled or unloaded in the middle
+   // of validating its script files.
+   ExtensionRegistry* registry = ExtensionRegistry::Get(browser_context());
++#if BUILDFLAG(IS_ANDROID)
++  if (!validation_loader || !extension() ||
++      registry->enabled_extensions().GetByID(extension_id()) != extension()) {
++    if (validation_loader) {
++      validation_loader->FinishDynamicScriptOperation(operation);
++    }
++    Respond(Error(
++        "The extension was unloaded before script validation finished."));
++    Release();  // Matches the AddRef() in Run().
++    return;
++  }
++#else
+   if (!extension() ||
+       !registry->enabled_extensions().Contains(extension_id())) {
+     // Note: a Respond() is not needed if the system is shutting down or if the
+@@ -575,13 +669,18 @@
+     Release();  // Matches the `AddRef()` in `Run()`.
+     return;
+   }
++#endif
+ 
+   auto error = std::move(result.second);
+   auto scripts = std::move(result.first);
++#if BUILDFLAG(IS_ANDROID)
++  ExtensionUserScriptLoader* loader = validation_loader.get();
++#else
+   ExtensionUserScriptLoader* loader =
+       ExtensionSystem::Get(browser_context())
+           ->user_script_manager()
+           ->GetUserScriptLoaderForExtension(extension()->id());
++#endif
+ 
+   bool allowed_in_incognito = scripting::ScriptsShouldBeAllowedInIncognito(
+       extension()->id(), browser_context());
+@@ -593,7 +692,11 @@
+   }
+ 
+   if (error.has_value()) {
++#if BUILDFLAG(IS_ANDROID)
++    loader->FinishDynamicScriptOperation(operation);
++#else
+     loader->RemovePendingDynamicScriptIDs(script_ids);
++#endif
+     Respond(Error(std::move(*error)));
+     Release();  // Matches the `AddRef()` in `Run()`.
+     return;
+@@ -601,8 +704,12 @@
+ 
+   // User scripts are always persisted across sessions.
+   std::set<std::string> persistent_script_ids = script_ids;
++#if BUILDFLAG(IS_ANDROID)
++  loader->UpdateOwnedDynamicScripts(operation, std::move(scripts),
++#else
+   loader->UpdateDynamicScripts(
+       std::move(scripts), std::move(script_ids),
++#endif
+       std::move(persistent_script_ids),
+       base::BindOnce(&UserScriptsUpdateFunction::OnUserScriptsUpdated, this));
+ }
+@@ -634,8 +741,18 @@
+   UserScriptWorldConfigurationManager* config_manager =
+       UserScriptWorldConfigurationManager::Get(browser_context());
+   static constexpr size_t kMaxNumberOfRegisteredWorlds = 100;
++#if BUILDFLAG(IS_ANDROID)
++  const auto configured_worlds =
++      config_manager->GetAllUserScriptWorlds(extension()->id());
++  // Updating an existing configuration does not allocate another world.
++  if (configured_worlds.size() >= kMaxNumberOfRegisteredWorlds &&
++      std::ranges::none_of(configured_worlds, [&world_id](const auto& world) {
++        return world->world_id == world_id;
++      })) {
++#else
+   if (config_manager->GetAllUserScriptWorlds(extension()->id()).size() >=
+       kMaxNumberOfRegisteredWorlds) {
++#endif
+     return RespondNow(
+         Error(base::StringPrintf("You may only configure up to %" PRIuS
+                                  " individual user script worlds.",

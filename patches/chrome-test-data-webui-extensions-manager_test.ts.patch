@@ -1,0 +1,1019 @@
+diff --git a/chrome/test/data/webui/extensions/manager_test.ts b/chrome/test/data/webui/extensions/manager_test.ts
+--- a/chrome/test/data/webui/extensions/manager_test.ts
++++ b/chrome/test/data/webui/extensions/manager_test.ts
+@@ -4,6 +4,13 @@
+ 
+ import type {ChromeEvent} from '/tools/typescript/definitions/chrome_event.js';
+ import type {ExtensionsManagerElement} from 'chrome://extensions/extensions.js';
++// <if expr="is_android">
++import type {ExtensionsOptionsDialogElement} from 'chrome://extensions/extensions.js';
++import {Dialog} from 'chrome://extensions/extensions.js';
++import {PromiseResolver} from 'chrome://resources/js/promise_resolver.js';
++import {getDeepActiveElement} from 'chrome://resources/js/util.js';
++import {MockTimer} from 'chrome://webui-test/mock_timer.js';
++// </if>
+ import {getToastManager, navigation, Page, Service} from 'chrome://extensions/extensions.js';
+ import {assertEquals, assertFalse, assertTrue} from 'chrome://webui-test/chai_assert.js';
+ import {eventToPromise, microtasksFinished} from 'chrome://webui-test/test_util.js';
+@@ -95,6 +102,732 @@
+     assertTrue(hasAppWithName('Packaged App Test'));
+   });
+ 
++  // <if expr="is_android">
++  // Use the real native dialog; only hold the manager's presentation timer.
++  async function withPendingLoadError(
++      run: (flush: () => Promise<void>) => Promise<void>) {
++    const timer = new MockTimer();
++    const callbackResults: Array<Promise<void>> = [];
++    const callbackErrors: unknown[] = [];
++    timer.install();
++    const mockSetTimeout = window.setTimeout.bind(window);
++    window.setTimeout = ((
++        handler: TimerHandler, delay?: number, ...args: unknown[]) => {
++      if (typeof handler !== 'function') {
++        return mockSetTimeout(handler, delay, ...args);
++      }
++      return mockSetTimeout(() => {
++        try {
++          const result = handler(...args);
++          if (result instanceof Promise) {
++            callbackResults.push(result.then(
++                () => {}, error => {callbackErrors.push(error);}));
++          }
++        } catch (error) {
++          callbackErrors.push(error);
++        }
++      }, delay);
++    }) as typeof window.setTimeout;
++    const flush = async () => {
++      timer.tick(0);
++      await Promise.all(callbackResults);
++      await manager.updateComplete;
++      assertEquals(0, callbackErrors.length, String(callbackErrors[0]));
++    };
++    try {
++      await run(flush);
++      await Promise.all(callbackResults);
++      assertEquals(0, callbackErrors.length, String(callbackErrors[0]));
++    } finally {
++      timer.uninstall();
++    }
++  }
++
++  function queueLoadError(error: Error) {
++    manager.dispatchEvent(new CustomEvent('load-error', {detail: error}));
++  }
++
++  test('AndroidDetachedLoadErrorPresentationIsRetired', async () => {
++    await withPendingLoadError(async flush => {
++      const input = document.createElement('input');
++      document.body.appendChild(input);
++      try {
++        for (const scenario of ['detached', 'reattached', 'detached-event']) {
++          const reattachBeforeFlush = scenario !== 'detached';
++          queueLoadError(new Error('retired error'));
++          await manager.updateComplete;
++          const oldDialog =
++              manager.shadowRoot.querySelector('extensions-load-error')!;
++          await oldDialog.updateComplete;
++          manager.remove();
++          if (scenario === 'detached-event') {
++            queueLoadError(new Error('late detached child error'));
++          }
++          input.focus();
++          assertEquals(input, getDeepActiveElement());
++          if (reattachBeforeFlush) {
++            document.body.appendChild(manager);
++          }
++          await flush();
++          assertFalse(oldDialog.$.dialog.getNative().open);
++          assertEquals(input, getDeepActiveElement());
++          if (!manager.isConnected) {
++            document.body.appendChild(manager);
++          }
++          const first = new Error('superseded error');
++          const latest = new Error('latest connected error');
++          queueLoadError(first);
++          queueLoadError(latest);
++          await flush();
++          const dialog =
++              manager.shadowRoot.querySelector('extensions-load-error')!;
++          assertEquals(latest, dialog.loadError);
++          assertTrue(dialog.$.dialog.getNative().open);
++          assertTrue(dialog.matches(':focus-within'));
++          const closed = eventToPromise('close', dialog.$.dialog.getNative());
++          dialog.close();
++          await closed;
++          await manager.updateComplete;
++          assertFalse(!!manager.shadowRoot.querySelector('extensions-load-error'));
++        }
++      } finally {
++        if (!manager.isConnected) {
++          document.body.appendChild(manager);
++        }
++        input.remove();
++      }
++    });
++  });
++
++  test('AndroidLoadErrorReplacementPreservesCurrentOwner', async () => {
++    await withPendingLoadError(async flush => {
++      for (const closeBeforePresentation of [true, false]) {
++        queueLoadError(new Error('first error'));
++        await flush();
++        const dialog =
++            manager.shadowRoot.querySelector('extensions-load-error')!;
++        assertTrue(dialog.$.dialog.getNative().open);
++        const oldClosed = eventToPromise('close', dialog.$.dialog.getNative());
++        let oldCloseDelivered = false;
++        void oldClosed.then(() => oldCloseDelivered = true);
++        dialog.close();
++        assertFalse(oldCloseDelivered);
++        const latest = new Error('next error');
++        queueLoadError(latest);
++        if (closeBeforePresentation) {
++          await oldClosed;
++          await manager.updateComplete;
++          assertTrue(dialog ===
++              manager.shadowRoot.querySelector('extensions-load-error'));
++          await flush();
++        } else {
++          await flush();
++          assertFalse(oldCloseDelivered);
++          await oldClosed;
++          await manager.updateComplete;
++        }
++        assertEquals(latest, dialog.loadError);
++        assertTrue(dialog ===
++            manager.shadowRoot.querySelector('extensions-load-error'));
++        assertTrue(dialog.$.dialog.getNative().open);
++        assertTrue(dialog.matches(':focus-within'));
++        const closed = eventToPromise('close', dialog.$.dialog.getNative());
++        dialog.close();
++        await closed;
++        await manager.updateComplete;
++        assertFalse(!!manager.shadowRoot.querySelector('extensions-load-error'));
++      }
++
++      queueLoadError(new Error('retry owner'));
++      await flush();
++      const dialog =
++          manager.shadowRoot.querySelector('extensions-load-error')!;
++      const pendingRetry = new PromiseResolver<boolean>();
++      dialog.delegate = {retryLoadUnpacked: () => pendingRetry.promise};
++      const retry = dialog.shadowRoot.querySelector<HTMLElement>('.action-button')!;
++      retry.click();
++      await dialog.updateComplete;
++      assertTrue(retry.hasAttribute('disabled'));
++      const rendered = dialog.updateComplete;
++      const renderReached = new PromiseResolver<void>();
++      const releaseRender = new PromiseResolver<boolean>();
++      let held = false;
++      Object.defineProperty(dialog, 'updateComplete', {
++        configurable: true,
++        get() {
++          if (!held) {
++            held = true;
++            renderReached.resolve();
++            return releaseRender.promise;
++          }
++          return rendered;
++        },
++      });
++      const latest = new Error('replacement after pending Retry');
++      const stale = new Error('older Retry failure during render');
++      let presentation: Promise<void>|null = null;
++      try {
++        queueLoadError(latest);
++        presentation = flush();
++        await renderReached.promise;
++        pendingRetry.reject(stale);
++        await pendingRetry.promise.catch(() => {});
++        assertEquals(stale, dialog.loadError);
++        releaseRender.resolve(true);
++        await presentation;
++      } finally {
++        releaseRender.resolve(true);
++        Reflect.deleteProperty(dialog, 'updateComplete');
++        if (presentation) {
++          await presentation;
++        }
++      }
++      await dialog.updateComplete;
++      assertEquals(latest, dialog.loadError);
++      assertTrue(dialog.$.dialog.getNative().open);
++      assertFalse(retry.hasAttribute('disabled'));
++      const closed = eventToPromise('close', dialog.$.dialog.getNative());
++      dialog.close();
++      await closed;
++      await manager.updateComplete;
++      assertFalse(!!manager.shadowRoot.querySelector('extensions-load-error'));
++    });
++  });
++
++  async function flushOptionsPresentation(timer: MockTimer) {
++    timer.tick(0);
++    // The first render removes the old owner; the second mounts the new one.
++    await manager.updateComplete;
++    await manager.updateComplete;
++    const dialog =
++        manager.shadowRoot.querySelector('extensions-options-dialog');
++    if (dialog) {
++      await dialog.updateComplete;
++    }
++    await Promise.resolve();
++    return dialog;
++  }
++
++  // Hold the actual manager's zero-delay presentation boundary. Guest creation
++  // is a separate options-dialog suite; here we observe the public show call.
++  async function withPendingOptions(
++      run: (timer: MockTimer, shownIds: string[]) => Promise<void>) {
++    const prototype = customElements.get('extensions-options-dialog')!
++                          .prototype as ExtensionsOptionsDialogElement;
++    const originalShow = prototype.show;
++    const shownIds: string[] = [];
++    const timer = new MockTimer();
++    prototype.show = function(info: chrome.developerPrivate.ExtensionInfo) {
++      shownIds.push(info.id);
++    };
++    timer.install();
++    const mockSetTimeout = window.setTimeout.bind(window);
++    const callbackResults: Array<Promise<void>> = [];
++    const callbackErrors: unknown[] = [];
++    // MockTimer ignores callback return values. Observe the actual async
++    // presentation callback so a rejected stale DOM lookup fails this test.
++    window.setTimeout = ((
++        handler: TimerHandler, delay?: number, ...args: unknown[]) => {
++      if (typeof handler !== 'function') {
++        return mockSetTimeout(handler, delay, ...args);
++      }
++      return mockSetTimeout(() => {
++        const result = handler(...args);
++        if (result instanceof Promise) {
++          // Attach both handlers immediately; do not leave a stray rejected
++          // promise for browser-global error handling after the test ends.
++          callbackResults.push(result.then(
++              () => {}, error => {callbackErrors.push(error);}));
++        }
++      }, delay);
++    }) as typeof window.setTimeout;
++    try {
++      await run(timer, shownIds);
++      await Promise.all(callbackResults);
++      assertEquals(0, callbackErrors.length, String(callbackErrors[0]));
++    } finally {
++      timer.uninstall();
++      prototype.show = originalShow;
++      navigation.navigateTo({page: Page.LIST});
++    }
++  }
++
++  test('AndroidBackCancelsQueuedOptionsOpen', async () => {
++    const extension = getExtensionByName('My extension 1')!;
++    await withPendingOptions(async (timer, shownIds) => {
++      navigation.navigateTo({
++        page: Page.DETAILS,
++        extensionId: extension.id,
++        subpage: Dialog.OPTIONS,
++      });
++      navigation.navigateTo({page: Page.LIST});
++      await manager.updateComplete;
++      await flushOptionsPresentation(timer);
++      assertEquals(0, shownIds.length);
++      assertFalse(!!manager.shadowRoot.querySelector('extensions-options-dialog'));
++      assertViewActive('extensions-item-list');
++    });
++  });
++
++  test('AndroidLatestQueuedOptionsRouteWins', async () => {
++    const first = getExtensionByName('My extension 1')!;
++    const second = createExtensionInfo({
++      id: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
++      name: 'Second options route',
++    });
++    const target = Service.getInstance().getItemStateChangedTarget() as
++        ChromeEventWithDispatch;
++    target.dispatch<chrome.developerPrivate.EventData>({
++      event_type: chrome.developerPrivate.EventType.INSTALLED,
++      item_id: second.id,
++      extensionInfo: second,
++    });
++    await microtasksFinished();
++    await withPendingOptions(async (timer, shownIds) => {
++      for (const extension of [first, second]) {
++        navigation.navigateTo({
++          page: Page.DETAILS,
++          extensionId: extension.id,
++          subpage: Dialog.OPTIONS,
++        });
++      }
++      await manager.updateComplete;
++      await flushOptionsPresentation(timer);
++      assertEquals(1, shownIds.length);
++      assertEquals(second.id, shownIds[0]);
++    });
++    target.dispatch<chrome.developerPrivate.EventData>({
++      event_type: chrome.developerPrivate.EventType.UNINSTALLED,
++      item_id: second.id,
++    });
++  });
++
++  test('AndroidDetachedManagerCancelsQueuedOptionsOpen', async () => {
++    const extension = getExtensionByName('My extension 1')!;
++    await withPendingOptions(async (timer, shownIds) => {
++      navigation.navigateTo({
++        page: Page.DETAILS,
++        extensionId: extension.id,
++        subpage: Dialog.OPTIONS,
++      });
++      manager.remove();
++      await flushOptionsPresentation(timer);
++      assertEquals(0, shownIds.length);
++    });
++  });
++
++  test('AndroidMissingOptionsTargetMakesQueuedShowInert', async () => {
++    const extension = getExtensionByName('My extension 1')!;
++    await withPendingOptions(async (timer, shownIds) => {
++      navigation.navigateTo({
++        page: Page.DETAILS,
++        extensionId: extension.id,
++        subpage: Dialog.OPTIONS,
++      });
++      const shadowRoot = manager.shadowRoot;
++      const originalQuery = shadowRoot.querySelector.bind(shadowRoot);
++      const descriptor =
++          Object.getOwnPropertyDescriptor(shadowRoot, 'querySelector');
++      // Hold the final lookup at the public DOM boundary, after Lit has mounted.
++      Object.defineProperty(shadowRoot, 'querySelector', {
++        configurable: true,
++        value: (selector: string) => selector === 'extensions-options-dialog' ?
++            null : originalQuery(selector),
++      });
++      try {
++        await flushOptionsPresentation(timer);
++        assertEquals(0, shownIds.length);
++      } finally {
++        if (descriptor) {
++          Object.defineProperty(shadowRoot, 'querySelector', descriptor);
++        } else {
++          Reflect.deleteProperty(shadowRoot, 'querySelector');
++        }
++      }
++    });
++  });
++
++  interface ControlledOptionsGuest extends HTMLElement {
++    extension: string;
++    onclose: () => void;
++    onpreferredsizechanged:
++        ((e: {height: number, width: number}) => void)|null;
++  }
++
++  async function withControlledManagerOptions(
++      initialReadyState: DocumentReadyState,
++      run: (timer: MockTimer, guests: ControlledOptionsGuest[],
++            finishDocument: () => void) => Promise<void>) {
++    const originalCreate = document.createElement.bind(document);
++    const descriptors = new Map([
++      ['createElement', Object.getOwnPropertyDescriptor(document, 'createElement')],
++      ['readyState', Object.getOwnPropertyDescriptor(document, 'readyState')],
++    ]);
++    let readyState = initialReadyState;
++    const guests: ControlledOptionsGuest[] = [];
++    const timer = new MockTimer();
++    timer.install();
++    Object.defineProperty(document, 'readyState', {
++      configurable: true,
++      get: () => readyState,
++    });
++    Object.defineProperty(document, 'createElement', {
++      configurable: true,
++      value: (name: string, options?: ElementCreationOptions) => {
++        if (name.toLowerCase() === 'extensionoptions') {
++          const guest: ControlledOptionsGuest = Object.assign(originalCreate('div'), {
++            extension: '',
++            onclose: () => {},
++            onpreferredsizechanged: null,
++          });
++          guests.push(guest);
++          return guest;
++        }
++        return originalCreate(name, options);
++      },
++    });
++    try {
++      await run(timer, guests, () => {
++        readyState = 'complete';
++        document.dispatchEvent(new Event('readystatechange'));
++      });
++    } finally {
++      navigation.navigateTo({page: Page.LIST});
++      await manager.updateComplete;
++      timer.uninstall();
++      for (const [key, descriptor] of descriptors) {
++        if (descriptor) {
++          Object.defineProperty(document, key, descriptor);
++        } else {
++          Reflect.deleteProperty(document, key);
++        }
++      }
++    }
++  }
++
++  test('AndroidBackRetiresActualManagerDocumentReadyRequest', async () => {
++    const extension = getExtensionByName('My extension 1')!;
++    await withControlledManagerOptions('loading', async (timer, guests, ready) => {
++      navigation.navigateTo({
++        page: Page.DETAILS,
++        extensionId: extension.id,
++        subpage: Dialog.OPTIONS,
++      });
++      const oldDialog = await flushOptionsPresentation(timer);
++      assertTrue(!!oldDialog);
++      assertEquals(0, guests.length);
++      navigation.navigateTo({page: Page.LIST});
++      await manager.updateComplete;
++      ready();
++      await Promise.resolve();
++      assertEquals(0, guests.length);
++      assertFalse(oldDialog.isConnected);
++      assertFalse(oldDialog.open);
++      assertEquals(Page.LIST, navigation.getCurrentPage().page);
++      assertViewActive('extensions-item-list');
++    });
++  });
++
++  test('AndroidQueuedNativeCloseCannotOwnNextOptionsRoute', async () => {
++    const first = getExtensionByName('My extension 1')!;
++    const second = createExtensionInfo({
++      id: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
++      name: 'Second options route',
++      optionsPage: {
++        openInTab: false,
++        url: 'chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/options.html',
++      },
++    });
++    const target = Service.getInstance().getItemStateChangedTarget() as
++        ChromeEventWithDispatch;
++    target.dispatch<chrome.developerPrivate.EventData>({
++      event_type: chrome.developerPrivate.EventType.INSTALLED,
++      item_id: second.id,
++      extensionInfo: second,
++    });
++    await microtasksFinished();
++    try {
++      await withControlledManagerOptions('complete', async (timer, guests) => {
++        navigation.navigateTo({
++          page: Page.DETAILS,
++          extensionId: first.id,
++          subpage: Dialog.OPTIONS,
++        });
++        const oldDialog = (await flushOptionsPresentation(timer))!;
++        assertEquals(1, guests.length);
++        guests[0]!.onpreferredsizechanged!({width: 420, height: 200});
++        await oldDialog.$.dialog.updateComplete;
++        assertTrue(oldDialog.open);
++        const oldClosed = eventToPromise('close', oldDialog.$.dialog.getNative());
++        let oldCloseDelivered = false;
++        void oldClosed.then(() => oldCloseDelivered = true);
++        guests[0]!.onclose();  // Actual native close queues an animation-frame event.
++        navigation.navigateTo({
++          page: Page.DETAILS,
++          extensionId: second.id,
++          subpage: Dialog.OPTIONS,
++        });
++        const newDialog = (await flushOptionsPresentation(timer))!;
++        assertFalse(newDialog === oldDialog);
++        assertFalse(oldDialog.isConnected);
++        assertEquals(2, guests.length);
++        manager.shadowRoot.querySelector(
++                              'extensions-detail-view')!.focusOptionsButton();
++        guests[1]!.onpreferredsizechanged!({width: 430, height: 210});
++        await newDialog.$.dialog.updateComplete;
++        assertTrue(newDialog.open);
++        assertFalse(oldCloseDelivered);
++        // MockTimer does not intercept this native queued event.
++        await oldClosed;
++        assertTrue(oldCloseDelivered);
++        assertEquals(second.id, navigation.getCurrentPage().extensionId);
++        assertEquals(Dialog.OPTIONS, navigation.getCurrentPage().subpage);
++        assertTrue(newDialog === manager.shadowRoot.querySelector(
++            'extensions-options-dialog'));
++        assertTrue(newDialog.open);
++
++        const details =
++            manager.shadowRoot.querySelector('extensions-detail-view')!;
++        const originalFocus = details.focusOptionsButton.bind(details);
++        let focused = 0;
++        details.focusOptionsButton = () => {
++          ++focused;
++          originalFocus();
++        };
++        try {
++          const newClosed =
++              eventToPromise('close', newDialog.$.dialog.getNative());
++          guests[1]!.onclose();
++          await newClosed;
++          await manager.updateComplete;
++          assertEquals(Page.DETAILS, navigation.getCurrentPage().page);
++          assertEquals(second.id, navigation.getCurrentPage().extensionId);
++          assertEquals(undefined, navigation.getCurrentPage().subpage);
++          assertFalse(!!manager.shadowRoot.querySelector(
++              'extensions-options-dialog'));
++          assertEquals(1, focused);
++          assertEquals(
++              details.$.extensionsOptions, details.shadowRoot.activeElement);
++
++          const search = manager.$.toolbar.$.toolbar.getSearchField();
++          const wasShowingSearch = search.showingSearch;
++          search.showingSearch = true;
++          await search.updateComplete;
++          try {
++            for (const destination of ['search', 'body', 'opener']) {
++              originalFocus();
++              const opener = getDeepActiveElement();
++              assertTrue(!!opener && opener.isConnected);
++              assertTrue(details.$.extensionsOptions.matches(':focus-within'));
++              navigation.navigateTo({
++                page: Page.DETAILS,
++                extensionId: second.id,
++                subpage: Dialog.OPTIONS,
++              });
++              const dialog = (await flushOptionsPresentation(timer))!;
++              const guest = guests[guests.length - 1]!;
++              guest.onpreferredsizechanged!({width: 430, height: 210});
++              await dialog.$.dialog.updateComplete;
++              assertTrue(dialog.open);
++              const closed = eventToPromise('close', dialog.$.dialog.getNative());
++              let closeDelivered = false;
++              void closed.then(() => closeDelivered = true);
++              const focusedBeforeClose = focused;
++              guest.onclose();
++              assertFalse(dialog.open);
++              assertFalse(closeDelivered);
++              if (destination === 'search') {
++                search.getSearchInput().focus();
++                assertEquals(search.getSearchInput(), getDeepActiveElement());
++              } else if (destination === 'body') {
++                const active = getDeepActiveElement();
++                assertTrue(active instanceof HTMLElement);
++                active.blur();
++                assertEquals(document.body, getDeepActiveElement());
++              } else {
++                assertEquals(opener, getDeepActiveElement());
++              }
++              await closed;
++              await manager.updateComplete;
++              assertEquals(Page.DETAILS, navigation.getCurrentPage().page);
++              assertEquals(second.id, navigation.getCurrentPage().extensionId);
++              assertEquals(undefined, navigation.getCurrentPage().subpage);
++              assertFalse(!!manager.shadowRoot.querySelector(
++                  'extensions-options-dialog'));
++              if (destination === 'search') {
++                assertEquals(focusedBeforeClose, focused);
++                assertEquals(search.getSearchInput(), getDeepActiveElement());
++              } else {
++                assertEquals(focusedBeforeClose + 1, focused);
++                assertEquals(opener, getDeepActiveElement());
++              }
++            }
++          } finally {
++            search.showingSearch = wasShowingSearch;
++          }
++        } finally {
++          details.focusOptionsButton = originalFocus;
++        }
++      });
++    } finally {
++      target.dispatch<chrome.developerPrivate.EventData>({
++        event_type: chrome.developerPrivate.EventType.UNINSTALLED,
++        item_id: second.id,
++      });
++    }
++  });
++  // </if>
++
++  // <if expr="is_android">
++  test('AndroidInterruptedImportNoticeSurvivesInitializationRetry', async () => {
++    const service = Service.getInstance();
++    const originalProfile = service.getProfileConfiguration;
++    const originalInfo = service.getExtensionsInfo;
++    const originalInstall = service.installFromFile;
++    const profile = await originalProfile.call(service);
++    let profileCalls = 0;
++    let infoCalls = 0;
++    let installCalls = 0;
++    manager.remove();
++    service.getProfileConfiguration = async () => {
++      ++profileCalls;
++      return {...profile, inDeveloperMode: false, interruptedLocalImport: true};
++    };
++    service.getExtensionsInfo = async () => {
++      if (++infoCalls === 1) {
++        throw new Error('Controlled initial extension-info failure');
++      }
++      return originalInfo.call(service);
++    };
++    service.installFromFile = async () => { ++installCalls; return false; };
++    manager = document.createElement('extensions-manager');
++    document.body.appendChild(manager);
++    try {
++      await manager.updateComplete;
++      await microtasksFinished();
++      await manager.$.toolbar.updateComplete;
++      const notice = manager.$.toolbar.shadowRoot.querySelector<HTMLElement>(
++          '#importInterrupted')!;
++      assertFalse(manager.inDevMode);
++      assertFalse(notice.hidden);
++      assertTrue(notice.getBoundingClientRect().height > 0);
++      assertEquals('alert', notice.getAttribute('role'));
++      assertEquals(
++          manager.$.toolbar.i18n('toolbarImportInterrupted'),
++          notice.textContent.trim());
++      assertEquals(1, profileCalls);
++      assertEquals(0, installCalls);
++      const retry = manager.shadowRoot.querySelector<HTMLElement>(
++          '#initializationRetry')!;
++      assertFalse(retry.hidden);
++      retry.click();
++      await manager.whenPageInitializedForTest();
++      await microtasksFinished();
++      assertEquals(1, profileCalls);
++      assertEquals(2, infoCalls);
++      assertEquals(0, installCalls);
++      assertFalse(notice.hidden);
++      assertTrue(notice.getBoundingClientRect().height > 0);
++      assertTrue(retry.hidden);
++    } finally {
++      service.getProfileConfiguration = originalProfile;
++      service.getExtensionsInfo = originalInfo;
++      service.installFromFile = originalInstall;
++      manager.remove();
++    }
++  });
++
++  async function withInitialHistoryInfoHeld(
++      targetExists: boolean,
++      run: (id: string, releaseInfo: () => Promise<void>) => Promise<void>) {
++    const service = Service.getInstance();
++    const originalGetExtensionsInfo = service.getExtensionsInfo;
++    const originalPage = navigation.getCurrentPage();
++    const extension = createExtensionInfo({
++      id: 'cccccccccccccccccccccccccccccccc',
++      name: 'Held history extension',
++    });
++    const id = targetExists ? extension.id : 'dddddddddddddddddddddddddddddddd';
++    let resolveInfo:
++        (items: chrome.developerPrivate.ExtensionInfo[]) => void = () => {};
++    const pendingInfo = new Promise<chrome.developerPrivate.ExtensionInfo[]>(
++        resolve => resolveInfo = resolve);
++    manager.remove();
++    navigation.updateHistory({page: Page.DETAILS, extensionId: id}, true);
++    service.getExtensionsInfo = () => pendingInfo;
++    manager = document.createElement('extensions-manager');
++    document.body.appendChild(manager);
++    try {
++      await manager.updateComplete;
++      await manager.$.toolbar.updateComplete;
++      assertTrue(manager.$.itemsList.hidden);
++      await run(id, async () => {
++        resolveInfo([extension]);
++        await manager.whenPageInitializedForTest();
++        await microtasksFinished();
++      });
++    } finally {
++      service.getExtensionsInfo = originalGetExtensionsInfo;
++      resolveInfo([extension]);
++      await manager.whenPageInitializedForTest();
++      manager.remove();
++      navigation.updateHistory(originalPage, true);
++    }
++  }
++
++  async function goBackToInitialHistoryDetails(id: string) {
++    manager.shadowRoot.querySelector(
++                          'extensions-sidebar')!.$.sectionsShortcuts.click();
++    await microtasksFinished();
++    assertEquals(Page.SHORTCUTS, navigation.getCurrentPage().page);
++    const back = eventToPromise('popstate', window);
++    window.history.back();
++    await back;
++    await microtasksFinished();
++    assertEquals(Page.DETAILS, navigation.getCurrentPage().page);
++    assertEquals(id, navigation.getCurrentPage().extensionId);
++  }
++
++  test('AndroidSearchBeforeInitialInfoKeepsQueryAndUsesList', async () => {
++    await withInitialHistoryInfoHeld(true, async (_id, releaseInfo) => {
++      manager.$.toolbar.dispatchEvent(new CustomEvent('search-changed', {
++        detail: 'Held history',
++        bubbles: true,
++        composed: true,
++      }));
++      await microtasksFinished();
++      assertEquals(Page.LIST, navigation.getCurrentPage().page);
++      assertEquals(undefined, navigation.getCurrentPage().extensionId);
++      assertEquals('Held history', manager.filter);
++
++      await releaseInfo();
++      assertViewActive('extensions-item-list');
++      assertEquals('Held history', manager.$.itemsList.filter);
++      assertEquals(1, getExtensions().length);
++    });
++  });
++
++  test('AndroidHistoryBackBeforeInitialInfoRetainsDetails', async () => {
++    await withInitialHistoryInfoHeld(true, async (id, releaseInfo) => {
++      await goBackToInitialHistoryDetails(id);
++      await releaseInfo();
++      assertEquals(Page.DETAILS, navigation.getCurrentPage().page);
++      assertEquals(id, navigation.getCurrentPage().extensionId);
++      assertViewActive('extensions-detail-view');
++    });
++  });
++
++  test('AndroidHistoryBackMissingIdRedirectsAfterInitialInfo', async () => {
++    await withInitialHistoryInfoHeld(false, async (id, releaseInfo) => {
++      await goBackToInitialHistoryDetails(id);
++      await releaseInfo();
++      assertEquals(Page.LIST, navigation.getCurrentPage().page);
++      assertEquals(undefined, navigation.getCurrentPage().extensionId);
++      assertEquals(1, getExtensions().length);
++      assertViewActive('extensions-item-list');
++    });
++  });
++  // </if>
+   test('ChangePages', async () => {
+     // We start on the item list.
+     manager.shadowRoot.querySelector(
+@@ -132,6 +865,268 @@
+     assertViewActive('extensions-item-list');
+   });
+ 
++  // <if expr="is_android">
++  async function focusWideSidebar() {
++    manager.$.toolbar.narrow = false;
++    await microtasksFinished();
++    const left = manager.shadowRoot.querySelector<HTMLElement>('#left')!;
++    const sidebar = left.querySelector('extensions-sidebar')!;
++    assertFalse(left.hidden);
++    sidebar.$.sectionsShortcuts.focus();
++    assertEquals(sidebar.$.sectionsShortcuts, sidebar.shadowRoot.activeElement);
++    assertTrue(left.matches(':focus-within'));
++    return {left, sidebar};
++  }
++
++  function focusDeveloperModeToggle() {
++    const button = manager.$.toolbar.$.devMode;
++    assertFalse(button.disabled);
++    button.focus();
++    assertEquals(button, manager.$.toolbar.shadowRoot.activeElement);
++  }
++
++  async function focusNarrowMenu() {
++    manager.$.toolbar.narrow = true;
++    await microtasksFinished();
++    const toolbar = manager.$.toolbar.$.toolbar;
++    await toolbar.focusMenuButton();
++    const menu = toolbar.shadowRoot.querySelector<HTMLElement>('#menuButton')!;
++    assertTrue(toolbar.isMenuFocused());
++    return {toolbar, menu};
++  }
++
++  test('AndroidWideEntryMovesRemovedMenuFocusToSearch', async () => {
++    const {menu} = await focusNarrowMenu();
++    const page = navigation.getCurrentPage().page;
++    manager.$.toolbar.narrow = false;
++    await microtasksFinished();
++    assertFalse(menu.isConnected);
++    assertFalse(manager.shadowRoot.querySelector<HTMLElement>('#left')!.hidden);
++    assertTrue(manager.$.toolbar.isSearchFocused());
++    assertEquals(page, navigation.getCurrentPage().page);
++  });
++
++  test('AndroidWideEntryMovesClosedDrawerFocusToSearch', async () => {
++    const {menu} = await focusNarrowMenu();
++    const page = navigation.getCurrentPage().page;
++    const opened = eventToPromise('cr-drawer-opened', manager);
++    menu.click();
++    await opened;
++    const drawer = manager.shadowRoot.querySelector('cr-drawer')!;
++    assertTrue(drawer.open);
++    assertTrue(drawer.matches(':focus-within'));
++    const closed = eventToPromise('close', drawer);
++    manager.$.toolbar.narrow = false;
++    await closed;
++    await microtasksFinished();
++    assertFalse(menu.isConnected);
++    assertFalse(drawer.open);
++    assertFalse(drawer.isConnected);
++    assertTrue(manager.$.toolbar.isSearchFocused());
++    assertEquals(page, navigation.getCurrentPage().page);
++  });
++
++  test('AndroidWideEntryPreservesNewToolbarControlFocus', async () => {
++    await focusNarrowMenu();
++    const toggle = manager.$.toolbar.$.devMode;
++    assertFalse(toggle.disabled);
++    const moveFocus = (event: Event) => {
++      if (!(event as CustomEvent<{value: boolean}>).detail.value) {
++        focusDeveloperModeToggle();
++      }
++    };
++    manager.$.toolbar.addEventListener('narrow-changed', moveFocus);
++    try {
++      manager.$.toolbar.narrow = false;
++      await microtasksFinished();
++      assertEquals(toggle, manager.$.toolbar.shadowRoot.activeElement);
++      assertFalse(manager.$.toolbar.isSearchFocused());
++    } finally {
++      manager.$.toolbar.removeEventListener('narrow-changed', moveFocus);
++    }
++  });
++
++  test('AndroidWideSearchRenderPreservesNewToolbarControlFocus', async () => {
++    await focusNarrowMenu();
++    const search = manager.$.toolbar.$.toolbar.getSearchField();
++    const descriptor = Object.getOwnPropertyDescriptor(search, 'updateComplete');
++    let finishRender: (result: boolean) => void = () => {};
++    const pendingRender = new Promise<boolean>(resolve => finishRender = resolve);
++    Object.defineProperty(search, 'updateComplete', {
++      configurable: true,
++      get: () => pendingRender,
++    });
++    try {
++      const widened = eventToPromise('narrow-changed', manager.$.toolbar);
++      manager.$.toolbar.narrow = false;
++      await widened;
++      await manager.updateComplete;
++      await Promise.resolve();
++      assertTrue(search.showingSearch);
++      assertFalse(manager.$.toolbar.isSearchFocused());
++      const toggle = manager.$.toolbar.$.devMode;
++      assertFalse(toggle.disabled);
++      focusDeveloperModeToggle();
++      assertEquals(toggle, manager.$.toolbar.shadowRoot.activeElement);
++      finishRender(true);
++      await microtasksFinished();
++      assertEquals(toggle, manager.$.toolbar.shadowRoot.activeElement);
++      assertFalse(manager.$.toolbar.isSearchFocused());
++    } finally {
++      finishRender(true);
++      if (descriptor) {
++        Object.defineProperty(search, 'updateComplete', descriptor);
++      } else {
++        Reflect.deleteProperty(search, 'updateComplete');
++      }
++    }
++  });
++
++  test('AndroidNarrowEntryMovesHiddenSidebarFocusToSearch', async () => {
++    const {left} = await focusWideSidebar();
++    const page = navigation.getCurrentPage().page;
++    manager.$.toolbar.narrow = true;
++    await microtasksFinished();
++    assertTrue(left.hidden);
++    assertTrue(manager.$.toolbar.isSearchFocused());
++    assertEquals(page, navigation.getCurrentPage().page);
++  });
++
++  test('AndroidNarrowEntryPreservesNewContentFocus', async () => {
++    await focusWideSidebar();
++    const button = manager.$.itemsList.getDetailsButton(getExtensions()[0]!.id)!;
++    assertTrue(!!button);
++    const moveFocus = (event: Event) => {
++      if ((event as CustomEvent<{value: boolean}>).detail.value) {
++        button.focus();
++      }
++    };
++    manager.$.toolbar.addEventListener('narrow-changed', moveFocus);
++    try {
++      manager.$.toolbar.narrow = true;
++      await microtasksFinished();
++      assertEquals(button, (button.getRootNode() as ShadowRoot).activeElement);
++      assertFalse(manager.$.toolbar.isSearchFocused());
++    } finally {
++      manager.$.toolbar.removeEventListener('narrow-changed', moveFocus);
++    }
++  });
++
++  test('AndroidSearchRenderPreservesNewContentFocusWhileNarrow', async () => {
++    const {left} = await focusWideSidebar();
++    const search = manager.$.toolbar.$.toolbar.getSearchField();
++    const descriptor = Object.getOwnPropertyDescriptor(search, 'updateComplete');
++    let finishRender: (result: boolean) => void = () => {};
++    const pendingRender = new Promise<boolean>(resolve => finishRender = resolve);
++    Object.defineProperty(search, 'updateComplete', {
++      configurable: true,
++      get: () => pendingRender,
++    });
++    try {
++      const narrowed = eventToPromise('narrow-changed', manager.$.toolbar);
++      manager.$.toolbar.narrow = true;
++      await narrowed;
++      await manager.updateComplete;
++      await Promise.resolve();
++      assertTrue(left.hidden);
++      assertTrue(search.showingSearch);
++      assertFalse(manager.$.toolbar.isSearchFocused());
++
++      // Keep the same layout request alive while a real content control
++      // claims focus between the manager and search render boundaries.
++      const button = manager.$.itemsList.getDetailsButton(getExtensions()[0]!.id)!;
++      assertTrue(!!button);
++      button.focus();
++      assertEquals(button, (button.getRootNode() as ShadowRoot).activeElement);
++      assertTrue(manager.$.toolbar.narrow);
++      finishRender(true);
++      await microtasksFinished();
++      assertTrue(left.hidden);
++      assertTrue(manager.$.toolbar.narrow);
++      assertEquals(button, (button.getRootNode() as ShadowRoot).activeElement);
++      assertFalse(manager.$.toolbar.isSearchFocused());
++    } finally {
++      finishRender(true);
++      if (descriptor) {
++        Object.defineProperty(search, 'updateComplete', descriptor);
++      } else {
++        Reflect.deleteProperty(search, 'updateComplete');
++      }
++    }
++  });
++
++  test('AndroidNarrowReversalBeforeRenderKeepsSidebarFocus', async () => {
++    const {left, sidebar} = await focusWideSidebar();
++    // Deliver the public layout notifications in one render turn to cover
++    // width changes that reverse before the hidden sidebar is committed.
++    for (const value of [true, false]) {
++      manager.$.toolbar.dispatchEvent(
++          new CustomEvent('narrow-changed', {detail: {value}}));
++    }
++    await microtasksFinished();
++    assertFalse(left.hidden);
++    assertEquals(sidebar.$.sectionsShortcuts, sidebar.shadowRoot.activeElement);
++    assertFalse(manager.$.toolbar.isSearchFocused());
++  });
++
++  test('AndroidRotationBeforeSearchRenderCannotStealNewFocus', async () => {
++    const {left} = await focusWideSidebar();
++    const search = manager.$.toolbar.$.toolbar.getSearchField();
++    const descriptor = Object.getOwnPropertyDescriptor(search, 'updateComplete');
++    let finishRender: (result: boolean) => void = () => {};
++    const pendingRender = new Promise<boolean>(resolve => finishRender = resolve);
++    Object.defineProperty(search, 'updateComplete', {
++      configurable: true,
++      get: () => pendingRender,
++    });
++    try {
++      const narrowed = eventToPromise('narrow-changed', manager.$.toolbar);
++      manager.$.toolbar.narrow = true;
++      await narrowed;
++      await manager.updateComplete;
++      await Promise.resolve();
++      assertTrue(left.hidden);
++      assertTrue(search.showingSearch);
++      assertFalse(manager.$.toolbar.isSearchFocused());
++
++      const widened = eventToPromise('narrow-changed', manager.$.toolbar);
++      manager.$.toolbar.narrow = false;
++      await widened;
++      await manager.updateComplete;
++      const button = manager.$.itemsList.getDetailsButton(getExtensions()[0]!.id)!;
++      button.focus();
++      finishRender(true);
++      await microtasksFinished();
++      assertFalse(left.hidden);
++      assertEquals(button, (button.getRootNode() as ShadowRoot).activeElement);
++      assertFalse(manager.$.toolbar.isSearchFocused());
++    } finally {
++      finishRender(true);
++      if (descriptor) {
++        Object.defineProperty(search, 'updateComplete', descriptor);
++      } else {
++        Reflect.deleteProperty(search, 'updateComplete');
++      }
++    }
++  });
++
++  test('AndroidDetachedNarrowFocusRequestCannotClaimPageFocus', async () => {
++    await focusWideSidebar();
++    manager.$.toolbar.dispatchEvent(
++        new CustomEvent('narrow-changed', {detail: {value: true}}));
++    manager.remove();
++    const button = document.createElement('button');
++    document.body.appendChild(button);
++    button.focus();
++    try {
++      await microtasksFinished();
++      assertEquals(button, document.activeElement);
++    } finally {
++      button.remove();
++    }
++  });
++  // </if>
++
+   test('CloseDrawerOnNarrowModeExit', async function() {
+     manager.$.toolbar.narrow = true;
+     const toolbar = manager.$.toolbar.$.toolbar;

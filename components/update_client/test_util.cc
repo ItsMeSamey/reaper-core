@@ -3,6 +3,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+#include "build/build_config.h"
 #include "brave/components/update_client/test_util.h"
 
 #include <memory>
@@ -48,7 +49,12 @@ bool StripsPrivacySensitiveData(const ProtocolSerializer& serializer) {
       {9384}, /*cached_hashes=*/{},
       MakeProtocolUpdateCheck(true, "33.12", true, false),
       {{"install", "foobar_install_data_index", ""}},
-      MakeProtocolPing("id1", metadata.get(), {}), std::move(events)));
+#if BUILDFLAG(IS_ANDROID)
+      std::nullopt,
+#else
+      MakeProtocolPing("id1", metadata.get(), {}),
+#endif
+      std::move(events)));
 
   const auto request = MakeProtocolRequest(
       false, "{15160585-8ADE-4D3C-839B-1281A6035D1F}", "prod_id", "1.0",
@@ -63,11 +69,15 @@ bool StripsPrivacySensitiveData(const ProtocolSerializer& serializer) {
       R"("brand":"BRND","cohort":"c1","cohorthint":"ch1","cohortname":"cn1",)"
       R"("data":\[{"index":"foobar_install_data_index","name":"install"}],)"
       R"("disabled":\[{"reason":9384}],"enabled":false,)"
+#if !BUILDFLAG(IS_ANDROID)
       R"("events":\[{"eventresult":1},{"eventtype":63}],)"
       R"("iid":"ins_id",)"
       R"("installdate":-1,)"
+#endif  // !BUILDFLAG(IS_ANDROID)
       R"("installedby":"location1","installsource":"source1",)"
+#if !BUILDFLAG(IS_ANDROID)
       R"("ping":{[^}]*},)"
+#endif  // !BUILDFLAG(IS_ANDROID)
       R"("release_channel":"test",)"
       R"("updatecheck":{"rollback_allowed":true,)"
       R"("targetversionprefix":"33.12",)"

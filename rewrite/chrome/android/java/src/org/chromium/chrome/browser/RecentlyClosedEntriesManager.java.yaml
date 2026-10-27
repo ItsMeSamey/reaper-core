@@ -1,0 +1,1216 @@
+# Android mixed native-tab and Java-window session restoration.
+substitutions:
+- description: Use public Android launch and Activity lifetime contracts
+  regex:
+    re_pattern: import\ androidx\.annotation\.VisibleForTesting;
+    replace: 'import android.app.Activity;
+
+      import android.content.ActivityNotFoundException;
+
+
+      import androidx.annotation.VisibleForTesting;'
+- description: Retire posted work and observe Activity ownership during persisted restore
+  regex:
+    re_pattern: import\ org\.chromium\.base\.Callback;
+    replace: 'import org.chromium.base.ActivityState;
+
+      import org.chromium.base.ApplicationStatus;
+
+      import org.chromium.base.Callback;
+
+      import org.chromium.base.CancelableRunnable;'
+- description: Read the existing public persisted window profile-type API
+  regex:
+    re_pattern: import\ org\.chromium\.chrome\.browser\.tabmodel\.TabModel;
+    replace: 'import org.chromium.chrome.browser.tabmodel.SupportedProfileType;
+
+      import org.chromium.chrome.browser.tabmodel.TabModel;'
+- description: Resolve only the restored Activity exact existing native browser window
+  regex:
+    re_pattern: import\ org\.chromium\.chrome\.browser\.tabwindow\.TabWindowManager;
+    replace: 'import org.chromium.chrome.browser.tabwindow.TabWindowManager;
+
+      import org.chromium.chrome.browser.ui.browser_window.AndroidBrowserWindowObserver;
+
+      import org.chromium.chrome.browser.ui.browser_window.ChromeAndroidTask;
+
+      import org.chromium.chrome.browser.ui.browser_window.ChromeAndroidTaskTracker;
+
+      import org.chromium.chrome.browser.ui.browser_window.ChromeAndroidTaskTrackerFactory;
+
+      import org.chromium.chrome.browser.ui.browser_window.ChromeAndroidTaskTrackerObserver;'
+- description: Own metadata and restore operations until completion or manager teardown
+  regex:
+    re_pattern: \ \ \ \ private\ final\ Profile\ mProfile;
+    replace: "    private final Profile mProfile;\n    private final TabModelSelector mOwnerSelector;\n    private boolean mDestroyed;\n    private final List<TabStateInitializedObserver> mMetadataRequests = new ArrayList<>();\n    private final List<WindowRestoreOperation> mWindowRestores = new ArrayList<>();"
+- description: Keep closed-window metadata profile-scoped and make its callback once-only before reentry
+  regex:
+    re_pattern: '\ \ \ \ static\ class\ TabStateInitializedObserver\ implements\ TabModelSelectorObserver\ \{\
+
+      \ \ \ \ \ \ \ \ private\ final\ TabModelSelector\ mTabModelSelector;\
+
+      \ \ \ \ \ \ \ \ private\ final\ long\ mTimestamp;\
+
+      \ \ \ \ \ \ \ \ private\ final\ int\ mInstanceId;\
+
+      \ \ \ \ \ \ \ \ private\ @Nullable\ JniOnceCallback<@Nullable\ RecentlyClosedWindowMetadata>\ mCallback;\
+
+      \
+
+      \ \ \ \ \ \ \ \ TabStateInitializedObserver\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ TabModelSelector\ selector,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ long\ timestamp,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ int\ instanceId,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ JniOnceCallback<@Nullable\ RecentlyClosedWindowMetadata>\ callback\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ assert\ callback\ !=\ null;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mTabModelSelector\ =\ selector;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mTimestamp\ =\ timestamp;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mInstanceId\ =\ instanceId;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mCallback\ =\ callback;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mTabModelSelector\.addObserver\(this\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ @Override\
+
+      \ \ \ \ \ \ \ \ public\ void\ onTabStateInitialized\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ //\ Call\ the\ callback\ with\ the\ TabModelSelector\.\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ assumeNonNull\(mCallback\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ RecentlyClosedWindowMetadata\ result\ =\ new\ RecentlyClosedWindowMetadata\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ result\.tabModel\ =\ mTabModelSelector\.getCurrentModel\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ result\.timestamp\ =\ mTimestamp;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ result\.instanceId\ =\ mInstanceId;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mCallback\.onResult\(result\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ //\ Set\ the\ callback\ to\ null\ to\ indicate\ we\ ran\ it\.\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mCallback\ =\ null;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mTabModelSelector\.removeObserver\(this\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ @Override\
+
+      \ \ \ \ \ \ \ \ public\ void\ onDestroyed\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ //\ If\ the\ callback\ wasn''t\ called,\ notify\ the\ C\+\+\ side\ so\ it\ can\ continue\.\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(mCallback\ !=\ null\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mCallback\.onResult\(null\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mCallback\ =\ null;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mTabModelSelector\.removeObserver\(this\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \}\
+
+      \
+
+      '
+    replace: "    private final class TabStateInitializedObserver implements TabModelSelectorObserver {\n        private final TabModelSelector mTabModelSelector;\n        private final long mTimestamp;\n        private final int mInstanceId;\n        private @Nullable JniOnceCallback<@Nullable RecentlyClosedWindowMetadata> mCallback;\n        private final CancelableRunnable mCheck = new CancelableRunnable(this::onTabStateInitialized);\n\n        TabStateInitializedObserver(TabModelSelector selector, long timestamp, int instanceId,\n                JniOnceCallback<@Nullable RecentlyClosedWindowMetadata> callback) {\n            mTabModelSelector = selector;\n            mTimestamp = timestamp;\n            mInstanceId = instanceId;\n            mCallback = callback;\n            mMetadataRequests.add(this);\n            selector.addObserver(this);\n            if (mCallback != null && selector.isTabStateInitialized()) {\n                PostTask.postTask(TaskTraits.UI_DEFAULT, mCheck);\n            }\n        }\n\n        @Override\n        public void onTabStateInitialized() {\n            if (mCallback == null) return;\n            TabModel model = mTabModelSelector.getModel(false);\n            if (mDestroyed || mProfile.shutdownStarted() || model.getProfile() != mProfile\n                    || TabWindowManagerSingleton.getInstance().getTabModelSelectorById(mInstanceId)\n                            != mTabModelSelector\n                    || getRecentlyClosedWindowById(mInstanceId, mTimestamp) == null) {\n                finish(null);\n                return;\n            }\n            RecentlyClosedWindowMetadata result = new RecentlyClosedWindowMetadata();\n            result.tabModel = model;\n            result.timestamp = mTimestamp;\n            result.instanceId = mInstanceId;\n            finish(result);\n        }\n\n        private void finish(@Nullable RecentlyClosedWindowMetadata result) {\n            JniOnceCallback<@Nullable RecentlyClosedWindowMetadata> callback = mCallback;\n            if (callback == null) return;\n            mCallback = null;\n            mCheck.cancel();\n            mTabModelSelector.removeObserver(this);\n            mMetadataRequests.remove(this);\n            callback.onResult(result);\n        }\n\n        @Override\n        public void onDestroyed() {\n            finish(null);\n        }\n    }\n\n"
+- description: Retain the exact Activity selector that owns this manager
+  regex:
+    re_pattern: \ \ \ \ \ \ \ \ mMultiInstanceManager\ =\ multiInstanceManager;
+    replace: "        mMultiInstanceManager = multiInstanceManager;\n        mOwnerSelector = tabModelSelector;"
+- description: Scope native metadata queries to their exact regular profile
+  regex:
+    re_pattern: '\ \ \ \ public\ static\ void\ getRecentlyClosedWindow\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ int\ instanceId,'
+    replace: "    public static void getRecentlyClosedWindow(\n            @JniType(\"Profile*\") Profile profile,\n            int instanceId,"
+- description: Never choose an arbitrary manager or return another profile window state
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ if\ \(managers\.isEmpty\(\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ callback\.onResult\(null\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ return;\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ //\ All\ managers\ are\ notified\ about\ each\ window\ close,\ so\ pick\ the\ first\ one\.\
+
+      \ \ \ \ \ \ \ \ RecentlyClosedEntriesManager\ manager\ =\ managers\.iterator\(\)\.next\(\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ //\ Move\ from\ static\ to\ instance\ method\ to\ simplify\ using\ inner\ classes\.\
+
+      \ \ \ \ \ \ \ \ manager\.getRecentlyClosedWindowInternal\(instanceId,\ callback\);\
+
+      \ \ \ \ \}\
+
+      '
+    replace: "        if (!profile.isOffTheRecord() && !profile.shutdownStarted()) {\n            for (RecentlyClosedEntriesManager manager : managers) {\n                if (!manager.mDestroyed && manager.mProfile == profile) {\n                    manager.getRecentlyClosedWindowInternal(instanceId, callback);\n                    return;\n                }\n            }\n        }\n        callback.onResult(null);\n    }\n"
+- description: Reject metadata work after owner/profile teardown
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ //\ Look\ up\ recently\ closed\ windows\.\
+
+      \ \ \ \ \ \ \ \ List<RecentlyClosedWindow>\ windows\ =\ getRecentlyClosedWindows\(\);'
+    replace: "        if (mDestroyed || mProfile.isOffTheRecord() || mProfile.shutdownStarted()) {\n            callback.onResult(null);\n            return;\n        }\n        // Look up recently closed windows.\n        List<RecentlyClosedWindow> windows = getRecentlyClosedWindows();"
+- description: Load the original persisted headless selector for restore requests after restart
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ if\ \(selector\ ==\ null\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ callback\.onResult\(null\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ return;\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ //\ If\ the\ tab\ state\ is\ initialized'
+    replace: "        if (selector == null) {\n            // A persisted session ID remains usable after process restart, even before any\n            // listing UI has materialized the inactive window's headless tab state.\n            selector = TabWindowManagerSingleton.getInstance()\n                    .requestSelectorWithoutActivity(windowInstanceId, mProfile);\n        }\n        if (selector == null) {\n            callback.onResult(null);\n            return;\n        }\n\n        // If the tab state is initialized"
+- description: Restore the original persisted Activity instance and await exact ready owner instead of copying URLs
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ //\ If\ the\ tab\ state\ is\ initialized,\ run\ the\ callback\ now\.\ Post\ it\ as\ a\ task\ so\ it''s\
+
+      \ \ \ \ \ \ \ \ //\ always\ async\ from\ the\ C\+\+\ side,\ which\ simplifies\ the\ calling\ code\.\
+
+      \ \ \ \ \ \ \ \ if\ \(selector\.isTabStateInitialized\(\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ PostTask\.postTask\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ TaskTraits\.UI_DEFAULT,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \(\)\ \->\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ RecentlyClosedWindowMetadata\ result\ =\ new\ RecentlyClosedWindowMetadata\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ result\.tabModel\ =\ selector\.getCurrentModel\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ result\.timestamp\ =\ timestamp;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ result\.instanceId\ =\ windowInstanceId;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ callback\.onResult\(result\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ return;\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ //\ Otherwise\ wait\ for\ tab\ state\ to\ be\ initialized\.\ The\ observer\ adds\ and\ removes\ itself\.\
+
+      \ \ \ \ \ \ \ \ new\ TabStateInitializedObserver\(selector,\ timestamp,\ windowInstanceId,\ callback\);\
+
+      \ \ \ \ \}\
+
+      '
+    replace: "        // The owned observer also posts already-ready results, revalidates the exact regular\n        // model, and balances pending native callbacks on selector or manager destruction.\n        new TabStateInitializedObserver(selector, timestamp, windowInstanceId, callback);\n    }\n\n    /** A pending persisted-session operation owned by this manager. */\n    public interface RestoreOperation {\n        /** Stops waiting; a successfully launched Android task is not closed. */\n        void cancel();\n    }\n\n    @CalledByNative\n    public static void cancelRestoreOperation(@Nullable RestoreOperation operation) {\n        if (operation != null) operation.cancel();\n    }\n\n    /** Restores the persisted instance, including navigation histories, groups and splits. */\n    @CalledByNative\n    public static @Nullable RestoreOperation restoreWindow(\n            @JniType(\"Profile*\") Profile profile,\n            int instanceId,\n            long expectedClosureTime,\n            @JniType(\"base::OnceCallback<void(int64_t)>&&\") JniOnceCallback<Long> callback) {\n        if (profile.isOffTheRecord() || profile.shutdownStarted()\n                || !MultiWindowUtils.isMultiInstanceApi31Enabled() || !canRestoreWindow()) {\n            callback.onResult(0L);\n            return null;\n        }\n        Set<RecentlyClosedEntriesManager> managers =\n                RecentlyClosedEntriesManagerTrackerImpl.getInstance().getManagers();\n        for (RecentlyClosedEntriesManager manager : managers) {\n            for (WindowRestoreOperation operation : manager.mWindowRestores) {\n                if (operation.mInstanceId == instanceId) {\n                    callback.onResult(0L);\n                    return null;\n                }\n            }\n        }\n        for (RecentlyClosedEntriesManager manager : managers) {\n            if (manager.mDestroyed || manager.mProfile != profile\n                    || !manager.hasLiveOwner()\n                    || manager.getRecentlyClosedWindowById(instanceId, expectedClosureTime) == null) {\n                continue;\n            }\n            TabWindowManager windowManager = TabWindowManagerSingleton.getInstance();\n            TabModelSelector closedSelector = windowManager.getTabModelSelectorById(instanceId);\n            if (closedSelector == null || !closedSelector.isTabStateInitialized()\n                    || closedSelector.getModel(false).getProfile() != profile\n                    || MultiWindowUtils.getActivityById(instanceId) != null\n                    || MultiWindowUtils.readProfileType(instanceId)\n                            == SupportedProfileType.OFF_THE_RECORD) {\n                callback.onResult(0L);\n                return null;\n            }\n            WindowRestoreOperation operation = manager.new WindowRestoreOperation(\n                    instanceId, closedSelector, windowManager, callback);\n            manager.mWindowRestores.add(operation);\n            operation.start();\n            return operation;\n        }\n        callback.onResult(0L);\n        return null;\n    }\n\n    private boolean hasLiveOwner() {\n        TabWindowManager windowManager = TabWindowManagerSingleton.getInstance();\n        int ownerId = windowManager.getWindowIdForSelector(mOwnerSelector);\n        Activity activity = MultiWindowUtils.getActivityById(ownerId);\n        return ownerId != TabWindowManager.INVALID_WINDOW_ID\n                && activity != null && !activity.isFinishing() && !activity.isDestroyed()\n                && windowManager.getIdForWindow(activity) == ownerId\n                && windowManager.getTabModelSelectorById(ownerId) == mOwnerSelector\n                && mOwnerSelector.getModel(false).getProfile() == mProfile;\n    }\n\n    private @Nullable RecentlyClosedWindow getRecentlyClosedWindowById(\n            int instanceId, long expectedClosureTime) {\n        if (mDestroyed || mProfile.shutdownStarted()) return null;\n        for (RecentlyClosedWindow window : getRecentlyClosedWindows()) {\n            if (window.getInstanceId() == instanceId\n                    && window.getTimestamp() == expectedClosureTime) return window;\n        }\n        return null;\n    }\n\n    private final class WindowRestoreOperation\n            implements RestoreOperation, TabWindowManager.Observer, TabModelSelectorObserver,\n                    ApplicationStatus.ActivityStateListener, ChromeAndroidTaskTrackerObserver,\n                    AndroidBrowserWindowObserver {\n        private final int mInstanceId;\n        private final TabModelSelector mClosedSelector;\n        private final TabWindowManager mWindowManager;\n        private final ChromeAndroidTaskTracker mTaskTracker;\n        private final CancelableRunnable mTimeout = new CancelableRunnable(() -> finish(0));\n        private final CancelableRunnable mCheck = new CancelableRunnable(() -> {\n            mCheckQueued = false;\n            checkReady();\n        });\n        private @Nullable JniOnceCallback<Long> mCallback;\n        private @Nullable TabModelSelector mRestoredSelector;\n        private @Nullable Activity mActivity;\n        private @Nullable ChromeAndroidTask mTask;\n        private boolean mCheckQueued;\n        private boolean mLaunchAccepted;\n\n        WindowRestoreOperation(int instanceId, TabModelSelector closedSelector,\n                TabWindowManager windowManager, JniOnceCallback<Long> callback) {\n            mInstanceId = instanceId;\n            mClosedSelector = closedSelector;\n            mWindowManager = windowManager;\n            mTaskTracker = ChromeAndroidTaskTrackerFactory.getInstance();\n            mCallback = callback;\n        }\n\n        void start() {\n            // Observe before launching: selector/task creation can occur during startActivity.\n            mWindowManager.addObserver(this);\n            mTaskTracker.addObserver(this);\n            ApplicationStatus.registerStateListenerForAllActivities(this);\n            PostTask.postDelayedTask(TaskTraits.UI_DEFAULT, mTimeout, TimeUnit.MINUTES.toMillis(1));\n            try {\n                // This path consumes the closed-window record only after Android accepts launch.\n                // It reloads the original persistent session instead of recreating tabs by URL.\n                mMultiInstanceManager.openWindow(mInstanceId, NewWindowAppSource.BROWSER_WINDOW_CREATOR);\n            } catch (ActivityNotFoundException | SecurityException e) {\n                finish(0);\n                return;\n            }\n            mLaunchAccepted = true;\n            scheduleCheck();\n        }\n\n        private void scheduleCheck() {\n            if (mCallback == null || mCheckQueued) return;\n            mCheckQueued = true;\n            PostTask.postTask(TaskTraits.UI_DEFAULT, mCheck);\n        }\n\n        @SuppressWarnings(\"deprecation\") // Read the exact existing Activity/profile window; never create one.\n        private void checkReady() {\n            if (mCallback == null || !mLaunchAccepted) return;\n            if (mDestroyed || mProfile.shutdownStarted() || !hasLiveOwner()) {\n                finish(0);\n                return;\n            }\n            TabModelSelector selector = mWindowManager.getTabModelSelectorById(mInstanceId);\n            if (selector == null || selector == mClosedSelector) return;\n            if (mRestoredSelector != null && selector != mRestoredSelector) {\n                finish(0);\n                return;\n            }\n            Activity activity = MultiWindowUtils.getActivityById(mInstanceId);\n            if (activity == null) return;\n            if (activity.isFinishing() || activity.isDestroyed()\n                    || mWindowManager.getIdForWindow(activity) != mInstanceId\n                    || mWindowManager.getWindowIdForSelector(selector) != mInstanceId\n                    || (mActivity != null && mActivity != activity)) {\n                finish(0);\n                return;\n            }\n            mActivity = activity;\n            if (mRestoredSelector == null) {\n                mRestoredSelector = selector;\n                selector.addObserver(this);\n                if (mCallback == null) return;\n            }\n            ChromeAndroidTask task = mTaskTracker.get(activity.getTaskId());\n            if (task == null) return;\n            if (task.isDestroyed() || (mTask != null && mTask != task)) {\n                finish(0);\n                return;\n            }\n            if (mTask == null) {\n                mTask = task;\n                task.addAndroidBrowserWindowObserver(this);\n                if (mCallback == null) return;\n            }\n            if (!selector.isTabStateInitialized()) return;\n            if (selector.getModel(false).getProfile() != mProfile) {\n                finish(0);\n                return;\n            }\n            long browserWindow = task.getNativeBrowserWindowPtr(mProfile, activity);\n            if (browserWindow != 0) finish(browserWindow);\n        }\n\n        @Override\n        public void cancel() {\n            finish(0);\n        }\n\n        private void finish(long browserWindow) {\n            JniOnceCallback<Long> callback = mCallback;\n            if (callback == null) return;\n            mCallback = null;\n            mTimeout.cancel();\n            mCheck.cancel();\n            mWindowManager.removeObserver(this);\n            mTaskTracker.removeObserver(this);\n            ApplicationStatus.unregisterActivityStateListener(this);\n            if (mRestoredSelector != null) mRestoredSelector.removeObserver(this);\n            if (mTask != null) mTask.removeAndroidBrowserWindowObserver(this);\n            mRestoredSelector = null;\n            mTask = null;\n            mActivity = null;\n            mWindowRestores.remove(this);\n            // Native may reenter cancellation or destroy the manager. Retire all ownership first.\n            callback.onResult(browserWindow);\n        }\n\n        @Override\n        public void onTabModelSelectorAdded(TabModelSelector selector) {\n            scheduleCheck();\n        }\n\n        @Override\n        public void onTabStateInitialized() {\n            scheduleCheck();\n        }\n\n        @Override\n        public void onDestroyed() {\n            finish(0);\n        }\n\n        @Override\n        public void onActivityStateChange(Activity activity, int newState) {\n            if (newState == ActivityState.DESTROYED && (activity == mActivity\n                    || mWindowManager.getIdForWindow(activity) == mInstanceId)) {\n                finish(0);\n            } else {\n                scheduleCheck();\n            }\n        }\n\n        @Override\n        public void onTaskAdded(ChromeAndroidTask task) {\n            scheduleCheck();\n        }\n\n        @Override\n        public void onTaskRemoved(ChromeAndroidTask task) {\n            if (task == mTask) finish(0);\n        }\n\n        @Override\n        public void onBrowserWindowAdded(AndroidBrowserWindowInfo windowInfo) {\n            scheduleCheck();\n        }\n\n        @Override\n        public void onBrowserWindowRemoved(AndroidBrowserWindowInfo windowInfo) {\n            if (windowInfo.mProfile == mProfile\n                    && windowInfo.mActivityWindowAndroid != null\n                    && windowInfo.mActivityWindowAndroid.getActivity().get() == mActivity) finish(0);\n        }\n    }\n\n"
+- description: Cancel all pending native callbacks before destroying their manager dependencies
+  regex:
+    re_pattern: '\ \ \ \ /\*\ package\ \*/\ void\ destroy\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ if\ \(mRecentlyClosedTabManager\ !=\ null\)\ \{'
+    replace: "    /* package */ void destroy() {\n        if (mDestroyed) return;\n        mDestroyed = true;\n        for (TabStateInitializedObserver request : new ArrayList<>(mMetadataRequests)) {\n            request.onDestroyed();\n        }\n        for (WindowRestoreOperation operation : new ArrayList<>(mWindowRestores)) {\n            operation.cancel();\n        }\n        if (mRecentlyClosedTabManager != null) {"
+- description: Bind native closed-window metadata to the selected closure generation
+  regex:
+    re_pattern: '\ \ \ \ public\ static\ void\ getRecentlyClosedWindow\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ @JniType\("Profile\*"\)\ Profile\ profile,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ int\ instanceId,'
+    replace: "    public static void getRecentlyClosedWindow(\n            @JniType(\"Profile*\") Profile profile,\n            int instanceId,\n            long expectedClosureMillis,"
+- description: Revalidate the snapshot before materializing persisted tabs
+  regex:
+    re_pattern: \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ manager\.getRecentlyClosedWindowInternal\(instanceId,\ callback\);
+    replace: "                    manager.getRecentlyClosedWindowInternal(\n                            instanceId, expectedClosureMillis, callback);"
+- description: Preserve the existing test helper while carrying an exact native closure timestamp
+  regex:
+    re_pattern: '\ \ \ \ @VisibleForTesting\
+
+      \ \ \ \ public\ void\ getRecentlyClosedWindowInternal\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ int\ instanceId,\ JniOnceCallback<@Nullable\ RecentlyClosedWindowMetadata>\ callback\)\ \{\
+
+      '
+    replace: "    @VisibleForTesting\n    public void getRecentlyClosedWindowInternal(\n            int instanceId, JniOnceCallback<@Nullable RecentlyClosedWindowMetadata> callback) {\n        getRecentlyClosedWindowInternal(instanceId, 0, callback);\n    }\n\n    private void getRecentlyClosedWindowInternal(\n            int instanceId, long expectedClosureMillis,\n            JniOnceCallback<@Nullable RecentlyClosedWindowMetadata> callback) {\n"
+- description: Reject reused or reclosed instance IDs before loading a headless selector
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ if\ \(window\ ==\ null\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ callback\.onResult\(null\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ return;\
+
+      \ \ \ \ \ \ \ \ \}'
+    replace: "        if (window == null\n                || (expectedClosureMillis != 0 && window.getTimestamp() != expectedClosureMillis)) {\n            callback.onResult(null);\n            return;\n        }"
+- description: Enumerate bounded real closed-window identities without eagerly loading their tabs
+  regex:
+    re_pattern: '\ \ \ \ /\*\*\
+
+      \ \ \ \ \ \*\ Returns\ the\ TabModel\ and\ other\ metadata\ via\ callback\ for\ a\ recently\ closed\ window\ with\ the'
+    replace: "    /**\n     * Returns newest-first pairs of persisted instance ID and closure milliseconds. This snapshot\n     * does not load any tab state: native merges these times with native tab/group session entries\n     * before sequentially requesting metadata for the windows needed by the bounded response.\n     */\n    @CalledByNative\n    public static @JniType(\"std::vector<int64_t>\") long[] getRecentlyClosedWindowSnapshot(\n            @JniType(\"Profile*\") Profile profile, int maxEntries) {\n        if (maxEntries <= 0 || profile.isOffTheRecord() || profile.shutdownStarted()) {\n            return new long[0];\n        }\n        int limit = Math.min(maxEntries, MAX_RECENTLY_CLOSED_TABS_AND_WINDOWS);\n        for (RecentlyClosedEntriesManager manager :\n                RecentlyClosedEntriesManagerTrackerImpl.getInstance().getManagers()) {\n            if (manager.mDestroyed || manager.mProfile != profile) continue;\n            List<RecentlyClosedWindow> windows = manager.getRecentlyClosedWindows();\n            if (manager.mDestroyed || profile.shutdownStarted()) return new long[0];\n            int count = Math.min(limit, windows.size());\n            long[] snapshot = new long[count * 2];\n            for (int i = 0; i < count; ++i) {\n                RecentlyClosedWindow window = windows.get(i);\n                snapshot[i * 2] = window.getInstanceId();\n                snapshot[i * 2 + 1] = window.getTimestamp();\n            }\n            return snapshot;\n        }\n        return new long[0];\n    }\n\n    /**\n     * Returns the TabModel and other metadata via callback for a recently closed window with the"
+- description: Retain saved group visual metadata during single-tab restoration
+  regex:
+    re_pattern: import\ org\.chromium\.base\.TimeUtils;
+    replace: 'import org.chromium.base.TimeUtils;
+
+      import org.chromium.base.Token;
+
+      import org.chromium.base.Log;'
+- description: Reuse the existing real Tab reparenting path
+  regex:
+    re_pattern: import\ org\.chromium\.chrome\.browser\.multiwindow\.MultiWindowUtils;
+    replace: 'import org.chromium.chrome.browser.multiwindow.MultiWindowUtils;
+
+      import org.chromium.chrome.browser.multiwindow.MultiInstanceOrchestratorFactory;'
+- description: Observe exact destination insertion rather than early attachment
+  regex:
+    re_pattern: import\ org\.chromium\.chrome\.browser\.tabmodel\.SupportedProfileType;
+    replace: 'import org.chromium.chrome.browser.tab.Tab;
+
+      import org.chromium.chrome.browser.tab.TabCreationState;
+
+      import org.chromium.chrome.browser.tab.TabLaunchType;
+
+      import org.chromium.chrome.browser.tabmodel.TabList;
+
+      import org.chromium.chrome.browser.tabmodel.TabModelObserver;
+
+      import org.chromium.chrome.browser.tabmodel.SupportedProfileType;'
+- description: Own saved-tab callbacks until completion or teardown
+  regex:
+    re_pattern: \ \ \ \ private\ final\ List<WindowRestoreOperation>\ mWindowRestores\ =\ new\ ArrayList<>\(\);
+    replace: "    private final List<WindowRestoreOperation> mWindowRestores = new ArrayList<>();\n    private final List<SavedTabRestoreOperation> mSavedTabRestores = new ArrayList<>();"
+- description: Do not reopen an instance midway through one of its child transfers
+  regex:
+    re_pattern: \|\|\ !canRestoreWindow\(\)\)\ \{
+    replace: "|| !canRestoreWindow()\n                || hasPendingSavedTabRestore(instanceId)) {"
+- description: Restore one saved child through the real Android tab-transfer and persistence observers
+  regex:
+    re_pattern: \ \ \ \ private\ boolean\ hasLiveOwner\(\)\ \{
+    replace: "    private static boolean hasPendingSavedTabRestore(int instanceId) {\n        for (RecentlyClosedEntriesManager manager :\n                RecentlyClosedEntriesManagerTrackerImpl.getInstance().getManagers()) {\n            for (SavedTabRestoreOperation operation : manager.mSavedTabRestores) {\n                if (operation.mInstanceId == instanceId) return true;\n            }\n        }\n        return false;\n    }\n\n    /** Moves only the named saved tab, preserving its serialized navigation state. */\n    @CalledByNative\n    public static @Nullable RestoreOperation restoreTab(\n            @JniType(\"Profile*\") Profile profile,\n            int instanceId,\n            long expectedClosureTime,\n            int androidTabId,\n            @JniType(\"TabModel*\") TabModel target,\n            @JniType(\"base::OnceCallback<void(const jni_zero::JavaRef<jobject>&)>&&\")\n                    JniOnceCallback<@Nullable Tab> callback) {\n        if (profile.isOffTheRecord()\n                || profile.shutdownStarted()\n                || target.isIncognito()\n                || target.getProfile() != profile\n                || !MultiWindowUtils.isMultiInstanceApi31Enabled()) {\n            callback.onResult(null);\n            return null;\n        }\n        Set<RecentlyClosedEntriesManager> managers =\n                RecentlyClosedEntriesManagerTrackerImpl.getInstance().getManagers();\n        for (RecentlyClosedEntriesManager manager : managers) {\n            for (WindowRestoreOperation operation : manager.mWindowRestores) {\n                if (operation.mInstanceId == instanceId) {\n                    callback.onResult(null);\n                    return null;\n                }\n            }\n        }\n        for (RecentlyClosedEntriesManager manager : managers) {\n            if (manager.mDestroyed\n                    || manager.mProfile != profile\n                    || manager.mRegularTabModel != target\n                    || !manager.hasLiveOwner()\n                    || !manager.mOwnerSelector.isTabStateInitialized()\n                    || !(MultiWindowUtils.getActivityById(\n                                    TabWindowManagerSingleton.getInstance()\n                                            .getWindowIdForSelector(manager.mOwnerSelector))\n                            instanceof ChromeTabbedActivity)\n                    || manager.getRecentlyClosedWindowById(instanceId, expectedClosureTime)\n                            == null) {\n                continue;\n            }\n            TabWindowManager windows = TabWindowManagerSingleton.getInstance();\n            TabModelSelector source = windows.getTabModelSelectorById(instanceId);\n            if (source == null\n                    || source == manager.mOwnerSelector\n                    || !source.isTabStateInitialized()\n                    || source.getModel(false).getProfile() != profile\n                    || MultiWindowUtils.getActivityById(instanceId) != null\n                    || MultiWindowUtils.readProfileType(instanceId)\n                            == SupportedProfileType.OFF_THE_RECORD) {\n                callback.onResult(null);\n                return null;\n            }\n            Tab tab = source.getModel(false).getTabById(androidTabId);\n            if (tab == null\n                    || tab.isDestroyed()\n                    || tab.isClosing()\n                    || tab.getProfile() != profile\n                    || tab.isIncognito()\n                    || target.getTabById(androidTabId) != null) {\n                callback.onResult(null);\n                return null;\n            }\n            SavedTabRestoreOperation operation =\n                    manager.new SavedTabRestoreOperation(instanceId, source, tab, callback);\n            manager.mSavedTabRestores.add(operation);\n            operation.start();\n            return operation;\n        }\n        callback.onResult(null);\n        return null;\n    }\n\n    private final class SavedTabRestoreOperation\n            implements RestoreOperation, TabModelObserver, TabModelSelectorObserver {\n        private final int mInstanceId;\n        private final Tab mTab;\n        private final @Nullable Token mOriginalGroup;\n        private final String mGroupTitle;\n        private final int mGroupColor;\n        private @Nullable JniOnceCallback<@Nullable Tab> mCallback;\n        private final CancelableRunnable mCheck = new CancelableRunnable(this::completeTransfer);\n        private boolean mInserted;\n\n        SavedTabRestoreOperation(\n                int instanceId,\n                TabModelSelector source,\n                Tab tab,\n                JniOnceCallback<@Nullable Tab> callback) {\n            mInstanceId = instanceId;\n            mTab = tab;\n            mCallback = callback;\n            mOriginalGroup = tab.getTabGroupId();\n            mGroupTitle =\n                    mOriginalGroup == null\n                            ? \"\"\n                            : source.getModel(false).getTabGroupTitle(mOriginalGroup);\n            mGroupColor =\n                    mOriginalGroup == null\n                            ? 0\n                            : source.getModel(false).getTabGroupColorWithFallback(mOriginalGroup);\n        }\n\n        void start() {\n            mRegularTabModel.addObserver(this);\n            mOwnerSelector.addObserver(this);\n            if (mCallback == null || mDestroyed || !hasLiveOwner()) {\n                finish(null);\n                return;\n            }\n            int destinationWindow =\n                    TabWindowManagerSingleton.getInstance().getWindowIdForSelector(mOwnerSelector);\n            // This existing-window route calls onNewIntent synchronously. It uses setupIntent,\n            // not begin(), so it also supports a frozen source tab without an Activity/Window.\n            // Source tabRemoved observers persist the remaining window; no URL is recreated.\n            try {\n                MultiInstanceOrchestratorFactory.getInstance()\n                        .moveTabsToWindowByIdChecked(\n                                destinationWindow,\n                                List.of(mTab),\n                                TabList.INVALID_TAB_INDEX,\n                                TabList.INVALID_TAB_INDEX,\n                                true);\n            } catch (RuntimeException e) {\n                Log.w(\"RecentSessions\", \"Saved-tab transfer did not finish normally.\", e);\n                // The existing move may already have committed before bring-to-front fails.\n                // Resolve from actual model ownership instead of replaying a second transfer.\n            }\n            PostTask.postTask(TaskTraits.UI_DEFAULT, mCheck);\n        }\n\n        @Override\n        public void didAddTab(\n                Tab tab,\n                @TabLaunchType int type,\n                @TabCreationState int creationState,\n                boolean markedForSelection) {\n            if (tab == mTab) mInserted = true;\n        }\n\n        private void completeTransfer() {\n            if (mCallback == null) return;\n            if (!mInserted\n                    || mDestroyed\n                    || mProfile.shutdownStarted()\n                    || !hasLiveOwner()\n                    || mTab.isDestroyed()\n                    || mTab.isClosing()\n                    || mTab.getProfile() != mProfile\n                    || mRegularTabModel.getTabById(mTab.getId()) != mTab) {\n                finish(null);\n                return;\n            }\n            // Match RecentlyClosedBridge.restoreTabGroup: restore grouped status and visuals\n            // with ordinary model operations. A new local token avoids duplicating the token\n            // of siblings still in the saved headless window. Restoring one split child does\n            // not restore its partner, matching TabRestoreServiceHelper::RestoreOneTabFromSplit.\n            if (mOriginalGroup != null && mTab.getTabGroupId() == null) {\n                List<Tab> existingGroup = mRegularTabModel.getTabsInGroup(mOriginalGroup);\n                if (!existingGroup.isEmpty()) {\n                    // Rejoin an existing destination group only after the ordinary transfer\n                    // has ungrouped the source. The reparent API rejects grouped input when\n                    // a destination group is specified.\n                    mRegularTabModel.mergeTabsToGroup(mTab.getId(), existingGroup.get(0).getId());\n                } else {\n                    mRegularTabModel.createSingleTabGroup(mTab);\n                    if (!ownsRestoredTab()) {\n                        finish(null);\n                        return;\n                    }\n                    Token group = mTab.getTabGroupId();\n                    if (group != null) {\n                        mRegularTabModel.setTabGroupColor(group, mGroupColor);\n                        if (!ownsRestoredTab()) {\n                            finish(null);\n                            return;\n                        }\n                        if (!mGroupTitle.isEmpty()) {\n                            mRegularTabModel.setTabGroupTitle(group, mGroupTitle);\n                        }\n                    }\n                }\n                if (!ownsRestoredTab()) {\n                    finish(null);\n                    return;\n                }\n            }\n            // The persistence observers have already updated the source count. Invalidate all\n            // profile-local UI caches, then rebuild the existing recent-window list. Removing\n            // its final child retires the empty source via the ordinary headless observer.\n            for (RecentlyClosedEntriesManager manager :\n                    new ArrayList<>(\n                            RecentlyClosedEntriesManagerTrackerImpl.getInstance().getManagers())) {\n                if (!manager.mDestroyed && manager.mProfile == mProfile) {\n                    manager.mCachedTabsForClosedWindows.remove(mInstanceId);\n                    manager.updateRecentlyClosedEntries();\n                    if (!ownsRestoredTab()) {\n                        finish(null);\n                        return;\n                    }\n                }\n            }\n            // Native registers its profile callback on one manager, which may belong to\n            // another window. Notify that live owner once after all UI caches are coherent.\n            for (RecentlyClosedEntriesManager manager :\n                    new ArrayList<>(\n                            RecentlyClosedEntriesManagerTrackerImpl.getInstance().getManagers())) {\n                if (!manager.mDestroyed\n                        && manager.mProfile == mProfile\n                        && manager.mNativeUpdatedCallback != null) {\n                    manager.mNativeUpdatedCallback.onResult(\n                            mProfile.getNativeBrowserContextPointer());\n                    // The callback may destroy either manager. Do not touch its owner again.\n                    break;\n                }\n            }\n            finish(ownsRestoredTab() ? mTab : null);\n        }\n\n        private boolean ownsRestoredTab() {\n            return mCallback != null\n                    && !mDestroyed\n                    && !mProfile.shutdownStarted()\n                    && hasLiveOwner()\n                    && !mTab.isDestroyed()\n                    && !mTab.isClosing()\n                    && mTab.getProfile() == mProfile\n                    && mRegularTabModel.getTabById(mTab.getId()) == mTab;\n        }\n\n        @Override\n        public void onDestroy() {\n            finish(null);\n        }\n\n        @Override\n        public void onDestroyed() {\n            finish(null);\n        }\n\n        @Override\n        public void cancel() {\n            finish(null);\n        }\n\n        private void finish(@Nullable Tab tab) {\n            JniOnceCallback<@Nullable Tab> callback = mCallback;\n            if (callback == null) return;\n            mCallback = null;\n            mCheck.cancel();\n            mRegularTabModel.removeObserver(this);\n            mOwnerSelector.removeObserver(this);\n            mSavedTabRestores.remove(this);\n            callback.onResult(tab);\n        }\n    }\n\n    private boolean hasLiveOwner() {"
+- description: Finish pending saved-tab callbacks before releasing their owning manager
+  regex:
+    re_pattern: \ \ \ \ \ \ \ \ mDestroyed\ =\ true;
+    replace: "        mDestroyed = true;\n        for (SavedTabRestoreOperation operation : new ArrayList<>(mSavedTabRestores)) {\n            operation.cancel();\n        }"
+- description: Make pending metadata reads cancellable through the existing owned-operation contract
+  regex:
+    re_pattern: private\ final\ class\ TabStateInitializedObserver\ implements\ TabModelSelectorObserver\ \{
+    replace: "private final class TabStateInitializedObserver\n            implements TabModelSelectorObserver, RestoreOperation {"
+- description: Bound a metadata callback whose headless selector never finishes initialization
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ private\ final\ CancelableRunnable\ mCheck\ =\ new\ CancelableRunnable\(this::onTabStateInitialized\);\
+
+      '
+    replace: "        private final CancelableRunnable mCheck =\n                new CancelableRunnable(this::onTabStateInitialized);\n        private final CancelableRunnable mTimeout = new CancelableRunnable(() -> finish(null));\n"
+- description: Arm one timeout only while the observer still owns an unanswered metadata callback
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ selector\.addObserver\(this\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(mCallback\ !=\ null\ \&\&\ selector\.isTabStateInitialized\(\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ PostTask\.postTask\(TaskTraits\.UI_DEFAULT,\ mCheck\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      '
+    replace: "            selector.addObserver(this);\n            if (mCallback == null) return;\n            PostTask.postDelayedTask(TaskTraits.UI_DEFAULT, mTimeout, TimeUnit.MINUTES.toMillis(1));\n            if (selector.isTabStateInitialized() && mCallback != null) {\n                PostTask.postTask(TaskTraits.UI_DEFAULT, mCheck);\n            }\n"
+- description: Retire both queued tasks before unregistering or notifying native metadata clients
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ mCallback\ =\ null;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mCheck\.cancel\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mTabModelSelector\.removeObserver\(this\);\
+
+      '
+    replace: "            mCallback = null;\n            mCheck.cancel();\n            mTimeout.cancel();\n            mTabModelSelector.removeObserver(this);\n"
+- description: Complete cancellation or selector destruction with one null result after cleanup
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ @Override\
+
+      \ \ \ \ \ \ \ \ public\ void\ onDestroyed\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ finish\(null\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ /\*\*\
+
+      \ \ \ \ \ \*\ @param\ multiInstanceManager'
+    replace: "        @Override\n        public void cancel() {\n            finish(null);\n        }\n\n        @Override\n        public void onDestroyed() {\n            cancel();\n        }\n    }\n\n    /**\n     * @param multiInstanceManager"
+- description: Return the exact metadata observer handle to the native request owner
+  regex:
+    re_pattern: '\ \ \ \ @CalledByNative\
+
+      \ \ \ \ public\ static\ void\ getRecentlyClosedWindow\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ @JniType\("Profile\*"\)\ Profile\ profile,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ int\ instanceId,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ long\ expectedClosureMillis,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ @JniType\("base::OnceCallback<void\(const\ jni_zero::JavaRef<jobject>\&\)>\&\&"\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ JniOnceCallback<@Nullable\ RecentlyClosedWindowMetadata>\ callback\)\ \{\
+
+      \ \ \ \ \ \ \ \ Set<RecentlyClosedEntriesManager>\ managers\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ RecentlyClosedEntriesManagerTrackerImpl\.getInstance\(\)\.getManagers\(\);\
+
+      \ \ \ \ \ \ \ \ if\ \(!profile\.isOffTheRecord\(\)\ \&\&\ !profile\.shutdownStarted\(\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ for\ \(RecentlyClosedEntriesManager\ manager\ :\ managers\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ if\ \(!manager\.mDestroyed\ \&\&\ manager\.mProfile\ ==\ profile\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ manager\.getRecentlyClosedWindowInternal\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ instanceId,\ expectedClosureMillis,\ callback\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ return;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ callback\.onResult\(null\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      '
+    replace: "    @CalledByNative\n    public static @Nullable RestoreOperation getRecentlyClosedWindow(\n            @JniType(\"Profile*\") Profile profile,\n            int instanceId,\n            long expectedClosureMillis,\n            @JniType(\"base::OnceCallback<void(const jni_zero::JavaRef<jobject>&)>&&\")\n                    JniOnceCallback<@Nullable RecentlyClosedWindowMetadata> callback) {\n        Set<RecentlyClosedEntriesManager> managers =\n                RecentlyClosedEntriesManagerTrackerImpl.getInstance().getManagers();\n        if (!profile.isOffTheRecord() && !profile.shutdownStarted()) {\n            for (RecentlyClosedEntriesManager manager : managers) {\n                if (!manager.mDestroyed && manager.mProfile == profile) {\n                    return manager.getRecentlyClosedWindowInternal(\n                            instanceId, expectedClosureMillis, callback);\n                }\n            }\n        }\n        callback.onResult(null);\n        return null;\n    }\n\n"
+- description: Preserve the void test helper while returning cancellable pending metadata to native
+  regex:
+    re_pattern: '\ \ \ \ private\ void\ getRecentlyClosedWindowInternal\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ int\ instanceId,\ long\ expectedClosureMillis,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ JniOnceCallback<@Nullable\ RecentlyClosedWindowMetadata>\ callback\)\ \{\
+
+      \ \ \ \ \ \ \ \ if\ \(mDestroyed\ \|\|\ mProfile\.isOffTheRecord\(\)\ \|\|\ mProfile\.shutdownStarted\(\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ callback\.onResult\(null\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ return;\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ //\ Look\ up\ recently\ closed\ windows\.\
+
+      \ \ \ \ \ \ \ \ List<RecentlyClosedWindow>\ windows\ =\ getRecentlyClosedWindows\(\);\
+
+      \ \ \ \ \ \ \ \ if\ \(windows\.isEmpty\(\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ callback\.onResult\(null\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ return;\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ //\ Look\ for\ the\ window\.\
+
+      \ \ \ \ \ \ \ \ RecentlyClosedWindow\ window\ =\ null;\
+
+      \ \ \ \ \ \ \ \ if\ \(instanceId\ ==\ TabWindowManager\.INVALID_WINDOW_ID\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ //\ Use\ the\ first\ window\.\ Entries\ are\ sorted\ by\ close\ time,\ most\ recently\ closed\ first\.\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ window\ =\ windows\.get\(0\);\
+
+      \ \ \ \ \ \ \ \ \}\ else\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ //\ Search\ for\ a\ window\ with\ matching\ instance\ id\.\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ for\ \(RecentlyClosedWindow\ w\ :\ windows\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ if\ \(w\.getInstanceId\(\)\ ==\ instanceId\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ window\ =\ w;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ break;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ //\ Return\ an\ error\ if\ no\ window\ was\ found\.\
+
+      \ \ \ \ \ \ \ \ if\ \(window\ ==\ null\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \|\|\ \(expectedClosureMillis\ !=\ 0\ \&\&\ window\.getTimestamp\(\)\ !=\ expectedClosureMillis\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ callback\.onResult\(null\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ return;\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ //\ Milliseconds\ since\ UNIX\ epoch\ when\ this\ entry\ was\ created\.\
+
+      \ \ \ \ \ \ \ \ final\ long\ timestamp\ =\ window\.getTimestamp\(\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ //\ Get\ the\ window''s\ instance\ ID\ in\ case\ we\ looked\ it\ up\ with\ instanceId\ ==\ \-1\.\
+
+      \ \ \ \ \ \ \ \ final\ int\ windowInstanceId\ =\ window\.getInstanceId\(\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ //\ Get\ the\ TabModelSelector\ for\ the\ closed\ window\.\
+
+      \ \ \ \ \ \ \ \ TabModelSelector\ selector\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ TabWindowManagerSingleton\.getInstance\(\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \.getTabModelSelectorById\(window\.getInstanceId\(\)\);\
+
+      \ \ \ \ \ \ \ \ if\ \(selector\ ==\ null\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ //\ A\ persisted\ session\ ID\ remains\ usable\ after\ process\ restart,\ even\ before\ any\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ //\ listing\ UI\ has\ materialized\ the\ inactive\ window''s\ headless\ tab\ state\.\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ selector\ =\ TabWindowManagerSingleton\.getInstance\(\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \.requestSelectorWithoutActivity\(windowInstanceId,\ mProfile\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ if\ \(selector\ ==\ null\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ callback\.onResult\(null\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ return;\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ //\ The\ owned\ observer\ also\ posts\ already\-ready\ results,\ revalidates\ the\ exact\ regular\
+
+      \ \ \ \ \ \ \ \ //\ model,\ and\ balances\ pending\ native\ callbacks\ on\ selector\ or\ manager\ destruction\.\
+
+      \ \ \ \ \ \ \ \ new\ TabStateInitializedObserver\(selector,\ timestamp,\ windowInstanceId,\ callback\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      '
+    replace: "    private @Nullable RestoreOperation getRecentlyClosedWindowInternal(\n            int instanceId, long expectedClosureMillis,\n            JniOnceCallback<@Nullable RecentlyClosedWindowMetadata> callback) {\n        if (mDestroyed || mProfile.isOffTheRecord() || mProfile.shutdownStarted()) {\n            callback.onResult(null);\n            return null;\n        }\n        // Look up recently closed windows.\n        List<RecentlyClosedWindow> windows = getRecentlyClosedWindows();\n        if (windows.isEmpty()) {\n            callback.onResult(null);\n            return null;\n        }\n\n        // Look for the window.\n        RecentlyClosedWindow window = null;\n        if (instanceId == TabWindowManager.INVALID_WINDOW_ID) {\n            // Use the first window. Entries are sorted by close time, most recently closed first.\n            window = windows.get(0);\n        } else {\n            // Search for a window with matching instance id.\n            for (RecentlyClosedWindow w : windows) {\n                if (w.getInstanceId() == instanceId) {\n                    window = w;\n                    break;\n                }\n            }\n        }\n\n        // Return an error if no window was found.\n        if (window == null\n                || (expectedClosureMillis != 0 && window.getTimestamp() != expectedClosureMillis)) {\n            callback.onResult(null);\n            return null;\n        }\n\n        // Milliseconds since UNIX epoch when this entry was created.\n        final long timestamp = window.getTimestamp();\n\n        // Get the window's instance ID in case we looked it up with instanceId == -1.\n        final int windowInstanceId = window.getInstanceId();\n\n        // Get the TabModelSelector for the closed window.\n        TabModelSelector selector =\n                TabWindowManagerSingleton.getInstance()\n                        .getTabModelSelectorById(window.getInstanceId());\n        if (selector == null) {\n            // A persisted session ID remains usable after process restart, even before any\n            // listing UI has materialized the inactive window's headless tab state.\n            selector = TabWindowManagerSingleton.getInstance()\n                    .requestSelectorWithoutActivity(windowInstanceId, mProfile);\n        }\n        if (selector == null || mDestroyed || mProfile.shutdownStarted()) {\n            callback.onResult(null);\n            return null;\n        }\n\n        // The owned observer also posts already-ready results, revalidates the exact regular\n        // model, and balances pending native callbacks on selector or manager destruction.\n        return new TabStateInitializedObserver(selector, timestamp, windowInstanceId, callback);\n    }\n\n"
+- description: Format changed Java with the pinned Chromium formatter
+  regex:
+    re_pattern: 'import\ org\.chromium\.base\.Callback;\
+
+      import\ org\.chromium\.base\.CancelableRunnable;\
+
+      import\ org\.chromium\.base\.JniOnceCallback;\
+
+      import\ org\.chromium\.base\.JniRepeatingCallback;\
+
+      import\ org\.chromium\.base\.ResettersForTesting;\
+
+      import\ org\.chromium\.base\.StrictModeContext;\
+
+      import\ org\.chromium\.base\.TimeUtils;\
+
+      import\ org\.chromium\.base\.Token;\
+
+      import\ org\.chromium\.base\.Log;\
+
+      import\ org\.chromium\.base\.task\.PostTask;\
+
+      import\ org\.chromium\.base\.task\.TaskTraits;\
+
+      import\ org\.chromium\.build\.annotations\.NullMarked;\
+
+      import\ org\.chromium\.build\.annotations\.Nullable;\
+
+      '
+    replace: 'import org.chromium.base.Callback;
+
+      import org.chromium.base.CancelableRunnable;
+
+      import org.chromium.base.JniOnceCallback;
+
+      import org.chromium.base.JniRepeatingCallback;
+
+      import org.chromium.base.Log;
+
+      import org.chromium.base.ResettersForTesting;
+
+      import org.chromium.base.StrictModeContext;
+
+      import org.chromium.base.TimeUtils;
+
+      import org.chromium.base.Token;
+
+      import org.chromium.base.task.PostTask;
+
+      import org.chromium.base.task.TaskTraits;
+
+      import org.chromium.build.annotations.NullMarked;
+
+      import org.chromium.build.annotations.Nullable;
+
+      '
+- description: Format changed Java with the pinned Chromium formatter
+  regex:
+    re_pattern: 'import\ org\.chromium\.chrome\.browser\.multiwindow\.MultiInstanceManager;\
+
+      import\ org\.chromium\.chrome\.browser\.multiwindow\.MultiInstanceManager\.CloseWindowAppSource;\
+
+      import\ org\.chromium\.chrome\.browser\.multiwindow\.MultiInstanceManager\.NewWindowAppSource;\
+
+      import\ org\.chromium\.chrome\.browser\.multiwindow\.MultiInstanceManager\.PersistedInstanceType;\
+
+      import\ org\.chromium\.chrome\.browser\.multiwindow\.MultiWindowUtils;\
+
+      import\ org\.chromium\.chrome\.browser\.multiwindow\.MultiInstanceOrchestratorFactory;\
+
+      import\ org\.chromium\.chrome\.browser\.ntp\.RecentlyClosedBridge;\
+
+      import\ org\.chromium\.chrome\.browser\.ntp\.RecentlyClosedEntry;\
+
+      import\ org\.chromium\.chrome\.browser\.ntp\.RecentlyClosedTab;\
+
+      import\ org\.chromium\.chrome\.browser\.ntp\.RecentlyClosedTabManager;\
+
+      '
+    replace: 'import org.chromium.chrome.browser.multiwindow.MultiInstanceManager;
+
+      import org.chromium.chrome.browser.multiwindow.MultiInstanceManager.CloseWindowAppSource;
+
+      import org.chromium.chrome.browser.multiwindow.MultiInstanceManager.NewWindowAppSource;
+
+      import org.chromium.chrome.browser.multiwindow.MultiInstanceManager.PersistedInstanceType;
+
+      import org.chromium.chrome.browser.multiwindow.MultiInstanceOrchestratorFactory;
+
+      import org.chromium.chrome.browser.multiwindow.MultiWindowUtils;
+
+      import org.chromium.chrome.browser.ntp.RecentlyClosedBridge;
+
+      import org.chromium.chrome.browser.ntp.RecentlyClosedEntry;
+
+      import org.chromium.chrome.browser.ntp.RecentlyClosedTab;
+
+      import org.chromium.chrome.browser.ntp.RecentlyClosedTabManager;
+
+      '
+- description: Format changed Java with the pinned Chromium formatter
+  regex:
+    re_pattern: 'import\ org\.chromium\.chrome\.browser\.profiles\.Profile;\
+
+      import\ org\.chromium\.chrome\.browser\.tab\.Tab;\
+
+      import\ org\.chromium\.chrome\.browser\.tab\.TabCreationState;\
+
+      import\ org\.chromium\.chrome\.browser\.tab\.TabLaunchType;\
+
+      import\ org\.chromium\.chrome\.browser\.tabmodel\.TabList;\
+
+      import\ org\.chromium\.chrome\.browser\.tabmodel\.TabModelObserver;\
+
+      import\ org\.chromium\.chrome\.browser\.tabmodel\.SupportedProfileType;\
+
+      import\ org\.chromium\.chrome\.browser\.tabmodel\.TabModel;\
+
+      import\ org\.chromium\.chrome\.browser\.tabmodel\.TabModelSelector;\
+
+      import\ org\.chromium\.chrome\.browser\.tabmodel\.TabModelSelectorObserver;\
+
+      import\ org\.chromium\.chrome\.browser\.tabmodel\.TabPersistentStoreImpl;\
+
+      import\ org\.chromium\.chrome\.browser\.tabmodel\.TabPersistentStoreImpl\.ClosedWindowTabInfo;\
+
+      '
+    replace: 'import org.chromium.chrome.browser.profiles.Profile;
+
+      import org.chromium.chrome.browser.tab.Tab;
+
+      import org.chromium.chrome.browser.tab.TabCreationState;
+
+      import org.chromium.chrome.browser.tab.TabLaunchType;
+
+      import org.chromium.chrome.browser.tabmodel.SupportedProfileType;
+
+      import org.chromium.chrome.browser.tabmodel.TabList;
+
+      import org.chromium.chrome.browser.tabmodel.TabModel;
+
+      import org.chromium.chrome.browser.tabmodel.TabModelObserver;
+
+      import org.chromium.chrome.browser.tabmodel.TabModelSelector;
+
+      import org.chromium.chrome.browser.tabmodel.TabModelSelectorObserver;
+
+      import org.chromium.chrome.browser.tabmodel.TabPersistentStoreImpl;
+
+      import org.chromium.chrome.browser.tabmodel.TabPersistentStoreImpl.ClosedWindowTabInfo;
+
+      '
+- description: Format changed Java with the pinned Chromium formatter
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ private\ final\ CancelableRunnable\ mCheck\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ new\ CancelableRunnable\(this::onTabStateInitialized\);\
+
+      \ \ \ \ \ \ \ \ private\ final\ CancelableRunnable\ mTimeout\ =\ new\ CancelableRunnable\(\(\)\ \->\ finish\(null\)\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ TabStateInitializedObserver\(TabModelSelector\ selector,\ long\ timestamp,\ int\ instanceId,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ JniOnceCallback<@Nullable\ RecentlyClosedWindowMetadata>\ callback\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mTabModelSelector\ =\ selector;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mTimestamp\ =\ timestamp;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mInstanceId\ =\ instanceId;\
+
+      '
+    replace: "        private final CancelableRunnable mCheck =\n                new CancelableRunnable(this::onTabStateInitialized);\n        private final CancelableRunnable mTimeout = new CancelableRunnable(() -> finish(null));\n\n        TabStateInitializedObserver(\n                TabModelSelector selector,\n                long timestamp,\n                int instanceId,\n                JniOnceCallback<@Nullable RecentlyClosedWindowMetadata> callback) {\n            mTabModelSelector = selector;\n            mTimestamp = timestamp;\n            mInstanceId = instanceId;\n"
+- description: Format changed Java with the pinned Chromium formatter
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ @Override\
+
+      \ \ \ \ \ \ \ \ public\ void\ onTabStateInitialized\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(mCallback\ ==\ null\)\ return;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ TabModel\ model\ =\ mTabModelSelector\.getModel\(false\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(mDestroyed\ \|\|\ mProfile\.shutdownStarted\(\)\ \|\|\ model\.getProfile\(\)\ !=\ mProfile\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \|\|\ TabWindowManagerSingleton\.getInstance\(\)\.getTabModelSelectorById\(mInstanceId\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ !=\ mTabModelSelector\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \|\|\ getRecentlyClosedWindowById\(mInstanceId,\ mTimestamp\)\ ==\ null\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ finish\(null\);\
+
+      '
+    replace: "        @Override\n        public void onTabStateInitialized() {\n            if (mCallback == null) return;\n            TabModel model = mTabModelSelector.getModel(false);\n            if (mDestroyed\n                    || mProfile.shutdownStarted()\n                    || model.getProfile() != mProfile\n                    || TabWindowManagerSingleton.getInstance().getTabModelSelectorById(mInstanceId)\n                            != mTabModelSelector\n                    || getRecentlyClosedWindowById(mInstanceId, mTimestamp) == null) {\n                finish(null);\n"
+- description: Format changed Java with the pinned Chromium formatter
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ getRecentlyClosedWindowInternal\(instanceId,\ 0,\ callback\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ private\ @Nullable\ RestoreOperation\ getRecentlyClosedWindowInternal\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ int\ instanceId,\ long\ expectedClosureMillis,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ JniOnceCallback<@Nullable\ RecentlyClosedWindowMetadata>\ callback\)\ \{\
+
+      \ \ \ \ \ \ \ \ if\ \(mDestroyed\ \|\|\ mProfile\.isOffTheRecord\(\)\ \|\|\ mProfile\.shutdownStarted\(\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ callback\.onResult\(null\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ return\ null;\
+
+      '
+    replace: "        getRecentlyClosedWindowInternal(instanceId, 0, callback);\n    }\n\n    private @Nullable RestoreOperation getRecentlyClosedWindowInternal(\n            int instanceId,\n            long expectedClosureMillis,\n            JniOnceCallback<@Nullable RecentlyClosedWindowMetadata> callback) {\n        if (mDestroyed || mProfile.isOffTheRecord() || mProfile.shutdownStarted()) {\n            callback.onResult(null);\n            return null;\n"
+- description: Format changed Java with the pinned Chromium formatter
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \.getTabModelSelectorById\(window\.getInstanceId\(\)\);\
+
+      \ \ \ \ \ \ \ \ if\ \(selector\ ==\ null\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ //\ A\ persisted\ session\ ID\ remains\ usable\ after\ process\ restart,\ even\ before\ any\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ //\ listing\ UI\ has\ materialized\ the\ inactive\ window''s\ headless\ tab\ state\.\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ selector\ =\ TabWindowManagerSingleton\.getInstance\(\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \.requestSelectorWithoutActivity\(windowInstanceId,\ mProfile\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ if\ \(selector\ ==\ null\ \|\|\ mDestroyed\ \|\|\ mProfile\.shutdownStarted\(\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ callback\.onResult\(null\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ return\ null;\
+
+      '
+    replace: "                        .getTabModelSelectorById(window.getInstanceId());\n        if (selector == null) {\n            // A persisted session ID remains usable after process restart, even before any\n            // listing UI has materialized the inactive window's headless tab state.\n            selector =\n                    TabWindowManagerSingleton.getInstance()\n                            .requestSelectorWithoutActivity(windowInstanceId, mProfile);\n        }\n        if (selector == null || mDestroyed || mProfile.shutdownStarted()) {\n            callback.onResult(null);\n            return null;\n"
+- description: Format changed Java with the pinned Chromium formatter
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ @JniType\("Profile\*"\)\ Profile\ profile,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ int\ instanceId,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ long\ expectedClosureTime,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ @JniType\("base::OnceCallback<void\(int64_t\)>\&\&"\)\ JniOnceCallback<Long>\ callback\)\ \{\
+
+      \ \ \ \ \ \ \ \ if\ \(profile\.isOffTheRecord\(\)\ \|\|\ profile\.shutdownStarted\(\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \|\|\ !MultiWindowUtils\.isMultiInstanceApi31Enabled\(\)\ \|\|\ !canRestoreWindow\(\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \|\|\ hasPendingSavedTabRestore\(instanceId\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ callback\.onResult\(0L\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ return\ null;\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      '
+    replace: "            @JniType(\"Profile*\") Profile profile,\n            int instanceId,\n            long expectedClosureTime,\n            @JniType(\"base::OnceCallback<void(int64_t)>&&\") JniOnceCallback<Long> callback) {\n        if (profile.isOffTheRecord()\n                || profile.shutdownStarted()\n                || !MultiWindowUtils.isMultiInstanceApi31Enabled()\n                || !canRestoreWindow()\n                || hasPendingSavedTabRestore(instanceId)) {\n            callback.onResult(0L);\n            return null;\n        }\n"
+- description: Format changed Java with the pinned Chromium formatter
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ for\ \(RecentlyClosedEntriesManager\ manager\ :\ managers\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(manager\.mDestroyed\ \|\|\ manager\.mProfile\ !=\ profile\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \|\|\ !manager\.hasLiveOwner\(\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \|\|\ manager\.getRecentlyClosedWindowById\(instanceId,\ expectedClosureTime\)\ ==\ null\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ continue;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ TabWindowManager\ windowManager\ =\ TabWindowManagerSingleton\.getInstance\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ TabModelSelector\ closedSelector\ =\ windowManager\.getTabModelSelectorById\(instanceId\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(closedSelector\ ==\ null\ \|\|\ !closedSelector\.isTabStateInitialized\(\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \|\|\ closedSelector\.getModel\(false\)\.getProfile\(\)\ !=\ profile\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \|\|\ MultiWindowUtils\.getActivityById\(instanceId\)\ !=\ null\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \|\|\ MultiWindowUtils\.readProfileType\(instanceId\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ ==\ SupportedProfileType\.OFF_THE_RECORD\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ callback\.onResult\(0L\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ return\ null;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ WindowRestoreOperation\ operation\ =\ manager\.new\ WindowRestoreOperation\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ instanceId,\ closedSelector,\ windowManager,\ callback\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ manager\.mWindowRestores\.add\(operation\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ operation\.start\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ return\ operation;\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      '
+    replace: "                }\n            }\n        }\n        for (RecentlyClosedEntriesManager manager : managers) {\n            if (manager.mDestroyed\n                    || manager.mProfile != profile\n                    || !manager.hasLiveOwner()\n                    || manager.getRecentlyClosedWindowById(instanceId, expectedClosureTime)\n                            == null) {\n                continue;\n            }\n            TabWindowManager windowManager = TabWindowManagerSingleton.getInstance();\n            TabModelSelector closedSelector = windowManager.getTabModelSelectorById(instanceId);\n            if (closedSelector == null\n                    || !closedSelector.isTabStateInitialized()\n                    || closedSelector.getModel(false).getProfile() != profile\n                    || MultiWindowUtils.getActivityById(instanceId) != null\n                    || MultiWindowUtils.readProfileType(instanceId)\n                            == SupportedProfileType.OFF_THE_RECORD) {\n                callback.onResult(0L);\n                return null;\n            }\n            WindowRestoreOperation operation =\n                    manager\n                    .new WindowRestoreOperation(\n                            instanceId, closedSelector, windowManager, callback);\n            manager.mWindowRestores.add(operation);\n            operation.start();\n            return operation;\n        }\n"
+- description: Format changed Java with the pinned Chromium formatter
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ TabWindowManager\ windowManager\ =\ TabWindowManagerSingleton\.getInstance\(\);\
+
+      \ \ \ \ \ \ \ \ int\ ownerId\ =\ windowManager\.getWindowIdForSelector\(mOwnerSelector\);\
+
+      \ \ \ \ \ \ \ \ Activity\ activity\ =\ MultiWindowUtils\.getActivityById\(ownerId\);\
+
+      \ \ \ \ \ \ \ \ return\ ownerId\ !=\ TabWindowManager\.INVALID_WINDOW_ID\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \&\&\ activity\ !=\ null\ \&\&\ !activity\.isFinishing\(\)\ \&\&\ !activity\.isDestroyed\(\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \&\&\ windowManager\.getIdForWindow\(activity\)\ ==\ ownerId\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \&\&\ windowManager\.getTabModelSelectorById\(ownerId\)\ ==\ mOwnerSelector\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \&\&\ mOwnerSelector\.getModel\(false\)\.getProfile\(\)\ ==\ mProfile;\
+
+      \ \ \ \ \}\
+
+      '
+    replace: "        TabWindowManager windowManager = TabWindowManagerSingleton.getInstance();\n        int ownerId = windowManager.getWindowIdForSelector(mOwnerSelector);\n        Activity activity = MultiWindowUtils.getActivityById(ownerId);\n        return ownerId != TabWindowManager.INVALID_WINDOW_ID\n                && activity != null\n                && !activity.isFinishing()\n                && !activity.isDestroyed()\n                && windowManager.getIdForWindow(activity) == ownerId\n                && windowManager.getTabModelSelectorById(ownerId) == mOwnerSelector\n                && mOwnerSelector.getModel(false).getProfile() == mProfile;\n    }\n"
+- description: Format changed Java with the pinned Chromium formatter
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ return\ null;\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ private\ final\ class\ WindowRestoreOperation\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ implements\ RestoreOperation,\ TabWindowManager\.Observer,\ TabModelSelectorObserver,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ ApplicationStatus\.ActivityStateListener,\ ChromeAndroidTaskTrackerObserver,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ AndroidBrowserWindowObserver\ \{\
+
+      \ \ \ \ \ \ \ \ private\ final\ int\ mInstanceId;\
+
+      \ \ \ \ \ \ \ \ private\ final\ TabModelSelector\ mClosedSelector;\
+
+      \ \ \ \ \ \ \ \ private\ final\ TabWindowManager\ mWindowManager;\
+
+      \ \ \ \ \ \ \ \ private\ final\ ChromeAndroidTaskTracker\ mTaskTracker;\
+
+      \ \ \ \ \ \ \ \ private\ final\ CancelableRunnable\ mTimeout\ =\ new\ CancelableRunnable\(\(\)\ \->\ finish\(0\)\);\
+
+      \ \ \ \ \ \ \ \ private\ final\ CancelableRunnable\ mCheck\ =\ new\ CancelableRunnable\(\(\)\ \->\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mCheckQueued\ =\ false;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ checkReady\(\);\
+
+      \ \ \ \ \ \ \ \ \}\);\
+
+      \ \ \ \ \ \ \ \ private\ @Nullable\ JniOnceCallback<Long>\ mCallback;\
+
+      \ \ \ \ \ \ \ \ private\ @Nullable\ TabModelSelector\ mRestoredSelector;\
+
+      \ \ \ \ \ \ \ \ private\ @Nullable\ Activity\ mActivity;\
+
+      \ \ \ \ \ \ \ \ private\ @Nullable\ ChromeAndroidTask\ mTask;\
+
+      \ \ \ \ \ \ \ \ private\ boolean\ mCheckQueued;\
+
+      \ \ \ \ \ \ \ \ private\ boolean\ mLaunchAccepted;\
+
+      \
+
+      \ \ \ \ \ \ \ \ WindowRestoreOperation\(int\ instanceId,\ TabModelSelector\ closedSelector,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ TabWindowManager\ windowManager,\ JniOnceCallback<Long>\ callback\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mInstanceId\ =\ instanceId;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mClosedSelector\ =\ closedSelector;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mWindowManager\ =\ windowManager;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mTaskTracker\ =\ ChromeAndroidTaskTrackerFactory\.getInstance\(\);\
+
+      '
+    replace: "        return null;\n    }\n\n    private final class WindowRestoreOperation\n            implements RestoreOperation,\n                    TabWindowManager.Observer,\n                    TabModelSelectorObserver,\n                    ApplicationStatus.ActivityStateListener,\n                    ChromeAndroidTaskTrackerObserver,\n                    AndroidBrowserWindowObserver {\n        private final int mInstanceId;\n        private final TabModelSelector mClosedSelector;\n        private final TabWindowManager mWindowManager;\n        private final ChromeAndroidTaskTracker mTaskTracker;\n        private final CancelableRunnable mTimeout = new CancelableRunnable(() -> finish(0));\n        private final CancelableRunnable mCheck =\n                new CancelableRunnable(\n                        () -> {\n                            mCheckQueued = false;\n                            checkReady();\n                        });\n        private @Nullable JniOnceCallback<Long> mCallback;\n        private @Nullable TabModelSelector mRestoredSelector;\n        private @Nullable Activity mActivity;\n        private @Nullable ChromeAndroidTask mTask;\n        private boolean mCheckQueued;\n        private boolean mLaunchAccepted;\n\n        WindowRestoreOperation(\n                int instanceId,\n                TabModelSelector closedSelector,\n                TabWindowManager windowManager,\n                JniOnceCallback<Long> callback) {\n            mInstanceId = instanceId;\n            mClosedSelector = closedSelector;\n            mWindowManager = windowManager;\n            mTaskTracker = ChromeAndroidTaskTrackerFactory.getInstance();\n"
+- description: Format changed Java with the pinned Chromium formatter
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ PostTask\.postDelayedTask\(TaskTraits\.UI_DEFAULT,\ mTimeout,\ TimeUnit\.MINUTES\.toMillis\(1\)\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ try\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ //\ This\ path\ consumes\ the\ closed\-window\ record\ only\ after\ Android\ accepts\ launch\.\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ //\ It\ reloads\ the\ original\ persistent\ session\ instead\ of\ recreating\ tabs\ by\ URL\.\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mMultiInstanceManager\.openWindow\(mInstanceId,\ NewWindowAppSource\.BROWSER_WINDOW_CREATOR\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\ catch\ \(ActivityNotFoundException\ \|\ SecurityException\ e\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ finish\(0\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ return;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      '
+    replace: "            PostTask.postDelayedTask(TaskTraits.UI_DEFAULT, mTimeout, TimeUnit.MINUTES.toMillis(1));\n            try {\n                // This path consumes the closed-window record only after Android accepts launch.\n                // It reloads the original persistent session instead of recreating tabs by URL.\n                mMultiInstanceManager.openWindow(\n                        mInstanceId, NewWindowAppSource.BROWSER_WINDOW_CREATOR);\n            } catch (ActivityNotFoundException | SecurityException e) {\n                finish(0);\n                return;\n            }\n"
+- description: Format changed Java with the pinned Chromium formatter
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ mCheckQueued\ =\ true;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ PostTask\.postTask\(TaskTraits\.UI_DEFAULT,\ mCheck\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ @SuppressWarnings\("deprecation"\)\ //\ Read\ the\ exact\ existing\ Activity/profile\ window;\ never\ create\ one\.\
+
+      \ \ \ \ \ \ \ \ private\ void\ checkReady\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(mCallback\ ==\ null\ \|\|\ !mLaunchAccepted\)\ return;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(mDestroyed\ \|\|\ mProfile\.shutdownStarted\(\)\ \|\|\ !hasLiveOwner\(\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ finish\(0\);\
+
+      '
+    replace: "            mCheckQueued = true;\n            PostTask.postTask(TaskTraits.UI_DEFAULT, mCheck);\n        }\n\n        @SuppressWarnings(\n                \"deprecation\") // Read the exact existing Activity/profile window; never create one.\n        private void checkReady() {\n            if (mCallback == null || !mLaunchAccepted) return;\n            if (mDestroyed || mProfile.shutdownStarted() || !hasLiveOwner()) {\n                finish(0);\n"
+- description: Format changed Java with the pinned Chromium formatter
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ return;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ Activity\ activity\ =\ MultiWindowUtils\.getActivityById\(mInstanceId\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(activity\ ==\ null\)\ return;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(activity\.isFinishing\(\)\ \|\|\ activity\.isDestroyed\(\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \|\|\ mWindowManager\.getIdForWindow\(activity\)\ !=\ mInstanceId\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \|\|\ mWindowManager\.getWindowIdForSelector\(selector\)\ !=\ mInstanceId\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \|\|\ \(mActivity\ !=\ null\ \&\&\ mActivity\ !=\ activity\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ finish\(0\);\
+
+      '
+    replace: "                return;\n            }\n            Activity activity = MultiWindowUtils.getActivityById(mInstanceId);\n            if (activity == null) return;\n            if (activity.isFinishing()\n                    || activity.isDestroyed()\n                    || mWindowManager.getIdForWindow(activity) != mInstanceId\n                    || mWindowManager.getWindowIdForSelector(selector) != mInstanceId\n                    || (mActivity != null && mActivity != activity)) {\n                finish(0);\n"
+- description: Format changed Java with the pinned Chromium formatter
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ @Override\
+
+      \ \ \ \ \ \ \ \ public\ void\ onActivityStateChange\(Activity\ activity,\ int\ newState\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(newState\ ==\ ActivityState\.DESTROYED\ \&\&\ \(activity\ ==\ mActivity\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \|\|\ mWindowManager\.getIdForWindow\(activity\)\ ==\ mInstanceId\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ finish\(0\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\ else\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ scheduleCheck\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      '
+    replace: "        }\n\n        @Override\n        public void onActivityStateChange(Activity activity, int newState) {\n            if (newState == ActivityState.DESTROYED\n                    && (activity == mActivity\n                            || mWindowManager.getIdForWindow(activity) == mInstanceId)) {\n                finish(0);\n            } else {\n                scheduleCheck();\n            }\n"
+- description: Format changed Java with the pinned Chromium formatter
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ @Override\
+
+      \ \ \ \ \ \ \ \ public\ void\ onBrowserWindowRemoved\(AndroidBrowserWindowInfo\ windowInfo\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(windowInfo\.mProfile\ ==\ mProfile\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \&\&\ windowInfo\.mActivityWindowAndroid\ !=\ null\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \&\&\ windowInfo\.mActivityWindowAndroid\.getActivity\(\)\.get\(\)\ ==\ mActivity\)\ finish\(0\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \}\
+
+      \
+
+      \
+
+      \ \ \ \ /\*\*\
+
+      \ \ \ \ \ \*\ Updates\ the\ list\ of\ recently\ closed\ entries\ by\ merging\ list\ of\ closed\ windows\ and\ closed\
+
+      \ \ \ \ \ \*\ tabs/groups\.\
+
+      '
+    replace: "        @Override\n        public void onBrowserWindowRemoved(AndroidBrowserWindowInfo windowInfo) {\n            if (windowInfo.mProfile == mProfile\n                    && windowInfo.mActivityWindowAndroid != null\n                    && windowInfo.mActivityWindowAndroid.getActivity().get() == mActivity)\n                finish(0);\n        }\n    }\n\n    /**\n     * Updates the list of recently closed entries by merging list of closed windows and closed\n     * tabs/groups.\n"
+- description: Keep native subscriptions with their profile instead of one Activity manager
+  regex:
+    pattern: "    /** Callback to native for updates to the entry list. */\n    private @Nullable JniRepeatingCallback<Long>\
+      \ mNativeUpdatedCallback;\n"
+    replace: "    // The native SessionsEventRouter owns each profile subscription. Activity managers may\n    // disappear\
+      \ and be recreated while that subscription remains active.\n    private static final Map<Profile, JniRepeatingCallback<Long>>\
+      \ sNativeUpdatedCallbacks =\n            new HashMap<>();\n"
+  count: 1
+- description: Register even with no managers; release replaced subscriptions
+  regex:
+    pattern: "    @CalledByNative\n    public static void setNativeUpdatedCallback(\n            @JniType(\"Profile*\") Profile\
+      \ profile,\n            @JniType(\"base::RepeatingCallback<void(int64_t)>\")\n                    JniRepeatingCallback<Long>\
+      \ callback) {\n        // All managers are notified about each window update, so just use the first one that\n     \
+      \   // matches the browser context.\n        Set<RecentlyClosedEntriesManager> managers =\n                RecentlyClosedEntriesManagerTrackerImpl.getInstance().getManagers();\n\
+      \        for (RecentlyClosedEntriesManager manager : managers) {\n            if (manager.mProfile == profile) {\n \
+      \               manager.mNativeUpdatedCallback = callback;\n                return;\n            }\n        }\n    }\n"
+    replace: "    @CalledByNative\n    public static void setNativeUpdatedCallback(\n            @JniType(\"Profile*\") Profile\
+      \ profile,\n            @JniType(\"base::RepeatingCallback<void(int64_t)>\")\n                    JniRepeatingCallback<Long>\
+      \ callback) {\n        JniRepeatingCallback<Long> previous = sNativeUpdatedCallbacks.put(profile, callback);\n     \
+      \   if (previous != null && previous != callback) previous.destroy();\n        ResettersForTesting.register(() -> clearNativeUpdatedCallback(profile));\n\
+      \    }\n"
+  count: 1
+- description: Clear profile subscriptions independently of managers and deduplicate window broadcasts
+  regex:
+    pattern: "    @CalledByNative\n    public static void clearNativeUpdatedCallback(@JniType(\"Profile*\") Profile profile)\
+      \ {\n        Set<RecentlyClosedEntriesManager> managers =\n                RecentlyClosedEntriesManagerTrackerImpl.getInstance().getManagers();\n\
+      \        for (RecentlyClosedEntriesManager manager : managers) {\n            if (manager.mProfile == profile && manager.mNativeUpdatedCallback\
+      \ != null) {\n                manager.mNativeUpdatedCallback.destroy();\n                manager.mNativeUpdatedCallback\
+      \ = null;\n            }\n        }\n    }\n"
+    replace: "    @CalledByNative\n    public static void clearNativeUpdatedCallback(@JniType(\"Profile*\") Profile profile)\
+      \ {\n        JniRepeatingCallback<Long> callback = sNativeUpdatedCallbacks.remove(profile);\n        if (callback !=\
+      \ null) callback.destroy();\n    }\n\n    private static void notifyNativeUpdatedCallback(Profile profile) {\n     \
+      \   JniRepeatingCallback<Long> callback = sNativeUpdatedCallbacks.get(profile);\n        if (callback != null && !profile.shutdownStarted())\
+      \ {\n            callback.onResult(profile.getNativeBrowserContextPointer());\n        }\n    }\n\n    private void\
+      \ notifyNativeUpdatedCallback() {\n        if (mDestroyed) return;\n        // Each manager receives window updates.\
+      \ Select a current live manager at delivery time\n        // to notify once per profile without tying the subscription\
+      \ to that manager's lifetime.\n        for (RecentlyClosedEntriesManager manager :\n                RecentlyClosedEntriesManagerTrackerImpl.getInstance().getManagers())\
+      \ {\n            if (!manager.mDestroyed && manager.mProfile == mProfile) {\n                if (manager == this) notifyNativeUpdatedCallback(mProfile);\n\
+      \                return;\n            }\n        }\n    }\n"
+  count: 1
+- description: Deliver saved-tab history changes once after all profile caches are coherent
+  regex:
+    pattern: "            // Native registers its profile callback on one manager, which may belong to\n            // another\
+      \ window. Notify that live owner once after all UI caches are coherent.\n            for (RecentlyClosedEntriesManager\
+      \ manager :\n                    new ArrayList<>(\n                            RecentlyClosedEntriesManagerTrackerImpl.getInstance().getManagers()))\
+      \ {\n                if (!manager.mDestroyed\n                        && manager.mProfile == mProfile\n            \
+      \            && manager.mNativeUpdatedCallback != null) {\n                    manager.mNativeUpdatedCallback.onResult(\n\
+      \                            mProfile.getNativeBrowserContextPointer());\n                    // The callback may destroy\
+      \ either manager. Do not touch its owner again.\n                    break;\n                }\n            }\n"
+    replace: "            // Notify the profile subscription once after all UI caches are coherent.\n            notifyNativeUpdatedCallback(mProfile);\n"
+  count: 1
+- description: Use the current manager only for per-profile window event deduplication
+  regex:
+    pattern: "        if (mNativeUpdatedCallback != null) {\n            mNativeUpdatedCallback.onResult(mProfile.getNativeBrowserContextPointer());\n\
+      \        }\n"
+    replace: '        notifyNativeUpdatedCallback();
+
+      '
+  count: 2
+- description: Retire only Activity-owned work when its manager is destroyed
+  regex:
+    pattern: "        mEntriesUpdatedCallback = null;\n\n        if (mNativeUpdatedCallback != null) {\n            mNativeUpdatedCallback.destroy();\n\
+      \            mNativeUpdatedCallback = null;\n        }\n"
+    replace: '        mEntriesUpdatedCallback = null;
+
+      '
+  count: 1
+- description: Give every pending closed-window load an identity retired by existing cache invalidation
+  regex:
+    pattern: "    private final Map<Integer, List<RecentlyClosedTab>> mCachedTabsForClosedWindows =\n            new HashMap<>();\n"
+    replace: "    private static final class ClosedWindowTabCacheEntry {\n        @Nullable List<RecentlyClosedTab> tabs;\n\
+      \n        ClosedWindowTabCacheEntry(@Nullable List<RecentlyClosedTab> tabs) {\n            this.tabs = tabs;\n     \
+      \   }\n    }\n\n    private final Map<Integer, ClosedWindowTabCacheEntry> mCachedTabsForClosedWindows =\n          \
+      \  new HashMap<>();\n"
+  count: 1
+- description: Invalidate pending tab-list loads before destruction callbacks can reenter
+  regex:
+    pattern: "        if (mDestroyed) return;\n        mDestroyed = true;\n"
+    replace: "        if (mDestroyed) return;\n        mDestroyed = true;\n        clearTabListCache();\n"
+  count: 1
+- description: Preserve synchronous fallback while replacing any pending request identity and rejecting dead profiles
+  regex:
+    pattern: "    public List<RecentlyClosedTab> getTabsForClosedWindow(RecentlyClosedWindow window) {\n        int instanceId\
+      \ = window.getInstanceId();\n        List<RecentlyClosedTab> cachedTabs = mCachedTabsForClosedWindows.get(instanceId);\n\
+      \        if (cachedTabs != null) {\n            return cachedTabs;\n        }\n\n        // Fallback to synchronous\
+      \ I/O if cache is cold. It's not ideal to perform I/O on UI thread,\n        // but this should seldom happen.\n   \
+      \     List<ClosedWindowTabInfo> infoList;\n        try (StrictModeContext ignored = StrictModeContext.allowDiskReads())\
+      \ {\n            infoList = TabPersistentStoreImpl.getTabListForClosedWindow(instanceId);\n        }\n        List<RecentlyClosedTab>\
+      \ tabs = convertClosedWindowTabInfoList(window, infoList);\n        mCachedTabsForClosedWindows.put(instanceId, tabs);\n\
+      \n        return tabs;\n    }"
+    replace: "    public List<RecentlyClosedTab> getTabsForClosedWindow(RecentlyClosedWindow window) {\n        if (mDestroyed\
+      \ || mProfile.shutdownStarted()) return Collections.emptyList();\n        int instanceId = window.getInstanceId();\n\
+      \        ClosedWindowTabCacheEntry cachedEntry = mCachedTabsForClosedWindows.get(instanceId);\n        if (cachedEntry\
+      \ != null && cachedEntry.tabs != null) {\n            return cachedEntry.tabs;\n        }\n\n        // Fallback to\
+      \ synchronous I/O if cache is cold. It's not ideal to perform I/O on UI thread,\n        // but this should seldom happen.\n\
+      \        List<ClosedWindowTabInfo> infoList;\n        try (StrictModeContext ignored = StrictModeContext.allowDiskReads())\
+      \ {\n            infoList = TabPersistentStoreImpl.getTabListForClosedWindow(instanceId);\n        }\n        List<RecentlyClosedTab>\
+      \ tabs = convertClosedWindowTabInfoList(window, infoList);\n        mCachedTabsForClosedWindows.put(instanceId, new\
+      \ ClosedWindowTabCacheEntry(tabs));\n\n        return tabs;\n    }"
+  count: 1
+- description: Publish only the still-current pending request, not a later load for a reused instance ID
+  regex:
+    pattern: "    public void preFetchTabsForWindow(RecentlyClosedWindow window) {\n        int instanceId = window.getInstanceId();\n\
+      \        if (mCachedTabsForClosedWindows.containsKey(instanceId)) {\n            return;\n        }\n\n        mCachedTabsForClosedWindows.put(instanceId,\
+      \ null);\n        TabPersistentStoreImpl.getTabListForClosedWindow(\n                instanceId,\n                (infoList)\
+      \ -> {\n                    if (!mCachedTabsForClosedWindows.containsKey(instanceId)\n                            ||\
+      \ mCachedTabsForClosedWindows.get(instanceId) != null) {\n                        return;\n                    }\n \
+      \                   List<RecentlyClosedTab> tabs = convertClosedWindowTabInfoList(window, infoList);\n             \
+      \       mCachedTabsForClosedWindows.put(instanceId, tabs);\n                });\n    }"
+    replace: "    public void preFetchTabsForWindow(RecentlyClosedWindow window) {\n        if (mDestroyed || mProfile.shutdownStarted())\
+      \ return;\n        int instanceId = window.getInstanceId();\n        if (mCachedTabsForClosedWindows.containsKey(instanceId))\
+      \ {\n            return;\n        }\n\n        ClosedWindowTabCacheEntry request = new ClosedWindowTabCacheEntry(null);\n\
+      \        mCachedTabsForClosedWindows.put(instanceId, request);\n        TabPersistentStoreImpl.getTabListForClosedWindow(\n\
+      \                instanceId,\n                (infoList) -> {\n                    if (mDestroyed\n                \
+      \            || mProfile.shutdownStarted()\n                            || mCachedTabsForClosedWindows.get(instanceId)\
+      \ != request\n                            || request.tabs != null) {\n                        return;\n            \
+      \        }\n                    request.tabs = convertClosedWindowTabInfoList(window, infoList);\n                });\n\
+      \    }"
+  count: 1
+- description: "Replace application shadows with explicit test seams (1)"
+  regex:
+    pattern: "    private final Profile mProfile;\n    private final TabModelSelector mOwnerSelector;\n    private boolean mDestroyed;\n    private final List<TabStateInitializedObserver> mMetadataRequests = new ArrayList<>();\n    private final List<WindowRestoreOperation> mWindowRestores = new ArrayList<>();\n    private final List<SavedTabRestoreOperation> mSavedTabRestores = new ArrayList<>();\n"
+    replace: "    private final Profile mProfile;\n    private final TabModelSelector mOwnerSelector;\n    private boolean mDestroyed;\n    private @Nullable ChromeAndroidTaskTracker mTaskTrackerForTesting;\n    private @Nullable ClosedWindowTabReader mClosedWindowTabReaderForTesting;\n    private final List<TabStateInitializedObserver> mMetadataRequests = new ArrayList<>();\n    private final List<WindowRestoreOperation> mWindowRestores = new ArrayList<>();\n    private final List<SavedTabRestoreOperation> mSavedTabRestores = new ArrayList<>();\n"
+  count: 1
+- description: "Replace application shadows with explicit test seams (2)"
+  regex:
+    pattern: "            mInstanceId = instanceId;\n            mClosedSelector = closedSelector;\n            mWindowManager = windowManager;\n            mTaskTracker = ChromeAndroidTaskTrackerFactory.getInstance();\n            mCallback = callback;\n        }\n\n"
+    replace: "            mInstanceId = instanceId;\n            mClosedSelector = closedSelector;\n            mWindowManager = windowManager;\n            mTaskTracker =\n                    mTaskTrackerForTesting != null\n                            ? mTaskTrackerForTesting\n                            : ChromeAndroidTaskTrackerFactory.getInstance();\n            mCallback = callback;\n        }\n\n"
+  count: 1
+- description: "Replace application shadows with explicit test seams (3)"
+  regex:
+    pattern: "        // but this should seldom happen.\n        List<ClosedWindowTabInfo> infoList;\n        try (StrictModeContext ignored = StrictModeContext.allowDiskReads()) {\n            infoList = TabPersistentStoreImpl.getTabListForClosedWindow(instanceId);\n        }\n        List<RecentlyClosedTab> tabs = convertClosedWindowTabInfoList(window, infoList);\n        mCachedTabsForClosedWindows.put(instanceId, new ClosedWindowTabCacheEntry(tabs));\n"
+    replace: "        // but this should seldom happen.\n        List<ClosedWindowTabInfo> infoList;\n        try (StrictModeContext ignored = StrictModeContext.allowDiskReads()) {\n            infoList =\n                    mClosedWindowTabReaderForTesting != null\n                            ? mClosedWindowTabReaderForTesting.getTabListForClosedWindow(instanceId)\n                            : TabPersistentStoreImpl.getTabListForClosedWindow(instanceId);\n        }\n        List<RecentlyClosedTab> tabs = convertClosedWindowTabInfoList(window, infoList);\n        mCachedTabsForClosedWindows.put(instanceId, new ClosedWindowTabCacheEntry(tabs));\n"
+  count: 1
+- description: "Replace application shadows with explicit test seams (4)"
+  regex:
+    pattern: "\n        ClosedWindowTabCacheEntry request = new ClosedWindowTabCacheEntry(null);\n        mCachedTabsForClosedWindows.put(instanceId, request);\n        TabPersistentStoreImpl.getTabListForClosedWindow(\n                instanceId,\n                (infoList) -> {\n                    if (mDestroyed\n"
+    replace: "\n        ClosedWindowTabCacheEntry request = new ClosedWindowTabCacheEntry(null);\n        mCachedTabsForClosedWindows.put(instanceId, request);\n        readTabsForClosedWindow(\n                instanceId,\n                (infoList) -> {\n                    if (mDestroyed\n"
+  count: 1
+- description: "Replace application shadows with explicit test seams (5)"
+  regex:
+    pattern: "                    }\n                    request.tabs = convertClosedWindowTabInfoList(window, infoList);\n                });\n    }\n\n    private List<RecentlyClosedTab> convertClosedWindowTabInfoList(\n"
+    replace: "                    }\n                    request.tabs = convertClosedWindowTabInfoList(window, infoList);\n                });\n    }\n\n    private void readTabsForClosedWindow(\n            int instanceId, Callback<List<ClosedWindowTabInfo>> callback) {\n        if (mClosedWindowTabReaderForTesting != null) {\n            mClosedWindowTabReaderForTesting.getTabListForClosedWindow(instanceId, callback);\n        } else {\n            TabPersistentStoreImpl.getTabListForClosedWindow(instanceId, callback);\n        }\n    }\n\n    private List<RecentlyClosedTab> convertClosedWindowTabInfoList(\n"
+  count: 1
+- description: "Replace application shadows with explicit test seams (6)"
+  regex:
+    pattern: "        mCachedTabsForClosedWindows.clear();\n    }\n\n    public static void setRecentlyClosedTabManagerForTests(\n            @Nullable RecentlyClosedTabManager manager) {\n        sRecentlyClosedTabManagerForTests = manager;\n"
+    replace: "        mCachedTabsForClosedWindows.clear();\n    }\n\n    /** Supplies closed-window reads for tests that control asynchronous completion order. */\n    @VisibleForTesting\n    public interface ClosedWindowTabReader {\n        List<ClosedWindowTabInfo> getTabListForClosedWindow(int instanceId);\n\n        void getTabListForClosedWindow(\n                int instanceId, Callback<List<ClosedWindowTabInfo>> callback);\n    }\n\n    @VisibleForTesting\n    public void setClosedWindowTabReaderForTesting(ClosedWindowTabReader reader) {\n        mClosedWindowTabReaderForTesting = reader;\n        ResettersForTesting.register(() -> mClosedWindowTabReaderForTesting = null);\n    }\n\n    @VisibleForTesting\n    public void setTaskTrackerForTesting(ChromeAndroidTaskTracker tracker) {\n        mTaskTrackerForTesting = tracker;\n        ResettersForTesting.register(() -> mTaskTrackerForTesting = null);\n    }\n\n    public static void setRecentlyClosedTabManagerForTests(\n            @Nullable RecentlyClosedTabManager manager) {\n        sRecentlyClosedTabManagerForTests = manager;\n"
+  count: 1

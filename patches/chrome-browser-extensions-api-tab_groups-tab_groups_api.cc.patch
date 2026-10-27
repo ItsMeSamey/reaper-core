@@ -1,0 +1,186 @@
+diff --git a/chrome/browser/extensions/api/tab_groups/tab_groups_api.cc b/chrome/browser/extensions/api/tab_groups/tab_groups_api.cc
+index 36cb957..a4e7e0d 100644
+--- a/chrome/browser/extensions/api/tab_groups/tab_groups_api.cc
++++ b/chrome/browser/extensions/api/tab_groups/tab_groups_api.cc
+@@ -35,6 +35,7 @@
+ #include "ui/gfx/range/range.h"
+ 
+ #if BUILDFLAG(IS_ANDROID)
++#include "base/memory/scoped_refptr.h"
+ #include "chrome/browser/ui/android/tab_model/tab_model_list.h"
+ #include "chrome/browser/ui/android/tab_model/tab_model_observer.h"
+ #endif  // BUILDFLAG(IS_ANDROID)
+@@ -292,21 +293,42 @@
+ // because cross-window tab group moves are asynchronous.
+ class TabGroupsMoveFunction::ObserverHelper : public TabModelObserver {
+  public:
+-  ObserverHelper(TabGroupsMoveFunction* owner, TabModel* tab_model)
+-      : owner_(owner), tab_model_(tab_model) {
++  ObserverHelper(TabGroupsMoveFunction* owner,
++                 TabModel* tab_model,
++                 tab_groups::TabGroupId expected_group)
++      : owner_(owner), tab_model_(tab_model), expected_group_(expected_group) {
+     tab_model_->AddObserver(this);
+   }
+ 
+-  ~ObserverHelper() override { tab_model_->RemoveObserver(this); }
++  ~ObserverHelper() override {
++    if (tab_model_) {
++      tab_model_->RemoveObserver(this);
++    }
++  }
+ 
+   // TabModelObserver:
+   void OnTabGroupCreated(tab_groups::TabGroupId group_id) override {
++    // Other destination groups can be created while reparenting is pending.
++    if (group_id != expected_group_) {
++      return;
++    }
+     owner_->OnTabGroupCreated(group_id);
++  }
++
++  void OnTabModelDestroyed(TabModel& model) override {
++    DCHECK_EQ(tab_model_, &model);
++    scoped_refptr<TabGroupsMoveFunction> keep_alive(owner_);
++    // The model is still alive during this notification. Remove this slot now,
++    // and clear the pointer before owner retirement can destroy this helper.
++    TabModel* observed_model = std::exchange(tab_model_, nullptr);
++    observed_model->RemoveObserver(this);
++    keep_alive->OnTargetModelDestroyed();
+   }
+ 
+  private:
+   raw_ptr<TabGroupsMoveFunction> owner_;
+   raw_ptr<TabModel> tab_model_;
++  const tab_groups::TabGroupId expected_group_;
+ };
+ #endif  // BUILDFLAG(IS_ANDROID)
+ 
+@@ -326,17 +348,29 @@
+   tab_groups::TabGroupId group = tab_groups::TabGroupId::CreateEmpty();
+   bool cross_window = false;
+   std::string error;
++#if BUILDFLAG(IS_ANDROID)
++  // External reparenting may synchronously complete or retire the move.
++  scoped_refptr<TabGroupsMoveFunction> keep_alive(this);
++#endif  // BUILDFLAG(IS_ANDROID)
+   const bool group_moved =
+       MoveGroup(group_id, new_index, window_id, &group, &cross_window, &error);
++#if BUILDFLAG(IS_ANDROID)
++  if (did_respond()) {
++    return AlreadyResponded();
++  }
++  if (!browser_context() || browser_context()->ShutdownStarted()) {
++    // Context retirement has already balanced any owned pending reference.
++    return RespondLater();
++  }
++#endif  // BUILDFLAG(IS_ANDROID)
+   if (!group_moved) {
+     return RespondNow(Error(std::move(error)));
+   }
+ 
+ #if BUILDFLAG(IS_ANDROID)
+   if (cross_window) {
+-    // Cross window group moves are asynchronous on Android. OnTabGroupCreated()
+-    // will be called later when the group is created in the new window.
+-    AddRef();  // Balanced in OnTabGroupCreated().
++    // BeginPendingMove acquired ownership before external reparenting. A
++    // matching creation or real target/context shutdown retires that token.
+     return RespondLater();
+   }
+ #endif  // BUILDFLAG(IS_ANDROID)
+@@ -432,11 +466,18 @@
+         *error = ExtensionTabUtil::kTabStripDoesNotSupportTabGroupsError;
+         return false;
+       }
+-      observer_helper_ =
+-          std::make_unique<ObserverHelper>(this, target_tab_model);
+-#endif  // BUILDFLAG(IS_ANDROID)
++      BeginPendingMove(target_tab_model, *group);
++      const bool group_moved = MoveTabGroupBetweenBrowsers(
++          source_browser, target_browser, *group, visual_data, tabs, new_index,
++          error);
++      if (!group_moved && RetirePendingMove()) {
++        Release();
++      }
++      return group_moved;
++#else
+       return MoveTabGroupBetweenBrowsers(source_browser, target_browser, *group,
+                                          visual_data, tabs, new_index, error);
++#endif  // BUILDFLAG(IS_ANDROID)
+     }
+   }
+ 
+@@ -518,14 +559,65 @@
+ }
+ 
+ #if BUILDFLAG(IS_ANDROID)
++void TabGroupsMoveFunction::BeginPendingMove(
++    TabModel* target_model,
++    tab_groups::TabGroupId expected_group) {
++  DCHECK(!pending_move_ref_held_);
++  AddRef();
++  pending_move_ref_held_ = true;
++  observer_helper_ =
++      std::make_unique<ObserverHelper>(this, target_model, expected_group);
++}
++
++bool TabGroupsMoveFunction::RetirePendingMove() {
++  // Clear the latch and detach before Respond() can reenter model/context
++  // shutdown. The caller owns balancing this precise token after its callback.
++  const bool release_pending_ref = std::exchange(pending_move_ref_held_, false);
++  observer_helper_.reset();
++  return release_pending_ref;
++}
++
+ void TabGroupsMoveFunction::OnTabGroupCreated(tab_groups::TabGroupId group_id) {
+-  observer_helper_.reset();
+-
+-  auto group_object = ExtensionTabUtil::CreateTabGroupObject(group_id);
+-  CHECK(group_object);
+-  Respond(ArgumentList(api::tab_groups::Get::Results::Create(*group_object)));
+-
+-  Release();  // Balanced in MoveGroup().
++  if (!pending_move_ref_held_) {
++    return;
++  }
++  scoped_refptr<TabGroupsMoveFunction> keep_alive(this);
++  const bool release_pending_ref = RetirePendingMove();
++  if (!did_respond() && !response_callback_is_null() && browser_context() &&
++      !browser_context()->ShutdownStarted()) {
++    auto group_object = ExtensionTabUtil::CreateTabGroupObject(group_id);
++    if (group_object) {
++      Respond(ArgumentList(api::tab_groups::Get::Results::Create(*group_object)));
++    } else {
++      Respond(Error(kFailedToMoveGroupError));
++    }
++  }
++  if (release_pending_ref) {
++    Release();
++  }
++}
++
++void TabGroupsMoveFunction::OnTargetModelDestroyed() {
++  if (!pending_move_ref_held_) {
++    return;
++  }
++  scoped_refptr<TabGroupsMoveFunction> keep_alive(this);
++  const bool release_pending_ref = RetirePendingMove();
++  if (!did_respond() && !response_callback_is_null() && browser_context() &&
++      !browser_context()->ShutdownStarted()) {
++    Respond(Error(kFailedToMoveGroupError));
++  }
++  if (release_pending_ref) {
++    Release();
++  }
++}
++
++void TabGroupsMoveFunction::OnBrowserContextShutdown() {
++  // The base shutdown callback keeps any existing owner alive. An unstarted
++  // function owns no token; do not acquire or release a reference for it here.
++  if (RetirePendingMove()) {
++    Release();
++  }
+ }
+ #endif  // BUILDFLAG(IS_ANDROID)
+ 

@@ -1,0 +1,1459 @@
+substitutions:
+- description: 'Reaper Android: remove Actor thumbnail metadata and drawing; preserve ordinary tab thumbnails.'
+  regex:
+    re_pattern: 'romium\.build\.annotations\.NullMarked;\
+
+      import\ org\.chromium\.build\.annotations\.Nullable;\
+
+      import\ org\.chromium\.chrome\.browser\.actor\.ui\.InnerGlowDrawable;\
+
+      import\ org\.chromium\.chrome\.browser\.browser_controls\.BrowserControlsStateProvider;\
+
+      import\ org\.chromium\.chrome\.browser\.profiles\.Profile;\
+
+      import\ org\.chromium\.chrome\.browser\.tab\.Tab;\
+
+      import\ org\.chromium\.chrome\.browser\.tab_ui\.TabListFaviconProvider\.TabFaviconMetadata;\
+
+      import\ org\.chromium\.chrome\.browser\.tab_ui\.TabListFaviconProvider\.TabWebContentsFaviconDelegate;\
+
+      import\ org\.chromium\.chrome\.browser\.tabmodel\.TabModel;\
+
+      import\ org\.chromium\.components\.browser_ui\.styles\.SemanticColorUtils;\
+
+      import\ org\.chromium\.components\.tab_groups\.TabGroupColorId;\
+
+      import\ org\.chromium\.ui\.base\.LocalizationUtils;\
+
+      import\ org\.chromium\.url\.GURL;\
+
+      \
+
+      import\ java\.util\.ArrayList;\
+
+      import\ java\.util\.List;\
+
+      import\ java\.util\.Objects;\
+
+      import\ java\.util\.concurrent\.atomic\.AtomicInteger;\
+
+      import\ java\.util\.concurrent\.atomic\.AtomicReference;\
+
+      \
+
+      /\*\*\
+
+      \ \*\ A\ \{@link\ ThumbnailProvider\}\ that\ will\ create\ a\ single\ Bitmap\ Thumbnail\ for\ all\
+      the\ related\ tabs\
+
+      \ \*\ for\ the\ given\ tabs\.\
+
+      \ \*/\
+
+      @NullMarked\
+
+      public\ class\ MultiThumbnailCardProvider\ implements\ ThumbnailProvider\ \{\
+
+      \ \ \ \ /\*\*\
+
+      \ \ \ \ \ \*\ The\ metadata\ details\ for\ a\ thumbnail\ item\ as\ part\ of\ a\ multi\ thumbnail\
+      card\ representation\.\
+
+      \ \ \ \ \ \*\ This\ object\ represents\ both\ real\ \{@link\ Tab\}s\ and\ \{@link\ SavedTabGroupTab\}s\.\
+      If\ the\ tab\ field\
+
+      \ \ \ \ \ \*\ is\ null,\ a\ SavedTabGroupTab\ is\ being\ referenced\.\
+
+      \ \ \ \ \ \*/\
+
+      \ \ \ \ private\ static\ class\ ThumbnailItemMetadata\ \{\
+
+      \ \ \ \ \ \ \ \ public\ final\ @Nullable\ Tab\ tab;\
+
+      \ \ \ \ \ \ \ \ public\ final\ GURL\ url;\
+
+      \
+
+      \ \ \ \ \ \ \ \ ThumbnailItemMetadata\(@Nullable\ Tab\ tab,\ GURL\ url\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ this\.tab\ =\ tab;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ this\.url\ =\ url;\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ private\ final\ TabContentManager\ mTabContentManager;\
+
+      \ \ \ \ private\ final\ TabContentManagerThumbnailProvider\ mTabContentManagerThumbnailProvider;\
+
+      \ \ \ \ private\ final\ NullableObservableSupplier<TabModel>\ mCurrentTabModelSupplier;\
+
+      \ \ \ \ private\ final\ Callback<@Nullable\ TabModel>\ mOnTabModelChanged\ =\ this::onTabModelChanged;\
+
+      \
+
+      \ \ \ \ private\ final\ float\ mRadius;\
+
+      \ \ \ \ private\ final\ float\ mFaviconFrameCornerRadius;\
+
+      \ \ \ \ private\ final\ Paint\ mColordEmptyThumbnailPaint;\
+
+      \ \ \ \ private\ final\ Paint\ mEmptyThumbnailPaint;\
+
+      \ \ \ \ private\ final\ Paint\ mThumbnailFramePaint;\
+
+      \ \ \ \ private\ final\ Paint\ mThumbnailBasePaint;\
+
+      \ \ \ \ private\ final\ Paint\ mTextPaint;\
+
+      \ \ \ \ private\ final\ Paint\ mFaviconBackgroundPaint;\
+
+      \ \ \ \ private\ final\ Paint\ mSelectedEmptyThumbnailPaint;\
+
+      \ \ \ \ private\ final\ Paint\ mSelectedTextPaint;\
+
+      \ \ \ \ private\ final\ Drawable\ mEmptyThumbnailGhostLoadIllustration;\
+
+      \ \ \ \ private\ final\ Drawable\ mSelectedEmptyThumbnailGhostLoadIllustration;\
+
+      \ \ \ \ private\ final\ Drawable\ mActingOverlayDrawable;\
+
+      \ \ \ \ private\ final\ Drawable\ mSparkIconDrawable;\
+
+      \
+
+      \ \ \ \ private\ @ColorInt\ int\ mMiniThumbnailPlaceholderColor;\
+
+      \ \ \ \ private\ @Nullable\ @ColorInt\ Integer\ mGroupTintedMiniThumbnailPlaceholderColor;\
+
+      \
+
+      \ \ \ \ private\ final\ Context\ mContext;\
+
+      \ \ \ \ private\ final\ BrowserControlsStateProvider\ mBrowserControlsStateProvider;\
+
+      \ \ \ \ private\ final\ TabListFaviconProvider\ mTabListFaviconProvider;\
+
+      \
+
+      \ \ \ \ private\ class\ MultiThumbnailFetcher\ \{\
+
+      \ \ \ \ \ \ \ \ private\ static\ final\ int\ MAX_THUMBNAIL_COUNT\ =\ 4;\
+
+      \ \ \ \ \ \ \ \ private\ final\ MultiThumbnailMetadata\ mMultiThumbnailMetadata;\
+
+      \ \ \ \ \ \ \ \ private\ final\ Callback<@Nullable\ Drawable>\ mResultCallback;\
+
+      \ \ \ \ \ \ \ \ private\ final\ boolean\ mIsTabSelected;\
+
+      \ \ \ \ \ \ \ \ private\ final\ AtomicInteger\ mThumbnailsToFetch\ =\ new\ AtomicInteger\(\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ private\ Canvas\ mCanvas;\
+
+      \ \ \ \ \ \ \ \ private\ Bitmap\ mMultiThumbnailBitmap;\
+
+      \ \ \ \ \ \ \ \ private\ @Nullable\ String\ mText;\
+
+      \ \ \ \ \ \ \ \ private\ final\ Path\ mPath\ =\ new\ Path\(\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ private\ final\ List<Rect>\ mFaviconRects\ =\ new\ ArrayList<>\(MAX_THUMBNAIL_COUNT\);\
+
+      \ \ \ \ \ \ \ \ private\ final\ List<RectF>\ mThumbnailRects\ =\ new\ ArrayList<>\(MAX_THUMBNAIL_COUNT\);\
+
+      \ \ \ \ \ \ \ \ private\ final\ List<RectF>\ mFaviconBackgroundRects\ =\ new\ ArrayList<>\(MAX_THUMBNAIL_COUNT\);\
+
+      \ \ \ \ \ \ \ \ private\ final\ int\ mThumbnailWidth;\
+
+      \ \ \ \ \ \ \ \ private\ final\ int\ mThumbnailHeight;\
+
+      \ \ \ \ \ \ \ \ private\ final\ @ColorInt\ int\ mResolvedEmptyPlaceholderColor;\
+
+      \ \ \ \ \ \ \ \ private\ final\ @ColorInt\ int\ mResolvedTextColor;\
+
+      \ \ \ \ \ \ \ \ private\ final\ @ColorInt\ int\ mResolvedGhostIllustrationColor;\
+
+      \ \ \ \ \ \ \ \ private\ final\ List<Integer>\ mActingTabIds;\
+
+      \
+
+      \ \ \ \ \ \ \ \ /\*\*\
+
+      \ \ \ \ \ \ \ \ \ \*\ Fetcher\ that\ get\ the\ thumbnail\ drawable\ depending\ on\ if\ the\ tab\
+      is\ selected\.\
+
+      \ \ \ \ \ \ \ \ \ \*\
+
+      \ \ \ \ \ \ \ \ \ \*\ @see\ TabContentManager\#getTabThumbnailWithCallback\
+
+      \ \ \ \ \ \ \ \ \ \*\ @param\ metadata\ Thumbnail\ is\ generated\ for\ tabs\ related\ to\ \{@link\
+
+      \ \ \ \ \ \ \ \ \ \*\ \ \ \ \ MultiThumbnailMetadata\}\.\
+
+      \ \ \ \ \ \ \ \ \ \*\ @param\ thumbnailSize\ Desired\ size\ of\ multi\-thumbnail\.\
+
+      \ \ \ \ \ \ \ \ \ \*\ @param\ isTabSelected\ Whether\ the\ thumbnail\ is\ for\ a\ currently\ selected\
+      tab\.\
+
+      \ \ \ \ \ \ \ \ \ \*\ @param\ resultCallback\ Callback\ which\ receives\ generated\ bitmap\.\
+
+      \ \ \ \ \ \ \ \ \ \*/\
+
+      \ \ \ \ \ \ \ \ MultiThumbnailFetcher\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ MultiThumbnailMetadata\ metadata,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ Size\ thumbnailSize,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ boolean\ isTabSelected,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ Callback<@Nullable\ Drawable>\ resultCallback\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mResultCallback\ =\ Objects\.requireNonNull\(resultCallback\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mMultiThumbnailMetadata\ =\ metadata;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mIsTabSelected\ =\ isTabSelected;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mActingTabIds\ =\ metadata\.actingTabIds;\
+
+      \
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(thumbnailSize\.getHeight\(\)\ <=\ 0\ \|\|\ thumbnailSize\.getWidth\(\)\
+      <=\ 0\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ float\ expectedThumbnailAspectRatio\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ TabCardThemeUtil\.getTabThumbnailAspectRatio\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mContext,\ mBrowserControlsStateProvider\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mThumbnailWidth\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \(int\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mContext\.getResources\(\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \.getDimension\(R\.dimen\.tab_grid_thumbnail_card_default_size\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mThumbnailHeight\ =\ \(int\)\ \(mThumbnailWidth\ /\ expectedThumbnailAspectRatio\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\ else\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mThumbnailWidth\ =\ thumbnailSize\.getWidth\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mThumbnailHeight\ =\ thumbnailSize\.getHeight\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ \ \ \ \ @TabGroupColorId\ Integer\ actualColorId\ =\ null;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ boolean\ isIncognito\ =\ metadata\.isIncognito;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(metadata\.isInTabGroup\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ actualColorId\ =\ metadata\.tabGroupColor;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mResolvedEmptyPlaceholderColor\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ TabCardThemeUtil\.getMiniThumbnailPlaceholderColor\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mContext,\ isIncognito,\ mIsTabSelected,\
+      actualColorId\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mResolvedTextColor\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ TabCardThemeUtil\.getTitleTextColor\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mContext,\ isIncognito,\ mIsTabSelected,\
+      actualColorId\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mResolvedGhostIllustrationColor\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ TabCardThemeUtil\.getEmptyThumbnailColor\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mContext,\ isIncognito,\ mIsTabSelected,\
+      actualColorId\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ /\*\*\ Initialize\ rects\ used\ for\ thumbnails\.\ \*/\
+
+      \ \ \ \ \ \ \ \ private\ void\ initializeRects\(Context\ context\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ float\ thumbnailHorizontalPadding\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ TabCardThemeUtil\.getTabMiniThumbnailPaddingDimension\(context\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ float\ thumbnailVerticalPadding\ =\ thumbnailHorizontalPadding;\
+
+      \
+
+      \ \ \ \ \ \ \ \ \ \ \ \ float\ centerX\ =\ mThumbnailWidth\ \*\ 0\.5f;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ float\ centerY\ =\ mThumbnailHeight\ \*\ 0\.5f;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ float\ halfThumbnailHorizontalPadding\ =\ thumbnailHorizontalPadding\ /\
+      2;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ float\ halfThumbnailVerticalPadding\ =\ thumbnailVerticalPadding\ /\ 2;\
+
+      \
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mThumbnailRects\.add\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ new\ RectF\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ 0,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ 0,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ centerX\ \-\ halfThumbnailHorizontalPadding,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ centerY\ \-\ halfThumbnailVerticalPadding\)\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mThumbnailRects\.add\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ new\ RectF\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ centerX\ \+\ halfThumbnailHorizontalPadding,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ 0,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mThumbnailWidth,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ centerY\ \-\ halfThumbnailVerticalPadding\)\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mThumbnailRects\.add\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ new\ RectF\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ 0,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ centerY\ \+\ halfThumbnailVerticalPadding,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ centerX\ \-\ halfThumbnailHorizontalPadding,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mThumbnailHeight\)\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mThumbnailRects\.add\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ new\ RectF\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ centerX\ \+\ halfThumbnailHorizontalPadding,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ centerY\ \+\ halfThumbnailVerticalPadding,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mThumbnailWidth,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mThumbnailHeight\)\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ \ \ \ \ //\ Initialize\ Rects\ for\ favicons\ and\ favicon\ frame\.\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ final\ float\ faviconFrameSize\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mContext\.getResources\(\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \.getDimension\(R\.dimen\.tab_grid_thumbnail_favicon_frame_size\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ float\ offsetFromCard\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mContext\.getResources\(\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \.getDimension\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ R\.dimen\.tab_grid_thumbnail_favicon_frame_padding_from_card\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ float\ thumbnailFaviconPaddingFromBackground\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mContext\.getResources\(\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \.getDimension\(R\.dimen\.tab_grid_thumbnail_favicon_padding_from_frame\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ \ \ \ \ for\ \(int\ i\ =\ 0;\ i\ <\ 4;\ i\+\+\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ RectF\ faviconBackgroundRect\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ getFaviconBackgroundRect\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mThumbnailRects\.get\(i\),\ faviconFrameSize,\
+      offsetFromCard\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mFaviconBackgroundRects\.add\(faviconBackgroundRect\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ RectF\ faviconRectF\ =\ new\ RectF\(faviconBackgroundRect\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ faviconRectF\.inset\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ thumbnailFaviconPaddingFromBackground,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ thumbnailFaviconPaddingFromBackground\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ Rect\ faviconRect\ =\ new\ Rect\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ faviconRectF\.roundOut\(faviconRect\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mFaviconRects\.add\(faviconRect\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ private\ RectF\ getFaviconBackgroundRect\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ RectF\ thumbnailRect,\ float\ faviconFrameSize,\ float\ offsetFromCard\)\
+      \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ float\ thumbnailRectLeft\ =\ thumbnailRect\.left;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ float\ thumbnailRectRight\ =\ thumbnailRect\.right;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ float\ thumbnailRectTop\ =\ thumbnailRect\.top;\
+
+      \
+
+      \ \ \ \ \ \ \ \ \ \ \ \ RectF\ faviconBackgroundRect\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ new\ RectF\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ thumbnailRectLeft,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ thumbnailRectTop,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ thumbnailRectLeft\ \+\ faviconFrameSize,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ thumbnailRectTop\ \+\ faviconFrameSize\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ \ \ \ \ float\ horizontalOffsetToApply\ =\ offsetFromCard;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(LocalizationUtils\.isLayoutRtl\(\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ //\ In\ RTL\ \(Right\-to\-Left\)\ layout,\ calculate\ the\ effective\
+      ''horizontal''\ offset\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ //\ from\ the\ thumbnail''s\ left\ edge\ to\ position\ the\ favicon\
+      ''offsetFromCard''\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ //\ pixels\ from\ the\ thumbnail''s\ right\ edge\.\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ //\ This\ is\ done\ by\ taking\ the\ thumbnail''s\ width\ \(thumbnailRectRight\
+      \-\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ //\ thumbnailRectLeft\),\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ //\ subtracting\ the\ favicon''s\ width\ \(faviconFrameSize\),\
+      and\ then\ further\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ //\ subtracting\ the\ desired\ ''offsetFromCard''\ from\ the\ right\.\
+
+      \
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ //\ Visualization\ for\ RTL:\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ //\ \[TL\ \-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\ TR\]\ \ \(Thumbnail\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ //\ \ \ \ \ \ \ \[FL\ \-\-\-\ FR\]\ \ \ \ \ \ \ \ \ \ \ \ \ \(Favicon,\
+      where\ FR\ is\ Favicon\ Right\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ //\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ <\-\ offset\ \->\ \ \(Desired\
+      space\ from\ TR\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ //\ FL\ =\ TR\ \-\ TL\ \-\ FaviconWidth\ \-\ offset\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ horizontalOffsetToApply\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ thumbnailRectRight\ \-\ thumbnailRectLeft\ \-\ faviconFrameSize\
+      \-\ offsetFromCard;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ \ \ \ \ faviconBackgroundRect\.offset\(horizontalOffsetToApply,\ offsetFromCard\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ return\ faviconBackgroundRect;\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ @Initializer\
+
+      \ \ \ \ \ \ \ \ private\ void\ initializeAndStartFetching\(MultiThumbnailMetadata\ metadata\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ //\ Initialize\ mMultiThumbnailBitmap\.\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mMultiThumbnailBitmap\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ Bitmap\.createBitmap\(mThumbnailWidth,\ mThumbnailHeight,\
+      Bitmap\.Config\.ARGB_8888\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mCanvas\ =\ new\ Canvas\(mMultiThumbnailBitmap\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mCanvas\.drawColor\(Color\.TRANSPARENT\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ \ \ \ \ //\ Initialize\ Tabs\.\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ List<ThumbnailItemMetadata>\ thumbnailItemList\ =\ getThumbnailItems\(metadata\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ int\ relatedTabCount\ =\ thumbnailItemList\.size\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ boolean\ showPlus\ =\ relatedTabCount\ >\ MAX_THUMBNAIL_COUNT;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ int\ tabsToShow\ =\ showPlus\ \?\ MAX_THUMBNAIL_COUNT\ \-\ 1\ :\ relatedTabCount;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ ThumbnailItemMetadata\[\]\ thumbnailItems\ =\ new\ ThumbnailItemMetadata\[MAX_THUMBNAIL_COUNT\];\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mText\ =\ showPlus\ \?\ "\+"\ \+\ \(thumbnailItemList\.size\(\)\ \-\ tabsToShow\)\
+      :\ null;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mThumbnailsToFetch\.set\(tabsToShow\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ for\ \(int\ i\ =\ 0;\ i\ <\ tabsToShow;\ i\+\+\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ thumbnailItems\[i\]\ =\ thumbnailItemList\.get\(i\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ \ \ \ \ boolean\ anyHiddenTabActing\ =\ checkAnyHiddenTabActing\(thumbnailItemList,\
+      tabsToShow\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ \ \ \ \ //\ Fetch\ and\ draw\ all\.\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ for\ \(int\ i\ =\ 0;\ i\ <\ MAX_THUMBNAIL_COUNT;\ i\+\+\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ ThumbnailItemMetadata\ thumbnailItem\ =\ thumbnailItems\[i\];\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ RectF\ thumbnailRect\ =\ mThumbnailRects\.get\(i\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ if\ \(thumbnailItem\ !=\ null\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ //\ Create\ final\ copies\ to\ get\ lambda\ captures\ to\
+      compile\.\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ final\ int\ index\ =\ i;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ final\ Size\ tabThumbnailSize\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ new\ Size\(\(int\)\ thumbnailRect\.width\(\),\
+      \(int\)\ thumbnailRect\.height\(\)\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ //\ getTabThumbnailWithCallback\(\)\ might\ call\ the\ callback\
+      up\ to\ twice,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ //\ so\ use\ \|lastFavicon\|\ to\ avoid\ fetching\ the\
+      favicon\ the\ second\ time\.\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ //\ Fetching\ the\ favicon\ after\ getting\ the\ live\ thumbnail\
+      would\ lead\ to\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ //\ visible\ flicker\.\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ final\ AtomicReference<Drawable>\ lastFavicon\ =\ new\ AtomicReference<>\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ if\ \(thumbnailItem\.tab\ !=\ null\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ Tab\ tab\ =\ thumbnailItem\.tab;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mTabContentManager\.getTabThumbnailWithCallback\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ tab\.getId\(\),\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ tabThumbnailSize,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ thumbnail\ \->\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ if\ \(tab\.isClosing\(\)\
+      \|\|\ tab\.isDestroyed\(\)\)\ return;\
+
+      \
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ drawFavicon\(thumbnail,\
+      index,\ lastFavicon,\ thumbnailItem\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\ else\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ drawFavicon\(/\*\ thumbnail=\ \*/\ null,\ index,\
+      lastFavicon,\ thumbnailItem\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\ else\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ drawThumbnailBitmapOnCanvasWithFrame\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ null,\ i,\ /\*\ showGhostLoadIllustration=\
+      \*/\ false\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ if\ \(mText\ !=\ null\ \&\&\ i\ ==\ 3\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ if\ \(anyHiddenTabActing\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ drawFaviconDrawableOnCanvasWithFrame\(mSparkIconDrawable,\
+      i\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ //\ Draw\ the\ text\ exactly\ centered\ on\ the\
+      thumbnail\ rect\.\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ Paint\ textPaint\ =\ mIsTabSelected\ \?\ mSelectedTextPaint\
+      :\ mTextPaint;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mCanvas\.drawText\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mText,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \(thumbnailRect\.left\ \+\ thumbnailRect\.right\)\
+      /\ 2,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \(thumbnailRect\.top\ \+\ thumbnailRect\.bottom\)\
+      /\ 2\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \-\ \(\(mTextPaint\.descent\(\)\
+      \+\ mTextPaint\.ascent\(\)\)\ /\ 2\),\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ textPaint\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ private\ void\ drawThumbnailBitmapOnCanvasWithFrame\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ @Nullable\ Bitmap\ thumbnail,\ int\ index,\ boolean\ showGhostLoadIllustration\)\
+      \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ final\ RectF\ rect\ =\ mThumbnailRects\.get\(index\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(thumbnail\ ==\ null\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mTextPaint\.setColor\(mResolvedTextColor\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mColordEmptyThumbnailPaint\.setColor\(mResolvedEmptyPlaceholderColor\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ Paint\ emptyThumbnailPaint\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mIsTabSelected\ \?\ mSelectedEmptyThumbnailPaint\
+      :\ mColordEmptyThumbnailPaint;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mCanvas\.drawRoundRect\(rect,\ mRadius,\ mRadius,\ emptyThumbnailPaint\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ if\ \(showGhostLoadIllustration\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ Resources\ res\ =\ mContext\.getResources\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mEmptyThumbnailGhostLoadIllustration\.setTint\(mResolvedGhostIllustrationColor\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ Drawable\ ghostLoadIllustration\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mIsTabSelected\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \?\ mSelectedEmptyThumbnailGhostLoadIllustration\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ :\ mEmptyThumbnailGhostLoadIllustration;\
+
+      \
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ int\ lrPadding\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ res\.getDimensionPixelSize\(R\.dimen\.tab_grid_empty_thumbnail_lr_inset\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ int\ topPadding\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ res\.getDimensionPixelSize\(R\.dimen\.tab_grid_empty_thumbnail_top_inset\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ int\ bottomPadding\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ res\.getDimensionPixelSize\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ R\.dimen\.tab_grid_empty_thumbnail_bottom_inset\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ int\ left\ =\ Math\.round\(rect\.left\)\ \+\ lrPadding;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ int\ right\ =\ Math\.round\(rect\.right\)\ \-\ lrPadding;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ int\ top\ =\ Math\.round\(rect\.top\)\ \+\ topPadding;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ int\ bottom\ =\ Math\.round\(rect\.bottom\)\ \-\ bottomPadding;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ Rect\ rectDrawable\ =\ new\ Rect\(left,\ top,\ right,\ bottom\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ ghostLoadIllustration\.setBounds\(rectDrawable\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ ghostLoadIllustration\.draw\(mCanvas\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ return;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mCanvas\.save\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mCanvas\.clipRect\(rect\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ Matrix\ m\ =\ new\ Matrix\(\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ \ \ \ \ final\ float\ newWidth\ =\ rect\.width\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ final\ float\ scale\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ Math\.max\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ newWidth\ /\ thumbnail\.getWidth\(\),\ rect\.height\(\)\
+      /\ thumbnail\.getHeight\(\)\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ m\.setScale\(scale,\ scale\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ final\ float\ xOffset\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ rect\.left\ \+\ \(int\)\ \(\(newWidth\ \-\ \(thumbnail\.getWidth\(\)\
+      \*\ scale\)\)\ /\ 2\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ final\ float\ yOffset\ =\ rect\.top;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ m\.postTranslate\(xOffset,\ yOffset\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ \ \ \ \ //\ Draw\ the\ base\ paint\ first\ and\ set\ the\ base\ for\ thumbnail\
+      to\ draw\.\ Setting\ the\ xfer\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ //\ mode\ as\ SRC_OVER\ so\ the\ thumbnail\ can\ be\ drawn\ on\ top\ of\
+      this\ paint\.\ See\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ //\ https://crbug\.com/40777171\.\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mThumbnailBasePaint\.setXfermode\(new\ PorterDuffXfermode\(PorterDuff\.Mode\.SRC_OVER\)\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mCanvas\.drawRoundRect\(rect,\ mRadius,\ mRadius,\ mThumbnailBasePaint\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mThumbnailBasePaint\.setXfermode\(new\ PorterDuffXfermode\(PorterDuff\.Mode\.SRC_IN\)\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mCanvas\.drawBitmap\(thumbnail,\ m,\ mThumbnailBasePaint\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mCanvas\.restore\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ thumbnail\.recycle\(\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ private\ void\ drawFaviconDrawableOnCanvasWithFrame\(Drawable\ favicon,\ int\ index\)\
+      \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mCanvas\.drawRoundRect\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mFaviconBackgroundRects\.get\(index\),\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mFaviconFrameCornerRadius,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mFaviconFrameCornerRadius,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mFaviconBackgroundPaint\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ Rect\ oldBounds\ =\ new\ Rect\(favicon\.getBounds\(\)\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ favicon\.setBounds\(mFaviconRects\.get\(index\)\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ favicon\.draw\(mCanvas\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ //\ Restore\ the\ bounds\ since\ this\ may\ be\ a\ shared\ drawable\.\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ favicon\.setBounds\(oldBounds\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ private\ void\ drawFaviconThenMaybeSendBack\(Drawable\ favicon,\ int\ index\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ drawFaviconDrawableOnCanvasWithFrame\(favicon,\ index\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(mThumbnailsToFetch\.decrementAndGet\(\)\ ==\ 0\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ BitmapDrawable\ drawable\ =\ new\ BitmapDrawable\(mMultiThumbnailBitmap\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ PostTask\.postTask\(TaskTraits\.UI_USER_VISIBLE,\ mResultCallback\.bind\(drawable\)\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ private\ void\ fetch\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ initializeRects\(mContext\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ initializeAndStartFetching\(mMultiThumbnailMetadata\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ private\ List<ThumbnailItemMetadata>\ getThumbnailItems\(MultiThumbnailMetadata\
+      metadata\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ List<ThumbnailItemMetadata>\ thumbnailItems\ =\ new\ ArrayList<>\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ TabModel\ tabModel\ =\ mCurrentTabModelSupplier\.get\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ assumeNonNull\(tabModel\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(metadata\.tabId\ !=\ Tab\.INVALID_TAB_ID\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ //\ Retrieve\ all\ related\ tabs\ in\ the\ tab\ model\ for\ non\-SavedTabGroup\
+      groups\.\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ List<Tab>\ relatedTabList\ =\ tabModel\.getRelatedTabList\(metadata\.tabId\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ for\ \(Tab\ tab\ :\ relatedTabList\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ thumbnailItems\.add\(new\ ThumbnailItemMetadata\(tab,\ tab\.getUrl\(\)\)\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\ else\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ //\ Populate\ just\ the\ URLs\ for\ SavedTabGroupTabs\.\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ for\ \(GURL\ url\ :\ metadata\.urlList\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ thumbnailItems\.add\(new\ ThumbnailItemMetadata\(/\*\ tab=\
+      \*/\ null,\ url\)\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ \ \ \ \ return\ thumbnailItems;\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ private\ boolean\ checkAnyHiddenTabActing\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ List<ThumbnailItemMetadata>\ thumbnailItemList,\ int\ tabsToShow\)\
+      \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ for\ \(int\ i\ =\ tabsToShow;\ i\ <\ thumbnailItemList\.size\(\);\ i\+\+\)\
+      \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ Tab\ tab\ =\ thumbnailItemList\.get\(i\)\.tab;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ if\ \(tab\ !=\ null\ \&\&\ mActingTabIds\.contains\(tab\.getId\(\)\)\)\
+      \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ return\ true;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ return\ false;\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ private\ void\ drawActingOverlay\(int\ index\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ RectF\ rect\ =\ mThumbnailRects\.get\(index\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mCanvas\.save\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mPath\.reset\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mPath\.addRoundRect\(rect,\ mRadius,\ mRadius,\ Path\.Direction\.CW\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mCanvas\.clipPath\(mPath\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mActingOverlayDrawable\.setBounds\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ Math\.round\(rect\.left\),\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ Math\.round\(rect\.top\),\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ Math\.round\(rect\.right\),\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ Math\.round\(rect\.bottom\)\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mActingOverlayDrawable\.draw\(mCanvas\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mCanvas\.restore\(\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ private\ void\ drawFavicon\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ @Nullable\ Bitmap\ thumbnail,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ int\ index,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ AtomicReference<Drawable>\ lastFavicon,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ ThumbnailItemMetadata\ thumbnailItem\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ Tab\ tab\ =\ thumbnailItem\.tab;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ drawThumbnailBitmapOnCanvasWithFrame\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ thumbnail,\ index,\ /\*\ showGhostLoadIllustration=\ \*/\
+      true\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ \ \ \ \ boolean\ isActing\ =\ tab\ !=\ null\ \&\&\ mActingTabIds\.contains\(tab\.getId\(\)\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(isActing\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ drawActingOverlay\(index\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(lastFavicon\.get\(\)\ !=\ null\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ drawFaviconThenMaybeSendBack\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ isActing\ \?\ mSparkIconDrawable\ :\ lastFavicon\.get\(\),\
+      index\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\ else\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mTabListFaviconProvider\.getFaviconDrawableForTabAsync\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ new\ TabFaviconMetadata\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ tab,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ thumbnailItem\.url,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mMultiThumbnailMetadata\.isIncognito,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mMultiThumbnailMetadata\.isInTabGroup\),\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \(Drawable\ favicon\)\ \->\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ if\ \(tab\ !=\ null\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ if\ \(tab\.isClosing\(\)\ \|\|\
+      tab\.isDestroyed\(\)\)\ return;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ lastFavicon\.set\(favicon\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ drawFaviconThenMaybeSendBack\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ isActing\ \?\ mSparkIconDrawable\
+      :\ favicon,\ index\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ /\*\*\
+
+      \ \ \ \ \ \*\ Constructs\ a\ \{@link\ MultiThumbnailCardProvider\}\.\
+
+      \ \ \ \ \ \*\
+
+      \ \ \ \ \ \*\ @param\ context\ Context\ of\ the\ application\.\
+
+      \ \ \ \ \ \*\ @param\ browserControlsStateProvider\ For\ getting\ browser\ controls\ height\.\
+
+      \ \ \ \ \ \*\ @param\ tabContentManager\ Tab\ content\ manager\ for\ fetching\ thumbnails\.\
+
+      \ \ \ \ \ \*\ @param\ currentTabModelSupplier\ Supplier\ of\ the\ current\ tab\ model\.\
+
+      \ \ \ \ \ \*\ @param\ tabWebContentsFaviconDelegate\ Delegate\ to\ retrieve\ web\ contents\ favicons\.\
+
+      \ \ \ \ \ \*/\
+
+      \ \ \ \ public\ MultiThumbnailCardProvider\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ Context\ context,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ BrowserControlsStateProvider\ browserControlsStateProvider,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ TabContentManager\ tabContentManager,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ NullableObservableSupplier<TabModel>\ currentTabModelSupplier,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ @Nullable\ TabWebContentsFaviconDelegate\ tabWebContentsFaviconDelegate\)\
+      \{\
+
+      \ \ \ \ \ \ \ \ mContext\ =\ context;\
+
+      \ \ \ \ \ \ \ \ mBrowserControlsStateProvider\ =\ browserControlsStateProvider;\
+
+      \ \ \ \ \ \ \ \ Resources\ resources\ =\ context\.getResources\(\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ mTabContentManager\ =\ tabContentManager;\
+
+      \ \ \ \ \ \ \ \ mTabContentManagerThumbnailProvider\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ new\ TabContentManagerThumbnailProvider\(tabContentManager\);\
+
+      \ \ \ \ \ \ \ \ mCurrentTabModelSupplier\ =\ currentTabModelSupplier;\
+
+      \ \ \ \ \ \ \ \ mRadius\ =\ resources\.getDimension\(R\.dimen\.tab_list_mini_card_radius\);\
+
+      \ \ \ \ \ \ \ \ mFaviconFrameCornerRadius\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ resources\.getDimension\(R\.dimen\.tab_grid_thumbnail_favicon_frame_corner_radius\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ mTabListFaviconProvider\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ new\ TabListFaviconProvider\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ context,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ TabListMode\.GRID,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ R\.dimen\.default_favicon_corner_radius,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ tabWebContentsFaviconDelegate\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ //\ Initialize\ Paints\ to\ use\.\
+
+      \ \ \ \ \ \ \ \ mEmptyThumbnailPaint\ =\ new\ Paint\(\);\
+
+      \ \ \ \ \ \ \ \ mEmptyThumbnailPaint\.setStyle\(Paint\.Style\.FILL\);\
+
+      \ \ \ \ \ \ \ \ mEmptyThumbnailPaint\.setAntiAlias\(true\);\
+
+      \ \ \ \ \ \ \ \ mEmptyThumbnailPaint\.setColor\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ TabCardThemeUtil\.getMiniThumbnailPlaceholderColor\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ context,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ /\*\ isIncognito=\ \*/\ false,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ /\*\ isSelected=\ \*/\ false,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ /\*\ colorId=\ \*/\ null\)\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ mSelectedEmptyThumbnailPaint\ =\ new\ Paint\(mEmptyThumbnailPaint\);\
+
+      \ \ \ \ \ \ \ \ mSelectedEmptyThumbnailPaint\.setColor\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ TabCardThemeUtil\.getMiniThumbnailPlaceholderColor\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ context,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ /\*\ isIncognito=\ \*/\ false,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ /\*\ isSelected=\ \*/\ true,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ /\*\ colorId=\ \*/\ null\)\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ mColordEmptyThumbnailPaint\ =\ new\ Paint\(mEmptyThumbnailPaint\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ final\ Drawable\ ghostThumbnail\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ AppCompatResources\.getDrawable\(mContext,\ R\.drawable\.empty_thumbnail_background\);\
+
+      \ \ \ \ \ \ \ \ mEmptyThumbnailGhostLoadIllustration\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ assumeNonNull\(ghostThumbnail\.getConstantState\(\)\)\.newDrawable\(\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ mEmptyThumbnailGhostLoadIllustration\.setTint\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ TabCardThemeUtil\.getEmptyThumbnailColor\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mContext,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ /\*\ isIncognito=\ \*/\ false,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ /\*\ isSelected=\ \*/\ false,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ /\*\ colorId=\ \*/\ null\)\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ mSelectedEmptyThumbnailGhostLoadIllustration\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ ghostThumbnail\.getConstantState\(\)\.newDrawable\(\)\.mutate\(\);\
+
+      \ \ \ \ \ \ \ \ mSelectedEmptyThumbnailGhostLoadIllustration\.setTint\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ TabCardThemeUtil\.getEmptyThumbnailColor\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mContext,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ /\*\ isIncognito=\ \*/\ false,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ /\*\ isSelected=\ \*/\ true,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ /\*\ colorId=\ \*/\ null\)\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ mActingOverlayDrawable\ =\ InnerGlowDrawable\.createGtsPreviewGlow\(mContext\);\
+
+      \ \ \ \ \ \ \ \ mSparkIconDrawable\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ assumeNonNull\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ AppCompatResources\.getDrawable\(mContext,\ R\.drawable\.ic_spark_blue_16dp\)\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ //\ Paint\ used\ to\ set\ base\ for\ thumbnails,\ in\ case\ mEmptyThumbnailPaint\
+      has\ transparency\.\
+
+      \ \ \ \ \ \ \ \ mThumbnail'
+    replace: "romium.build.annotations.NullMarked;\nimport org.chromium.build.annotations.Nullable;\n\
+      import org.chromium.chrome.browser.browser_controls.BrowserControlsStateProvider;\nimport org.chromium.chrome.browser.profiles.Profile;\n\
+      import org.chromium.chrome.browser.tab.Tab;\nimport org.chromium.chrome.browser.tab_ui.TabListFaviconProvider.TabFaviconMetadata;\n\
+      import org.chromium.chrome.browser.tab_ui.TabListFaviconProvider.TabWebContentsFaviconDelegate;\n\
+      import org.chromium.chrome.browser.tabmodel.TabModel;\nimport org.chromium.components.browser_ui.styles.SemanticColorUtils;\n\
+      import org.chromium.components.tab_groups.TabGroupColorId;\nimport org.chromium.ui.base.LocalizationUtils;\n\
+      import org.chromium.url.GURL;\n\nimport java.util.ArrayList;\nimport java.util.List;\nimport java.util.Objects;\n\
+      import java.util.concurrent.atomic.AtomicInteger;\nimport java.util.concurrent.atomic.AtomicReference;\n\
+      \n/**\n * A {@link ThumbnailProvider} that will create a single Bitmap Thumbnail for all the related\
+      \ tabs\n * for the given tabs.\n */\n@NullMarked\npublic class MultiThumbnailCardProvider implements\
+      \ ThumbnailProvider {\n    /**\n     * The metadata details for a thumbnail item as part of a multi\
+      \ thumbnail card representation.\n     * This object represents both real {@link Tab}s and {@link\
+      \ SavedTabGroupTab}s. If the tab field\n     * is null, a SavedTabGroupTab is being referenced.\n\
+      \     */\n    private static class ThumbnailItemMetadata {\n        public final @Nullable Tab tab;\n\
+      \        public final GURL url;\n\n        ThumbnailItemMetadata(@Nullable Tab tab, GURL url) {\n\
+      \            this.tab = tab;\n            this.url = url;\n        }\n    }\n\n    private final\
+      \ TabContentManager mTabContentManager;\n    private final TabContentManagerThumbnailProvider mTabContentManagerThumbnailProvider;\n\
+      \    private final NullableObservableSupplier<TabModel> mCurrentTabModelSupplier;\n    private final\
+      \ Callback<@Nullable TabModel> mOnTabModelChanged = this::onTabModelChanged;\n\n    private final\
+      \ float mRadius;\n    private final float mFaviconFrameCornerRadius;\n    private final Paint mColordEmptyThumbnailPaint;\n\
+      \    private final Paint mEmptyThumbnailPaint;\n    private final Paint mThumbnailFramePaint;\n\
+      \    private final Paint mThumbnailBasePaint;\n    private final Paint mTextPaint;\n    private\
+      \ final Paint mFaviconBackgroundPaint;\n    private final Paint mSelectedEmptyThumbnailPaint;\n\
+      \    private final Paint mSelectedTextPaint;\n    private final Drawable mEmptyThumbnailGhostLoadIllustration;\n\
+      \    private final Drawable mSelectedEmptyThumbnailGhostLoadIllustration;\n\n    private @ColorInt\
+      \ int mMiniThumbnailPlaceholderColor;\n    private @Nullable @ColorInt Integer mGroupTintedMiniThumbnailPlaceholderColor;\n\
+      \n    private final Context mContext;\n    private final BrowserControlsStateProvider mBrowserControlsStateProvider;\n\
+      \    private final TabListFaviconProvider mTabListFaviconProvider;\n\n    private class MultiThumbnailFetcher\
+      \ {\n        private static final int MAX_THUMBNAIL_COUNT = 4;\n        private final MultiThumbnailMetadata\
+      \ mMultiThumbnailMetadata;\n        private final Callback<@Nullable Drawable> mResultCallback;\n\
+      \        private final boolean mIsTabSelected;\n        private final AtomicInteger mThumbnailsToFetch\
+      \ = new AtomicInteger();\n\n        private Canvas mCanvas;\n        private Bitmap mMultiThumbnailBitmap;\n\
+      \        private @Nullable String mText;\n        private final Path mPath = new Path();\n\n   \
+      \     private final List<Rect> mFaviconRects = new ArrayList<>(MAX_THUMBNAIL_COUNT);\n        private\
+      \ final List<RectF> mThumbnailRects = new ArrayList<>(MAX_THUMBNAIL_COUNT);\n        private final\
+      \ List<RectF> mFaviconBackgroundRects = new ArrayList<>(MAX_THUMBNAIL_COUNT);\n        private final\
+      \ int mThumbnailWidth;\n        private final int mThumbnailHeight;\n        private final @ColorInt\
+      \ int mResolvedEmptyPlaceholderColor;\n        private final @ColorInt int mResolvedTextColor;\n\
+      \        private final @ColorInt int mResolvedGhostIllustrationColor;\n\n        /**\n         *\
+      \ Fetcher that get the thumbnail drawable depending on if the tab is selected.\n         *\n   \
+      \      * @see TabContentManager#getTabThumbnailWithCallback\n         * @param metadata Thumbnail\
+      \ is generated for tabs related to {@link\n         *     MultiThumbnailMetadata}.\n         * @param\
+      \ thumbnailSize Desired size of multi-thumbnail.\n         * @param isTabSelected Whether the thumbnail\
+      \ is for a currently selected tab.\n         * @param resultCallback Callback which receives generated\
+      \ bitmap.\n         */\n        MultiThumbnailFetcher(\n                MultiThumbnailMetadata metadata,\n\
+      \                Size thumbnailSize,\n                boolean isTabSelected,\n                Callback<@Nullable\
+      \ Drawable> resultCallback) {\n            mResultCallback = Objects.requireNonNull(resultCallback);\n\
+      \            mMultiThumbnailMetadata = metadata;\n            mIsTabSelected = isTabSelected;\n\n\
+      \            if (thumbnailSize.getHeight() <= 0 || thumbnailSize.getWidth() <= 0) {\n          \
+      \      float expectedThumbnailAspectRatio =\n                        TabCardThemeUtil.getTabThumbnailAspectRatio(\n\
+      \                                mContext, mBrowserControlsStateProvider);\n                mThumbnailWidth\
+      \ =\n                        (int)\n                                mContext.getResources()\n  \
+      \                                      .getDimension(R.dimen.tab_grid_thumbnail_card_default_size);\n\
+      \                mThumbnailHeight = (int) (mThumbnailWidth / expectedThumbnailAspectRatio);\n  \
+      \          } else {\n                mThumbnailWidth = thumbnailSize.getWidth();\n             \
+      \   mThumbnailHeight = thumbnailSize.getHeight();\n            }\n\n            @TabGroupColorId\
+      \ Integer actualColorId = null;\n            boolean isIncognito = metadata.isIncognito;\n     \
+      \       if (metadata.isInTabGroup) {\n                actualColorId = metadata.tabGroupColor;\n\
+      \            }\n            mResolvedEmptyPlaceholderColor =\n                    TabCardThemeUtil.getMiniThumbnailPlaceholderColor(\n\
+      \                            mContext, isIncognito, mIsTabSelected, actualColorId);\n          \
+      \  mResolvedTextColor =\n                    TabCardThemeUtil.getTitleTextColor(\n             \
+      \               mContext, isIncognito, mIsTabSelected, actualColorId);\n            mResolvedGhostIllustrationColor\
+      \ =\n                    TabCardThemeUtil.getEmptyThumbnailColor(\n                            mContext,\
+      \ isIncognito, mIsTabSelected, actualColorId);\n        }\n\n        /** Initialize rects used for\
+      \ thumbnails. */\n        private void initializeRects(Context context) {\n            float thumbnailHorizontalPadding\
+      \ =\n                    TabCardThemeUtil.getTabMiniThumbnailPaddingDimension(context);\n      \
+      \      float thumbnailVerticalPadding = thumbnailHorizontalPadding;\n\n            float centerX\
+      \ = mThumbnailWidth * 0.5f;\n            float centerY = mThumbnailHeight * 0.5f;\n            float\
+      \ halfThumbnailHorizontalPadding = thumbnailHorizontalPadding / 2;\n            float halfThumbnailVerticalPadding\
+      \ = thumbnailVerticalPadding / 2;\n\n            mThumbnailRects.add(\n                    new RectF(\n\
+      \                            0,\n                            0,\n                            centerX\
+      \ - halfThumbnailHorizontalPadding,\n                            centerY - halfThumbnailVerticalPadding));\n\
+      \            mThumbnailRects.add(\n                    new RectF(\n                            centerX\
+      \ + halfThumbnailHorizontalPadding,\n                            0,\n                          \
+      \  mThumbnailWidth,\n                            centerY - halfThumbnailVerticalPadding));\n   \
+      \         mThumbnailRects.add(\n                    new RectF(\n                            0,\n\
+      \                            centerY + halfThumbnailVerticalPadding,\n                         \
+      \   centerX - halfThumbnailHorizontalPadding,\n                            mThumbnailHeight));\n\
+      \            mThumbnailRects.add(\n                    new RectF(\n                            centerX\
+      \ + halfThumbnailHorizontalPadding,\n                            centerY + halfThumbnailVerticalPadding,\n\
+      \                            mThumbnailWidth,\n                            mThumbnailHeight));\n\
+      \n            // Initialize Rects for favicons and favicon frame.\n            final float faviconFrameSize\
+      \ =\n                    mContext.getResources()\n                            .getDimension(R.dimen.tab_grid_thumbnail_favicon_frame_size);\n\
+      \            float offsetFromCard =\n                    mContext.getResources()\n             \
+      \               .getDimension(\n                                    R.dimen.tab_grid_thumbnail_favicon_frame_padding_from_card);\n\
+      \            float thumbnailFaviconPaddingFromBackground =\n                    mContext.getResources()\n\
+      \                            .getDimension(R.dimen.tab_grid_thumbnail_favicon_padding_from_frame);\n\
+      \n            for (int i = 0; i < 4; i++) {\n                RectF faviconBackgroundRect =\n   \
+      \                     getFaviconBackgroundRect(\n                                mThumbnailRects.get(i),\
+      \ faviconFrameSize, offsetFromCard);\n                mFaviconBackgroundRects.add(faviconBackgroundRect);\n\
+      \n                RectF faviconRectF = new RectF(faviconBackgroundRect);\n                faviconRectF.inset(\n\
+      \                        thumbnailFaviconPaddingFromBackground,\n                        thumbnailFaviconPaddingFromBackground);\n\
+      \n                Rect faviconRect = new Rect();\n                faviconRectF.roundOut(faviconRect);\n\
+      \                mFaviconRects.add(faviconRect);\n            }\n        }\n\n        private RectF\
+      \ getFaviconBackgroundRect(\n                RectF thumbnailRect, float faviconFrameSize, float\
+      \ offsetFromCard) {\n            float thumbnailRectLeft = thumbnailRect.left;\n            float\
+      \ thumbnailRectRight = thumbnailRect.right;\n            float thumbnailRectTop = thumbnailRect.top;\n\
+      \n            RectF faviconBackgroundRect =\n                    new RectF(\n                  \
+      \          thumbnailRectLeft,\n                            thumbnailRectTop,\n                 \
+      \           thumbnailRectLeft + faviconFrameSize,\n                            thumbnailRectTop\
+      \ + faviconFrameSize);\n\n            float horizontalOffsetToApply = offsetFromCard;\n        \
+      \    if (LocalizationUtils.isLayoutRtl()) {\n                // In RTL (Right-to-Left) layout, calculate\
+      \ the effective 'horizontal' offset\n                // from the thumbnail's left edge to position\
+      \ the favicon 'offsetFromCard'\n                // pixels from the thumbnail's right edge.\n   \
+      \             // This is done by taking the thumbnail's width (thumbnailRectRight -\n          \
+      \      // thumbnailRectLeft),\n                // subtracting the favicon's width (faviconFrameSize),\
+      \ and then further\n                // subtracting the desired 'offsetFromCard' from the right.\n\
+      \n                // Visualization for RTL:\n                // [TL -------------------- TR]  (Thumbnail)\n\
+      \                //       [FL --- FR]             (Favicon, where FR is Favicon Right)\n       \
+      \         //                 <- offset ->  (Desired space from TR)\n                // FL = TR -\
+      \ TL - FaviconWidth - offset\n                horizontalOffsetToApply =\n                      \
+      \  thumbnailRectRight - thumbnailRectLeft - faviconFrameSize - offsetFromCard;\n            }\n\n\
+      \            faviconBackgroundRect.offset(horizontalOffsetToApply, offsetFromCard);\n          \
+      \  return faviconBackgroundRect;\n        }\n\n        @Initializer\n        private void initializeAndStartFetching(MultiThumbnailMetadata\
+      \ metadata) {\n            // Initialize mMultiThumbnailBitmap.\n            mMultiThumbnailBitmap\
+      \ =\n                    Bitmap.createBitmap(mThumbnailWidth, mThumbnailHeight, Bitmap.Config.ARGB_8888);\n\
+      \            mCanvas = new Canvas(mMultiThumbnailBitmap);\n            mCanvas.drawColor(Color.TRANSPARENT);\n\
+      \n            // Initialize Tabs.\n            List<ThumbnailItemMetadata> thumbnailItemList = getThumbnailItems(metadata);\n\
+      \            int relatedTabCount = thumbnailItemList.size();\n            boolean showPlus = relatedTabCount\
+      \ > MAX_THUMBNAIL_COUNT;\n            int tabsToShow = showPlus ? MAX_THUMBNAIL_COUNT - 1 : relatedTabCount;\n\
+      \            ThumbnailItemMetadata[] thumbnailItems = new ThumbnailItemMetadata[MAX_THUMBNAIL_COUNT];\n\
+      \            mText = showPlus ? \"+\" + (thumbnailItemList.size() - tabsToShow) : null;\n      \
+      \      mThumbnailsToFetch.set(tabsToShow);\n            for (int i = 0; i < tabsToShow; i++) {\n\
+      \                thumbnailItems[i] = thumbnailItemList.get(i);\n            }\n\n            //\
+      \ Fetch and draw all.\n            for (int i = 0; i < MAX_THUMBNAIL_COUNT; i++) {\n           \
+      \     ThumbnailItemMetadata thumbnailItem = thumbnailItems[i];\n                RectF thumbnailRect\
+      \ = mThumbnailRects.get(i);\n                if (thumbnailItem != null) {\n                    //\
+      \ Create final copies to get lambda captures to compile.\n                    final int index =\
+      \ i;\n                    final Size tabThumbnailSize =\n                            new Size((int)\
+      \ thumbnailRect.width(), (int) thumbnailRect.height());\n                    // getTabThumbnailWithCallback()\
+      \ might call the callback up to twice,\n                    // so use |lastFavicon| to avoid fetching\
+      \ the favicon the second time.\n                    // Fetching the favicon after getting the live\
+      \ thumbnail would lead to\n                    // visible flicker.\n                    final AtomicReference<Drawable>\
+      \ lastFavicon = new AtomicReference<>();\n                    if (thumbnailItem.tab != null) {\n\
+      \                        Tab tab = thumbnailItem.tab;\n                        mTabContentManager.getTabThumbnailWithCallback(\n\
+      \                                tab.getId(),\n                                tabThumbnailSize,\n\
+      \                                thumbnail -> {\n                                    if (tab.isClosing()\
+      \ || tab.isDestroyed()) return;\n\n                                    drawFavicon(thumbnail, index,\
+      \ lastFavicon, thumbnailItem);\n                                });\n                    } else\
+      \ {\n                        drawFavicon(/* thumbnail= */ null, index, lastFavicon, thumbnailItem);\n\
+      \                    }\n                } else {\n                    drawThumbnailBitmapOnCanvasWithFrame(\n\
+      \                            null, i, /* showGhostLoadIllustration= */ false);\n               \
+      \     if (mText != null && i == 3) {\n                        // Draw the text exactly centered\
+      \ on the thumbnail rect.\n                        Paint textPaint = mIsTabSelected ? mSelectedTextPaint\
+      \ : mTextPaint;\n                        mCanvas.drawText(\n                                mText,\n\
+      \                                (thumbnailRect.left + thumbnailRect.right) / 2,\n             \
+      \                   (thumbnailRect.top + thumbnailRect.bottom) / 2\n                           \
+      \             - ((mTextPaint.descent() + mTextPaint.ascent()) / 2),\n                          \
+      \      textPaint);\n                    }\n                }\n            }\n        }\n\n     \
+      \   private void drawThumbnailBitmapOnCanvasWithFrame(\n                @Nullable Bitmap thumbnail,\
+      \ int index, boolean showGhostLoadIllustration) {\n            final RectF rect = mThumbnailRects.get(index);\n\
+      \            if (thumbnail == null) {\n                mTextPaint.setColor(mResolvedTextColor);\n\
+      \                mColordEmptyThumbnailPaint.setColor(mResolvedEmptyPlaceholderColor);\n        \
+      \        Paint emptyThumbnailPaint =\n                        mIsTabSelected ? mSelectedEmptyThumbnailPaint\
+      \ : mColordEmptyThumbnailPaint;\n                mCanvas.drawRoundRect(rect, mRadius, mRadius, emptyThumbnailPaint);\n\
+      \n                if (showGhostLoadIllustration) {\n                    Resources res = mContext.getResources();\n\
+      \                    mEmptyThumbnailGhostLoadIllustration.setTint(mResolvedGhostIllustrationColor);\n\
+      \                    Drawable ghostLoadIllustration =\n                            mIsTabSelected\n\
+      \                                    ? mSelectedEmptyThumbnailGhostLoadIllustration\n          \
+      \                          : mEmptyThumbnailGhostLoadIllustration;\n\n                    int lrPadding\
+      \ =\n                            res.getDimensionPixelSize(R.dimen.tab_grid_empty_thumbnail_lr_inset);\n\
+      \                    int topPadding =\n                            res.getDimensionPixelSize(R.dimen.tab_grid_empty_thumbnail_top_inset);\n\
+      \                    int bottomPadding =\n                            res.getDimensionPixelSize(\n\
+      \                                    R.dimen.tab_grid_empty_thumbnail_bottom_inset);\n\n       \
+      \             int left = Math.round(rect.left) + lrPadding;\n                    int right = Math.round(rect.right)\
+      \ - lrPadding;\n                    int top = Math.round(rect.top) + topPadding;\n             \
+      \       int bottom = Math.round(rect.bottom) - bottomPadding;\n                    Rect rectDrawable\
+      \ = new Rect(left, top, right, bottom);\n\n                    ghostLoadIllustration.setBounds(rectDrawable);\n\
+      \                    ghostLoadIllustration.draw(mCanvas);\n                }\n\n               \
+      \ return;\n            }\n\n            mCanvas.save();\n            mCanvas.clipRect(rect);\n \
+      \           Matrix m = new Matrix();\n\n            final float newWidth = rect.width();\n     \
+      \       final float scale =\n                    Math.max(\n                            newWidth\
+      \ / thumbnail.getWidth(), rect.height() / thumbnail.getHeight());\n            m.setScale(scale,\
+      \ scale);\n            final float xOffset =\n                    rect.left + (int) ((newWidth -\
+      \ (thumbnail.getWidth() * scale)) / 2);\n            final float yOffset = rect.top;\n         \
+      \   m.postTranslate(xOffset, yOffset);\n\n            // Draw the base paint first and set the base\
+      \ for thumbnail to draw. Setting the xfer\n            // mode as SRC_OVER so the thumbnail can\
+      \ be drawn on top of this paint. See\n            // https://crbug.com/40777171.\n            mThumbnailBasePaint.setXfermode(new\
+      \ PorterDuffXfermode(PorterDuff.Mode.SRC_OVER));\n            mCanvas.drawRoundRect(rect, mRadius,\
+      \ mRadius, mThumbnailBasePaint);\n\n            mThumbnailBasePaint.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.SRC_IN));\n\
+      \            mCanvas.drawBitmap(thumbnail, m, mThumbnailBasePaint);\n            mCanvas.restore();\n\
+      \            thumbnail.recycle();\n        }\n\n        private void drawFaviconDrawableOnCanvasWithFrame(Drawable\
+      \ favicon, int index) {\n            mCanvas.drawRoundRect(\n                    mFaviconBackgroundRects.get(index),\n\
+      \                    mFaviconFrameCornerRadius,\n                    mFaviconFrameCornerRadius,\n\
+      \                    mFaviconBackgroundPaint);\n            Rect oldBounds = new Rect(favicon.getBounds());\n\
+      \            favicon.setBounds(mFaviconRects.get(index));\n            favicon.draw(mCanvas);\n\
+      \            // Restore the bounds since this may be a shared drawable.\n            favicon.setBounds(oldBounds);\n\
+      \        }\n\n        private void drawFaviconThenMaybeSendBack(Drawable favicon, int index) {\n\
+      \            drawFaviconDrawableOnCanvasWithFrame(favicon, index);\n            if (mThumbnailsToFetch.decrementAndGet()\
+      \ == 0) {\n                BitmapDrawable drawable = new BitmapDrawable(mMultiThumbnailBitmap);\n\
+      \                PostTask.postTask(TaskTraits.UI_USER_VISIBLE, mResultCallback.bind(drawable));\n\
+      \            }\n        }\n\n        private void fetch() {\n            initializeRects(mContext);\n\
+      \            initializeAndStartFetching(mMultiThumbnailMetadata);\n        }\n\n        private\
+      \ List<ThumbnailItemMetadata> getThumbnailItems(MultiThumbnailMetadata metadata) {\n           \
+      \ List<ThumbnailItemMetadata> thumbnailItems = new ArrayList<>();\n            TabModel tabModel\
+      \ = mCurrentTabModelSupplier.get();\n            assumeNonNull(tabModel);\n            if (metadata.tabId\
+      \ != Tab.INVALID_TAB_ID) {\n                // Retrieve all related tabs in the tab model for non-SavedTabGroup\
+      \ groups.\n                List<Tab> relatedTabList = tabModel.getRelatedTabList(metadata.tabId);\n\
+      \                for (Tab tab : relatedTabList) {\n                    thumbnailItems.add(new ThumbnailItemMetadata(tab,\
+      \ tab.getUrl()));\n                }\n            } else {\n                // Populate just the\
+      \ URLs for SavedTabGroupTabs.\n                for (GURL url : metadata.urlList) {\n           \
+      \         thumbnailItems.add(new ThumbnailItemMetadata(/* tab= */ null, url));\n               \
+      \ }\n            }\n\n            return thumbnailItems;\n        }\n\n        private void drawFavicon(\n\
+      \                @Nullable Bitmap thumbnail,\n                int index,\n                AtomicReference<Drawable>\
+      \ lastFavicon,\n                ThumbnailItemMetadata thumbnailItem) {\n            Tab tab = thumbnailItem.tab;\n\
+      \            drawThumbnailBitmapOnCanvasWithFrame(\n                    thumbnail, index, /* showGhostLoadIllustration=\
+      \ */ true);\n\n            if (lastFavicon.get() != null) {\n                drawFaviconThenMaybeSendBack(lastFavicon.get(),\
+      \ index);\n            } else {\n                mTabListFaviconProvider.getFaviconDrawableForTabAsync(\n\
+      \                        new TabFaviconMetadata(\n                                tab,\n       \
+      \                         thumbnailItem.url,\n                                mMultiThumbnailMetadata.isIncognito,\n\
+      \                                mMultiThumbnailMetadata.isInTabGroup),\n                      \
+      \  (Drawable favicon) -> {\n                            if (tab != null) {\n                   \
+      \             if (tab.isClosing() || tab.isDestroyed()) return;\n                            }\n\
+      \n                            lastFavicon.set(favicon);\n                            drawFaviconThenMaybeSendBack(favicon,\
+      \ index);\n                        });\n            }\n        }\n    }\n\n    /**\n     * Constructs\
+      \ a {@link MultiThumbnailCardProvider}.\n     *\n     * @param context Context of the application.\n\
+      \     * @param browserControlsStateProvider For getting browser controls height.\n     * @param\
+      \ tabContentManager Tab content manager for fetching thumbnails.\n     * @param currentTabModelSupplier\
+      \ Supplier of the current tab model.\n     * @param tabWebContentsFaviconDelegate Delegate to retrieve\
+      \ web contents favicons.\n     */\n    public MultiThumbnailCardProvider(\n            Context context,\n\
+      \            BrowserControlsStateProvider browserControlsStateProvider,\n            TabContentManager\
+      \ tabContentManager,\n            NullableObservableSupplier<TabModel> currentTabModelSupplier,\n\
+      \            @Nullable TabWebContentsFaviconDelegate tabWebContentsFaviconDelegate) {\n        mContext\
+      \ = context;\n        mBrowserControlsStateProvider = browserControlsStateProvider;\n        Resources\
+      \ resources = context.getResources();\n\n        mTabContentManager = tabContentManager;\n     \
+      \   mTabContentManagerThumbnailProvider =\n                new TabContentManagerThumbnailProvider(tabContentManager);\n\
+      \        mCurrentTabModelSupplier = currentTabModelSupplier;\n        mRadius = resources.getDimension(R.dimen.tab_list_mini_card_radius);\n\
+      \        mFaviconFrameCornerRadius =\n                resources.getDimension(R.dimen.tab_grid_thumbnail_favicon_frame_corner_radius);\n\
+      \n        mTabListFaviconProvider =\n                new TabListFaviconProvider(\n             \
+      \           context,\n                        TabListMode.GRID,\n                        R.dimen.default_favicon_corner_radius,\n\
+      \                        tabWebContentsFaviconDelegate);\n\n        // Initialize Paints to use.\n\
+      \        mEmptyThumbnailPaint = new Paint();\n        mEmptyThumbnailPaint.setStyle(Paint.Style.FILL);\n\
+      \        mEmptyThumbnailPaint.setAntiAlias(true);\n        mEmptyThumbnailPaint.setColor(\n    \
+      \            TabCardThemeUtil.getMiniThumbnailPlaceholderColor(\n                        context,\n\
+      \                        /* isIncognito= */ false,\n                        /* isSelected= */ false,\n\
+      \                        /* colorId= */ null));\n\n        mSelectedEmptyThumbnailPaint = new Paint(mEmptyThumbnailPaint);\n\
+      \        mSelectedEmptyThumbnailPaint.setColor(\n                TabCardThemeUtil.getMiniThumbnailPlaceholderColor(\n\
+      \                        context,\n                        /* isIncognito= */ false,\n         \
+      \               /* isSelected= */ true,\n                        /* colorId= */ null));\n\n    \
+      \    mColordEmptyThumbnailPaint = new Paint(mEmptyThumbnailPaint);\n\n        final Drawable ghostThumbnail\
+      \ =\n                AppCompatResources.getDrawable(mContext, R.drawable.empty_thumbnail_background);\n\
+      \        mEmptyThumbnailGhostLoadIllustration =\n                assumeNonNull(ghostThumbnail.getConstantState()).newDrawable();\n\
+      \n        mEmptyThumbnailGhostLoadIllustration.setTint(\n                TabCardThemeUtil.getEmptyThumbnailColor(\n\
+      \                        mContext,\n                        /* isIncognito= */ false,\n        \
+      \                /* isSelected= */ false,\n                        /* colorId= */ null));\n\n  \
+      \      mSelectedEmptyThumbnailGhostLoadIllustration =\n                ghostThumbnail.getConstantState().newDrawable().mutate();\n\
+      \        mSelectedEmptyThumbnailGhostLoadIllustration.setTint(\n                TabCardThemeUtil.getEmptyThumbnailColor(\n\
+      \                        mContext,\n                        /* isIncognito= */ false,\n        \
+      \                /* isSelected= */ true,\n                        /* colorId= */ null));\n\n   \
+      \     // Paint used to set base for thumbnails, in case mEmptyThumbnailPaint has transparency.\n\
+      \        mThumbnail"
+- description: Reviewed literal source edit 1
+  regex:
+    pattern: 'import android.graphics.Path;
+
+      '
+    replace: ''
+  count: 1
+- description: Reviewed literal source edit 2
+  regex:
+    pattern: '        private final Path mPath = new Path();
+
+      '
+    replace: ''
+  count: 1

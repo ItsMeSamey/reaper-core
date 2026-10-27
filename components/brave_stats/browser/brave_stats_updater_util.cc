@@ -140,6 +140,7 @@ std::string GetAPIKey() {
       .value_or(BUILDFLAG(BRAVE_STATS_API_KEY));
 }
 
+#if !BUILDFLAG(IS_ANDROID)
 // This is a helper method for dealing with timestamps set by other services in
 // the browser. This method makes the assumption that enabling the service
 // required a user interaction, and thus the uasge ping for the current day has
@@ -182,5 +183,6 @@ uint8_t UsageBitfieldFromTimestamp(const base::Time& last_usage_time,
 
   return result;
 }
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 }  // namespace brave_stats

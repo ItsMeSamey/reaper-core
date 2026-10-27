@@ -1,0 +1,228 @@
+diff --git a/chrome/browser/android/compositor/layer/tab_handle_layer.cc b/chrome/browser/android/compositor/layer/tab_handle_layer.cc
+--- a/chrome/browser/android/compositor/layer/tab_handle_layer.cc
++++ b/chrome/browser/android/compositor/layer/tab_handle_layer.cc
+@@ -6,7 +6,9 @@
+ 
+ #include <math.h>
+ 
+-#include <numbers>
++#include <algorithm>
++#include <cmath>
++
+ #include <vector>
+ 
+ #include "cc/slim/layer.h"
+@@ -27,14 +29,6 @@
+ }
+ 
+ // static
+-void TabHandleLayer::SetConstants(float tab_underline_thickness,
+-                                  float tab_underline_corner_radius,
+-                                  float tab_underline_bottom_margin) {
+-  tab_underline_thickness_ = tab_underline_thickness;
+-  tab_underline_corner_radius_ = tab_underline_corner_radius;
+-  tab_underline_bottom_margin_ = tab_underline_bottom_margin;
+-}
+-
+ void TabHandleLayer::SetProperties(
+     int id,
+     ui::Resource* close_button_resource,
+@@ -56,9 +50,6 @@
+     float alert_indicator_internal_padding,
+     float title_to_alert_indicator_spacing,
+     float alert_indicator_opacity,
+-    ui::Resource* alert_indicator_overlay_resource,
+-    float target_rotation,
+-    float alert_indicator_overlay_width,
+     float toolbar_width,
+     float x,
+     float y,
+@@ -82,12 +73,7 @@
+     int keyboard_focus_ring_offset,
+     int stroke_width,
+     float folio_foot_length,
+-    float desktop_min_tab_width,
+-    float underline_opacity,
+-    float underline_shimmer_offset,
+-    SkColor underline_start_color,
+-    SkColor underline_end_color,
+-    int underline_width_threshold) {
++    float desktop_min_tab_width) {
+   if (foreground != foreground_ || opacity != opacity_ ||
+       is_pinned != is_pinned_) {
+     foreground_ = foreground;
+@@ -131,7 +117,8 @@
+   }
+ 
+   if (title_layer) {
+-    unsigned expected_children = 6;
++    // Four ordinary tab children remain after the Android AI overlay removal.
++    constexpr size_t expected_children = 5;
+     title_layer_ = title_layer->layer();
+     if (tab_->children().size() < expected_children) {
+       tab_->AddChild(title_layer_);
+@@ -233,28 +220,6 @@
+     alert_indicator_layer_->SetOpacity(alert_indicator_opacity);
+   } else {
+     alert_indicator_layer_->SetIsDrawable(false);
+-  }
+-
+-  if (should_show_alert_indicator && alert_indicator_overlay_resource) {
+-    alert_indicator_overlay_layer_->SetIsDrawable(true);
+-    alert_indicator_overlay_layer_->SetUIResourceId(
+-        alert_indicator_overlay_resource->ui_resource()->id());
+-    float overlay_size = alert_indicator_overlay_width;
+-    alert_indicator_overlay_layer_->SetBounds(
+-        gfx::Size(overlay_size, overlay_size));
+-    alert_indicator_overlay_layer_->SetOpacity(alert_indicator_opacity);
+-
+-    // Apply spinning animation.
+-    alert_indicator_overlay_layer_->SetTransformOrigin(
+-        gfx::PointF(overlay_size / 2, overlay_size / 2));
+-    float diff = target_rotation - alert_indicator_overlay_rotation_;
+-    alert_indicator_overlay_rotation_ = target_rotation;
+-    if (diff != 0) {
+-      transform_->RotateAboutZAxis(diff);
+-    }
+-    alert_indicator_overlay_layer_->SetTransform(*transform_.get());
+-  } else {
+-    alert_indicator_overlay_layer_->SetIsDrawable(false);
+   }
+ 
+   if (title_layer) {
+@@ -382,69 +347,6 @@
+                               alert_indicator_size) /
+                              2);
+     alert_indicator_layer_->SetPosition(gfx::PointF(alert_x, alert_y));
+-    float overlay_size = alert_indicator_overlay_width;
+-    float overlay_x = alert_x + (alert_indicator_size - overlay_size) / 2;
+-    float overlay_y = alert_y + (alert_indicator_size - overlay_size) / 2;
+-    alert_indicator_overlay_layer_->SetPosition(
+-        gfx::PointF(overlay_x, overlay_y));
+-  }
+-
+-  if (underline_opacity > 0.f) {
+-    float underline_width = width - padding_left - padding_right;
+-
+-    underline_start_layer_->SetIsDrawable(true);
+-    underline_start_layer_->SetOpacity(underline_opacity);
+-    underline_start_layer_->SetBackgroundColor(
+-        SkColor4f::FromColor(underline_start_color));
+-    underline_start_layer_->SetBounds(gfx::Size(
+-        std::round(underline_width), std::round(tab_underline_thickness_)));
+-    underline_start_layer_->SetPosition(gfx::PointF(
+-        padding_left,
+-        height - tab_underline_thickness_ - tab_underline_bottom_margin_));
+-    underline_start_layer_->SetRoundedCorner(
+-        gfx::RoundedCornersF(tab_underline_corner_radius_));
+-
+-    if (underline_width < underline_width_threshold) {
+-      underline_end_layer_->SetIsDrawable(false);
+-      underline_start_layer_->SetGradientMask(gfx::LinearGradient());
+-    } else {
+-      underline_end_layer_->SetIsDrawable(true);
+-      underline_end_layer_->SetOpacity(underline_opacity);
+-      underline_end_layer_->SetBackgroundColor(
+-          SkColor4f::FromColor(underline_end_color));
+-      underline_end_layer_->SetBounds(gfx::Size(
+-          std::round(underline_width), std::round(tab_underline_thickness_)));
+-      underline_end_layer_->SetPosition(gfx::PointF(
+-          padding_left,
+-          height - tab_underline_thickness_ - tab_underline_bottom_margin_));
+-      underline_end_layer_->SetRoundedCorner(
+-          gfx::RoundedCornersF(tab_underline_corner_radius_));
+-
+-      // Use a 3-point gradient mask to create a moving wave/shimmer effect
+-      // across the underline.
+-      gfx::LinearGradient gradient;
+-      gradient.AddStep(
+-          0.f, static_cast<uint8_t>(
+-                   255 * (0.5f +
+-                          0.5f * cos(std::numbers::pi_v<float> *
+-                                     (0.f - 2.f * underline_shimmer_offset)))));
+-      gradient.AddStep(
+-          0.5f,
+-          static_cast<uint8_t>(
+-              255 *
+-              (0.5f + 0.5f * cos(std::numbers::pi_v<float> *
+-                                 (0.5f - 2.f * underline_shimmer_offset)))));
+-      gradient.AddStep(
+-          1.f, static_cast<uint8_t>(
+-                   255 * (0.5f +
+-                          0.5f * cos(std::numbers::pi_v<float> *
+-                                     (1.f - 2.f * underline_shimmer_offset)))));
+-      gradient.set_angle(is_rtl ? 180 : 0);
+-      underline_start_layer_->SetGradientMask(gradient);
+-    }
+-  } else {
+-    underline_end_layer_->SetIsDrawable(false);
+-    underline_start_layer_->SetIsDrawable(false);
+   }
+ 
+   if (is_keyboard_focused) {
+@@ -482,6 +384,32 @@
+   }
+ }
+ 
++void TabHandleLayer::SetContainerMarker(SkColor color, float thickness) {
++  const gfx::Size bounds = decoration_tab_->bounds();
++  if (SkColorGetA(color) != 255 || !std::isfinite(thickness) || thickness <= 0 ||
++      bounds.height() < 2 || bounds.width() <= 0) {
++    container_marker_->SetIsDrawable(false);
++    return;
++  }
++  // Limit the rounded height before multiplying the inset. Double represents
++  // every gfx::Size integer exactly, so rounding cannot escape the integer cap.
++  const int max_height = std::min(bounds.height() / 2, bounds.width() / 4);
++  if (max_height <= 0) {
++    container_marker_->SetIsDrawable(false);
++    return;
++  }
++  const int height = static_cast<int>(std::ceil(std::min(
++      static_cast<double>(thickness), static_cast<double>(max_height))));
++  const int inset = height * 2;
++  const int width = std::max(0, bounds.width() - inset * 2);
++  container_marker_->SetIsDrawable(height > 0 && width > 0);
++  if (height <= 0 || width <= 0) return;
++  container_marker_->SetBackgroundColor(SkColor4f::FromColor(color));
++  container_marker_->SetBounds(gfx::Size(width, height));
++  container_marker_->SetPosition(gfx::PointF(inset, height));
++  container_marker_->SetRoundedCorner(gfx::RoundedCornersF(height * 0.5f));
++}
++
+ bool TabHandleLayer::foreground() {
+   return foreground_;
+ }
+@@ -504,20 +432,17 @@
+       start_divider_(cc::slim::UIResourceLayer::Create()),
+       end_divider_(cc::slim::UIResourceLayer::Create()),
+       alert_indicator_layer_(cc::slim::UIResourceLayer::Create()),
+-      alert_indicator_overlay_layer_(cc::slim::UIResourceLayer::Create()),
+       decoration_tab_(cc::slim::NinePatchLayer::Create()),
+       tab_outline_(cc::slim::NinePatchLayer::Create()),
+-      underline_end_layer_(cc::slim::SolidColorLayer::Create()),
+-      underline_start_layer_(cc::slim::SolidColorLayer::Create()),
+-      keyboard_focus_ring_(cc::slim::NinePatchLayer::Create()),
+-      transform_(new gfx::Transform()) {
++      container_marker_(cc::slim::SolidColorLayer::Create()),
++      keyboard_focus_ring_(cc::slim::NinePatchLayer::Create()) {
+   decoration_tab_->SetIsDrawable(true);
++  decoration_tab_->AddChild(container_marker_);
+ 
+   tab_->AddChild(decoration_tab_);
+   tab_->AddChild(tab_outline_);
+   tab_->AddChild(close_button_hover_highlight_);
+   tab_->AddChild(alert_indicator_layer_);
+-  tab_->AddChild(alert_indicator_overlay_layer_);
+   close_button_hover_highlight_->AddChild(close_button_);
+ 
+   decoration_tab_->SetPosition(gfx::PointF(0, 0));
+@@ -529,8 +454,6 @@
+   layer_->AddChild(start_divider_);
+   layer_->AddChild(end_divider_);
+   layer_->AddChild(close_keyboard_focus_ring_);
+-  layer_->AddChild(underline_end_layer_);
+-  layer_->AddChild(underline_start_layer_);
+   layer_->AddChild(keyboard_focus_ring_);
+ }
+ 

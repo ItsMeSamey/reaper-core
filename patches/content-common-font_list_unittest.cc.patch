@@ -1,0 +1,111 @@
+diff --git a/content/common/font_list_unittest.cc b/content/common/font_list_unittest.cc
+--- a/content/common/font_list_unittest.cc
++++ b/content/common/font_list_unittest.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "content/common/font_list.h"
+ 
++#include <set>
++#include <string>
+ #include <string_view>
+ 
+ #include "base/functional/bind.h"
+@@ -16,6 +18,13 @@
+ #include "base/values.h"
+ #include "build/build_config.h"
+ #include "testing/gtest/include/gtest/gtest.h"
++
++#if BUILDFLAG(IS_ANDROID)
++#include "skia/ext/font_utils.h"
++#include "third_party/skia/include/core/SkFontMgr.h"
++#include "third_party/skia/include/core/SkString.h"
++#include "third_party/skia/include/core/SkTypeface.h"
++#endif
+ 
+ namespace {
+ 
+@@ -38,7 +47,7 @@
+ }  // namespace
+ 
+ #if !BUILDFLAG(IS_ANDROID) && !BUILDFLAG(IS_FUCHSIA)
+-// GetFontList is not implemented on Android and Fuchsia.
++// These platform-specific expected fonts apply to desktop systems.
+ TEST(FontList, GetFontList) {
+   base::test::TaskEnvironment task_environment;
+ 
+@@ -59,6 +68,75 @@
+   task_environment.RunUntilIdle();
+ }
+ #endif  // !BUILDFLAG(IS_ANDROID) && !BUILDFLAG(IS_FUCHSIA)
++
++#if BUILDFLAG(IS_ANDROID)
++TEST(FontList, AndroidNamedFamiliesAreSelectableAndSorted) {
++  base::test::TaskEnvironment task_environment;
++  content::GetFontListTaskRunner()->PostTask(
++      FROM_HERE, base::BindOnce([] {
++        const auto manager = skia::DefaultFontMgr();
++        ASSERT_TRUE(manager);
++        const base::ListValue fonts = content::GetFontList_SlowBlocking();
++        ASSERT_FALSE(fonts.empty());
++        std::set<std::string> names;
++        std::string previous;
++        for (const auto& value : fonts) {
++          ASSERT_TRUE(value.is_list());
++          const auto& entry = value.GetList();
++          ASSERT_EQ(2u, entry.size());
++          ASSERT_TRUE(entry[0].is_string());
++          ASSERT_TRUE(entry[1].is_string());
++          const std::string& name = entry[0].GetString();
++          ASSERT_FALSE(name.empty());
++          EXPECT_TRUE(base::IsStringUTF8(name));
++          EXPECT_EQ(name, entry[1].GetString());
++          EXPECT_TRUE(previous.empty() || previous < name);
++          EXPECT_TRUE(names.insert(name).second);
++          previous = name;
++          const auto styles = manager->matchFamily(name.c_str());
++          ASSERT_TRUE(styles);
++          bool usable = false;
++          for (int i = 0; i < styles->count(); ++i) {
++            const auto face = styles->createTypeface(i);
++            usable |= face && face->countGlyphs() > 0;
++          }
++          EXPECT_TRUE(usable) << name;
++        }
++        // Check the real system catalog, not a fixed list of four aliases. This
++        // includes OEM families without making assumptions about their names.
++        for (int i = 0; i < manager->countFamilies(); ++i) {
++          SkString name;
++          manager->getFamilyName(i, &name);
++          const auto styles = manager->createStyleSet(i);
++          if (name.isEmpty() || !base::IsStringUTF8(name.c_str()) || !styles) {
++            continue;
++          }
++          for (int style = 0; style < styles->count(); ++style) {
++            const auto face = styles->createTypeface(style);
++            if (face && face->countGlyphs() > 0) {
++              EXPECT_TRUE(names.contains(name.c_str())) << name.c_str();
++              break;
++            }
++          }
++        }
++        for (const char* alias :
++             {"sans-serif", "serif", "monospace", "cursive"}) {
++          const auto styles = manager->matchFamily(alias);
++          if (!styles) {
++            continue;
++          }
++          for (int i = 0; i < styles->count(); ++i) {
++            const auto face = styles->createTypeface(i);
++            if (face && face->countGlyphs() > 0) {
++              EXPECT_TRUE(names.contains(alias)) << alias;
++              break;
++            }
++          }
++        }
++      }));
++  task_environment.RunUntilIdle();
++}
++#endif  // BUILDFLAG(IS_ANDROID)
+ 
+ #if BUILDFLAG(IS_WIN)
+ TEST(FontList, GetFontListLocalized) {

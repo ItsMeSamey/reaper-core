@@ -1,0 +1,108 @@
+diff --git a/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/extensions/ExtensionActionPopup.java b/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/extensions/ExtensionActionPopup.java
+index eddfde6b63e20f301827a5ba4b434163e1054d7f..0057605e7b96c4511423e47bec9daf69337179b2 100644
+--- a/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/extensions/ExtensionActionPopup.java
++++ b/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/extensions/ExtensionActionPopup.java
+@@ -15,6 +15,7 @@
+ import android.widget.PopupWindow.OnDismissListener;
+ 
+ import org.chromium.base.Callback;
++import org.chromium.base.ObserverList;
+ import org.chromium.base.lifetime.Destroyable;
+ import org.chromium.base.version_info.VersionInfo;
+ import org.chromium.build.NullUtil;
+@@ -78,6 +79,9 @@
+ 
+     private final TabModelSelector mTabModelSelector;
+     private final Callback<@Nullable Tab> mCurrentTabObserver;
++    private final ObserverList<OnDismissListener> mDismissListeners = new ObserverList<>();
++    private boolean mDestroyed;
++    private boolean mDismissNotified;
+ 
+     /**
+      * Constructs an ExtensionActionPopup.
+@@ -158,6 +162,7 @@
+                         mThinWebView.getView(),
+                         new ViewRectProvider(anchorView));
+ 
++        mPopupWindow.addOnDismissListener(this::notifyDismissed);
+         mPopupWindow.setHorizontalOverlapAnchor(true);
+ 
+         // The popup should close on focus loss only if it's not being inspected. Otherwise,
+@@ -194,6 +199,9 @@
+     /** Cleans up resources used by this popup. */
+     @Override
+     public void destroy() {
++        if (mDestroyed) return;
++        mDestroyed = true;
++        mContents.setDelegate(null);
+         mTabModelSelector.getCurrentTabSupplier().removeObserver(mCurrentTabObserver);
+         mPopupWindow.dismiss();
+         mThinWebView.destroy();
+@@ -208,25 +216,33 @@
+ 
+     /** Triggers the loading of the initial page for the extension popup. */
+     public void loadInitialPage() {
++        if (mDestroyed) return;
+         mContents.loadInitialPage();
+     }
+ 
+     /** Adds a listener that will be notified when the popup window is dismissed. */
+     public void addOnDismissListener(OnDismissListener listener) {
+-        mPopupWindow.addOnDismissListener(listener);
++        mDismissListeners.addObserver(listener);
++    }
++
++    private void notifyDismissed() {
++        if (mDismissNotified) return;
++        mDismissNotified = true;
++        for (OnDismissListener listener : mDismissListeners) listener.onDismiss();
++        mDismissListeners.clear();
+     }
+ 
+     private class ContentsDelegate implements ExtensionActionPopupContents.Delegate {
+         @Override
+         public void resizeDueToAutoResize(int width, int height) {
+-            if (Build.VERSION.SDK_INT >= 34) {
+-                // Disable transition animations for the popup window. On Android, {@link
+-                // onLoaded()} is called first, and then {@link resizeDueToAutoResize()} is called.
+-                // A transition would result in a sliding animation from the original bounds to the
+-                // updated bounds.
++            if (mDestroyed) return;
++            if (Build.VERSION.SDK_INT >= 34
++                    && mContentView.getRootView().getLayoutParams()
++                            instanceof WindowManager.LayoutParams popupLayoutParams) {
++                // The content can resize before the popup owns a window. Disable move
++                // animations only for an actual window, while retaining early desired sizing.
+                 // TODO(crbug.com/478100096): Figure out what to do for lower API levels.
+-                ((WindowManager.LayoutParams) mContentView.getRootView().getLayoutParams())
+-                        .setCanPlayMoveAnimation(false);
++                popupLayoutParams.setCanPlayMoveAnimation(false);
+             }
+ 
+             int targetWidthPx = ViewUtils.dpToPx(mActivity, width);
+@@ -248,18 +264,24 @@
+ 
+         @Override
+         public boolean handleKeyboardEvent(@Nullable KeyEvent event) {
++            if (mDestroyed) return false;
+             return ExtensionActionPopup.handleKeyboardEvent(mActivity, event);
+         }
+ 
+         @Override
+         public void onLoaded() {
++            if (mDestroyed) return;
+             mPopupWindow.show();
+             mContentView.requestFocus();
+         }
+ 
+         @Override
+         public void onClose() {
+-            mPopupWindow.dismiss();
++            if (mDestroyed) return;
++            boolean wasShowing = mPopupWindow.isShowing();
++            destroy();
++            // A hidden PopupWindow emits no dismissal callback. Retire its owner explicitly.
++            if (!wasShowing) notifyDismissed();
+         }
+     }
+ 

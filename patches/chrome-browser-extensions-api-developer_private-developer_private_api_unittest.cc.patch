@@ -1,0 +1,787 @@
+diff --git a/chrome/browser/extensions/api/developer_private/developer_private_api_unittest.cc b/chrome/browser/extensions/api/developer_private/developer_private_api_unittest.cc
+--- a/chrome/browser/extensions/api/developer_private/developer_private_api_unittest.cc
++++ b/chrome/browser/extensions/api/developer_private/developer_private_api_unittest.cc
+@@ -36,6 +36,10 @@
+ #include "chrome/browser/extensions/error_console/error_console.h"
+ #include "chrome/browser/extensions/extension_action_test_util.h"
+ #include "chrome/browser/extensions/extension_install_prompt_show_params.h"
++#if BUILDFLAG(IS_ANDROID)
++#include "chrome/browser/extensions/extension_install_prompt.h"
++#include "content/public/test/navigation_simulator.h"
++#endif
+ #include "chrome/browser/extensions/extension_management.h"
+ #include "chrome/browser/extensions/extension_management_test_util.h"
+ #include "chrome/browser/extensions/extension_service.h"
+@@ -102,7 +106,9 @@
+ #include "ui/shell_dialogs/selected_file_info.h"
+ 
+ #if BUILDFLAG(IS_ANDROID)
++#include "base/task/single_thread_task_runner.h"
+ #include "base/test/android/content_uri_test_utils.h"
++#include "chrome/browser/ui/android/extensions/extension_developer_private_bridge.h"
+ #include "chrome/browser/ui/android/extensions/extension_util_bridge.h"
+ #endif
+ 
+@@ -335,11 +341,12 @@
+   // `extension_id_`.
+   void WaitForEvent();
+ 
+-  // Resets the `event_info_` so the observer can wait for another matching
+-  // event.
++  // Resets the event info and matching-event count for the next request.
+   void Reset();
+ 
+   bool WasEventDispatched() { return event_info_.has_value(); }
++
++  int matching_event_count() const { return matching_event_count_; }
+ 
+   api::developer_private::ExtensionInfo event_info() {
+     return event_info_.has_value() ? event_info_->Clone()
+@@ -355,6 +362,7 @@
+   // The event info from the prefs changed event. Null if a matching event has
+   // not yet been dispatched.
+   std::optional<api::developer_private::ExtensionInfo> event_info_;
++  int matching_event_count_ = 0;
+   std::unique_ptr<base::RunLoop> run_loop_;
+ 
+   raw_ptr<EventRouter> event_router_;
+@@ -385,6 +393,7 @@
+ 
+ void ItemStatePrefsChangedObserver::Reset() {
+   event_info_ = std::nullopt;
++  matching_event_count_ = 0;
+ }
+ 
+ void ItemStatePrefsChangedObserver::OnWillDispatchEvent(const Event& event) {
+@@ -396,6 +405,7 @@
+       &info);
+ 
+   if (does_event_match) {
++    ++matching_event_count_;
+     event_info_ = std::move(info);
+     if (run_loop_) {
+       run_loop_->Quit();
+@@ -771,6 +781,69 @@
+   render_process_host_.reset();
+   ExtensionServiceTestWithInstall::TearDown();
+ }
++
++#if BUILDFLAG(IS_ANDROID)
++TEST_F(DeveloperPrivateApiUnitTest,
++       AndroidUserScriptsAccessPublishesFreshPrefsEvent) {
++  auto* extension_system =
++      static_cast<TestExtensionSystem*>(ExtensionSystem::Get(profile()));
++  extension_system->CreateUserScriptManager();
++  UserScriptManager* user_script_manager =
++      extension_system->user_script_manager();
++  ASSERT_TRUE(user_script_manager);
++
++  // This existing fixture has userScripts permission, but no background worker,
++  // content scripts or registered user scripts. Incidental worker events must
++  // not supply the missing settings update.
++  const Extension* extension = LoadUnpackedExtension();
++  ASSERT_TRUE(extension);
++  const ExtensionId id = extension->id();
++  base::RunLoop().RunUntilIdle();
++  ASSERT_FALSE(user_script_manager->AreUserScriptsAllowed(*extension));
++
++  auto update_access = [&](bool enabled) {
++    base::ListValue args;
++    args.Append(base::DictValue()
++                    .Set("extensionId", id)
++                    .Set("userScriptsAccess", enabled));
++    auto function = base::MakeRefCounted<
++        api::DeveloperPrivateUpdateExtensionConfigurationFunction>();
++    function->set_source_context_type(mojom::ContextType::kWebUi);
++    return RunFunction(function, args);
++  };
++
++  // No listener means the optional developer-private event router is absent.
++  ASSERT_FALSE(DeveloperPrivateAPI::Get(profile())
++                   ->developer_private_event_router());
++  ASSERT_TRUE(update_access(false));
++  EXPECT_FALSE(user_script_manager->AreUserScriptsAllowed(*extension));
++
++  EventRouter* event_router = EventRouter::Get(profile());
++  event_router->AddEventListener(
++      api::developer_private::OnItemStateChanged::kEventName,
++      render_process_host(), crx_file::id_util::GenerateId("listener"));
++  base::RunLoop().RunUntilIdle();
++  ItemStatePrefsChangedObserver observer(event_router, id);
++
++  // Repeated explicit settings updates also reconcile stale open pages; they
++  // must report current state, not the preference's pre-update allowed map.
++  for (bool enabled : {true, true, false, false}) {
++    SCOPED_TRACE(enabled);
++    observer.Reset();
++    ASSERT_EQ(0, observer.matching_event_count());
++    ASSERT_TRUE(update_access(enabled));
++    base::RunLoop().RunUntilIdle();
++    // The observer keeps the last payload: count every matching event so a
++    // stale-then-fresh pair or duplicate cannot hide behind that last value.
++    ASSERT_EQ(1, observer.matching_event_count());
++    auto info = observer.event_info();
++    EXPECT_EQ(id, info.id);
++    EXPECT_TRUE(info.user_scripts_access.is_enabled);
++    EXPECT_EQ(enabled, info.user_scripts_access.is_active);
++    EXPECT_EQ(enabled, user_script_manager->AreUserScriptsAllowed(*extension));
++  }
++}
++#endif
+ 
+ // Test developerPrivate.updateExtensionConfiguration.
+ TEST_F(DeveloperPrivateApiUnitTest,
+@@ -1196,6 +1269,243 @@
+     ASSERT_FALSE(result);
+   }
+ }
++
++#if BUILDFLAG(IS_ANDROID)
++TEST_F(DeveloperPrivateApiUnitTest,
++       RecoveredUnpackedImportDroppedCompletionReportsInterruption) {
++  int completions = 0;
++  std::string error;
++  auto completion = ExtensionDeveloperPrivateBridge::MakeUnpackedImportCompletion(
++      base::BindLambdaForTesting([&](std::string result) {
++        ++completions;
++        error = std::move(result);
++      }));
++  // UnpackedInstaller resets this callback when its browser context shuts down.
++  completion.Reset();
++  EXPECT_EQ(0, completions);
++  task_environment()->RunUntilIdle();
++  EXPECT_EQ(1, completions);
++  EXPECT_EQ("reaper.import.interrupted", error);
++  task_environment()->RunUntilIdle();
++  EXPECT_EQ(1, completions);
++}
++
++TEST_F(DeveloperPrivateApiUnitTest,
++       RecoveredUnpackedImportSuccessSuppressesAbandonment) {
++  auto extension = ExtensionBuilder("Recovered import completion")
++                       .SetManifestVersion(3)
++                       .Build();
++  ASSERT_TRUE(extension);
++  int completions = 0;
++  std::string error = "not completed";
++  auto completion = ExtensionDeveloperPrivateBridge::MakeUnpackedImportCompletion(
++      base::BindLambdaForTesting([&](std::string result) {
++        ++completions;
++        error = std::move(result);
++      }));
++  std::move(completion).Run(extension.get(), base::FilePath(), std::u16string());
++  EXPECT_EQ(1, completions);
++  EXPECT_TRUE(error.empty());
++  task_environment()->RunUntilIdle();
++  EXPECT_EQ(1, completions);
++  EXPECT_TRUE(error.empty());
++}
++
++TEST_F(DeveloperPrivateApiUnitTest,
++       RecoveredUnpackedImportFailureSuppressesAbandonment) {
++  int completions = 0;
++  std::string error;
++  auto completion = ExtensionDeveloperPrivateBridge::MakeUnpackedImportCompletion(
++      base::BindLambdaForTesting([&](std::string result) {
++        ++completions;
++        error = std::move(result);
++      }));
++  std::move(completion).Run(nullptr, base::FilePath(), u"Rejected local fixture");
++  EXPECT_EQ(1, completions);
++  EXPECT_EQ("Rejected local fixture", error);
++  task_environment()->RunUntilIdle();
++  EXPECT_EQ(1, completions);
++  EXPECT_EQ("Rejected local fixture", error);
++}
++
++TEST_F(DeveloperPrivateApiUnitTest, LoadUnpackedAndroidLocalAndSafRetryPaths) {
++  class InstallLifecycleObserver : public ExtensionRegistryObserver {
++   public:
++    explicit InstallLifecycleObserver(ExtensionRegistry* registry) {
++      observation_.Observe(registry);
++    }
++    void OnExtensionInstalled(content::BrowserContext*, const Extension*,
++                              bool) override {
++      ++installed_count_;
++    }
++    void OnExtensionLoaded(content::BrowserContext*, const Extension*) override {
++      ++loaded_count_;
++    }
++    void OnExtensionUnloaded(content::BrowserContext*, const Extension*,
++                             UnloadedExtensionReason) override {
++      ++unloaded_count_;
++    }
++    int installed_count() const { return installed_count_; }
++    int loaded_count() const { return loaded_count_; }
++    int unloaded_count() const { return unloaded_count_; }
++
++   private:
++    int installed_count_ = 0;
++    int loaded_count_ = 0;
++    int unloaded_count_ = 0;
++    base::ScopedObservation<ExtensionRegistry, ExtensionRegistryObserver>
++        observation_{this};
++  };
++
++  // Drive the actual listener boundary after the original sender is destroyed.
++  // The subclass changes only picker timing, not StartFileLoad or its result.
++  class DelayedSelection : public api::DeveloperPrivateLoadUnpackedFunction {
++   public:
++    DelayedSelection(base::OnceClosure close_source, base::FilePath path)
++        : close_source_(std::move(close_source)), path_(std::move(path)) {}
++
++   private:
++    ~DelayedSelection() override = default;
++    ResponseAction Run() override {
++      AddRef();  // The selection is pending; Finish() releases this reference.
++      base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
++          FROM_HERE, base::BindOnce(&DelayedSelection::CompleteSelection, this));
++      return RespondLater();
++    }
++    void CompleteSelection() {
++      std::move(close_source_).Run();
++      FileSelected(ui::SelectedFileInfo(path_), 0);
++    }
++    base::OnceClosure close_source_;
++    base::FilePath path_;
++  };
++
++  std::unique_ptr<content::WebContents> web_contents(
++      content::WebContentsTester::CreateTestWebContents(profile(), nullptr));
++  DeveloperPrivateAPI* api = DeveloperPrivateAPI::Get(profile());
++
++  for (int path_form = 0; path_form < 2; ++path_form) {
++    SCOPED_TRACE(path_form);
++    TestExtensionDir dir;
++    dir.WriteManifest(
++        R"({
++             "name": "Android path forms",
++             "version": 1,
++             "manifest_version": 3
++           })");
++    const base::FilePath native_path =
++        base::MakeAbsoluteFilePath(dir.UnpackedPath());
++    ASSERT_FALSE(native_path.empty());
++    ASSERT_TRUE(native_path.IsAbsolute());
++    ASSERT_FALSE(native_path.IsContentUri());
++
++    base::FilePath selected_path = native_path;
++    base::FilePath registered_path = native_path;
++    if (path_form == 1) {
++      auto tree_uri =
++          base::test::android::GetInMemoryContentTreeUriFromCacheDirDirectory(
++              native_path);
++      ASSERT_TRUE(tree_uri);
++      selected_path = *tree_uri;
++      ASSERT_TRUE(selected_path.IsContentUri());
++      auto virtual_path = base::ResolveToVirtualDocumentPath(selected_path);
++      ASSERT_TRUE(virtual_path);
++      registered_path = *virtual_path;
++    }
++
++    const ExtensionIdSet current_ids =
++        registry()->enabled_extensions().GetIDs();
++    auto function =
++        base::MakeRefCounted<api::DeveloperPrivateLoadUnpackedFunction>();
++    function->set_accept_dialog_for_testing(true);
++    function->set_selected_file_for_testing(ui::SelectedFileInfo(selected_path));
++    function->SetRenderFrameHost(web_contents->GetPrimaryMainFrame());
++    std::optional<base::Value> result =
++        api_test_utils::RunFunctionAndReturnSingleResult(
++            function.get(),
++            "[{\"failQuietly\": true, \"populateError\": true}]", profile());
++    ASSERT_TRUE(result);
++    auto error = api::developer_private::LoadError::FromValue(*result);
++    ASSERT_TRUE(error);
++    EXPECT_NE(std::string::npos, error->error.find("version"));
++    const std::string retry_guid = error->retry_guid;
++    ASSERT_FALSE(retry_guid.empty());
++    EXPECT_EQ(registered_path,
++              api->GetUnpackedPath(web_contents.get(), retry_guid));
++    // SAF picker metadata keeps the original URI; retries keep the virtual path.
++    EXPECT_EQ(selected_path, api->last_unpacked_directory());
++    EXPECT_EQ(current_ids, registry()->enabled_extensions().GetIDs());
++
++    const std::string retry_args = base::StringPrintf(
++        R"([{"failQuietly":true,"populateError":true,"retryGuid":"%s"}])",
++        retry_guid.c_str());
++    function =
++        base::MakeRefCounted<api::DeveloperPrivateLoadUnpackedFunction>();
++    // Retrying must use the registered path without opening another chooser.
++    function->set_accept_dialog_for_testing(false);
++    function->SetRenderFrameHost(web_contents->GetPrimaryMainFrame());
++    result = api_test_utils::RunFunctionAndReturnSingleResult(
++        function.get(), retry_args, profile());
++    ASSERT_TRUE(result);
++    error = api::developer_private::LoadError::FromValue(*result);
++    ASSERT_TRUE(error);
++    EXPECT_NE(std::string::npos, error->error.find("version"));
++    EXPECT_EQ(retry_guid, error->retry_guid);
++    EXPECT_EQ(registered_path,
++              api->GetUnpackedPath(web_contents.get(), retry_guid));
++    EXPECT_EQ(selected_path, api->last_unpacked_directory());
++
++    dir.WriteManifest(
++        R"({
++             "name": "Android path forms",
++             "version": "1.0",
++             "manifest_version": 3
++           })");
++    function =
++        base::MakeRefCounted<api::DeveloperPrivateLoadUnpackedFunction>();
++    function->set_accept_dialog_for_testing(false);
++    function->SetRenderFrameHost(web_contents->GetPrimaryMainFrame());
++    result = api_test_utils::RunFunctionAndReturnSingleResult(
++        function.get(), retry_args, profile());
++    EXPECT_FALSE(result);
++    EXPECT_TRUE(function->GetError().empty());
++    ExtensionIdSet added_ids = base::STLSetDifference<ExtensionIdSet>(
++        registry()->enabled_extensions().GetIDs(), current_ids);
++    ASSERT_EQ(1u, added_ids.size());
++    EXPECT_EQ(registered_path,
++              registry()->enabled_extensions().GetByID(*added_ids.begin())->path());
++    EXPECT_EQ(registered_path,
++              api->GetUnpackedPath(web_contents.get(), retry_guid));
++    EXPECT_EQ(selected_path, api->last_unpacked_directory());
++
++    // Isolate this late callback from the successful load/retry above. The
++    // selected extension is already installed, so IDs alone cannot detect an
++    // unintended same-ID reinstall or reload.
++    task_environment()->RunUntilIdle();
++    InstallLifecycleObserver late_callback_lifecycle(registry());
++    auto closing_contents =
++        content::WebContentsTester::CreateTestWebContents(profile(), nullptr);
++    const ExtensionIdSet installed_before =
++        registry()->enabled_extensions().GetIDs();
++    auto late_selection = base::MakeRefCounted<DelayedSelection>(
++        base::BindLambdaForTesting([&] { closing_contents.reset(); }),
++        selected_path);
++    late_selection->SetRenderFrameHost(closing_contents->GetPrimaryMainFrame());
++    EXPECT_EQ("Could not find a valid web contents.",
++              api_test_utils::RunFunctionAndReturnError(
++                  late_selection.get(), "[]", profile()));
++    EXPECT_FALSE(closing_contents);
++    task_environment()->RunUntilIdle();
++    EXPECT_EQ(0, late_callback_lifecycle.installed_count());
++    EXPECT_EQ(0, late_callback_lifecycle.loaded_count());
++    EXPECT_EQ(0, late_callback_lifecycle.unloaded_count());
++    EXPECT_EQ(installed_before, registry()->enabled_extensions().GetIDs());
++    EXPECT_EQ(selected_path, api->last_unpacked_directory());
++    EXPECT_EQ(registered_path,
++              api->GetUnpackedPath(web_contents.get(), retry_guid));
++  }
++}
++#endif  // BUILDFLAG(IS_ANDROID)
+ 
+ // Test that the retryGuid supplied by loadUnpacked works correctly.
+ TEST_F(DeveloperPrivateApiUnitTest, LoadUnpackedRetryId) {
+@@ -1464,6 +1774,41 @@
+     EXPECT_EQ(reloaded_extension->path(), path);
+     EXPECT_TRUE(registry()->enabled_extensions().Contains(id));
+   }
++#if BUILDFLAG(IS_ANDROID)
++  // Close the source only after real reload failure has queued manifest parsing.
++  // The reply must finish with an ordinary error, not register a retry on a
++  // missing WebContents or substitute another page.
++  class ReloadWithClosingSource : public api::DeveloperPrivateReloadFunction {
++   public:
++    explicit ReloadWithClosingSource(base::OnceClosure close_source)
++        : close_source_(std::move(close_source)) {}
++    void OnLoadFailure(content::BrowserContext* context,
++                       const base::FilePath& path,
++                       const std::u16string& error) override {
++      api::DeveloperPrivateReloadFunction::OnLoadFailure(context, path, error);
++      if (close_source_)
++        std::move(close_source_).Run();
++    }
++
++   private:
++    ~ReloadWithClosingSource() override = default;
++    base::OnceClosure close_source_;
++  };
++  dir.WriteManifest(kBadManifest);
++  const base::FilePath last_directory =
++      DeveloperPrivateAPI::Get(profile())->last_unpacked_directory();
++  auto closing_reload = base::MakeRefCounted<ReloadWithClosingSource>(
++      base::BindLambdaForTesting([&] { web_contents.reset(); }));
++  closing_reload->SetRenderFrameHost(web_contents->GetPrimaryMainFrame());
++  EXPECT_EQ("Could not find a valid web contents.",
++            api_test_utils::RunFunctionAndReturnError(
++                closing_reload.get(), reload_args, profile()));
++  EXPECT_FALSE(web_contents);
++  task_environment()->RunUntilIdle();
++  EXPECT_TRUE(registry()->disabled_extensions().Contains(id));
++  EXPECT_EQ(last_directory,
++            DeveloperPrivateAPI::Get(profile())->last_unpacked_directory());
++#endif
+ }
+ 
+ // On Android, file information cannot be directly accessed from the **drag
+@@ -1909,6 +2254,367 @@
+                                    function.get(), "[]", profile()));
+ #endif  // BUILDFLAG(IS_ANDROID)
+ }
++
++#if BUILDFLAG(IS_ANDROID)
++TEST_F(DeveloperPrivateApiUnitTest, InstallFromFilePickerCancellation) {
++  ExtensionFunction::ScopedUserGestureForTests gesture;
++  profile()->GetPrefs()->SetBoolean(prefs::kExtensionsUIDeveloperMode, true);
++  auto contents =
++      content::WebContentsTester::CreateTestWebContents(profile(), nullptr);
++  auto function =
++      base::MakeRefCounted<api::DeveloperPrivateInstallFromFileFunction>();
++  function->SetRenderFrameHost(contents->GetPrimaryMainFrame());
++  function->set_accept_dialog_for_testing(false);
++  ASSERT_TRUE(api_test_utils::RunFunction(function.get(), "[]", profile()));
++  ASSERT_EQ(1u, function->GetResultListForTest()->size());
++  EXPECT_FALSE((*function->GetResultListForTest())[0].GetBool());
++}
++
++TEST_F(DeveloperPrivateApiUnitTest, InstallFromFileRequiresDeveloperMode) {
++  ExtensionFunction::ScopedUserGestureForTests gesture;
++  profile()->GetPrefs()->SetBoolean(prefs::kExtensionsUIDeveloperMode, false);
++  auto contents =
++      content::WebContentsTester::CreateTestWebContents(profile(), nullptr);
++  auto function =
++      base::MakeRefCounted<api::DeveloperPrivateInstallFromFileFunction>();
++  function->SetRenderFrameHost(contents->GetPrimaryMainFrame());
++  function->set_accept_dialog_for_testing(false);
++  EXPECT_THAT(api_test_utils::RunFunctionAndReturnError(function.get(), "[]",
++                                                        profile()),
++              testing::HasSubstr("developer mode"));
++}
++
++TEST_F(DeveloperPrivateApiUnitTest,
++       InstallFromFileHonorsVerifiedPackagePolicy) {
++  ExtensionFunction::ScopedUserGestureForTests gesture;
++  profile()->GetPrefs()->SetBoolean(prefs::kExtensionsUIDeveloperMode, true);
++  TestExtensionDir test_dir;
++  test_dir.WriteManifest(
++      R"({"name":"Blocked local package","version":"1.0","manifest_version":3})");
++  const base::FilePath crx = test_dir.Pack();
++  auto disable_ui = ExtensionInstallUI::disable_ui_for_tests(true);
++  ScopedTestDialogAutoConfirm confirm(ScopedTestDialogAutoConfirm::ACCEPT);
++  {
++    ExtensionManagementPrefUpdater<sync_preferences::TestingPrefServiceSyncable>
++        updater(testing_pref_service());
++    updater.SetBlocklistedByDefault(true);
++  }
++  auto contents =
++      content::WebContentsTester::CreateTestWebContents(profile(), nullptr);
++  auto function =
++      base::MakeRefCounted<api::DeveloperPrivateInstallFromFileFunction>();
++  function->SetRenderFrameHost(contents->GetPrimaryMainFrame());
++  function->set_accept_dialog_for_testing(true);
++  function->set_selected_file_for_testing(ui::SelectedFileInfo(crx));
++  EXPECT_FALSE(
++      api_test_utils::RunFunctionAndReturnError(function.get(), "[]", profile())
++          .empty());
++  for (const auto& extension : registry()->GenerateInstalledExtensionsSet()) {
++    EXPECT_NE("Blocked local package", extension->name());
++  }
++  EXPECT_TRUE(base::PathExists(crx));
++}
++
++TEST_F(DeveloperPrivateApiUnitTest,
++       InstallFromFileAllowsPolicyAllowlistedPackage) {
++  ExtensionFunction::ScopedUserGestureForTests gesture;
++  profile()->GetPrefs()->SetBoolean(prefs::kExtensionsUIDeveloperMode, true);
++  TestExtensionDir test_dir;
++  test_dir.WriteManifest(
++      R"({"name":"Allowlisted local package","version":"1.0","manifest_version":3})");
++  const base::FilePath crx = test_dir.Pack();
++  auto disable_ui = ExtensionInstallUI::disable_ui_for_tests(true);
++  ScopedTestDialogAutoConfirm confirm(ScopedTestDialogAutoConfirm::ACCEPT);
++  // Discover the genuine signed fixture's ID through the existing test
++  // installer, then remove only that fixture before exercising the picker.
++  const Extension* initial = InstallCRX(crx, INSTALL_NEW);
++  ASSERT_TRUE(initial);
++  const ExtensionId id = initial->id();
++  UninstallExtension(id);
++  {
++    ExtensionManagementPrefUpdater<sync_preferences::TestingPrefServiceSyncable>
++        updater(testing_pref_service());
++    updater.SetBlocklistedByDefault(true);
++    updater.SetIndividualExtensionInstallationAllowed(id, true);
++  }
++  auto contents =
++      content::WebContentsTester::CreateTestWebContents(profile(), nullptr);
++  auto function =
++      base::MakeRefCounted<api::DeveloperPrivateInstallFromFileFunction>();
++  function->SetRenderFrameHost(contents->GetPrimaryMainFrame());
++  function->set_accept_dialog_for_testing(true);
++  function->set_selected_file_for_testing(ui::SelectedFileInfo(crx));
++  ASSERT_TRUE(api_test_utils::RunFunction(function.get(), "[]", profile()));
++  ASSERT_EQ(1u, function->GetResultListForTest()->size());
++  EXPECT_TRUE((*function->GetResultListForTest())[0].GetBool());
++  EXPECT_TRUE(registry()->GetInstalledExtension(id));
++  EXPECT_TRUE(base::PathExists(crx));
++}
++
++TEST_F(DeveloperPrivateApiUnitTest, InstallFromFileRejectsWrongSelectionType) {
++  ExtensionFunction::ScopedUserGestureForTests gesture;
++  profile()->GetPrefs()->SetBoolean(prefs::kExtensionsUIDeveloperMode, true);
++  auto contents =
++      content::WebContentsTester::CreateTestWebContents(profile(), nullptr);
++  auto function =
++      base::MakeRefCounted<api::DeveloperPrivateInstallFromFileFunction>();
++  function->SetRenderFrameHost(contents->GetPrimaryMainFrame());
++  function->set_accept_dialog_for_testing(true);
++  function->set_selected_file_for_testing(
++      ui::SelectedFileInfo(base::FilePath(FILE_PATH_LITERAL("manifest.json"))));
++  EXPECT_THAT(api_test_utils::RunFunctionAndReturnError(function.get(), "[]",
++                                                        profile()),
++              testing::HasSubstr(".crx"));
++}
++
++TEST_F(DeveloperPrivateApiUnitTest, InstallFromFileReportsNativeReadFailure) {
++  ExtensionFunction::ScopedUserGestureForTests gesture;
++  profile()->GetPrefs()->SetBoolean(prefs::kExtensionsUIDeveloperMode, true);
++  auto disable_ui = ExtensionInstallUI::disable_ui_for_tests(true);
++  base::ScopedTempDir temp;
++  ASSERT_TRUE(temp.CreateUniqueTempDir());
++  auto contents =
++      content::WebContentsTester::CreateTestWebContents(profile(), nullptr);
++  auto function =
++      base::MakeRefCounted<api::DeveloperPrivateInstallFromFileFunction>();
++  function->SetRenderFrameHost(contents->GetPrimaryMainFrame());
++  function->set_accept_dialog_for_testing(true);
++  function->set_selected_file_for_testing(
++      ui::SelectedFileInfo(temp.GetPath().AppendASCII("missing.crx")));
++  EXPECT_FALSE(
++      api_test_utils::RunFunctionAndReturnError(function.get(), "[]", profile())
++          .empty());
++}
++
++TEST_F(DeveloperPrivateApiUnitTest, InstallFromFileClosedSenderRetiresPending) {
++  ExtensionFunction::ScopedUserGestureForTests gesture;
++  profile()->GetPrefs()->SetBoolean(prefs::kExtensionsUIDeveloperMode, true);
++  TestExtensionDir test_dir;
++  test_dir.WriteManifest(
++      R"({"name":"Closed sender test","version":"1.0","manifest_version":3})");
++  const base::FilePath crx = test_dir.Pack();
++  auto disable_ui = ExtensionInstallUI::disable_ui_for_tests(true);
++  ScopedTestDialogAutoConfirm confirm(ScopedTestDialogAutoConfirm::CANCEL);
++  auto contents =
++      content::WebContentsTester::CreateTestWebContents(profile(), nullptr);
++  auto function =
++      base::MakeRefCounted<api::DeveloperPrivateInstallFromFileFunction>();
++  function->SetRenderFrameHost(contents->GetPrimaryMainFrame());
++  function->set_accept_dialog_for_testing(true);
++  function->set_selected_file_for_testing(ui::SelectedFileInfo(crx));
++  // Queue before starting native unpack work, so closing the initiating tab
++  // precedes the installer's asynchronous reply on this UI sequence.
++  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
++      FROM_HERE, base::BindLambdaForTesting([&] {
++        contents.reset();
++        EXPECT_TRUE(function->GetResultListForTest());
++      }));
++  ASSERT_TRUE(api_test_utils::RunFunction(function.get(), "[]", profile()));
++  EXPECT_FALSE(contents);
++  ASSERT_EQ(1u, function->GetResultListForTest()->size());
++  EXPECT_FALSE((*function->GetResultListForTest())[0].GetBool());
++  task_environment()->RunUntilIdle();
++  for (const auto& extension : registry()->GenerateInstalledExtensionsSet()) {
++    EXPECT_NE("Closed sender test", extension->name());
++  }
++  EXPECT_TRUE(base::PathExists(crx));
++
++  // A surviving tab can navigate before unpack finishes. The API retires its
++  // callback, and the installer must not show a delayed prompt on the new page.
++  contents = content::WebContentsTester::CreateTestWebContents(profile(), nullptr);
++  auto navigating =
++      base::MakeRefCounted<api::DeveloperPrivateInstallFromFileFunction>();
++  navigating->SetRenderFrameHost(contents->GetPrimaryMainFrame());
++  navigating->set_accept_dialog_for_testing(true);
++  navigating->set_selected_file_for_testing(ui::SelectedFileInfo(crx));
++  ExtensionInstallPrompt::g_last_prompt_type_for_tests =
++      InstallPromptData::UNSET_PROMPT_TYPE;
++  std::unique_ptr<content::NavigationSimulator> pending_navigation;
++  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
++      FROM_HERE, base::BindLambdaForTesting([&] {
++        pending_navigation = content::NavigationSimulator::CreateRendererInitiated(
++            GURL("https://example.test/replacement"), contents.get());
++        pending_navigation->Start();
++        EXPECT_TRUE(navigating->GetResultListForTest());
++      }));
++  ASSERT_TRUE(api_test_utils::RunFunction(navigating.get(), "[]", profile()));
++  ASSERT_EQ(1u, navigating->GetResultListForTest()->size());
++  EXPECT_FALSE((*navigating->GetResultListForTest())[0].GetBool());
++  // A late picker result must not revive the retired request.
++  navigating->FileSelected(ui::SelectedFileInfo(crx), 0);
++  ASSERT_TRUE(pending_navigation);
++  pending_navigation->Commit();
++  task_environment()->RunUntilIdle();
++  EXPECT_EQ(InstallPromptData::UNSET_PROMPT_TYPE,
++            ExtensionInstallPrompt::g_last_prompt_type_for_tests);
++  EXPECT_FALSE((*navigating->GetResultListForTest())[0].GetBool());
++  for (const auto& extension : registry()->GenerateInstalledExtensionsSet()) {
++    EXPECT_NE("Closed sender test", extension->name());
++  }
++
++  // Retiring that request must not poison an explicit fresh attempt.
++  ScopedTestDialogAutoConfirm accept(ScopedTestDialogAutoConfirm::ACCEPT);
++  auto retry = base::MakeRefCounted<api::DeveloperPrivateInstallFromFileFunction>();
++  retry->SetRenderFrameHost(contents->GetPrimaryMainFrame());
++  retry->set_accept_dialog_for_testing(true);
++  retry->set_selected_file_for_testing(ui::SelectedFileInfo(crx));
++  ASSERT_TRUE(api_test_utils::RunFunction(retry.get(), "[]", profile()));
++  ASSERT_EQ(1u, retry->GetResultListForTest()->size());
++  EXPECT_TRUE((*retry->GetResultListForTest())[0].GetBool());
++  EXPECT_TRUE(base::PathExists(crx));
++}
++
++TEST_F(DeveloperPrivateApiUnitTest,
++       InstallFromFileRendererLossNoticeIsTabScopedAndConsumedOnce) {
++  ExtensionFunction::ScopedUserGestureForTests gesture;
++  profile()->GetPrefs()->SetBoolean(prefs::kExtensionsUIDeveloperMode, true);
++  auto contents =
++      content::WebContentsTester::CreateTestWebContents(profile(), nullptr);
++  auto other_contents =
++      content::WebContentsTester::CreateTestWebContents(profile(), nullptr);
++  auto read_notice = [&](content::WebContents* sender, bool web_ui = true) {
++    auto query = base::MakeRefCounted<
++        api::DeveloperPrivateGetProfileConfigurationFunction>();
++    query->SetRenderFrameHost(sender->GetPrimaryMainFrame());
++    query->set_source_context_type(web_ui ? mojom::ContextType::kWebUi
++                                         : mojom::ContextType::kWebPage);
++    EXPECT_TRUE(api_test_utils::RunFunction(query.get(), "[]", profile()));
++    const auto* result = query->GetResultListForTest();
++    EXPECT_TRUE(result);
++    if (!result || result->size() != 1u) {
++      return false;
++    }
++    return (*result)[0]
++        .GetDict()
++        .FindBool("interruptedLocalImport")
++        .value_or(false);
++  };
++
++  auto cancelled =
++      base::MakeRefCounted<api::DeveloperPrivateInstallFromFileFunction>();
++  cancelled->SetRenderFrameHost(contents->GetPrimaryMainFrame());
++  cancelled->set_accept_dialog_for_testing(false);
++  ASSERT_TRUE(api_test_utils::RunFunction(cancelled.get(), "[]", profile()));
++  // An observer callback after an ordinary completed cancellation is inert.
++  static_cast<content::WebContentsObserver*>(cancelled.get())
++      ->PrimaryMainFrameRenderProcessGone(
++          base::TERMINATION_STATUS_PROCESS_WAS_KILLED);
++  EXPECT_FALSE(read_notice(contents.get()));
++
++  TestExtensionDir test_dir;
++  test_dir.WriteManifest(
++      R"({"name":"Interrupted local import","version":"1.0","manifest_version":3})");
++  const base::FilePath crx = test_dir.Pack();
++  auto disable_ui = ExtensionInstallUI::disable_ui_for_tests(true);
++  ScopedTestDialogAutoConfirm confirm(ScopedTestDialogAutoConfirm::CANCEL);
++  auto pending =
++      base::MakeRefCounted<api::DeveloperPrivateInstallFromFileFunction>();
++  pending->SetRenderFrameHost(contents->GetPrimaryMainFrame());
++  pending->set_accept_dialog_for_testing(true);
++  pending->set_selected_file_for_testing(ui::SelectedFileInfo(crx));
++  // Exercise the production observer callback before the native async reply.
++  // Actual Android renderer replacement remains a separate device regression.
++  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
++      FROM_HERE, base::BindLambdaForTesting([&] {
++        static_cast<content::WebContentsObserver*>(pending.get())
++            ->PrimaryMainFrameRenderProcessGone(
++                base::TERMINATION_STATUS_PROCESS_WAS_KILLED);
++      }));
++  ASSERT_TRUE(api_test_utils::RunFunction(pending.get(), "[]", profile()));
++  ASSERT_EQ(1u, pending->GetResultListForTest()->size());
++  EXPECT_FALSE((*pending->GetResultListForTest())[0].GetBool());
++  pending->FileSelected(ui::SelectedFileInfo(crx), 0);
++  task_environment()->RunUntilIdle();
++  EXPECT_FALSE(read_notice(contents.get(), false));
++  EXPECT_FALSE(read_notice(other_contents.get()));
++  EXPECT_TRUE(read_notice(contents.get()));
++  EXPECT_FALSE(read_notice(contents.get()));
++  static_cast<content::WebContentsObserver*>(pending.get())
++      ->PrimaryMainFrameRenderProcessGone(
++          base::TERMINATION_STATUS_PROCESS_WAS_KILLED);
++  EXPECT_FALSE(read_notice(contents.get()));
++  for (const auto& extension : registry()->GenerateInstalledExtensionsSet()) {
++    EXPECT_NE("Interrupted local import", extension->name());
++  }
++  EXPECT_TRUE(base::PathExists(crx));
++}
++
++TEST_F(DeveloperPrivateApiUnitTest, InstallFromFilePromptCancellation) {
++  ExtensionFunction::ScopedUserGestureForTests gesture;
++  profile()->GetPrefs()->SetBoolean(prefs::kExtensionsUIDeveloperMode, true);
++  TestExtensionDir test_dir;
++  test_dir.WriteManifest(
++      R"({"name":"Cancelled local picker test","version":"1.0","manifest_version":3})");
++  const base::FilePath crx = test_dir.Pack();
++  auto disable_ui = ExtensionInstallUI::disable_ui_for_tests(true);
++  ScopedTestDialogAutoConfirm confirm(ScopedTestDialogAutoConfirm::CANCEL);
++  auto contents =
++      content::WebContentsTester::CreateTestWebContents(profile(), nullptr);
++  auto function =
++      base::MakeRefCounted<api::DeveloperPrivateInstallFromFileFunction>();
++  function->SetRenderFrameHost(contents->GetPrimaryMainFrame());
++  function->set_accept_dialog_for_testing(true);
++  function->set_selected_file_for_testing(ui::SelectedFileInfo(crx));
++  ASSERT_TRUE(api_test_utils::RunFunction(function.get(), "[]", profile()));
++  ASSERT_EQ(1u, function->GetResultListForTest()->size());
++  EXPECT_FALSE((*function->GetResultListForTest())[0].GetBool());
++  for (const auto& extension : registry()->GenerateInstalledExtensionsSet()) {
++    EXPECT_NE("Cancelled local picker test", extension->name());
++  }
++  EXPECT_TRUE(base::PathExists(crx));
++}
++
++TEST_F(DeveloperPrivateApiUnitTest, InstallFromFileWaitsForSignedInstall) {
++  ExtensionFunction::ScopedUserGestureForTests gesture;
++  profile()->GetPrefs()->SetBoolean(prefs::kExtensionsUIDeveloperMode, true);
++  TestExtensionDir test_dir;
++  test_dir.WriteManifest(
++      R"({"name":"Local picker test","version":"1.0","manifest_version":3})");
++  const base::FilePath crx = test_dir.Pack();
++  auto disable_ui = ExtensionInstallUI::disable_ui_for_tests(true);
++  ScopedTestDialogAutoConfirm confirm(ScopedTestDialogAutoConfirm::ACCEPT);
++  auto contents =
++      content::WebContentsTester::CreateTestWebContents(profile(), nullptr);
++  auto function =
++      base::MakeRefCounted<api::DeveloperPrivateInstallFromFileFunction>();
++  function->SetRenderFrameHost(contents->GetPrimaryMainFrame());
++  function->set_accept_dialog_for_testing(true);
++  function->set_selected_file_for_testing(ui::SelectedFileInfo(crx));
++  ASSERT_TRUE(api_test_utils::RunFunction(function.get(), "[]", profile()));
++  ASSERT_EQ(1u, function->GetResultListForTest()->size());
++  EXPECT_TRUE((*function->GetResultListForTest())[0].GetBool());
++  bool installed = false;
++  for (const auto& extension : registry()->enabled_extensions()) {
++    installed |= extension->name() == "Local picker test";
++  }
++  EXPECT_TRUE(installed);
++  EXPECT_TRUE(base::PathExists(crx));
++
++  // Same-key updates keep the normal install-then-reenable lifecycle. API
++  // success must not retire a still-valid prompt for the original document.
++  test_dir.WriteManifest(
++      R"({"name":"Local picker test","version":"2.0","manifest_version":3,
++          "permissions":["tabs"]})");
++  const base::FilePath update_crx = test_dir.Pack("update.crx");
++  auto update = base::MakeRefCounted<api::DeveloperPrivateInstallFromFileFunction>();
++  update->SetRenderFrameHost(contents->GetPrimaryMainFrame());
++  update->set_accept_dialog_for_testing(true);
++  update->set_selected_file_for_testing(ui::SelectedFileInfo(update_crx));
++  ASSERT_TRUE(api_test_utils::RunFunction(update.get(), "[]", profile()));
++  ASSERT_EQ(1u, update->GetResultListForTest()->size());
++  EXPECT_TRUE((*update->GetResultListForTest())[0].GetBool());
++  task_environment()->RunUntilIdle();
++  bool updated_and_enabled = false;
++  for (const auto& extension : registry()->enabled_extensions()) {
++    if (extension->name() == "Local picker test") {
++      EXPECT_EQ("2.0", extension->version().GetString());
++      updated_and_enabled = extension->version().GetString() == "2.0";
++    }
++  }
++  EXPECT_TRUE(updated_and_enabled);
++  EXPECT_TRUE(base::PathExists(update_crx));
++}
++#endif
+ 
+ TEST_F(DeveloperPrivateApiUnitTest, InstallDroppedFileCrx) {
+   TestExtensionDir test_dir;

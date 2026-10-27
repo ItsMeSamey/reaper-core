@@ -1,0 +1,102 @@
+diff --git a/chrome/browser/resources/extensions/load_error.ts b/chrome/browser/resources/extensions/load_error.ts
+--- a/chrome/browser/resources/extensions/load_error.ts
++++ b/chrome/browser/resources/extensions/load_error.ts
+@@ -9,6 +9,9 @@
+ 
+ import type {CrDialogElement} from 'chrome://resources/cr_elements/cr_dialog/cr_dialog.js';
+ import {assert} from 'chrome://resources/js/assert.js';
++// <if expr="is_android">
++import {getDeepActiveElement} from 'chrome://resources/js/util.js';
++// </if>
+ import {CrLitElement} from 'chrome://resources/lit/v3_0/lit.rollup.js';
+ import type {PropertyValues} from 'chrome://resources/lit/v3_0/lit.rollup.js';
+ 
+@@ -70,6 +73,9 @@
+   protected accessor error_: string|null = null;
+   protected accessor isCodeSectionActive_: boolean|undefined;
+   protected accessor retrying_: boolean = false;
++  // <if expr="is_android">
++  private retryGeneration_: number = 0;
++  // </if>
+ 
+   override willUpdate(changedProperties: PropertyValues<this>) {
+     super.willUpdate(changedProperties);
+@@ -101,6 +107,11 @@
+   }
+ 
+   show() {
++    // <if expr="is_android">
++    // A new error presentation supersedes delivery from an older Retry.
++    // Keep its busy state until that operation actually settles.
++    ++this.retryGeneration_;
++    // </if>
+     this.$.dialog.showModal();
+   }
+ 
+@@ -109,10 +120,25 @@
+   }
+ 
+   close() {
++    // <if expr="is_android">
++    ++this.retryGeneration_;
++    // </if>
+     this.$.dialog.close();
+   }
+ 
+   protected onRetryClick_() {
++    // <if expr="is_android">
++    // Lit updates the disabled button asynchronously; reject another click now.
++    if (this.retrying_) {
++      return;
++    }
++    // </if>
++    // <if expr="is_android">
++    const retryButton =
++        this.shadowRoot.querySelector<CrLitElement>('.action-button')!;
++    const hadFocus = retryButton.matches(':focus-within');
++    const retryGeneration = ++this.retryGeneration_;
++    // </if>
+     this.retrying_ = true;
+     assert(this.delegate);
+     assert(this.loadError);
+@@ -122,11 +148,40 @@
+                                               this.loadError.retryGuid)
+         .then(
+             () => {
++              // <if expr="is_android">
++              this.retrying_ = false;
++              if (retryGeneration !== this.retryGeneration_) {
++                return;
++              }
++              // </if>
+               this.close();
+             },
++            // <if expr="is_android">
++            async loadError => {
++            // </if>
++            // <if expr="not is_android">
+             loadError => {
++            // </if>
++              // <if expr="is_android">
++              this.retrying_ = false;
++              if (retryGeneration !== this.retryGeneration_) {
++                return;
++              }
++              // </if>
+               this.loadError = loadError;
+               this.retrying_ = false;
++              // <if expr="is_android">
++              await this.updateComplete;
++              await retryButton.updateComplete;
++              const active = getDeepActiveElement();
++              if (retryGeneration === this.retryGeneration_ &&
++                  hadFocus && this.isConnected &&
++                  this.$.dialog.getNative().open &&
++                  (!active || active === document.body ||
++                   retryButton.matches(':focus-within'))) {
++                retryButton.focus();
++              }
++              // </if>
+             });
+   }
+ }

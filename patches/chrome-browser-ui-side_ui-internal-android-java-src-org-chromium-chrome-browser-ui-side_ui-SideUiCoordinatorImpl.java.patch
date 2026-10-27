@@ -1,0 +1,126 @@
+diff --git a/chrome/browser/ui/side_ui/internal/android/java/src/org/chromium/chrome/browser/ui/side_ui/SideUiCoordinatorImpl.java b/chrome/browser/ui/side_ui/internal/android/java/src/org/chromium/chrome/browser/ui/side_ui/SideUiCoordinatorImpl.java
+--- a/chrome/browser/ui/side_ui/internal/android/java/src/org/chromium/chrome/browser/ui/side_ui/SideUiCoordinatorImpl.java
++++ b/chrome/browser/ui/side_ui/internal/android/java/src/org/chromium/chrome/browser/ui/side_ui/SideUiCoordinatorImpl.java
+@@ -114,6 +114,8 @@
+      * <p>This is used to prevent re-entrancy into {@link #updateUiInternal}.
+      */
+     private boolean mIsUpdatingUi;
++
++    private boolean mDestroyed;
+ 
+     /**
+      * Constructor for a {@link SideUiCoordinatorImpl}.
+@@ -225,7 +227,10 @@
+         // initialization, but ChromeActivity is destroyed before the async task is completed.
+         //
+         // Therefore, we shouldn't assert that the given SideUiContainer is already registered.
+-        mSideUiContainers.remove(sideUiContainer);
++        if (mSideUiContainers.remove(sideUiContainer)) {
++            detachSideUiContainerView(sideUiContainer);
++            mCurrentHeightTypes.put(sideUiContainer.getAnchorSide(), HeightType.NOT_APPLICABLE);
++        }
+     }
+ 
+     @Override
+@@ -243,6 +248,7 @@
+     @Override
+     public void destroy() {
+         ThreadUtils.assertOnUiThread();
++        mDestroyed = true;
+         releasePersistentShowingToken();
+         if (mLayoutStateProvider != null && mLayoutStateObserver != null) {
+             mLayoutStateProvider.removeObserver(mLayoutStateObserver);
+@@ -820,6 +826,11 @@
+         SideUiSpecs newSideUiSpecs = uiUpdateSpecs.mNewSpecs;
+         SideUiSpecs sideUiSpecsDiff = uiUpdateSpecs.mSpecsDiff;
+         SideUiSpecs currentSideUiSpecs = uiUpdateSpecs.mCurrentSpecs;
++        List<SideUiContainer> transitionContainerOrder = new ArrayList<>(mSideUiContainers);
++        Map<@AnchorSide Integer, SideUiContainer> transitionContainers = new ArrayMap<>();
++        for (SideUiContainer container : transitionContainerOrder) {
++            transitionContainers.put(container.getAnchorSide(), container);
++        }
+ 
+         for (Map.Entry<@AnchorSide Integer, SideUiSize> entry : sideUiSpecsDiff.entrySet()) {
+             @AnchorSide int anchorSide = entry.getKey();
+@@ -844,13 +855,19 @@
+                 /* onTransitionEndCallback= */ new Callback<SideUiUpdateSpecs>() {
+                     @Override
+                     public void onResult(SideUiUpdateSpecs uiUpdateSpecs) {
+-                        // Detach and close the container after the transition is complete.
++                        if (mDestroyed) return;
++
++                        // A container can be unregistered or replaced while the animation runs.
++                        // Complete only the owners for which this transition was recorded.
+                         for (Map.Entry<@AnchorSide Integer, SideUiSize> entry :
+                                 uiUpdateSpecs.mSpecsDiff.entrySet()) {
+                             @AnchorSide int anchorSide = entry.getKey();
+                             @Px int newSideUiWidth = entry.getValue().mWidth;
+-                            SideUiContainer sideUiContainer =
+-                                    assumeNonNull(getSideUiContainerBySide(anchorSide));
++                            SideUiContainer sideUiContainer = transitionContainers.get(anchorSide);
++                            if (sideUiContainer == null
++                                    || getSideUiContainerBySide(anchorSide) != sideUiContainer) {
++                                continue;
++                            }
+                             if (newSideUiWidth == 0) {
+                                 detachSideUiContainerView(sideUiContainer);
+                                 sideUiContainer.setWidth(0);
+@@ -859,12 +876,54 @@
+ 
+                         for (Map.Entry<@AnchorSide Integer, SideUiSize> entry :
+                                 uiUpdateSpecs.mNewSpecs.entrySet()) {
+-                            mCurrentHeightTypes.put(entry.getKey(), entry.getValue().mHeightType);
++                            @AnchorSide int anchorSide = entry.getKey();
++                            if (getSideUiContainerBySide(anchorSide)
++                                    == transitionContainers.get(anchorSide)) {
++                                mCurrentHeightTypes.put(anchorSide, entry.getValue().mHeightType);
++                            }
+                         }
+ 
+-                        notifyContainersOnUiUpdateCompleted(
+-                                uiUpdateSpecs.mCurrentSpecs, uiUpdateSpecs.mNewSpecs);
+-                        mSideUiObserverNotifier.notifyTransitionEnded(uiUpdateSpecs.mNewSpecs);
++                        for (SideUiContainer container : transitionContainerOrder) {
++                            if (mDestroyed) return;
++                            @AnchorSide int anchorSide = container.getAnchorSide();
++                            if (getSideUiContainerBySide(anchorSide) != container) continue;
++                            @Px int oldWidth = uiUpdateSpecs.mCurrentSpecs.getWidth(anchorSide);
++                            @Px int newWidth = uiUpdateSpecs.mNewSpecs.getWidth(anchorSide);
++                            @HeightType int oldHeightType =
++                                    uiUpdateSpecs.mCurrentSpecs.getHeightType(anchorSide);
++                            @HeightType int newHeightType =
++                                    uiUpdateSpecs.mNewSpecs.getHeightType(anchorSide);
++                            if (newWidth != oldWidth || oldHeightType != newHeightType) {
++                                container.onUiUpdateCompleted(
++                                        oldWidth, newWidth, oldHeightType, newHeightType);
++                            }
++                        }
++
++                        if (mDestroyed) return;
++                        boolean sameOwners =
++                                mSideUiContainers.size() == transitionContainers.size();
++                        for (SideUiContainer container : mSideUiContainers) {
++                            if (transitionContainers.get(container.getAnchorSide()) != container) {
++                                sameOwners = false;
++                                break;
++                            }
++                        }
++                        SideUiSpecs completedSpecs = uiUpdateSpecs.mNewSpecs;
++                        if (!sameOwners) {
++                            // Balance the observer animation lifecycle using the current owners,
++                            // not the retired transition's targets or an unregistered child View.
++                            Map<@AnchorSide Integer, SideUiSize> effectiveSpecs = new ArrayMap<>();
++                            for (Map.Entry<@AnchorSide Integer, SideUiSize> entry :
++                                    getCurrentSideUiSpecsInternal().entrySet()) {
++                                effectiveSpecs.put(
++                                        entry.getKey(),
++                                        getSideUiContainerBySide(entry.getKey()) == null
++                                                ? new SideUiSize(0, HeightType.NOT_APPLICABLE)
++                                                : entry.getValue());
++                            }
++                            completedSpecs = new SideUiSpecs(effectiveSpecs);
++                        }
++                        mSideUiObserverNotifier.notifyTransitionEnded(completedSpecs);
+                     }
+                 });
+         transitionSet.addListener(mSideUiTransitionListener);

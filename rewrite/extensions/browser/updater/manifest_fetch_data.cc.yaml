@@ -1,0 +1,65 @@
+substitutions:
+- description: Compile enabled/disable-reason serializer out on Android.
+  regex:
+    pattern: "void AddEnabledStateToPing(std::string* ping_value,\n                           const DownloadPingData* ping_data)\
+      \ {\n  *ping_value += \"&e=\" + std::string(ping_data->is_enabled ? \"1\" : \"0\");\n  if (!ping_data->is_enabled) {\n\
+      \    // Add a dr=<number> param for each bit set in disable reasons.\n    for (int reason : ping_data->disable_reasons)\
+      \ {\n      if (reason != disable_reason::DISABLE_UNKNOWN) {\n        // Only append valid and known disable reasons.\n\
+      \        *ping_value += \"&dr=\" + base::NumberToString(reason);\n      }\n    }\n  }\n}\n"
+    replace: "#if !BUILDFLAG(IS_ANDROID)\nvoid AddEnabledStateToPing(std::string* ping_value,\n                          \
+      \ const DownloadPingData* ping_data) {\n  *ping_value += \"&e=\" + std::string(ping_data->is_enabled ? \"1\" : \"0\"\
+      );\n  if (!ping_data->is_enabled) {\n    // Add a dr=<number> param for each bit set in disable reasons.\n    for (int\
+      \ reason : ping_data->disable_reasons) {\n      if (reason != disable_reason::DISABLE_UNKNOWN) {\n        // Only append\
+      \ valid and known disable reasons.\n        *ping_value += \"&dr=\" + base::NumberToString(reason);\n      }\n    }\n\
+      \  }\n}\n#endif\n"
+  count: 1
+- description: Construct optional members only outside Android.
+  regex:
+    pattern: "      brand_code_(brand_code),\n      ping_mode_(ping_mode),\n"
+    replace: "#if !BUILDFLAG(IS_ANDROID)\n      brand_code_(brand_code),\n      ping_mode_(ping_mode),\n#endif\n"
+  count: 1
+- description: Compile brand/activity/rollcall/enabled URL emission out on Android.
+  regex:
+    pattern: "  // Append brand code, rollcall and active ping parameters.\n  if (ping_mode_ != NO_PING) {\n    if (!brand_code_.empty())\n\
+      \      parts.push_back(base::StringPrintf(\"brand=%s\", brand_code_.c_str()));\n\n    std::string ping_value;\n    pings_.emplace(\n\
+      \        std::piecewise_construct, std::forward_as_tuple(id),\n        std::forward_as_tuple(/*rollcall=*/0, /*active=*/0,\n\
+      \                              /*enabled=*/false, DisableReasonSet()));\n\n    if (ping_data) {\n      if (ping_data->rollcall_days\
+      \ == kNeverPinged ||\n          ping_data->rollcall_days > 0) {\n        ping_value += \"r=\" + base::NumberToString(ping_data->rollcall_days);\n\
+      \        if (ping_mode_ == PING_WITH_ENABLED_STATE)\n          AddEnabledStateToPing(&ping_value, ping_data);\n    \
+      \    pings_[id].rollcall_days = ping_data->rollcall_days;\n        pings_[id].is_enabled = ping_data->is_enabled;\n\
+      \      }\n      if (ping_data->active_days == kNeverPinged ||\n          ping_data->active_days > 0) {\n        if (!ping_value.empty())\n\
+      \          ping_value += \"&\";\n        ping_value += \"a=\" + base::NumberToString(ping_data->active_days);\n    \
+      \    pings_[id].active_days = ping_data->active_days;\n      }\n    }\n    if (!ping_value.empty())\n      parts.push_back(\"\
+      ping=\" + base::EscapeQueryParamValue(ping_value, true));\n  }\n\n"
+    replace: "#if !BUILDFLAG(IS_ANDROID)\n  // Append brand code, rollcall and active ping parameters.\n  if (ping_mode_ !=\
+      \ NO_PING) {\n    if (!brand_code_.empty())\n      parts.push_back(base::StringPrintf(\"brand=%s\", brand_code_.c_str()));\n\
+      \n    std::string ping_value;\n    pings_.emplace(\n        std::piecewise_construct, std::forward_as_tuple(id),\n \
+      \       std::forward_as_tuple(/*rollcall=*/0, /*active=*/0,\n                              /*enabled=*/false, DisableReasonSet()));\n\
+      \n    if (ping_data) {\n      if (ping_data->rollcall_days == kNeverPinged ||\n          ping_data->rollcall_days >\
+      \ 0) {\n        ping_value += \"r=\" + base::NumberToString(ping_data->rollcall_days);\n        if (ping_mode_ == PING_WITH_ENABLED_STATE)\n\
+      \          AddEnabledStateToPing(&ping_value, ping_data);\n        pings_[id].rollcall_days = ping_data->rollcall_days;\n\
+      \        pings_[id].is_enabled = ping_data->is_enabled;\n      }\n      if (ping_data->active_days == kNeverPinged ||\n\
+      \          ping_data->active_days > 0) {\n        if (!ping_value.empty())\n          ping_value += \"&\";\n       \
+      \ ping_value += \"a=\" + base::NumberToString(ping_data->active_days);\n        pings_[id].active_days = ping_data->active_days;\n\
+      \      }\n    }\n    if (!ping_value.empty())\n      parts.push_back(\"ping=\" + base::EscapeQueryParamValue(ping_value,\
+      \ true));\n  }\n\n#endif\n"
+  count: 1
+- description: Rebuild ordinary extension checks without an Android ping cache.
+  regex:
+    pattern: "    auto it = pings_.find(extension_id);\n    const DownloadPingData* optional_ping_data =\n        it != pings_.end()\
+      \ ? &(it->second) : nullptr;\n"
+    replace: "    const DownloadPingData* optional_ping_data = nullptr;\n#if !BUILDFLAG(IS_ANDROID)\n    auto it = pings_.find(extension_id);\n\
+      \    optional_ping_data = it != pings_.end() ? &(it->second) : nullptr;\n#endif\n"
+  count: 1
+- description: Keep Android callback ping status false without optional state.
+  regex:
+    pattern: "bool ManifestFetchData::DidPing(const ExtensionId& extension_id,\n                                PingType type)\
+      \ const {\n  auto i = pings_.find(extension_id);\n  if (i == pings_.end())\n    return false;\n  int value = 0;\n  if\
+      \ (type == ROLLCALL)\n    value = i->second.rollcall_days;\n  else if (type == ACTIVE)\n    value = i->second.active_days;\n\
+      \  else\n    NOTREACHED();\n  return value == kNeverPinged || value > 0;\n}\n"
+    replace: "bool ManifestFetchData::DidPing(const ExtensionId& extension_id,\n                                PingType type)\
+      \ const {\n#if BUILDFLAG(IS_ANDROID)\n  return false;\n#else\n  auto i = pings_.find(extension_id);\n  if (i == pings_.end())\n\
+      \    return false;\n  int value = 0;\n  if (type == ROLLCALL)\n    value = i->second.rollcall_days;\n  else if (type\
+      \ == ACTIVE)\n    value = i->second.active_days;\n  else\n    NOTREACHED();\n  return value == kNeverPinged || value\
+      \ > 0;\n#endif\n}\n"
+  count: 1

@@ -5,6 +5,8 @@
 
 #include "brave/components/brave_search_conversion/utils.h"
 
+#include "build/build_config.h"
+
 #include <algorithm>
 
 #include "base/check.h"
@@ -14,7 +16,9 @@
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/time/time.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_origin/brave_origin_utils.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_origin/buildflags/buildflags.h"
 #include "brave/components/brave_search_conversion/constants.h"
 #include "brave/components/brave_search_conversion/features.h"
@@ -103,6 +107,7 @@ void UpdateDDGConversionType(PrefService* prefs) {
   }
 }
 
+#if !BUILDFLAG(IS_ANDROID)
 bool ShouldSuppressForBraveOrigin() {
 #if BUILDFLAG(IS_BRAVE_ORIGIN_BRANDED)
   return true;
@@ -110,6 +115,7 @@ bool ShouldSuppressForBraveOrigin() {
   return brave_origin::IsBraveOriginPurchased();
 #endif
 }
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 }  // namespace
 
@@ -117,9 +123,11 @@ bool IsNTPPromotionEnabled(PrefService* prefs, TemplateURLService* service) {
   DCHECK(prefs);
   DCHECK(service);
 
+#if !BUILDFLAG(IS_ANDROID)
   if (ShouldSuppressForBraveOrigin()) {
     return false;
   }
+#endif  // !BUILDFLAG(IS_ANDROID)
 
   if (prefs->GetBoolean(prefs::kDismissed)) {
     return false;
@@ -146,9 +154,11 @@ ConversionType GetConversionType(PrefService* prefs,
   DCHECK(prefs);
   DCHECK(service);
 
+#if !BUILDFLAG(IS_ANDROID)
   if (ShouldSuppressForBraveOrigin()) {
     return ConversionType::kNone;
   }
+#endif  // !BUILDFLAG(IS_ANDROID)
 
   if (prefs->GetBoolean(prefs::kDismissed)) {
     return ConversionType::kNone;

@@ -1,64 +1,246 @@
 diff --git a/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/top/ToolbarPhone.java b/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/top/ToolbarPhone.java
-index efb5b0b4bb31f44a41da2934170d259d7aadbdc9..b11f5be05c5e311fd76ea737be354a79fb9c232d 100644
 --- a/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/top/ToolbarPhone.java
 +++ b/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/top/ToolbarPhone.java
-@@ -282,8 +282,8 @@ public class ToolbarPhone extends ToolbarLayout
+@@ -87,6 +87,7 @@
+ import org.chromium.chrome.browser.toolbar.ToolbarTabController;
+ import org.chromium.chrome.browser.toolbar.ToolbarVariationUtils;
+ import org.chromium.chrome.browser.toolbar.back_button.BackButtonCoordinator;
++import org.chromium.chrome.browser.toolbar.extensions.ExtensionsToolbarCoordinator;
+ import org.chromium.chrome.browser.toolbar.forward_button.ForwardButtonCoordinator;
+ import org.chromium.chrome.browser.toolbar.home_button.HomeButtonCoordinator;
+ import org.chromium.chrome.browser.toolbar.menu_button.MenuButtonCoordinator;
+@@ -162,6 +163,7 @@
+     private MonotonicObservableSupplier<Tracker> mTrackerSupplier;
+
+     private ViewGroup mToolbarButtonsContainer;
++    private @Nullable ExtensionsToolbarCoordinator mExtensionsToolbarCoordinator;
+     private @MonotonicNonNull OptionalButtonCoordinator mOptionalButtonCoordinator;
+     // Non-null after inflation occurs.
+     private ImageView mHomeButton;
+@@ -282,8 +284,8 @@
      private @Nullable PhoneCaptureStateToken mPhoneCaptureStateToken;
      private @Nullable ButtonData mButtonData;
- 
+
 -    private final @ColorInt int mToolbarBackgroundColorForNtp;
 -    private final @ColorInt int mLocationBarBackgroundColorForNtp;
 +    @ColorInt int mToolbarBackgroundColorForNtp;
 +    @ColorInt int mLocationBarBackgroundColorForNtp;
      private boolean mUseAdjustedTintColorForNtp;
      private boolean mIsToolbarExpandedOnNtp;
- 
-@@ -573,6 +573,7 @@ public class ToolbarPhone extends ToolbarLayout
- 
+
+@@ -450,8 +452,6 @@
+     @Initializer
+     public void setLocationBarCoordinator(LocationBarCoordinator locationBarCoordinator) {
+         mLocationBar = locationBarCoordinator;
+-        mLocationBar.setOnSpecializedFuseboxModeActivatedListener(
+-                isSpecializedMode -> updateBackgroundHairline(urlHasFocus(), isSpecializedMode));
+         Resources res = getResources();
+         mLocationBarBackgroundVerticalInset =
+                 res.getDimensionPixelSize(R.dimen.location_bar_vertical_margin);
+@@ -495,16 +495,6 @@
+         }
+     }
+
+-    private void updateBackgroundHairline(boolean urlHasFocus, boolean shouldShowRainbowOutline) {
+-        if (!urlHasFocus) {
+-            mLocationBarBackground.setHairlineBehavior(HairlineBehavior.NONE);
+-            return;
+-        }
+-
+-        mLocationBarBackground.setHairlineBehavior(
+-                shouldShowRainbowOutline ? HairlineBehavior.RAINBOW : HairlineBehavior.NONE);
+-    }
+-
+     @Override
+     public void invalidateDrawable(Drawable who) {
+         if (who == mLocationBarBackground) {
+@@ -538,10 +528,8 @@
+                         context,
+                         /* cornerRadiusPx= */ resources.getDimensionPixelSize(
+                                 R.dimen.modern_toolbar_background_corner_radius),
+-                        /* strokePx= */ resources.getDimensionPixelSize(
+-                                R.dimen.fusebox_glif_stroke_width),
+-                        /* blurStrokePx= */ resources.getDimensionPixelSize(
+-                                R.dimen.fusebox_glif_blur_stroke_width));
++                        /* standbyStrokePx= */ resources.getDimensionPixelSize(
++                                R.dimen.location_bar_standby_border_width));
+         drawable.setBackgroundColor(
+                 ContextCompat.getColor(context, R.color.toolbar_text_box_bg_color));
+         return drawable;
+@@ -573,6 +561,7 @@
+
      /** Set the background color of the location bar to appropriately match the theme color. */
      private void updateModernLocationBarColor(@ColorInt int color) {
 +        BraveToolbarLayout.class.cast(this).updateModernLocationBarColorImpl(color);
          if (mCurrentLocationBarColor == color) return;
          mCurrentLocationBarColor = color;
          mLocationBarBackground.setBackgroundColor(color);
-@@ -1281,6 +1282,7 @@ public class ToolbarPhone extends ToolbarLayout
+@@ -687,12 +676,116 @@
+     }
+
+     @Override
++    public void setExtensionsToolbarCoordinator(
++            @Nullable ExtensionsToolbarCoordinator extensionsToolbarCoordinator) {
++        mExtensionsToolbarCoordinator = extensionsToolbarCoordinator;
++        requestLayout();
++    }
++
++    private void updateExtensionsToolbarWidth(int toolbarWidth) {
++        if (mExtensionsToolbarCoordinator == null) return;
++        View extensionsContainer = findViewById(R.id.extensions_toolbar_container);
++        if (extensionsContainer == null) return;
++
++        // The phone toolbar does not use ToolbarTablet's ranking pass. Reserve existing controls
++        // before allocating extension buttons, including their margins in RTL.
++        int occupiedWidth =
++                getBoundsAfterAccountingForLeftButton()
++                        + getPaddingLeft()
++                        + getPaddingRight()
++                        + mToolbarButtonsContainer.getPaddingLeft()
++                        + mToolbarButtonsContainer.getPaddingRight();
++        int controlsWidth = toolbarWidth - getPaddingLeft() - getPaddingRight();
++        if (mToolbarButtonsContainer.getLayoutParams() instanceof MarginLayoutParams margins) {
++            occupiedWidth += margins.leftMargin + margins.rightMargin;
++            controlsWidth -= margins.leftMargin + margins.rightMargin;
++        }
++        if (extensionsContainer.getLayoutParams() instanceof MarginLayoutParams margins) {
++            occupiedWidth += margins.leftMargin + margins.rightMargin;
++        }
++        int controlsWidthSpec =
++                MeasureSpec.makeMeasureSpec(Math.max(0, controlsWidth), MeasureSpec.AT_MOST);
++        int controlsHeightSpec =
++                MeasureSpec.makeMeasureSpec(
++                        mToolbarButtonsContainer.getMeasuredHeight(), MeasureSpec.EXACTLY);
++        for (int i = 0; i < mToolbarButtonsContainer.getChildCount(); i++) {
++            View child = mToolbarButtonsContainer.getChildAt(i);
++            if (child == extensionsContainer || child.getVisibility() == GONE) continue;
++            ViewGroup.LayoutParams params = child.getLayoutParams();
++            int horizontalMargins = 0;
++            int verticalMargins = 0;
++            if (params instanceof MarginLayoutParams margins) {
++                horizontalMargins = margins.leftMargin + margins.rightMargin;
++                verticalMargins = margins.topMargin + margins.bottomMargin;
++            }
++            // The initial bounded pass may clip controls following an oversized extension list.
++            // Measure their own demand without that list's widthUsed. AT_MOST preserves intrinsic
++            // sizing for the Brave toolbar include, whose layout width is MATCH_PARENT.
++            child.measure(
++                    getChildMeasureSpec(
++                            controlsWidthSpec,
++                            mToolbarButtonsContainer.getPaddingLeft()
++                                    + mToolbarButtonsContainer.getPaddingRight()
++                                    + horizontalMargins,
++                            params.width),
++                    getChildMeasureSpec(
++                            controlsHeightSpec,
++                            mToolbarButtonsContainer.getPaddingTop()
++                                    + mToolbarButtonsContainer.getPaddingBottom()
++                                    + verticalMargins,
++                            params.height));
++            occupiedWidth += child.getMeasuredWidth() + horizontalMargins;
++        }
++
++        int availableWidth = Math.max(0, toolbarWidth - occupiedWidth);
++        availableWidth =
++                Math.max(
++                        0,
++                        availableWidth
++                                - mExtensionsToolbarCoordinator
++                                        .getPoppedOutActionWidthConsumer()
++                                        .updateVisibility(availableWidth));
++        availableWidth =
++                Math.max(
++                        0,
++                        availableWidth
++                                - mExtensionsToolbarCoordinator
++                                        .getMenuButtonWidthConsumer()
++                                        .updateVisibility(availableWidth));
++        // A popup's temporary anchor and the menu outrank optional URL-bar affordances. Keep
++        // all remaining space for the URL bar on compact phones; only spare width admits pins.
++        availableWidth =
++                Math.max(
++                        0,
++                        availableWidth
++                                - getResources()
++                                        .getDimensionPixelSize(
++                                                R.dimen.location_bar_minimalistic_ui_threshold));
++        availableWidth =
++                Math.max(
++                        0,
++                        availableWidth
++                                - mExtensionsToolbarCoordinator
++                                        .getRequestAccessButtonWidthConsumer()
++                                        .updateVisibility(availableWidth));
++        // This also reconciles the temporary action that must anchor an unpinned action's popup.
++        mExtensionsToolbarCoordinator
++                .getActionListWidthConsumer()
++                .updateVisibility(availableWidth);
++    }
++
++    @Override
+     protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+         // In case the call came from the handler after we destroyed the dependencies, skip the work
+         // that could touch the already destroyed objects.
+         if (mDestroyChecker.isDestroyed()) {
+             super.onMeasure(widthMeasureSpec, heightMeasureSpec);
+             return;
++        }
++        if (mExtensionsToolbarCoordinator != null) {
++            // Measure existing controls first, then let the normal pass measure the allocated list.
++            super.onMeasure(widthMeasureSpec, heightMeasureSpec);
++            updateExtensionsToolbarWidth(MeasureSpec.getSize(widthMeasureSpec));
+         }
+         if (!mDisableLocationBarRelayout) {
+             super.onMeasure(widthMeasureSpec, heightMeasureSpec);
+@@ -726,7 +819,9 @@
+
+         mUnfocusedLocationBarLayoutLeft = leftViewBounds;
+         mUnfocusedLocationBarLayoutRight = rightViewBounds;
+-        int unfocusedLocationBarLayoutWidth = rightViewBounds - leftViewBounds;
++        // A retiring extension row can retain its old width until its removal animation ends.
++        // Never pass a negative width through to LayoutParams as MATCH_PARENT or WRAP_CONTENT.
++        int unfocusedLocationBarLayoutWidth = Math.max(0, rightViewBounds - leftViewBounds);
+         if (mUnfocusedLocationBarLayoutWidth != unfocusedLocationBarLayoutWidth) {
+             mUnfocusedLocationBarLayoutWidth = unfocusedLocationBarLayoutWidth;
+             mLocationBar.setUnfocusedWidth(mUnfocusedLocationBarLayoutWidth);
+@@ -1281,6 +1376,7 @@
       * Tab Page.
       */
      private void updateLocationBarLayoutForExpansionAnimation() {
 +        if (!BraveToolbarLayout.class.cast(this).isLocationBarValid(mLocationBar)) return;
          TraceEvent.begin("ToolbarPhone.updateLocationBarLayoutForExpansionAnimation");
          if (isInTabSwitcherMode()) return;
- 
-@@ -1697,6 +1699,7 @@ public class ToolbarPhone extends ToolbarLayout
+
+@@ -1697,6 +1793,7 @@
              }
          }
- 
+
 +        BraveToolbarLayout.class.cast(this).drawAnimationOverlay(mToolbarButtonsContainer, canvas);
          // Draw the tab stack button and associated text if necessary.
          ToggleTabStackButtonCoordinator tabSwitcherButtonCoordinator =
                  getTabSwitcherButtonCoordinator();
-@@ -2089,7 +2092,7 @@ public class ToolbarPhone extends ToolbarLayout
- 
+@@ -2089,7 +2186,7 @@
+
      @Override
      public void onHomeButtonIsEnabledUpdate(boolean homeButtonEnabled) {
 -        mIsHomeButtonEnabled = homeButtonEnabled;
 +        mIsHomeButtonEnabled = false;
          updateButtonVisibility();
      }
- 
-@@ -2495,6 +2498,7 @@ public class ToolbarPhone extends ToolbarLayout
+
+@@ -2495,6 +2592,7 @@
      }
- 
+
      private void createAndRunFocusAnimatorLegacy(boolean hasFocus, boolean shouldShowKeyboard) {
 +        if (!BraveToolbarLayout.class.cast(this).isLocationBarValid(mLocationBar)) return;
          List<Animator> animators = new ArrayList<>();
          if (hasFocus) {
              populateUrlExpansionAnimatorSet(animators);
-@@ -3653,6 +3657,7 @@ public class ToolbarPhone extends ToolbarLayout
+@@ -3653,6 +3751,7 @@
       * @return The offset for the location bar when showing the dse icon.
       */
      int getLocationBarOffsetForFocusAnimation(boolean hasFocus) {
 +        if (!urlHasFocus()) return 0;
          StatusCoordinator statusCoordinator = mLocationBar.getStatusCoordinator();
          if (statusCoordinator == null) return 0;
- 
+

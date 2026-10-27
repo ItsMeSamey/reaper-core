@@ -1,0 +1,67 @@
+diff --git a/build/android/pylib/local/device/local_device_gtest_run_test.py b/build/android/pylib/local/device/local_device_gtest_run_test.py
+--- a/build/android/pylib/local/device/local_device_gtest_run_test.py
++++ b/build/android/pylib/local/device/local_device_gtest_run_test.py
+@@ -37,6 +37,63 @@
+             ),
+             mock.MagicMock(spec=gtest_test_instance.GtestTestInstance),
+         )
++
++    def testSharedStateLogcatKeepsCaptureWithoutClearing(self):
++        module = local_device_gtest_run
++        self._obj._test_instance.apk = '/out/native-tests.apk'
++        self._obj._test_instance.external_shard_index = 0
++        self._obj._test_instance.GetLogcatPackageNames.return_value = 'owned.test.package'
++        self._obj._env.trace_output = False
++        archived = self._obj._env.output_manager.ArchivedTempfile.return_value.__enter__.return_value
++        archived.name = '/tmp/owned-test-logcat'
++        archived.Link.return_value = None
++        device = mock.Mock(serial='owned-serial', product_cpu_abi='arm64-v8a')
++        for preserve in (False, True):
++            with self.subTest(preserve=preserve):
++                self._obj._env.preserve_shared_device_state = preserve
++                with (
++                    mock.patch.object(module.stack_symbolizer, 'PassThroughSymbolizerPool'),
++                    mock.patch.object(module.logcat_monitor, 'LogcatMonitor') as monitor_factory,
++                ):
++                    monitor = monitor_factory.return_value.__enter__.return_value
++                    with self._obj._ArchiveLogcat(device, 'Owned.test') as captured:
++                        self.assertIs(archived, captured)
++                    self.assertIs(not preserve, monitor_factory.call_args.kwargs['clear'])
++                    self.assertEqual(
++                        module.local_device_environment.LOGCAT_FILTERS,
++                        monitor_factory.call_args.kwargs['filter_specs'])
++                    self.assertEqual(archived.name, monitor_factory.call_args.kwargs['output_file'])
++                    self.assertFalse(monitor_factory.call_args.kwargs['check_error'])
++                    monitor.Close.assert_called_once()
++        self.assertEqual(2, self._obj._env.output_manager.ArchivedTempfile.call_count)
++
++    def testRealLogcatMonitorPreservesBufferAndStillStartsCapture(self):
++        module = local_device_gtest_run.logcat_monitor
++        for preserve in (False, True):
++            with self.subTest(preserve=preserve):
++                adb = mock.Mock(spec=module.adb_wrapper.AdbWrapper)
++                monitor = module.LogcatMonitor(adb, clear=not preserve, check_error=False)
++                monitor._record_file = mock.Mock()
++                with mock.patch.object(monitor, '_StartRecording') as start:
++                    monitor.Start()
++                    start.assert_called_once()
++                    if preserve:
++                        adb.Logcat.assert_not_called()
++                    else:
++                        adb.Logcat.assert_called_once_with(clear=True, check_error=False)
++                monitor.Close()
++
++    def testApkDataRootUsesSameNameAsInstrumentation(self):
++        device = mock.Mock()
++        device.GetExternalStoragePath.return_value = '/sdcard'
++        for name, expected in ((None, '/sdcard/chromium_tests_root'),
++                               ('chromium_tests_root_owned_09',
++                                '/sdcard/chromium_tests_root_owned_09')):
++            with self.subTest(name=name):
++                test_instance = mock.MagicMock(spec=gtest_test_instance.GtestTestInstance)
++                test_instance.extras = gtest_test_instance.GetTestDataRootExtras(name)
++                delegate = local_device_gtest_run._ApkDelegate(test_instance, mock.Mock())
++                self.assertEqual(expected, delegate.GetTestDataRoot(device))
+ 
+     def testExtractTestsFromFilter(self):
+         # Checks splitting by colons.

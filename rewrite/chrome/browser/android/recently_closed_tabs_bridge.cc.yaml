@@ -1,0 +1,212 @@
+# Android mixed native-tab and Java-window session restoration.
+substitutions:
+- description: Restore native split pairs after Java groups instead of losing them during regrouping
+  count: 2
+  regex:
+    re_pattern: \ \ RestoreAndroidTabGroups\(env,\ model,\ restore_context\.GetTabGroups\(\)\);
+    replace: "  RestoreAndroidTabGroups(env, model, restore_context.GetTabGroups());\n  restore_context.RestoreSplits();"
+- description: Keep built-in OpenRecentlyClosedEntry using shared Android group reconstruction
+  regex:
+    re_pattern: 'bool\ RecentlyClosedTabsBridge::OpenRecentlyClosedEntry\(\
+
+      \ \ \ \ JNIEnv\*\ env,\
+
+      \ \ \ \ TabModel\*\ model,\
+
+      \ \ \ \ int32_t\ entry_session_id\)\ \{\
+
+      \ \ //\ This\ should\ only\ be\ called\ when\ in\ bulk\ restore\ mode\ otherwise\ per\-tab\
+
+      \ \ //\ restore\ should\ always\ be\ used\.\
+
+      \ \ if\ \(!tab_restore_service_\)\ \{\
+
+      \ \ \ \ return\ false;\
+
+      \ \ \}\
+
+      \
+
+      \ \ if\ \(model\ ==\ nullptr\)\ \{\
+
+      \ \ \ \ return\ false;\
+
+      \ \ \}\
+
+      \
+
+      \ \ AndroidLiveTabContextRestoreWrapper\ restore_context\(model\);\
+
+      \ \ std::vector<sessions::LiveTab\*>\ restored_tabs\ =\
+
+      \ \ \ \ \ \ tab_restore_service_\->RestoreEntryById\(\
+
+      \ \ \ \ \ \ \ \ \ \ \&restore_context,\ SessionID::FromSerializedValue\(entry_session_id\),\
+
+      \ \ \ \ \ \ \ \ \ \ WindowOpenDisposition::NEW_BACKGROUND_TAB\);\
+
+      \ \ RestoreAndroidTabGroups\(env,\ model,\ restore_context\.GetTabGroups\(\)\);\
+
+      \ \ restore_context\.RestoreSplits\(\);\
+
+      \ \ return\ !restored_tabs\.empty\(\);\
+
+      \}\
+
+      \
+
+      bool\ '
+    replace: "bool RecentlyClosedTabsBridge::OpenRecentlyClosedEntry(\n    JNIEnv* env,\n    TabModel* model,\n    int32_t entry_session_id) {\n  // This should only be called when in bulk restore mode otherwise per-tab\n  // restore should always be used.\n  if (!tab_restore_service_) {\n    return false;\n  }\n\n  if (model == nullptr) {\n    return false;\n  }\n\n  AndroidLiveTabContextRestoreWrapper restore_context(model);\n  std::vector<sessions::LiveTab*> restored_tabs =\n      tab_restore_service_->RestoreEntryById(\n          &restore_context, SessionID::FromSerializedValue(entry_session_id),\n          WindowOpenDisposition::NEW_BACKGROUND_TAB);\n  restore_context.RestoreTabGroups(model);\n  restore_context.RestoreSplits();\n  return !restored_tabs.empty();\n}\n\nbool "
+- description: Keep built-in OpenMostRecentlyClosedEntry using shared Android group reconstruction
+  regex:
+    re_pattern: 'bool\ RecentlyClosedTabsBridge::OpenMostRecentlyClosedEntry\(JNIEnv\*\ env,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ TabModel\*\ model\)\ \{\
+
+      \ \ EnsureTabRestoreService\(\);\
+
+      \ \ if\ \(!tab_restore_service_\ \|\|\ tab_restore_service_\->entries\(\)\.empty\(\)\)\ \{\
+
+      \ \ \ \ return\ false;\
+
+      \ \ \}\
+
+      \
+
+      \ \ if\ \(model\ ==\ nullptr\)\ \{\
+
+      \ \ \ \ return\ false;\
+
+      \ \ \}\
+
+      \
+
+      \ \ AndroidLiveTabContextRestoreWrapper\ restore_context\(model\);\
+
+      \ \ //\ Do\ not\ use\ OpenMostRecentEntry\ as\ it\ uses\ WindowOpenDisposition::UNKNOWN\.\
+
+      \ \ //\ WindowOpenDisposition::UNKNOWN\ looks\ for\ a\ desktop\ window\ to\ use\ \(N/A\ on\
+
+      \ \ //\ Android\)\ this\ ends\ up\ replacing\ `restore_context`\ with\ the\ base\
+
+      \ \ //\ AndroidLiveTabContext\.\ `restore_context`\ is\ required\ to\ rebuild\ groups\
+
+      \ \ //\ information\.\ To\ avoid\ this\ just\ use\ the\ first\ entry\ in\ entries\ when\
+
+      \ \ //\ restoring\.\
+
+      \ \ std::vector<sessions::LiveTab\*>\ restored_tabs\ =\
+
+      \ \ \ \ \ \ tab_restore_service_\->RestoreEntryById\(\
+
+      \ \ \ \ \ \ \ \ \ \ \&restore_context,\ tab_restore_service_\->entries\(\)\.front\(\)\->id,\
+
+      \ \ \ \ \ \ \ \ \ \ WindowOpenDisposition::NEW_BACKGROUND_TAB\);\
+
+      \ \ RestoreAndroidTabGroups\(env,\ model,\ restore_context\.GetTabGroups\(\)\);\
+
+      \ \ restore_context\.RestoreSplits\(\);\
+
+      \ \ return\ !restored_tabs\.empty\(\);\
+
+      \}\
+
+      \
+
+      void\ '
+    replace: "bool RecentlyClosedTabsBridge::OpenMostRecentlyClosedEntry(JNIEnv* env,\n                                                           TabModel* model) {\n  EnsureTabRestoreService();\n  if (!tab_restore_service_ || tab_restore_service_->entries().empty()) {\n    return false;\n  }\n\n  if (model == nullptr) {\n    return false;\n  }\n\n  AndroidLiveTabContextRestoreWrapper restore_context(model);\n  // Do not use OpenMostRecentEntry as it uses WindowOpenDisposition::UNKNOWN.\n  // WindowOpenDisposition::UNKNOWN looks for a desktop window to use (N/A on\n  // Android) this ends up replacing `restore_context` with the base\n  // AndroidLiveTabContext. `restore_context` is required to rebuild groups\n  // information. To avoid this just use the first entry in entries when\n  // restoring.\n  std::vector<sessions::LiveTab*> restored_tabs =\n      tab_restore_service_->RestoreEntryById(\n          &restore_context, tab_restore_service_->entries().front()->id,\n          WindowOpenDisposition::NEW_BACKGROUND_TAB);\n  restore_context.RestoreTabGroups(model);\n  restore_context.RestoreSplits();\n  return !restored_tabs.empty();\n}\n\nvoid "
+- description: Move the single group reconstruction loop into the shared restore wrapper
+  regex:
+    re_pattern: 'void\ RecentlyClosedTabsBridge::RestoreAndroidTabGroups\(\
+
+      \ \ \ \ JNIEnv\*\ env,\
+
+      \ \ \ \ TabModel\*\ model,\
+
+      \ \ \ \ const\ std::map<tab_groups::TabGroupId,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ AndroidLiveTabContextRestoreWrapper::TabGroup>\&\ groups\)\ \{\
+
+      \ \ for\ \(const\ auto\&\ group\ :\ groups\)\ \{\
+
+      \ \ \ \ Java_RecentlyClosedBridge_restoreTabGroup\(\
+
+      \ \ \ \ \ \ \ \ env,\ bridge_,\ model,\ group\.second\.visual_data\.title\(\),\
+
+      \ \ \ \ \ \ \ \ static_cast<int>\(group\.second\.visual_data\.color\(\)\),\
+
+      \ \ \ \ \ \ \ \ group\.second\.tab_ids\);\
+
+      \ \ \}\
+
+      \}\
+
+      '
+    replace: ''
+- description: Format modified Android mixed-session restoration
+  regex:
+    re_pattern: '\ \ \ \ tab_restore_service_\->AddObserver\(this\);\
+
+      \ \ \}\
+
+      \}\
+
+      \
+
+      \
+
+      static\ int64_t\ JNI_RecentlyClosedBridge_Init\(JNIEnv\*\ env,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ const\ JavaRef<jobject>\&\ jbridge,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ Profile\*\ profile\)\ \{\
+
+      \ \ RecentlyClosedTabsBridge\*\ bridge\ =\ new\ RecentlyClosedTabsBridge\(\
+
+      '
+    replace: "    tab_restore_service_->AddObserver(this);\n  }\n}\n\nstatic int64_t JNI_RecentlyClosedBridge_Init(JNIEnv* env,\n                                             const JavaRef<jobject>& jbridge,\n                                             Profile* profile) {\n  RecentlyClosedTabsBridge* bridge = new RecentlyClosedTabsBridge(\n"
+- description: Include the range algorithm used by the relocated group restoration body.
+  regex:
+    re_pattern: '\#include\ "chrome/browser/android/recently_closed_tabs_bridge\.h"\
+
+      '
+    replace: '#include "chrome/browser/android/recently_closed_tabs_bridge.h"
+
+
+      #include <algorithm>
+
+      '
+- description: Include the model list used by the relocated group restoration body.
+  regex:
+    re_pattern: '\#include\ "chrome/browser/ui/android/tab_model/tab_model_jni_bridge\.h"\
+
+      '
+    replace: '#include "chrome/browser/ui/android/tab_model/tab_model_jni_bridge.h"
+
+      #include "chrome/browser/ui/android/tab_model/tab_model_list.h"
+
+      '
+- description: Define group restoration in the existing JNI owner without changing its body.
+  regex:
+    re_pattern: 'DEFINE_JNI\(RecentlyClosedBridge\)\
+
+      '
+    replace: "bool AndroidLiveTabContextRestoreWrapper::RestoreTabGroups(TabModel* model) {\n  const auto is_live = [model] {\n    const auto& models = TabModelList::models();\n    return std::ranges::find(models, model) != models.end();\n  };\n  JNIEnv* env = base::android::AttachCurrentThread();\n  for (const auto& [id, group] : tab_groups_) {\n    if (!is_live()) {\n      return false;\n    }\n    Java_RecentlyClosedBridge_restoreTabGroup(\n        env, model, group.visual_data.title(),\n        static_cast<int>(group.visual_data.color()), group.tab_ids);\n  }\n  return is_live();\n}\n\nDEFINE_JNI(RecentlyClosedBridge)\n"
+- description: Repair reviewed AN Android native compiler integration errors without changing intended behavior
+  regex:
+    re_pattern: '\ \ \ \ if\ \(!is_live\(\)\)\ \{\
+
+      \ \ \ \ \ \ return\ false;\
+
+      \ \ \ \ \}\
+
+      \ \ \ \ Java_RecentlyClosedBridge_restoreTabGroup\(\
+
+      \ \ \ \ \ \ \ \ env,\ model,\ group\.visual_data\.title\(\),\
+
+      \ \ \ \ \ \ \ \ static_cast<int>\(group\.visual_data\.color\(\)\),\ group\.tab_ids\);\
+
+      \ \ \}\
+
+      '
+    replace: "    if (!is_live()) {\n      return false;\n    }\n    recent_tabs::Java_RecentlyClosedBridge_restoreTabGroup(\n        env, model, group.visual_data.title(),\n        static_cast<int>(group.visual_data.color()), group.tab_ids);\n  }\n"

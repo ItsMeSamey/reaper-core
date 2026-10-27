@@ -1,0 +1,89 @@
+diff --git a/components/messages/android/message_dispatcher_bridge.cc b/components/messages/android/message_dispatcher_bridge.cc
+index af28a66f708d9df1b36c0f52e80851a9fbeebfaf..3b13c7ebffb08f0c59ec50049604d271e6d5132f 100644
+--- a/components/messages/android/message_dispatcher_bridge.cc
++++ b/components/messages/android/message_dispatcher_bridge.cc
+@@ -6,9 +6,12 @@
+ 
+ #include <jni.h>
+ 
++#include <utility>
++
+ #include "base/android/jni_android.h"
+ #include "base/android/scoped_java_ref.h"
+ #include "base/check.h"
++#include "base/functional/bind.h"
+ #include "base/no_destructor.h"
+ #include "content/public/browser/web_contents.h"
+ 
+@@ -37,8 +40,54 @@
+   g_message_dospatcher_bridge_for_testing = instance;
+ }
+ 
+-MessageDispatcherBridge::MessageDispatcherBridge() = default;
+-MessageDispatcherBridge::~MessageDispatcherBridge() = default;
++MessageDispatcherBridge::MessageDispatcherBridge() {
++  dispatcher_callbacks_.set_removal_callback(base::BindRepeating(
++      &MessageDispatcherBridge::OnDispatcherCallbacksRemoved,
++      base::Unretained(this)));
++}
++MessageDispatcherBridge::~MessageDispatcherBridge() {
++  DCHECK(dispatcher_callbacks_.empty());
++}
++
++base::CallbackListSubscription
++MessageDispatcherBridge::AddDispatcherChangedCallback(
++    base::RepeatingClosure callback) {
++  const bool was_empty = dispatcher_callbacks_.empty();
++  auto subscription = dispatcher_callbacks_.Add(std::move(callback));
++  if (was_empty) {
++    SetDispatcherNotificationsEnabled(true);
++  }
++  return subscription;
++}
++
++void MessageDispatcherBridge::OnDispatcherCallbacksRemoved() {
++  if (dispatcher_callbacks_.empty()) {
++    SetDispatcherNotificationsEnabled(false);
++  }
++}
++
++void MessageDispatcherBridge::SetDispatcherNotificationsEnabled(bool enabled) {
++  Java_MessageDispatcherBridge_setDispatcherNotificationsEnabled(
++      base::android::AttachCurrentThread(), enabled);
++}
++
++base::android::ScopedJavaLocalRef<jobject>
++MessageDispatcherBridge::GetMessageDispatcher(
++    const base::android::JavaRef<jobject>& java_window_android) {
++  if (java_window_android.is_null()) {
++    return {};
++  }
++  return Java_MessageDispatcherBridge_getMessageDispatcher(
++      base::android::AttachCurrentThread(), java_window_android);
++}
++
++void MessageDispatcherBridge::NotifyDispatcherChanged() {
++  dispatcher_callbacks_.Notify();
++}
++
++static void JNI_MessageDispatcherBridge_OnMessageDispatcherChanged(JNIEnv*) {
++  MessageDispatcherBridge::Get()->NotifyDispatcherChanged();
++}
+ 
+ bool MessageDispatcherBridge::EnqueueMessage(MessageWrapper* message,
+                                              content::WebContents* web_contents,
+@@ -63,11 +112,11 @@
+     MessagePriority priority) {
+   CHECK(!message->is_in_queue());
+   JNIEnv* env = base::android::AttachCurrentThread();
++  auto java_window_android = window_android->GetJavaObject();
+   if (Java_MessageDispatcherBridge_enqueueWindowScopedMessage(
+-          env, message->GetJavaMessageWrapper(),
+-          window_android->GetJavaObject(),
++          env, message->GetJavaMessageWrapper(), java_window_android,
+           priority == MessagePriority::kUrgent) == JNI_TRUE) {
+-    message->SetMessageEnqueued(window_android->GetJavaObject());
++    message->SetMessageEnqueued(java_window_android);
+     return true;
+   }
+   return false;

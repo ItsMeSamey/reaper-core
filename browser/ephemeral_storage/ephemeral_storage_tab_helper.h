@@ -22,8 +22,9 @@
 #include "content/public/browser/web_contents_user_data.h"
 
 #if BUILDFLAG(IS_ANDROID)
-#include "base/memory/raw_ptr.h"
+#include "base/scoped_multi_source_observation.h"
 #include "chrome/browser/android/tab_android.h"
+#include "chrome/browser/ui/android/tab_model/tab_model_list_observer.h"
 #include "chrome/browser/ui/android/tab_model/tab_model_observer.h"
 
 class TabModel;
@@ -45,6 +46,7 @@ class EphemeralStorageTabHelper
     : public content::WebContentsObserver,
 #if BUILDFLAG(IS_ANDROID)
       public TabModelObserver,
+      public TabModelListObserver,
 #endif
       public content::WebContentsUserData<EphemeralStorageTabHelper> {
  public:
@@ -79,10 +81,16 @@ class EphemeralStorageTabHelper
 #if BUILDFLAG(IS_ANDROID)
   // TabModelObserver
   void WillCloseTab(TabAndroid* tab) override;
+  void OnTabModelDestroyed(TabModel& tab_model) override;
 
-  // Store the TabModel we registered with, so we can remove ourselves in
-  // destructor even after WebContents is destroyed.
-  raw_ptr<TabModel> registered_tab_model_ = nullptr;
+  // TabModelListObserver
+  void OnTabModelAdded(TabModel* tab_model) override;
+  void OnTabModelRemoved(TabModel* tab_model) override;
+  void StopObservingTabModels();
+
+  base::ScopedMultiSourceObservation<TabModel, TabModelObserver>
+      tab_model_observations_{this};
+  bool observing_tab_model_list_ = false;
 #endif
 
   const base::raw_ptr<HostContentSettingsMap> host_content_settings_map_;

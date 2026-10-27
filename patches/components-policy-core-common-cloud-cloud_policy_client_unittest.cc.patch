@@ -1,0 +1,112 @@
+diff --git a/components/policy/core/common/cloud/cloud_policy_client_unittest.cc b/components/policy/core/common/cloud/cloud_policy_client_unittest.cc
+index fdd88db722643be2649aa4694b060ef2746bf2e9..9cff74ef40414d4ba1a3e90f3cd4a30d591cc323 100644
+--- a/components/policy/core/common/cloud/cloud_policy_client_unittest.cc
++++ b/components/policy/core/common/cloud/cloud_policy_client_unittest.cc
+@@ -114,7 +114,9 @@
+ constexpr char kMachineCertificate[] = "fake-machine-certificate";
+ constexpr char kEnrollmentCertificate[] = "fake-enrollment-certificate";
+ constexpr char kEnrollmentId[] = "fake-enrollment-id";
++#if !BUILDFLAG(IS_ANDROID)
+ constexpr char kOsName[] = "fake-os-name";
++#endif  // !BUILDFLAG(IS_ANDROID)
+ 
+ #if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
+ constexpr char kIdToken[] = "id_token";
+@@ -2546,6 +2548,7 @@
+   EXPECT_EQ(DM_STATUS_SUCCESS, client_->last_dm_status());
+ }
+ 
++#if !BUILDFLAG(IS_ANDROID)
+ TEST_F(CloudPolicyClientTest, UploadChromeDesktopReport) {
+   RegisterClient();
+ 
+@@ -2695,6 +2698,7 @@
+             CloudPolicyClient::Result(CloudPolicyClient::NotRegistered()));
+ }
+ 
++#endif  // !BUILDFLAG(IS_ANDROID)
+ // A helper class to test all em::DeviceRegisterRequest::PsmExecutionResult enum
+ // values.
+ class CloudPolicyClientRegisterWithPsmParamsTest
+@@ -3473,6 +3477,7 @@
+   EXPECT_EQ(DM_STATUS_SUCCESS, client_->last_dm_status());
+ }
+ 
++#if !BUILDFLAG(IS_ANDROID)
+ TEST_F(CloudPolicyClientTest, DeterminePromotionEligibilityRequest) {
+   RegisterClient();
+ 
+@@ -3507,6 +3512,8 @@
+   EXPECT_EQ(DM_STATUS_SUCCESS, client_->last_dm_status());
+ }
+ 
++#endif  // !BUILDFLAG(IS_ANDROID)
++#if !BUILDFLAG(IS_ANDROID)
+ TEST_F(CloudPolicyClientTest, GenerateChromeProfileChallengeRequest) {
+   base::HistogramTester histogram_tester;
+   RegisterClient();
+@@ -3574,6 +3581,64 @@
+       "Enterprise.GenerateChromeProfileChallenge.Status",
+       DM_STATUS_RESPONSE_DECODING_ERROR, 1);
+ }
++
++#else
++TEST_F(CloudPolicyClientTest, EnterpriseReportsUnavailableWithoutStartingJobs) {
++  EXPECT_CALL(job_creation_handler_, OnJobCreation).Times(0);
++  for (bool registered : {false, true}) {
++    if (registered) {
++      RegisterClient();
++    }
++    const auto previous_status = client_->last_dm_status();
++    base::test::TestFuture<CloudPolicyClient::Result> desktop;
++    client_->UploadChromeDesktopReport(
++        std::make_unique<em::ChromeDesktopReportRequest>(), desktop.GetCallback());
++    ASSERT_TRUE(desktop.IsReady());
++    EXPECT_EQ(desktop.Get(),
++              CloudPolicyClient::Result(DM_STATUS_SERVICE_MANAGEMENT_NOT_SUPPORTED));
++
++    base::test::TestFuture<CloudPolicyClient::Result> profile;
++    client_->UploadChromeProfileReport(
++        false, std::make_unique<em::ChromeProfileReportRequest>(),
++        profile.GetCallback());
++    ASSERT_TRUE(profile.IsReady());
++    EXPECT_EQ(profile.Get(),
++              CloudPolicyClient::Result(DM_STATUS_SERVICE_MANAGEMENT_NOT_SUPPORTED));
++
++    base::test::TestFuture<CloudPolicyClient::Result> os_user;
++    client_->UploadChromeOsUserReport(
++        std::make_unique<em::ChromeOsUserReportRequest>(), os_user.GetCallback());
++    ASSERT_TRUE(os_user.IsReady());
++    EXPECT_EQ(os_user.Get(),
++              CloudPolicyClient::Result(DM_STATUS_SERVICE_MANAGEMENT_NOT_SUPPORTED));
++    task_environment_->RunUntilIdle();
++    EXPECT_EQ(client_->GetActiveRequestCountForTest(), 0);
++    EXPECT_EQ(client_->last_dm_status(), previous_status);
++  }
++}
++
++TEST_F(CloudPolicyClientTest, ReportChallengeUnavailableWithoutStartingJobs) {
++  EXPECT_CALL(job_creation_handler_, OnJobCreation).Times(0);
++  for (bool registered : {false, true}) {
++    if (registered) {
++      RegisterClient();
++    }
++    const auto previous_status = client_->last_dm_status();
++    base::test::TestFuture<DeviceManagementStatus,
++                           const em::GenerateChromeProfileChallengeResponse&>
++        result;
++    client_->GenerateChromeProfileChallenge(result.GetCallback());
++    ASSERT_TRUE(result.IsReady());
++    const auto [status, response] = result.Get();
++    EXPECT_EQ(status, DM_STATUS_SERVICE_MANAGEMENT_NOT_SUPPORTED);
++    EXPECT_FALSE(response.has_challenge());
++    task_environment_->RunUntilIdle();
++    EXPECT_EQ(client_->GetActiveRequestCountForTest(), 0);
++    EXPECT_EQ(client_->last_dm_status(), previous_status);
++  }
++}
++
++#endif  // !BUILDFLAG(IS_ANDROID)
+ 
+ struct MockClientCertProvisioningRequestCallbackObserver {
+   MOCK_METHOD(

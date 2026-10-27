@@ -5,28 +5,50 @@
 
 #include "brave/browser/browser_context_keyed_service_factories.h"
 
+#include "build/build_config.h"
+
+#include "brave/components/ntp_background_images/buildflags/buildflags.h"
+
 #include "base/feature_list.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/brave_account/brave_account_service_factory.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/brave_adaptive_captcha/brave_adaptive_captcha_service_factory.h"
 #include "brave/browser/brave_origin/brave_origin_service_factory.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/brave_search/backup_results_service_factory.h"
 #include "brave/browser/brave_shields/ad_block_pref_service_factory.h"
 #include "brave/browser/brave_shields/brave_shields_settings_service_factory.h"
 #include "brave/browser/debounce/debounce_service_factory.h"
 #include "brave/browser/ephemeral_storage/ephemeral_storage_service_factory.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/misc_metrics/profile_misc_metrics_service_factory.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
 #include "brave/browser/ntp_background/view_counter_service_factory.h"
+#endif  // BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
 #include "brave/browser/permissions/permission_lifetime_manager_factory.h"
 #include "brave/browser/profiles/brave_renderer_updater_factory.h"
 #include "brave/browser/search_engines/search_engine_provider_service_factory.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/search_engines/search_engine_tracker.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/serp_metrics/serp_metrics_service_factory.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/skus/skus_service_factory.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/sync/brave_sync_alerts_service_factory.h"
 #include "brave/browser/url_sanitizer/url_sanitizer_service_factory.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/webcompat_reporter/webcompat_reporter_service_factory.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/ai_chat/core/common/buildflags/buildflags.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_account/features.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_ads/buildflags/buildflags.h"
 #include "brave/components/brave_news/common/buildflags/buildflags.h"
 #include "brave/components/brave_perf_predictor/browser/named_third_party_registry_factory.h"
@@ -43,6 +65,7 @@
 #include "brave/components/tor/buildflags/buildflags.h"
 #include "brave/components/traffic_control/buildflags/buildflags.h"
 #include "brave/components/web_discovery/buildflags/buildflags.h"
+#include "extensions/buildflags/buildflags.h"
 
 #if BUILDFLAG(ENABLE_AI_CHAT)
 #include "brave/browser/ai_chat/ai_chat_service_factory.h"
@@ -72,7 +95,9 @@
 #include "chrome/browser/ui/tabs/features.h"
 #else
 #include "brave/browser/brave_shields/filter_list_service_factory.h"
+#if BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
 #include "brave/browser/ntp_background/android/ntp_background_images_bridge.h"
+#endif  // BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
 #endif
 
 #if BUILDFLAG(ENABLE_TOR)
@@ -137,11 +162,15 @@
 namespace brave {
 
 void EnsureBrowserContextKeyedServiceFactoriesBuilt() {
+#if !BUILDFLAG(IS_ANDROID)
   brave_adaptive_captcha::BraveAdaptiveCaptchaServiceFactory::GetInstance();
+#endif  // !BUILDFLAG(IS_ANDROID)
 #if BUILDFLAG(ENABLE_BRAVE_ADS)
   brave_ads::AdsServiceFactory::GetInstance();
 #endif  // BUILDFLAG(ENABLE_BRAVE_ADS)
+#if !BUILDFLAG(IS_ANDROID)
   brave_origin::BraveOriginServiceFactory::GetInstance();
+#endif  // !BUILDFLAG(IS_ANDROID)
   brave_perf_predictor::NamedThirdPartyRegistryFactory::GetInstance();
 #if BUILDFLAG(ENABLE_BRAVE_REWARDS)
   brave_rewards::RewardsServiceFactory::GetInstance();
@@ -151,19 +180,29 @@ void EnsureBrowserContextKeyedServiceFactoriesBuilt() {
   brave::URLSanitizerServiceFactory::GetInstance();
   BraveRendererUpdaterFactory::GetInstance();
   SearchEngineProviderServiceFactory::GetInstance();
+#if !BUILDFLAG(IS_ANDROID)
   misc_metrics::ProfileMiscMetricsServiceFactory::GetInstance();
+#endif  // !BUILDFLAG(IS_ANDROID)
 #if BUILDFLAG(ENABLE_TOR)
   TorProfileServiceFactory::GetInstance();
 #endif
+#if !BUILDFLAG(IS_ANDROID)
   SearchEngineTrackerFactory::GetInstance();
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
   ntp_background_images::ViewCounterServiceFactory::GetInstance();
+#endif  // BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
 
 #if BUILDFLAG(IS_ANDROID)
   brave_shields::FilterListServiceFactory::GetInstance();
+#if BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
   ntp_background_images::NTPBackgroundImagesBridgeFactory::GetInstance();
+#endif  // BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
 #endif
 
+#if !BUILDFLAG(IS_ANDROID)
   webcompat_reporter::WebcompatReporterServiceFactory::GetInstance();
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 #if BUILDFLAG(ENABLE_BRAVE_NEWS)
   brave_news::BraveNewsControllerFactory::GetInstance();
@@ -187,7 +226,9 @@ void EnsureBrowserContextKeyedServiceFactoriesBuilt() {
 
   EphemeralStorageServiceFactory::GetInstance();
   PermissionLifetimeManagerFactory::GetInstance();
+#if !BUILDFLAG(IS_ANDROID)
   skus::SkusServiceFactory::GetInstance();
+#endif  // !BUILDFLAG(IS_ANDROID)
 #if BUILDFLAG(ENABLE_BRAVE_VPN)
   brave_vpn::BraveVpnServiceFactory::GetInstance();
 #endif
@@ -240,9 +281,11 @@ void EnsureBrowserContextKeyedServiceFactoriesBuilt() {
   web_discovery::WebDiscoveryServiceFactory::GetInstance();
 #endif
 
+#if !BUILDFLAG(IS_ANDROID)
   if (brave_account::features::IsBraveAccountEnabled()) {
     brave_account::BraveAccountServiceFactory::GetInstance();
   }
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 #if BUILDFLAG(ENABLE_EMAIL_ALIASES)
   if (email_aliases::features::IsEmailAliasesEnabled()) {
@@ -260,7 +303,9 @@ void EnsureBrowserContextKeyedServiceFactoriesBuilt() {
   PsstReporterServiceFactory::GetInstance();
 #endif  // BUILDFLAG(ENABLE_PSST)
 
+#if !BUILDFLAG(IS_ANDROID)
   serp_metrics::SerpMetricsServiceFactory::GetInstance();
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 #if !BUILDFLAG(IS_ANDROID)
   WorkspaceServiceFactory::GetInstance();

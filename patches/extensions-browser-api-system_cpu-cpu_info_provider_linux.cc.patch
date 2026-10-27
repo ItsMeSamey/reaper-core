@@ -1,0 +1,73 @@
+diff --git a/extensions/browser/api/system_cpu/cpu_info_provider_linux.cc b/extensions/browser/api/system_cpu/cpu_info_provider_linux.cc
+index 05ff5d9ed4063e5ba3bfbc2abc55a075fdfe6cf3..5f57e180c79c6d3d133dec5374d2a448e8715b5d 100644
+--- a/extensions/browser/api/system_cpu/cpu_info_provider_linux.cc
++++ b/extensions/browser/api/system_cpu/cpu_info_provider_linux.cc
+@@ -14,6 +14,10 @@
+ #include "base/files/file_util.h"
+ #include "base/format_macros.h"
+ 
++#if BUILDFLAG(IS_ANDROID)
++#include <unistd.h>
++#endif
++
+ namespace extensions {
+ 
+ namespace {
+@@ -42,6 +46,9 @@ bool CpuInfoProvider::QueryCpuTimePerProcessor(
+     return false;
+   }
+ 
++#if BUILDFLAG(IS_ANDROID)
++  return ParseCpuTimeForAndroid(contents, sysconf(_SC_CLK_TCK), infos);
++#else
+   std::istringstream iss(contents);
+   std::string line;
+ 
+@@ -73,7 +80,47 @@ bool CpuInfoProvider::QueryCpuTimePerProcessor(
+         static_cast<double>(sys + user + nice + idle);
+   }
+ 
++  return true;
++#endif  // BUILDFLAG(IS_ANDROID)
++}
++
++#if BUILDFLAG(IS_ANDROID)
++bool CpuInfoProvider::ParseCpuTimeForAndroid(
++    const std::string& contents,
++    long ticks_per_second,
++    std::vector<api::system_cpu::ProcessorInfo>* infos) {
++  DCHECK(infos);
++  if (ticks_per_second <= 0) {
++    return false;
++  }
++  const double milliseconds_per_tick = 1000.0 / ticks_per_second;
++  std::istringstream iss(contents);
++  std::string line;
++  // The first row aggregates all processors; the API reports each cpuN row.
++  std::getline(iss, line);
++  while (std::getline(iss, line)) {
++    if (line.compare(0, 3, "cpu") != 0) {
++      continue;
++    }
++    uint64_t user = 0, nice = 0, sys = 0, idle = 0;
++    uint32_t pindex = 0;
++    int vals = UNSAFE_TODO(sscanf(line.c_str(),
++                                "cpu%" SCNu32 " %" SCNu64 " %" SCNu64
++                                " %" SCNu64 " %" SCNu64,
++                                &pindex, &user, &nice, &sys, &idle));
++    if (vals != 5 || pindex >= infos->size()) {
++      return false;
++    }
++    auto& usage = infos->at(pindex).usage;
++    // Convert before adding so valid uint64 counters cannot wrap their sums.
++    usage.kernel = static_cast<double>(sys) * milliseconds_per_tick;
++    usage.user = (static_cast<double>(user) + static_cast<double>(nice)) *
++                 milliseconds_per_tick;
++    usage.idle = static_cast<double>(idle) * milliseconds_per_tick;
++    usage.total = usage.user + usage.kernel + usage.idle;
++  }
+   return true;
+ }
++#endif  // BUILDFLAG(IS_ANDROID)
+ 
+ }  // namespace extensions

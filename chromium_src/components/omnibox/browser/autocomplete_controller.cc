@@ -12,7 +12,6 @@
 #include "base/check.h"
 #include "base/memory/scoped_refptr.h"
 #include "brave/components/ai_chat/core/common/buildflags/buildflags.h"
-#include "brave/components/brave_search_conversion/utils.h"
 #include "brave/components/commander/common/buildflags/buildflags.h"
 #include "brave/components/omnibox/browser/brave_bookmark_provider.h"
 #include "brave/components/omnibox/browser/brave_history_quick_provider.h"
@@ -21,14 +20,19 @@
 #include "brave/components/omnibox/browser/brave_on_device_head_provider.h"
 #include "brave/components/omnibox/browser/brave_search_provider.h"
 #include "brave/components/omnibox/browser/brave_shortcuts_provider.h"
-#include "brave/components/omnibox/browser/promotion_provider.h"
-#include "brave/components/omnibox/browser/promotion_utils.h"
+#include "build/build_config.h"
 #include "components/omnibox/browser/autocomplete_input.h"
 #include "components/omnibox/browser/autocomplete_match.h"
 #include "components/omnibox/browser/calculator_provider.h"
 #include "components/omnibox/browser/clipboard_provider.h"
 #include "components/omnibox/browser/history_cluster_provider.h"
 #include "components/omnibox/browser/history_fuzzy_provider.h"
+
+#if !BUILDFLAG(IS_ANDROID)
+#include "brave/components/brave_search_conversion/utils.h"
+#include "brave/components/omnibox/browser/promotion_provider.h"
+#include "brave/components/omnibox/browser/promotion_utils.h"
+#endif
 
 #if BUILDFLAG(ENABLE_AI_CHAT)
 #include "brave/components/ai_chat/core/browser/utils.h"
@@ -43,7 +47,9 @@
 #include "brave/components/omnibox/browser/commander_provider.h"
 #endif
 
+#if !BUILDFLAG(IS_ANDROID)
 using brave_search_conversion::IsBraveSearchConversionFeatureEnabled;
+#endif
 
 namespace {
 // If this input has triggered the commander then only show commander results.
@@ -111,6 +117,14 @@ void MaybeShowLeoMatch(AutocompleteResult* result) {
 #define BookmarkProvider BraveBookmarkProvider
 #define ShortcutsProvider BraveShortcutsProvider
 #define OnDeviceHeadProvider BraveOnDeviceHeadProvider
+#if BUILDFLAG(IS_ANDROID)
+#define BRAVE_AUTOCOMPLETE_CONTROLLER_AUTOCOMPLETE_CONTROLLER \
+  MaybeAddCommanderProvider(providers_, this);               \
+  IF_BUILDFLAG(ENABLE_AI_CHAT, MaybeAddLeoProvider(providers_, this);)
+#define BRAVE_AUTOCOMPLETE_CONTROLLER_UPDATE_RESULT                        \
+  IF_BUILDFLAG(ENABLE_AI_CHAT, ai_chat::MaybeShowLeoMatch(&internal_result_);) \
+  MaybeShowCommands(&internal_result_, input_);
+#else
 #define BRAVE_AUTOCOMPLETE_CONTROLLER_AUTOCOMPLETE_CONTROLLER          \
   MaybeAddCommanderProvider(providers_, this);                         \
   IF_BUILDFLAG(ENABLE_AI_CHAT, MaybeAddLeoProvider(providers_, this);) \
@@ -125,6 +139,8 @@ void MaybeShowLeoMatch(AutocompleteResult* result) {
   IF_BUILDFLAG(ENABLE_AI_CHAT, ai_chat::MaybeShowLeoMatch(&internal_result_);) \
   SortBraveSearchPromotionMatch(&internal_result_);                            \
   MaybeShowCommands(&internal_result_, input_);
+
+#endif  // BUILDFLAG(IS_ANDROID)
 
 #include <components/omnibox/browser/autocomplete_controller.cc>
 

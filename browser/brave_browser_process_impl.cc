@@ -3,7 +3,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+#include "build/build_config.h"
+
 #include "brave/browser/brave_browser_process_impl.h"
+
+#include "brave/components/ntp_background_images/buildflags/buildflags.h"
 
 #include <memory>
 #include <string>
@@ -14,26 +18,38 @@
 #include "base/memory/scoped_refptr.h"
 #include "base/path_service.h"
 #include "base/task/thread_pool.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/brave_origin/brave_origin_service_factory.h"
 #include "brave/browser/brave_referrals/referrals_service_delegate.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/brave_shields/ad_block_subscription_download_manager_getter.h"
 #include "brave/browser/brave_stats/buildflags.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/brave_stats/first_run_util.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/component_updater/brave_component_updater_configurator.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/misc_metrics/process_misc_metrics.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/net/brave_system_request_handler.h"
 #include "brave/browser/profiles/brave_profile_manager.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/serp_metrics/serp_metrics_p3a.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/common/brave_channel_info.h"
 #include "brave/components/ai_chat/core/common/buildflags/buildflags.h"
 #include "brave/components/brave_component_updater/browser/brave_component_updater_delegate.h"
 #include "brave/components/brave_component_updater/browser/local_data_files_service.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_origin/brave_origin_policy_manager.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_policy/ad_block_only_mode/ad_block_only_mode_policy_manager.h"
 #include "brave/components/brave_shields/content/browser/ad_block_service.h"
 #include "brave/components/brave_shields/content/browser/ad_block_subscription_service_manager.h"
 #include "brave/components/brave_shields/core/common/features.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_stats/browser/brave_stats_updater_util.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_sync/network_time_helper.h"
 #include "brave/components/brave_wallet/common/buildflags/buildflags.h"
 #include "brave/components/constants/pref_names.h"
@@ -41,14 +57,21 @@
 #include "brave/components/debounce/core/common/features.h"
 #include "brave/components/https_upgrade_exceptions/browser/https_upgrade_exceptions_service.h"
 #include "brave/components/local_ai/buildflags/buildflags.h"
+#if BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
 #include "brave/components/ntp_background_images/browser/ntp_background_images_service.h"
+#endif  // BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/p3a/histograms_braveizer.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/p3a/p3a_config.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/p3a/p3a_service.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/webcompat/content/browser/webcompat_exceptions_service.h"
 #include "brave/components/webcompat/core/common/features.h"
 #include "brave/services/network/public/cpp/system_request_handler.h"
-#include "build/build_config.h"
 #include "chrome/browser/component_updater/component_updater_utils.h"
 #include "chrome/browser/net/system_network_context_manager.h"
 #include "chrome/browser/obsolete_system/obsolete_system.h"
@@ -76,7 +99,9 @@
 #endif
 
 #if BUILDFLAG(ENABLE_BRAVE_ADS)
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/brave_ads/analytics/p3a/brave_stats_helper.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_ads/browser/component_updater/resource_component.h"
 #endif
 
@@ -115,7 +140,7 @@
 #include "brave/components/brave_vpn/browser/connection/brave_vpn_connection_manager.h"
 #endif
 
-#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_ANDROID)
+#if BUILDFLAG(IS_WIN)
 #include "brave/browser/day_zero_browser_ui_expt/day_zero_browser_ui_expt_manager.h"
 #endif
 
@@ -134,7 +159,9 @@
 #endif
 
 using brave_component_updater::BraveComponent;
+#if BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
 using ntp_background_images::NTPBackgroundImagesService;
+#endif  // BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
 
 namespace {
 
@@ -152,12 +179,14 @@ void InitSystemRequestHandlerCallback() {
 using content::BrowserThread;
 
 BraveBrowserProcessImpl::~BraveBrowserProcessImpl() {
+#if !BUILDFLAG(IS_ANDROID)
   // StartTearDown is skipped on early startup exits, leaving P3AService
   // observing process_misc_metrics_, which is destroyed first. Members are
   // still alive here, so tear down while the observed object is valid.
   if (p3a_service_) {
     p3a_service_->StartTeardown();
   }
+#endif  // !BUILDFLAG(IS_ANDROID)
   profile_manager_.reset();
 }
 
@@ -166,6 +195,7 @@ BraveBrowserProcessImpl::BraveBrowserProcessImpl(StartupData* startup_data)
   g_browser_process = this;
   g_brave_browser_process = this;
 
+#if !BUILDFLAG(IS_ANDROID)
   // Disabled on mobile platforms, see for instance issues/6176
   // Create P3A Service early to catch more histograms. The full initialization
   // should be started once browser process impl is ready.
@@ -174,6 +204,7 @@ BraveBrowserProcessImpl::BraveBrowserProcessImpl(StartupData* startup_data)
 
   // early initialize misc metrics
   process_misc_metrics();
+#endif  // !BUILDFLAG(IS_ANDROID)
 }
 
 void BraveBrowserProcessImpl::Init() {
@@ -199,7 +230,7 @@ void BraveBrowserProcessImpl::Init() {
                           base::Unretained(this)));
 #endif
 
-#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_ANDROID)
+#if BUILDFLAG(IS_WIN)
   day_zero_browser_ui_expt_manager_ =
       DayZeroBrowserUIExptManager::Create(profile_manager());
 #endif
@@ -231,6 +262,7 @@ void BraveBrowserProcessImpl::Init() {
   brave_policy::AdBlockOnlyModePolicyManager::GetInstance()->Init(
       local_state());
 
+#if !BUILDFLAG(IS_ANDROID)
   // Initialize BraveOriginPolicyManager here so its managed prefs are merged
   // into local state before any profile's policy connector polls
   // `BraveProfilePolicyProvider::IsInitializationComplete`. Without this,
@@ -245,6 +277,7 @@ void BraveBrowserProcessImpl::Init() {
         brave_origin::BraveOriginServiceFactory::GetProfilePolicyDefinitions(),
         local_state());
   }
+#endif  // !BUILDFLAG(IS_ANDROID)
 }
 
 void BraveBrowserProcessImpl::PreMainMessageLoopRun() {
@@ -265,10 +298,14 @@ void BraveBrowserProcessImpl::StartTearDown() {
 #if BUILDFLAG(ENABLE_BRAVE_STATS_UPDATER)
   brave_stats_updater_.reset();
 #endif
+#if !BUILDFLAG(IS_ANDROID)
   brave_referrals_service_.reset();
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
   if (ntp_background_images_service_) {
     ntp_background_images_service_->StartTearDown();
   }
+#endif  // BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
   if (process_misc_metrics_) {
     process_misc_metrics_->serp_metrics_p3a()->Shutdown();
   }
@@ -292,8 +329,10 @@ void BraveBrowserProcessImpl::StartTearDown() {
   local_ai::ShutdownLocalModelsComponentRegistration();
   local_ai::ShutdownOnDeviceSpeechModelsComponentRegistration();
 #endif
+#if !BUILDFLAG(IS_ANDROID)
   // Reset BraveOriginPolicyManager to prevent dangling pointer to local_state_
   brave_origin::BraveOriginPolicyManager::GetInstance()->Shutdown();
+#endif  // !BUILDFLAG(IS_ANDROID)
   brave_policy::AdBlockOnlyModePolicyManager::GetInstance()->Shutdown();
   brave_sync::NetworkTimeHelper::GetInstance()->Shutdown();
 #if BUILDFLAG(ENABLE_TOR)
@@ -330,8 +369,10 @@ ProfileManager* BraveBrowserProcessImpl::profile_manager() {
 void BraveBrowserProcessImpl::StartBraveServices() {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
 
+#if !BUILDFLAG(IS_ANDROID)
   process_misc_metrics()->serp_metrics_p3a()->Init(
       p3a_service(), profile_manager()->GetProfileAttributesStorage());
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 #if BUILDFLAG(ENABLE_BRAVE_ADS)
   resource_component();
@@ -378,6 +419,7 @@ brave_shields::AdBlockService* BraveBrowserProcessImpl::ad_block_service() {
   return ad_block_service_.get();
 }
 
+#if BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
 NTPBackgroundImagesService*
 BraveBrowserProcessImpl::ntp_background_images_service() {
   if (!ntp_background_images_service_) {
@@ -389,6 +431,7 @@ BraveBrowserProcessImpl::ntp_background_images_service() {
 
   return ntp_background_images_service_.get();
 }
+#endif  // BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
 
 https_upgrade_exceptions::HttpsUpgradeExceptionsService*
 BraveBrowserProcessImpl::https_upgrade_exceptions_service() {
@@ -496,6 +539,7 @@ void BraveBrowserProcessImpl::OnTorEnabledChanged() {
 }
 #endif
 
+#if !BUILDFLAG(IS_ANDROID)
 p3a::P3AService* BraveBrowserProcessImpl::p3a_service() {
   if (p3a_service_) {
     return p3a_service_.get();
@@ -507,7 +551,9 @@ p3a::P3AService* BraveBrowserProcessImpl::p3a_service() {
   p3a_service()->InitCallbacks();
   return p3a_service_.get();
 }
+#endif  // !BUILDFLAG(IS_ANDROID)
 
+#if !BUILDFLAG(IS_ANDROID)
 brave::BraveReferralsService*
 BraveBrowserProcessImpl::brave_referrals_service() {
   if (!brave_referrals_service_) {
@@ -520,6 +566,7 @@ BraveBrowserProcessImpl::brave_referrals_service() {
   }
   return brave_referrals_service_.get();
 }
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 #if BUILDFLAG(ENABLE_BRAVE_STATS_UPDATER)
 brave_stats::BraveStatsUpdater* BraveBrowserProcessImpl::brave_stats_updater() {
@@ -587,6 +634,7 @@ BraveBrowserProcessImpl::brave_vpn_connection_manager() {
 }
 #endif
 
+#if !BUILDFLAG(IS_ANDROID)
 misc_metrics::ProcessMiscMetrics*
 BraveBrowserProcessImpl::process_misc_metrics() {
   if (!process_misc_metrics_) {
@@ -599,3 +647,4 @@ BraveBrowserProcessImpl::process_misc_metrics() {
   }
   return process_misc_metrics_.get();
 }
+#endif  // !BUILDFLAG(IS_ANDROID)

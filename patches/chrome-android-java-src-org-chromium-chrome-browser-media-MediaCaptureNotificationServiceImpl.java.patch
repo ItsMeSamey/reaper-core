@@ -1,0 +1,191 @@
+diff --git a/chrome/android/java/src/org/chromium/chrome/browser/media/MediaCaptureNotificationServiceImpl.java b/chrome/android/java/src/org/chromium/chrome/browser/media/MediaCaptureNotificationServiceImpl.java
+--- a/chrome/android/java/src/org/chromium/chrome/browser/media/MediaCaptureNotificationServiceImpl.java
++++ b/chrome/android/java/src/org/chromium/chrome/browser/media/MediaCaptureNotificationServiceImpl.java
+@@ -128,6 +128,11 @@
+             if (ACTION_MEDIA_CAPTURE_UPDATE.equals(action)) {
+                 updateNotification(notificationId, mediaTypes, url, isIncognito, startId);
+             } else if (ACTION_SCREEN_CAPTURE_STOP.equals(action)) {
++                if (notificationId < 0) {
++                    // Extension pages may have no Tab. These IDs identify one consent grant.
++                    ScreenCapture.cancelPick(-notificationId);
++                    return super.onStartCommand(intent, flags, startId);
++                }
+                 // Notify native to stop capture when the STOP button in notification
+                 // is clicked.
+                 final int tabId = getTabIdFromNotificationId(notificationId);
+@@ -278,7 +283,12 @@
+                         //    required type.
+                         Pair<Integer, NotificationWrapper> latest =
+                                 mNotifications.get(mNotifications.size() - 1);
+-                        startOrUpdateForegroundService(latest.first, latest.second);
++                        if (!startOrUpdateForegroundService(latest.first, latest.second)) {
++                            for (int id : new ArrayList<>(mNotificationsType.keySet())) {
++                                stopCaptureForNotification(id);
++                            }
++                            stopForegroundService();
++                        }
+                     }
+                 }
+             } else {
+@@ -291,6 +301,19 @@
+         }
+     }
+ 
++    private void stopCaptureForNotification(int notificationId) {
++        if (notificationId < 0) {
++            ScreenCapture.cancelPick(-notificationId);
++            return;
++        }
++        Tab tab =
++                TabWindowManagerSingleton.getInstance()
++                        .getTabById(getTabIdFromNotificationId(notificationId));
++        if (tab == null || tab.getWebContents() == null) return;
++        MediaCaptureDevicesDispatcherAndroid.notifyTabCapturingStopped(tab.getWebContents());
++        MediaCaptureDevicesDispatcherAndroid.notifyDisplayMediaStopped(tab.getWebContents());
++    }
++
+     private @MediaType int getPrimaryMediaType(Set<@MediaType Integer> mediaTypes) {
+         // We preferentially put the tab/window/screen capture types first because they need a stop
+         // intent attached to the notification. We only support one notification for desktop for
+@@ -337,9 +360,11 @@
+                                 notificationId));
+ 
+         Intent tabIntent =
+-                IntentHandler.createTrustedBringTabToFrontIntent(
+-                        getTabIdFromNotificationId(notificationId),
+-                        IntentHandler.BringToFrontSource.NOTIFICATION);
++                notificationId < 0
++                        ? null
++                        : IntentHandler.createTrustedBringTabToFrontIntent(
++                                getTabIdFromNotificationId(notificationId),
++                                IntentHandler.BringToFrontSource.NOTIFICATION);
+         PendingIntentProvider contentIntent =
+                 tabIntent == null
+                         ? null
+@@ -363,7 +388,11 @@
+         if (isBackgroundMediaCapturingEnabled()) {
+             // For large screen device, we use the latest notification to start or update
+             // the foreground service.
+-            startOrUpdateForegroundService(notificationId, notification);
++            if (!startOrUpdateForegroundService(notificationId, notification)) {
++                mNotificationsType.remove(notificationId);
++                stopCaptureForNotification(notificationId);
++                return;
++            }
+             mNotifications.add(new Pair<>(notificationId, notification));
+         } else {
+             mNotificationManager.notify(notification);
+@@ -398,17 +427,21 @@
+         }
+ 
+         int foregroundServiceType = 0;
+-        if (ActivityCompat.checkSelfPermission(getService(), Manifest.permission.CAMERA)
+-                == PackageManager.PERMISSION_GRANTED) {
++        if ((allMediaTypes.contains(MediaType.VIDEO_ONLY)
++                        || allMediaTypes.contains(MediaType.AUDIO_AND_VIDEO))
++                && ActivityCompat.checkSelfPermission(getService(), Manifest.permission.CAMERA)
++                        == PackageManager.PERMISSION_GRANTED) {
+             foregroundServiceType |= ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA;
+         }
+-        if (ActivityCompat.checkSelfPermission(getService(), Manifest.permission.RECORD_AUDIO)
+-                == PackageManager.PERMISSION_GRANTED) {
++        if ((allMediaTypes.contains(MediaType.AUDIO_ONLY)
++                        || allMediaTypes.contains(MediaType.AUDIO_AND_VIDEO))
++                && ActivityCompat.checkSelfPermission(
++                                getService(), Manifest.permission.RECORD_AUDIO)
++                        == PackageManager.PERMISSION_GRANTED) {
+             foregroundServiceType |= ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE;
+         }
+         if (allMediaTypes.contains(MediaType.TAB_CAPTURE)) {
+             foregroundServiceType |= ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK;
+-            foregroundServiceType |= ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION;
+         }
+         if (allMediaTypes.contains(MediaType.SCREEN_CAPTURE)
+                 || allMediaTypes.contains(MediaType.WINDOW_CAPTURE)) {
+@@ -417,20 +450,26 @@
+         return foregroundServiceType;
+     }
+ 
+-    private void startOrUpdateForegroundService(
++    private boolean startOrUpdateForegroundService(
+             int notificationId, NotificationWrapper notification) {
+-        mForgroundServiceType = getRequiredForegroundServiceType();
+-        ForegroundServiceUtils.getInstance()
+-                .startForeground(
+-                        getService(),
+-                        notificationId,
+-                        notification.getNotification(),
+-                        mForgroundServiceType);
+-
++        int requiredType = getRequiredForegroundServiceType();
++        try {
++            ForegroundServiceUtils.getInstance()
++                    .startForeground(
++                            getService(),
++                            notificationId,
++                            notification.getNotification(),
++                            requiredType);
++        } catch (RuntimeException error) {
++            Log.w(TAG, "Unable to start capture foreground service", error);
++            return false;
++        }
++        mForgroundServiceType = requiredType;
+         mStartedForegroundService = true;
+         boolean isRunningMediaProjection =
+                 (mForgroundServiceType & ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION) != 0;
+         ScreenCapture.onForegroundServiceRunning(isRunningMediaProjection);
++        return true;
+     }
+ 
+     private void stopForegroundService() {
+@@ -468,6 +507,10 @@
+ 
+     @Override
+     public void onDestroy() {
++        // Never leave a projection running after its required foreground service is gone.
++        for (int notificationId : new ArrayList<>(mNotificationsType.keySet())) {
++            if (notificationId < 0) ScreenCapture.cancelPick(-notificationId);
++        }
+         cancelPreviousWebRtcNotifications();
+         stopForegroundService();
+         super.onDestroy();
+@@ -566,6 +609,39 @@
+             context.startService(intent);
+         } catch (IllegalStateException e) {
+             Log.e(TAG, "Unable to start service for update: " + e);
++        }
++    }
++
++    /** Called only after a successful public Android screen-consent result was registered. */
++    public static boolean prepareScreenCapture(Context context, int captureId) {
++        if (captureId <= 0 || !isBackgroundMediaCapturingEnabled()) return false;
++        Intent intent = new Intent(context, MediaCaptureNotificationService.class);
++        intent.setAction(ACTION_MEDIA_CAPTURE_UPDATE);
++        // Normal Tab notifications use nonnegative IDs. Keep grants from extension pages separate.
++        intent.putExtra(NOTIFICATION_ID_EXTRA, -captureId);
++        intent.putExtra(NOTIFICATION_MEDIA_IS_INCOGNITO, true);
++        intent.putIntegerArrayListExtra(
++                NOTIFICATION_MEDIA_TYPE_EXTRA, new ArrayList<>(List.of(MediaType.SCREEN_CAPTURE)));
++        try {
++            return context.startForegroundService(intent) != null;
++        } catch (RuntimeException error) {
++            Log.w(TAG, "Unable to prepare screen capture foreground service", error);
++            return false;
++        }
++    }
++
++    /** Remove the notification for an expired, rejected, stopped or destroyed consent grant. */
++    public static void finishScreenCapture(int captureId) {
++        if (captureId <= 0) return;
++        Context context = ContextUtils.getApplicationContext();
++        Intent intent = new Intent(context, MediaCaptureNotificationService.class);
++        intent.setAction(ACTION_MEDIA_CAPTURE_UPDATE);
++        intent.putExtra(NOTIFICATION_ID_EXTRA, -captureId);
++        intent.putIntegerArrayListExtra(NOTIFICATION_MEDIA_TYPE_EXTRA, new ArrayList<>());
++        try {
++            context.startService(intent);
++        } catch (RuntimeException error) {
++            Log.w(TAG, "Unable to clear screen capture foreground service", error);
+         }
+     }
+ 

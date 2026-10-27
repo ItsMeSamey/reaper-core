@@ -10,7 +10,10 @@
 #include <variant>
 
 #include "base/check.h"
+#include "build/build_config.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "base/metrics/histogram_macros.h"
+#endif
 #include "base/notreached.h"
 #include "base/task/task_traits.h"
 #include "base/task/thread_pool.h"
@@ -161,7 +164,9 @@ void DistillPage(const GURL& url,
 
   auto distill = [](const GURL& url, std::string data,
                     std::unique_ptr<Rewriter> rewriter) -> Result {
+#if !BUILDFLAG(IS_ANDROID)
     SCOPED_UMA_HISTOGRAM_TIMER("Brave.Speedreader.Distill");
+#endif
     int written = rewriter->Write(data.c_str(), data.length());
     // Error occurred
     if (written != 0) {

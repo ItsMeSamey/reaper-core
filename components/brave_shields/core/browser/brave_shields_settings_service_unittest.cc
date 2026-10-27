@@ -3,6 +3,8 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at https://mozilla.org/MPL/2.0/.
 
+#include "build/build_config.h"
+
 #include "brave/components/brave_shields/core/browser/brave_shields_settings_service.h"
 
 #include <array>
@@ -10,7 +12,9 @@
 
 #include "base/test/scoped_feature_list.h"
 #include "base/test/task_environment.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_shields/core/browser/brave_shields_p3a.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_shields/core/browser/brave_shields_test_utils.h"
 #include "brave/components/brave_shields/core/browser/brave_shields_utils.h"
 #include "brave/components/brave_shields/core/common/features.h"
@@ -33,8 +37,12 @@ class BraveShieldsSettingsServiceTest : public testing::Test {
 
   void SetUp() override {
     HostContentSettingsMap::RegisterProfilePrefs(profile_prefs_.registry());
+#if !BUILDFLAG(IS_ANDROID)
     brave_shields::RegisterShieldsP3AProfilePrefs(profile_prefs_.registry());
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
     brave_shields::RegisterShieldsP3ALocalPrefs(local_state_.registry());
+#endif  // !BUILDFLAG(IS_ANDROID)
     host_content_settings_map_ = new HostContentSettingsMap(
         &profile_prefs_, false /* is_off_the_record */,
         false /* store_last_modified */, false /* restore_session */,

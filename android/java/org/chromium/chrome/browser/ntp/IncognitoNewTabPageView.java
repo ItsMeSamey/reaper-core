@@ -10,20 +10,14 @@ import android.graphics.Canvas;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.LayerDrawable;
 import android.util.AttributeSet;
-import android.view.View;
 import android.widget.CompoundButton.OnCheckedChangeListener;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.ScrollView;
-import android.widget.TextView;
 
 import org.chromium.chrome.R;
-import org.chromium.chrome.browser.InternetConnection;
-import org.chromium.chrome.browser.vpn.utils.BraveVpnPrefUtils;
-import org.chromium.chrome.browser.vpn.utils.BraveVpnUtils;
 import org.chromium.components.content_settings.CookieControlsEnforcement;
 import org.chromium.ui.base.ViewUtils;
-import org.chromium.ui.widget.Toast;
 
 /** The New Tab Page to use in the incognito profile. */
 public class IncognitoNewTabPageView extends FrameLayout {
@@ -34,11 +28,6 @@ public class IncognitoNewTabPageView extends FrameLayout {
     private int mSnapshotWidth;
     private int mSnapshotHeight;
     private int mSnapshotScrollY;
-    private View mVpnIcon;
-    private TextView mVpnTitle;
-    private TextView mVpnDescription;
-    private TextView mVpnCta;
-    private boolean mVpnDisabledByPolicy;
 
     /** Manages the view interaction with the rest of the system. */
     interface IncognitoNewTabPageManager {
@@ -85,19 +74,11 @@ public class IncognitoNewTabPageView extends FrameLayout {
         // any shortcut causes the UrlBar to be focused. See ViewRootImpl.leaveTouchMode().
         mScrollView.setDescendantFocusability(FOCUS_BEFORE_DESCENDANTS);
 
-        mVpnIcon = findViewById(R.id.iv_third_icon);
-        mVpnTitle = findViewById(R.id.tv_third_title);
-        mVpnDescription = findViewById(R.id.tv_third_description);
-        mVpnCta = findViewById(R.id.tv_try_vpn);
-        // Hide by default, will be shown by setVpnDisabledByPolicy() if allowed
-        setVpnSectionVisibility(View.GONE);
-
         // Nala icons default to @color/icon_default; override just the icon layer
         // (not the circle) so the private NTP shows the designed purple.
         int iconTint = getContext().getColor(R.color.primitive_private_window_60);
         tintLayerListIcon(R.id.iv_first_icon, iconTint);
         tintLayerListIcon(R.id.iv_second_icon, iconTint);
-        tintLayerListIcon(R.id.iv_third_icon, iconTint);
     }
 
     private void tintLayerListIcon(int imageViewId, int tint) {
@@ -108,59 +89,6 @@ public class IncognitoNewTabPageView extends FrameLayout {
         LayerDrawable layers = (LayerDrawable) drawable.mutate();
         Drawable iconLayer = layers.getDrawable(1).mutate();
         iconLayer.setTint(tint);
-    }
-
-    private void setVpnSectionVisibility(int visibility) {
-        if (mVpnIcon != null) mVpnIcon.setVisibility(visibility);
-        if (mVpnTitle != null) mVpnTitle.setVisibility(visibility);
-        if (mVpnDescription != null) mVpnDescription.setVisibility(visibility);
-        if (mVpnCta != null) mVpnCta.setVisibility(visibility);
-    }
-
-    /**
-     * Sets whether VPN is disabled by policy and updates VPN CTA visibility accordingly. Called
-     * from BraveIncognitoNewTabPage after the view is inflated.
-     */
-    public void setVpnDisabledByPolicy(boolean disabledByPolicy) {
-        mVpnDisabledByPolicy = disabledByPolicy;
-        updateVpnSectionVisibility();
-    }
-
-    private void updateVpnSectionVisibility() {
-        // If policy disables VPN, hide entire section
-        if (mVpnDisabledByPolicy) {
-            setVpnSectionVisibility(View.GONE);
-            return;
-        }
-
-        // Policy allows VPN - show icon/title/description
-        if (mVpnIcon != null) mVpnIcon.setVisibility(View.VISIBLE);
-        if (mVpnTitle != null) mVpnTitle.setVisibility(View.VISIBLE);
-        if (mVpnDescription != null) mVpnDescription.setVisibility(View.VISIBLE);
-
-        if (mVpnCta == null) {
-            return;
-        }
-
-        // Show CTA only if VPN is supported and user hasn't purchased
-        boolean shouldShowCta =
-                BraveVpnUtils.isVpnFeatureSupported(getContext())
-                        && !BraveVpnPrefUtils.isSubscriptionPurchase();
-
-        if (shouldShowCta) {
-            mVpnCta.setVisibility(View.VISIBLE);
-            mVpnCta.setOnClickListener(
-                    v -> {
-                        if (!InternetConnection.isNetworkAvailable(getContext())) {
-                            Toast.makeText(getContext(), R.string.no_internet, Toast.LENGTH_SHORT)
-                                    .show();
-                        } else {
-                            BraveVpnUtils.openBraveVpnPlansActivity(getContext());
-                        }
-                    });
-        } else {
-            mVpnCta.setVisibility(View.GONE);
-        }
     }
 
     /**

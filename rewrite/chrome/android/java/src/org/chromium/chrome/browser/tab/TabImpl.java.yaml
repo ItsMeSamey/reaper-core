@@ -1,0 +1,451 @@
+# Android R build import and nested type-annotation corrections.
+substitutions:
+- description: Query the compiled extension backend for the Web Store UA exception.
+  regex:
+    pattern: import org.chromium.chrome.browser.tabwindow.TabWindowManager;
+    replace: 'import org.chromium.chrome.browser.tabwindow.TabWindowManager;
+
+      import org.chromium.chrome.browser.ui.extensions.ExtensionUi;'
+- description: Use Chromium's desktop UA and client hints only on the HTTPS Web Store host.
+  regex:
+    pattern: "        boolean shouldRequestDesktopSite =\n                DesktopSiteUtils.shouldOverrideDesktopSite(mProfile, url, getContext());"
+    replace: "        // The Web Store serves a non-installable marketing page to mobile UAs.\n        // Reuse the normal desktop UA + client-hint override for this exact host.\n        boolean isExtensionStore =\n                url != null\n                        && \"https\".equals(url.getScheme())\n                        && \"chromewebstore.google.com\".equals(url.getHost())\n                        && ExtensionUi.isEnabled(mProfile);\n        boolean shouldRequestDesktopSite =\n                isExtensionStore\n                        || DesktopSiteUtils.shouldOverrideDesktopSite(mProfile, url, getContext());"
+- description: Keep active native split mirror separate from the closing snapshot
+  count: 1
+  regex:
+    re_pattern: \ \ \ \ private\ @Nullable\ Token\ mTabGroupId;
+    replace: "    private @Nullable Token mTabGroupId;\n    private @Nullable Token mSplitTabId;\n    private int mSplitLayout;\n    private double mSplitRatio = 0.5;\n    private int mSplitPosition = -1;\n    private @Nullable Tab.SplitData mClosingSplitData;"
+- description: Update persisted split fields only through native membership notifications and retain historical values through unsplit
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ @Override\
+
+      \ \ \ \ @CalledByNative\
+
+      \ \ \ \ public\ @TabUserAgent\ int\ getUserAgent\(\)'
+    replace: "    @Override\n    public @Nullable Token getSplitTabId() { return mSplitTabId; }\n\n    @Override\n    public int getSplitLayout() { return mSplitLayout; }\n\n    @Override\n    public double getSplitRatio() { return mSplitRatio; }\n\n    @Override\n    public int getSplitPosition() { return mSplitPosition; }\n\n    @Override\n    @CalledByNative\n    public void setSplitData(@JniType(\"std::optional<base::Token>\") @Nullable Token token, int layout, double ratio, int position) {\n        if (isDestroyed()) return;\n        if (!Tab.SplitData.isValid(token, layout, ratio, position)) {\n            token = null;\n            layout = 0;\n            ratio = 0.5;\n            position = -1;\n        }\n        if (Objects.equals(mSplitTabId, token) && mSplitLayout == layout\n                && Double.compare(mSplitRatio, ratio) == 0 && mSplitPosition == position) return;\n        mSplitTabId = token;\n        mSplitLayout = layout;\n        mSplitRatio = ratio;\n        mSplitPosition = position;\n        for (TabObserver observer : mObservers) observer.onSplitDataChanged(this);\n    }\n\n    @Override\n    public void captureSplitDataForClosure() {\n        Token token = mSplitTabId;\n        mClosingSplitData = token == null ? null\n                : new Tab.SplitData(token, mSplitLayout, mSplitRatio, mSplitPosition);\n    }\n\n    @Override\n    public @Nullable Tab.SplitData getSplitDataForClosure() { return mClosingSplitData; }\n\n    @Override\n    public void clearSplitDataForClosure() { mClosingSplitData = null; }\n\n    @CalledByNative\n    private @JniType(\"std::optional<base::Token>\") @Nullable Token getHistoricalSplitTabId() {\n        return mClosingSplitData == null ? mSplitTabId : mClosingSplitData.getToken();\n    }\n\n    @CalledByNative\n    private int getHistoricalSplitLayout() {\n        return mClosingSplitData == null ? mSplitLayout : mClosingSplitData.getLayout();\n    }\n\n    @CalledByNative\n    private double getHistoricalSplitRatio() {\n        return mClosingSplitData == null ? mSplitRatio : mClosingSplitData.getRatio();\n    }\n\n    @CalledByNative\n    private int getHistoricalSplitPosition() {\n        return mClosingSplitData == null ? mSplitPosition : mClosingSplitData.getPosition();\n    }\n\n    @Override\n    @CalledByNative\n    public @TabUserAgent int getUserAgent()"
+- description: Load split metadata while frozen; the persistent-store barrier rebuilds actual native pairs
+  count: 1
+  regex:
+    re_pattern: \ \ \ \ \ \ \ \ setIsPinned\(state\.isPinned\);
+    replace: "        setIsPinned(state.isPinned);\n        setSplitData(state.splitTabId, state.splitLayout, state.splitRatio, state.splitPosition);"
+- description: Guard visibility observers that synchronously hide the same tab
+  count: 1
+  regex:
+    re_pattern: \ \ \ \ private\ boolean\ mIsHidden\ =\ true;
+    replace: "    private boolean mIsHidden = true;\n    private boolean mDispatchingWillHide;"
+- description: Never show a tab destroyed by a visibility observer
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ TraceEvent\.begin\("Tab\.show"\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(!isHidden\(\)\)\ \{'
+    replace: "            TraceEvent.begin(\"Tab.show\");\n            if (isDestroyed()) return;\n            if (!isHidden()) {"
+- description: Notify actual visibility before reentrant loading or Java observers can hide the tab
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ mIsHidden\ =\ false;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ updateInteractableState\(\);'
+    replace: "            mIsHidden = false;\n            if (mNativeTabAndroid != 0) {\n                // Visible split panes can remain inactive. Notify after the visibility transition,\n                // independently of the current-tab supplier's activation notifications.\n                TabImplJni.get().sendDidBecomeVisibleUpdate(mNativeTabAndroid);\n                if (isDestroyed() || isHidden() || mNativeTabAndroid == 0) return;\n            }\n            updateInteractableState();"
+- description: Notify before the hide transition exactly once, without retaining a destroyed native peer
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ if\ \(isHidden\(\)\)\ return;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mIsHidden\ =\ true;'
+    replace: "            if (isDestroyed() || isHidden() || mDispatchingWillHide) return;\n            if (mNativeTabAndroid != 0) {\n                // The will-hide callback must observe the old visible state. Reentrant hide calls\n                // are already covered by this pending transition.\n                mDispatchingWillHide = true;\n                try {\n                    TabImplJni.get().sendWillBecomeHiddenUpdate(mNativeTabAndroid);\n                } finally {\n                    mDispatchingWillHide = false;\n                }\n                if (isDestroyed() || isHidden()) return;\n            }\n            mIsHidden = true;"
+- description: Keep the native visibility and activation notification entrypoints separate
+  count: 1
+  regex:
+    re_pattern: \ \ \ \ \ \ \ \ void\ sendWillDeactivateUpdate\(long\ nativeTabAndroid\);
+    replace: "        void sendWillDeactivateUpdate(long nativeTabAndroid);\n\n        void sendDidBecomeVisibleUpdate(long nativeTabAndroid);\n\n        void sendWillBecomeHiddenUpdate(long nativeTabAndroid);"
+- description: Format modified Android split persistence Java sources
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ private\ boolean\ mIsBeingRestored;\
+
+      \
+
+      \ \ \ \ /\*\*\ Whether\ or\ not\ the\ Tab\ is\ currently\ visible\ to\ the\ user\.\ \*/\
+
+      \ \ \ \ private\ boolean\ mIsHidden\ =\ true;\
+
+      \ \ \ \ private\ boolean\ mDispatchingWillHide;\
+
+      \
+
+      \ \ \ \ /\*\*\ Called\ when\ the\ current\ window''s\ occlusion\ changes\.\ \*/\
+
+      \ \ \ \ private\ final\ Callback<Boolean>\ mOcclusionCallback\ =\ \(v\)\ \->\ updateWebContentsVisibility\(\);\
+
+      '
+    replace: "    private boolean mIsBeingRestored;\n\n    /** Whether or not the Tab is currently visible to the user. */\n    private boolean mIsHidden = true;\n\n    private boolean mDispatchingWillHide;\n\n    /** Called when the current window's occlusion changes. */\n    private final Callback<Boolean> mOcclusionCallback = (v) -> updateWebContentsVisibility();\n"
+- description: Format modified Android split persistence Java sources
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ @Override\
+
+      \ \ \ \ public\ @Nullable\ Token\ getSplitTabId\(\)\ \{\ return\ mSplitTabId;\ \}\
+
+      \
+
+      \ \ \ \ @Override\
+
+      \ \ \ \ public\ int\ getSplitLayout\(\)\ \{\ return\ mSplitLayout;\ \}\
+
+      \
+
+      \ \ \ \ @Override\
+
+      \ \ \ \ public\ double\ getSplitRatio\(\)\ \{\ return\ mSplitRatio;\ \}\
+
+      \
+
+      \ \ \ \ @Override\
+
+      \ \ \ \ public\ int\ getSplitPosition\(\)\ \{\ return\ mSplitPosition;\ \}\
+
+      \
+
+      \ \ \ \ @Override\
+
+      \ \ \ \ @CalledByNative\
+
+      \ \ \ \ public\ void\ setSplitData\(@JniType\("std::optional<base::Token>"\)\ @Nullable\ Token\ token,\ int\ layout,\ double\ ratio,\ int\ position\)\ \{\
+
+      \ \ \ \ \ \ \ \ if\ \(isDestroyed\(\)\)\ return;\
+
+      \ \ \ \ \ \ \ \ if\ \(!Tab\.SplitData\.isValid\(token,\ layout,\ ratio,\ position\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ token\ =\ null;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ layout\ =\ 0;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ ratio\ =\ 0\.5;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ position\ =\ \-1;\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ if\ \(Objects\.equals\(mSplitTabId,\ token\)\ \&\&\ mSplitLayout\ ==\ layout\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \&\&\ Double\.compare\(mSplitRatio,\ ratio\)\ ==\ 0\ \&\&\ mSplitPosition\ ==\ position\)\ return;\
+
+      \ \ \ \ \ \ \ \ mSplitTabId\ =\ token;\
+
+      \ \ \ \ \ \ \ \ mSplitLayout\ =\ layout;\
+
+      \ \ \ \ \ \ \ \ mSplitRatio\ =\ ratio;\
+
+      \ \ \ \ \ \ \ \ mSplitPosition\ =\ position;\
+
+      '
+    replace: "        }\n    }\n\n    @Override\n    public @Nullable Token getSplitTabId() {\n        return mSplitTabId;\n    }\n\n    @Override\n    public int getSplitLayout() {\n        return mSplitLayout;\n    }\n\n    @Override\n    public double getSplitRatio() {\n        return mSplitRatio;\n    }\n\n    @Override\n    public int getSplitPosition() {\n        return mSplitPosition;\n    }\n\n    @Override\n    @CalledByNative\n    public void setSplitData(\n            @JniType(\"std::optional<base::Token>\") @Nullable Token token,\n            int layout,\n            double ratio,\n            int position) {\n        if (isDestroyed()) return;\n        if (!Tab.SplitData.isValid(token, layout, ratio, position)) {\n            token = null;\n            layout = 0;\n            ratio = 0.5;\n            position = -1;\n        }\n        if (Objects.equals(mSplitTabId, token)\n                && mSplitLayout == layout\n                && Double.compare(mSplitRatio, ratio) == 0\n                && mSplitPosition == position) return;\n        mSplitTabId = token;\n        mSplitLayout = layout;\n        mSplitRatio = ratio;\n        mSplitPosition = position;\n"
+- description: Format modified Android split persistence Java sources
+  count: 1
+  regex:
+    re_pattern: '\
+
+      \ \ \ \ @Override\
+
+      \ \ \ \ public\ void\ captureSplitDataForClosure\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ Token\ token\ =\ mSplitTabId;\
+
+      \ \ \ \ \ \ \ \ mClosingSplitData\ =\ token\ ==\ null\ \?\ null\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ :\ new\ Tab\.SplitData\(token,\ mSplitLayout,\ mSplitRatio,\ mSplitPosition\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ @Override\
+
+      \ \ \ \ public\ @Nullable\ Tab\.SplitData\ getSplitDataForClosure\(\)\ \{\ return\ mClosingSplitData;\ \}\
+
+      \
+
+      \ \ \ \ @Override\
+
+      \ \ \ \ public\ void\ clearSplitDataForClosure\(\)\ \{\ mClosingSplitData\ =\ null;\ \}\
+
+      \
+
+      \ \ \ \ @CalledByNative\
+
+      \ \ \ \ private\ @JniType\("std::optional<base::Token>"\)\ @Nullable\ Token\ getHistoricalSplitTabId\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ return\ mClosingSplitData\ ==\ null\ \?\ mSplitTabId\ :\ mClosingSplitData\.getToken\(\);\
+
+      '
+    replace: "\n    @Override\n    public void captureSplitDataForClosure() {\n        Token token = mSplitTabId;\n        mClosingSplitData =\n                token == null\n                        ? null\n                        : new Tab.SplitData(token, mSplitLayout, mSplitRatio, mSplitPosition);\n    }\n\n    @Override\n    public @Nullable Tab.SplitData getSplitDataForClosure() {\n        return mClosingSplitData;\n    }\n\n    @Override\n    public void clearSplitDataForClosure() {\n        mClosingSplitData = null;\n    }\n\n    @CalledByNative\n    private @JniType(\"std::optional<base::Token>\") @Nullable Token getHistoricalSplitTabId() {\n        return mClosingSplitData == null ? mSplitTabId : mClosingSplitData.getToken();\n"
+- description: Annotate the nested SplitData type rather than its enclosing Tab qualifier
+  regex:
+    re_pattern: '@Nullable\ Tab\.SplitData'
+    replace: Tab.@Nullable SplitData
+  count: 2
+- description: "Preserve native lazy-tab session identity and API behavior (literal 1)"
+  regex:
+    re_pattern: "\\ \\ \\ \\ \\ \\ \\ \\ notifyPageTitleChanged\\(\\);\\\n\\ \\ \\ \\ \\}\\\n\\\n\\ \\ \\ \\ @Override\\\n\\ \\ \\ \\ public\\ @Nullable\\ LoadUrlParams\\ getPendingLoadParams\\(\\)\\ \\{\\\n\\ \\ \\ \\ \\ \\ \\ \\ return\\ mPendingLoadParams;\\\n"
+    replace: "        notifyPageTitleChanged();\n    }\n\n    @CalledByNative\n    private @JniType(\"GURL\") GURL getPendingUrl() {\n        return mPendingLoadParams == null ? GURL.emptyGURL() : getUrl();\n    }\n\n    @Override\n    public @Nullable LoadUrlParams getPendingLoadParams() {\n        return mPendingLoadParams;\n"
+- description: "Preserve serialized pending and committed metadata (literal 1)"
+  regex:
+    re_pattern: "\\ \\ \\ \\ @CalledByNative\\\n\\ \\ \\ \\ private\\ @JniType\\(\"GURL\"\\)\\ GURL\\ getPendingUrl\\(\\)\\ \\{\\\n\\ \\ \\ \\ \\ \\ \\ \\ return\\ mPendingLoadParams\\ ==\\ null\\ \\?\\ GURL\\.emptyGURL\\(\\)\\ :\\ getUrl\\(\\);\\\n\\ \\ \\ \\ \\}\\\n"
+    replace: "    @CalledByNative\n    private @JniType(\"GURL\") GURL getPendingUrl() {\n        boolean serializedPending =\n                mWebContentsState != null && mWebContentsState.hasPendingNavigation();\n        return mPendingLoadParams != null || serializedPending ? getUrl() : GURL.emptyGURL();\n    }\n\n    @CalledByNative\n    private @JniType(\"GURL\") GURL getCommittedUrl() {\n        if (mPendingLoadParams != null) return GURL.emptyGURL();\n        if (mWebContentsState != null && mWebContentsState.hasPendingNavigation()) {\n            var metadata = mWebContentsState.getLastCommittedMetadata();\n            return metadata == null ? GURL.emptyGURL() : new GURL(metadata.virtualUrl);\n        }\n        return getUrl();\n    }\n\n    @CalledByNative\n    private @JniType(\"std::u16string\") String getCommittedTitle() {\n        if (mPendingLoadParams != null) return \"\";\n        if (mWebContentsState != null && mWebContentsState.hasPendingNavigation()) {\n            var metadata = mWebContentsState.getLastCommittedMetadata();\n            return metadata == null ? \"\" : metadata.title;\n        }\n        return getTitle();\n    }\n"
+
+# Reaper Android containers lifecycle successor; retain the complete inherited recipe.
+- description: 'Reaper Android containers: immutable tab identity, trusted CCT admission, persistent partition/SQL/reference lifecycle.'
+  regex:
+    re_pattern: 'import\ org\.chromium\.build\.annotations\.NullMarked;\
+
+      import\ org\.chromium\.build\.annotations\.Nullable;\
+
+      import\ org\.chromium\.chrome\.R;\
+
+      import\ org\.chromium\.chrome\.browser\.ActivityUtils;\
+
+      import\ org\.chromium\.chrome\.browser\.WarmupManager;\
+
+      import\ org\.chromium\.chrome\.browser\.app\.tabwindow\.TabWindowManagerSingleton;\
+
+      '
+    replace: 'import org.chromium.build.annotations.NullMarked;
+
+      import org.chromium.build.annotations.Nullable;
+
+      import org.chromium.chrome.R;
+
+      import org.chromium.chrome.browser.containers.ContainersBridge;
+
+      import org.chromium.chrome.browser.containers.ContainersPersistentTabReferences;
+
+      import org.chromium.chrome.browser.ActivityUtils;
+
+      import org.chromium.chrome.browser.WarmupManager;
+
+      import org.chromium.chrome.browser.app.tabwindow.TabWindowManagerSingleton;
+
+      '
+- description: 'Reaper Android containers: immutable tab identity, trusted CCT admission, persistent partition/SQL/reference lifecycle.'
+  regex:
+    re_pattern: '\ \ \ \ /\*\*\ The\ Profile\ associated\ with\ this\ tab\.\ \*/\
+
+      \ \ \ \ private\ final\ Profile\ mProfile;\
+
+      \
+
+      \ \ \ \ /\*\*\ The\ tab\ model\ this\ tab\ is\ currently\ attached\ to\.\ \*/\
+
+      \ \ \ \ private\ @Nullable\ LookAheadObservableSupplier<Tab>\ mCurrentTabSupplier;\
+
+      \
+
+      '
+    replace: "    /** The Profile associated with this tab. */\n    private final Profile mProfile;\n\n    // Set once before native initialization; existing WebContents are never retagged.\n    private String mContainerId = \"\";\n    private boolean mContainerAdmissionFailed;\n    private boolean mContainerIdentityAssigned;\n    private boolean mSeparateStoragePartitionExperiment;\n\n    /** The tab model this tab is currently attached to. */\n    private @Nullable LookAheadObservableSupplier<Tab> mCurrentTabSupplier;\n\n"
+- description: 'Reaper Android containers: immutable tab identity, trusted CCT admission, persistent partition/SQL/reference lifecycle.'
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ if\ \(mWebContents\ ==\ null\)\ return\ new\ LoadUrlResult\(TabLoadStatus\.PAGE_LOAD_FAILED,\ null\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ if\ \(!fixedUrl\.isValid\(\)\)\ return\ new\ LoadUrlResult\(TabLoadStatus\.PAGE_LOAD_FAILED,\ null\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ //\ Discard\ pending\ load\ params\ if\ they\ exist\.\ At\ this\ point\ we\ are\ navigating\ to\ a\ new\ URL\
+
+      \ \ \ \ \ \ \ \ //\ programmatically\ and\ the\ pending\ load\ never\ occurred\.\
+
+      '
+    replace: "        if (mWebContents == null) return new LoadUrlResult(TabLoadStatus.PAGE_LOAD_FAILED, null);\n\n        if (!fixedUrl.isValid()) return new LoadUrlResult(TabLoadStatus.PAGE_LOAD_FAILED, null);\n        if ((!mContainerId.isEmpty() || mSeparateStoragePartitionExperiment)\n                && !matchesExpectedStoragePartition(mWebContents)) {\n            return new LoadUrlResult(TabLoadStatus.PAGE_LOAD_FAILED, null);\n        }\n\n        // Discard pending load params if they exist. At this point we are navigating to a new URL\n        // programmatically and the pending load never occurred.\n"
+- description: 'Reaper Android containers: immutable tab identity, trusted CCT admission, persistent partition/SQL/reference lifecycle.'
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ if\ \(mPendingLoadParams\ !=\ null\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(mWebContents\ ==\ null\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ WebContents\ webContents\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ WebContentsFactory\.createWebContents\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mProfile,\ isHidden\(\),\ /\*\ initializeRenderer=\ \*/\ false\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ initWebContents\(webContents\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ loadUrl\(mPendingLoadParams\);\
+
+      '
+    replace: "        if (mPendingLoadParams != null) {\n            if (mWebContents == null) {\n                WebContents webContents =\n                        createContainerWebContents(\n                                isHidden(), /* initializeRenderer= */ false);\n                if (webContents == null) return false;\n                initWebContents(webContents);\n            }\n            loadUrl(mPendingLoadParams);\n"
+- description: 'Reaper Android containers: immutable tab identity, trusted CCT admission, persistent partition/SQL/reference lifecycle.'
+  regex:
+    re_pattern: '\
+
+      \ \ \ \ //\ TabLifecycle\ implementation\.\
+
+      \
+
+      \ \ \ \ @Override\
+
+      \ \ \ \ public\ boolean\ isInitialized\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ return\ mNativeTabAndroid\ !=\ 0;\
+
+      '
+    replace: "\n    // TabLifecycle implementation.\n\n    @CalledByNative\n    @Override\n    public @JniType(\"std::string\") String getContainerId() {\n        return mContainerId;\n    }\n\n    void setContainerIdForCreation(String containerId) {\n        if (mContainerIdentityAssigned || isInitialized() || mWebContents != null) {\n            throw new IllegalStateException(\"Cannot change an initialized tab's container\");\n        }\n        if (!ContainersBridge.isContainerIdValid(mProfile, containerId)) {\n            throw new IllegalArgumentException(\"Invalid or unavailable storage container\");\n        }\n        if (!containerId.isEmpty()) ContainersPersistentTabReferences.invalidate(mProfile);\n        mContainerId = containerId;\n        mContainerIdentityAssigned = true;\n    }\n\n    void setSeparateStoragePartitionExperimentForCreation(WebContents contents) {\n        if (!mContainerIdentityAssigned || !mContainerId.isEmpty() || isInitialized()\n                || mWebContents != null || mSeparateStoragePartitionExperiment) {\n            throw new IllegalStateException(\"Cannot change an initialized tab's storage policy\");\n        }\n        if (!WebContentsFactory.isWebContentsForSeparateStoragePartitionExperiment(\n                mProfile, contents)) {\n            throw new IllegalArgumentException(\"Invalid speculative CCT contents\");\n        }\n        mSeparateStoragePartitionExperiment = true;\n    }\n\n    private boolean matchesExpectedStoragePartition(WebContents contents) {\n        return mSeparateStoragePartitionExperiment\n                ? mContainerId.isEmpty()\n                        && WebContentsFactory.isWebContentsForSeparateStoragePartitionExperiment(\n                                mProfile, contents)\n                : ContainersBridge.isWebContentsInContainer(mProfile, contents, mContainerId);\n    }\n\n    private @Nullable WebContents createContainerWebContents(\n            boolean initiallyHidden, boolean initializeRenderer) {\n        WebContents contents =\n                mSeparateStoragePartitionExperiment\n                        ? WebContentsFactory.createWebContentsWithSeparateStoragePartitionForExperiment(\n                                mProfile)\n                        : WebContentsFactory.createWebContentsForContainer(\n                                mProfile, initiallyHidden, initializeRenderer, mContainerId);\n        mContainerAdmissionFailed = contents == null;\n        return contents;\n    }\n\n    @Override\n    public boolean isInitialized() {\n        return mNativeTabAndroid != 0;\n"
+- description: 'Reaper Android containers: immutable tab identity, trusted CCT admission, persistent partition/SQL/reference lifecycle.'
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ webContents\ =\ getWebContents\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ //\ unfreezeContents\(\)\ already\ called\ initWebContents\(\)\.\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ needsToCallInitWebContents\ =\ false;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ assert\ webContents\ !=\ null;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\ else\ if\ \(hasPendingLoadUrlParams\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ assert\ webContents\ ==\ null;\
+
+      \
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ webContents\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ WebContentsFactory\.createWebContents\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mProfile,\ isHidden\(\),\ initializeRenderer\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\ else\ if\ \(eligibleToCreateWebContents\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ webContents\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ WebContentsFactory\.createWebContents\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mProfile,\ initiallyHidden,\ initializeRenderer\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ assert\ webContents\ !=\ null;\
+
+      \ \ \ \ \ \ \ \ \}\ else\ if\ \(mWebContentsState\ ==\ null\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \&\&\ !hasPendingLoadUrlParams\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \&\&\ eligibleToCreateWebContents\)\ \{\
+
+      '
+    replace: "                webContents = getWebContents();\n                // unfreezeContents() already called initWebContents().\n                needsToCallInitWebContents = false;\n                assert webContents != null || mContainerAdmissionFailed;\n            } else if (hasPendingLoadUrlParams) {\n                assert webContents == null;\n\n                webContents =\n                        createContainerWebContents(isHidden(), initializeRenderer);\n            } else if (eligibleToCreateWebContents) {\n                webContents =\n                        createContainerWebContents(initiallyHidden, initializeRenderer);\n            }\n            assert webContents != null || mContainerAdmissionFailed;\n        } else if (mWebContentsState == null\n                && !hasPendingLoadUrlParams\n                && eligibleToCreateWebContents) {\n"
+- description: 'Reaper Android containers: immutable tab identity, trusted CCT admission, persistent partition/SQL/reference lifecycle.'
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ //\ also\ correct\ to\ not\ create\ a\ WebContents\ if\ one\ was\ provided\ to\ this\ method\.\
+
+      \
+
+      \ \ \ \ \ \ \ \ \ \ \ \ webContents\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ WebContentsFactory\.createWebContents\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mProfile,\ initiallyHidden,\ initializeRenderer\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ //\ WebContents\ may\ still\ be\ null\ at\ this\ point\ if:\
+
+      '
+    replace: "            // also correct to not create a WebContents if one was provided to this method.\n\n            webContents =\n                    createContainerWebContents(initiallyHidden, initializeRenderer);\n        }\n\n        // WebContents may still be null at this point if:\n"
+- description: 'Reaper Android containers: immutable tab identity, trusted CCT admission, persistent partition/SQL/reference lifecycle.'
+  regex:
+    re_pattern: '\ \ \ \ \ \*/\
+
+      \ \ \ \ void\ restoreFieldsFromState\(TabState\ state\)\ \{\
+
+      \ \ \ \ \ \ \ \ assert\ state\ !=\ null;\
+
+      \ \ \ \ \ \ \ \ mWebContentsState\ =\ state\.contentsState;\
+
+      \ \ \ \ \ \ \ \ setTimestampMillis\(state\.timestampMillis\);\
+
+      \ \ \ \ \ \ \ \ setLastNavigationCommittedTimestampMillis\(state\.lastNavigationCommittedTimestampMillis\);\
+
+      '
+    replace: "     */\n    void restoreFieldsFromState(TabState state) {\n        assert state != null;\n        if (!state.containerId.equals(mContainerId)) {\n            throw new IllegalArgumentException(\"Restored storage identity does not match tab\");\n        }\n        mWebContentsState = state.contentsState;\n        setTimestampMillis(state.timestampMillis);\n        setLastNavigationCommittedTimestampMillis(state.lastNavigationCommittedTimestampMillis);\n"
+- description: 'Reaper Android containers: immutable tab identity, trusted CCT admission, persistent partition/SQL/reference lifecycle.'
+  regex:
+    re_pattern: '\ \ \ \ \ \*/\
+
+      \ \ \ \ private\ void\ initWebContents\(WebContents\ webContents\)\ \{\
+
+      \ \ \ \ \ \ \ \ assert\ !isDormant\(\)\ :\ "Dormant\ tabs\ must\ never\ initialize\ WebContents\.";\
+
+      \ \ \ \ \ \ \ \ try\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ TraceEvent\.begin\("ChromeTab\.initWebContents"\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ WebContents\ oldWebContents\ =\ mWebContents;\
+
+      '
+    replace: "     */\n    private void initWebContents(WebContents webContents) {\n        assert !isDormant() : \"Dormant tabs must never initialize WebContents.\";\n        if (!matchesExpectedStoragePartition(webContents)) {\n            throw new IllegalArgumentException(\"Contents storage does not match immutable tab\");\n        }\n        try {\n            TraceEvent.begin(\"ChromeTab.initWebContents\");\n            WebContents oldWebContents = mWebContents;\n"
+- description: 'Reaper Android containers: immutable tab identity, trusted CCT admission, persistent partition/SQL/reference lifecycle.'
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ TraceEvent\.begin\("Tab\.unfreezeContents"\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ assert\ mWebContentsState\ !=\ null;\
+
+      \
+
+      \ \ \ \ \ \ \ \ \ \ \ \ WebContents\ webContents\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mWebContentsState\.restoreWebContents\(getProfile\(\),\ isHidden\(\),\ noRenderer\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ \ \ \ \ UrlConstantResolver\ urlConstantResolver\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ UrlConstantResolverFactory\.getForProfile\(mProfile\);\
+
+      '
+    replace: "            TraceEvent.begin(\"Tab.unfreezeContents\");\n            assert mWebContentsState != null;\n\n            if (mWebContentsState.hasContainerIdentityConflict(getProfile(), mContainerId)) {\n                // A readable conflicting jar must not enter the corrupt-data URL fallback.\n                return false;\n            }\n            WebContents webContents =\n                    mWebContentsState.restoreWebContents(\n                            getProfile(), isHidden(), noRenderer, mContainerId);\n\n            UrlConstantResolver urlConstantResolver =\n                    UrlConstantResolverFactory.getForProfile(mProfile);\n"
+- description: 'Reaper Android containers: immutable tab identity, trusted CCT admission, persistent partition/SQL/reference lifecycle.'
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ if\ \(webContents\ ==\ null\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ //\ State\ restore\ failed,\ just\ create\ a\ new\ empty\ web\ contents\ as\ that\ is\ the\ best\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ //\ that\ can\ be\ done\ at\ this\ point\.\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ webContents\ =\ WebContentsFactory\.createWebContents\(mProfile,\ isHidden\(\),\ false\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ for\ \(TabObserver\ observer\ :\ mObservers\)\ observer\.onRestoreFailed\(this\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ restored\ =\ false;\
+
+      \
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ assumeNonNull\(mUrl\);\
+
+      '
+    replace: "            if (webContents == null) {\n                // State restore failed, just create a new empty web contents as that is the best\n                // that can be done at this point.\n                webContents = createContainerWebContents(isHidden(), false);\n                for (TabObserver observer : mObservers) observer.onRestoreFailed(this);\n                if (webContents == null) return false;\n                restored = false;\n\n                assumeNonNull(mUrl);\n"
+- description: Remove the retired annotated-page-content converter import.
+  regex:
+    pattern: 'import org.chromium.components.embedder_support.virtual_structure.PageContentProtoViewStructureBuilder;
+
+      '
+    replace: ''
+  count: 1
+- description: Retain the ordinary ContentView accessibility fallback instead of installing the retired AI converter.
+  regex:
+    pattern: "        if (ChromeFeatureList.isEnabled(\n                ChromeFeatureList.ANNOTATED_PAGE_CONTENTS_VIRTUAL_STRUCTURE))\
+      \ {\n            cv.setVirtualStructureProvider(new PageContentProtoViewStructureBuilder());\n        }\n"
+    replace: ''
+  count: 1

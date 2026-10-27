@@ -1,0 +1,75 @@
+diff --git a/chrome/test/data/extensions/api_test/user_scripts/update/worker.js b/chrome/test/data/extensions/api_test/user_scripts/update/worker.js
+--- a/chrome/test/data/extensions/api_test/user_scripts/update/worker.js
++++ b/chrome/test/data/extensions/api_test/user_scripts/update/worker.js
+@@ -344,6 +344,71 @@
+     chrome.test.succeed();
+   },
+ 
++  // Updates to globs must affect both returned metadata and actual injection.
++  async function scriptUpdated_GlobsAndroid() {
++    const platform = await chrome.runtime.getPlatformInfo();
++    if (platform.os !== 'android') {
++      chrome.test.succeed();
++      return;
++    }
++    await chrome.userScripts.unregister();
++
++    const id = 'globs';
++    await chrome.userScripts.register([{
++      id,
++      matches: ['*://hostperms-a.com/*'],
++      includeGlobs: ['*://hostperms-b.com:*/*'],
++      excludeGlobs: ['*exclude-before*'],
++      js: [{file: 'user_script.js'}],
++      runAt: 'document_end',
++    }]);
++    const config = await chrome.test.getConfig();
++    async function expectInjection(host, query, injected) {
++      const url = `http://${host}:${config.testServer.port}/simple.html${query}`;
++      const tab = await openTab(url);
++      chrome.test.assertEq(
++          injected ? ['injected_user_script'] : [],
++          await getInjectedElementIds(tab.id));
++      await chrome.tabs.remove(tab.id);
++    }
++    await expectInjection('hostperms-a.com', '', true);
++    await expectInjection('hostperms-a.com', '?exclude-before', false);
++    await expectInjection('hostperms-b.com', '', true);
++
++    const includeGlobs = ['*include-after*'];
++    const excludeGlobs = ['*exclude-after*'];
++    await chrome.userScripts.update([{id, includeGlobs, excludeGlobs}]);
++    let [script] = await chrome.userScripts.getScripts({ids: [id]});
++    chrome.test.assertEq(includeGlobs, script.includeGlobs);
++    chrome.test.assertEq(excludeGlobs, script.excludeGlobs);
++    chrome.test.assertEq(['*://hostperms-a.com/*'], script.matches);
++    chrome.test.assertEq('document_end', script.runAt);
++    await expectInjection('hostperms-a.com', '?exclude-before', true);
++    await expectInjection('hostperms-a.com', '?exclude-after', false);
++    await expectInjection('hostperms-b.com', '', false);
++    await expectInjection('hostperms-b.com', '?include-after', true);
++    await expectInjection('hostperms-b.com', '?include-after&exclude-after', false);
++
++    // Omitting globs in another update preserves both new lists.
++    await chrome.userScripts.update([{id, allFrames: true}]);
++    [script] = await chrome.userScripts.getScripts({ids: [id]});
++    chrome.test.assertEq(includeGlobs, script.includeGlobs);
++    chrome.test.assertEq(excludeGlobs, script.excludeGlobs);
++    chrome.test.assertTrue(script.allFrames);
++    await expectInjection('hostperms-a.com', '?exclude-after', false);
++    await expectInjection('hostperms-b.com', '?include-after', true);
++
++    // A supplied empty array clears a list; it is different from omission.
++    await chrome.userScripts.update([{id, includeGlobs: [], excludeGlobs: []}]);
++    [script] = await chrome.userScripts.getScripts({ids: [id]});
++    chrome.test.assertEq(undefined, script.includeGlobs);
++    chrome.test.assertEq(undefined, script.excludeGlobs);
++    await expectInjection('hostperms-a.com', '?exclude-after', true);
++    await expectInjection('hostperms-b.com', '?include-after', false);
++    await chrome.userScripts.unregister({ids: [id]});
++    chrome.test.succeed();
++  },
++
+   // Tests that the script id is the only required field when calling
+   // userScripts.update. Such call will be successful and have no effect.
+   async function scriptUpdated_requiredFields() {

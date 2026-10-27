@@ -15,6 +15,7 @@
 #include "base/memory/weak_ptr.h"
 #include "base/scoped_observation.h"
 #include "brave/components/containers/core/browser/containers_service.h"
+#include "build/build_config.h"
 #include "chrome/common/buildflags.h"
 #include "components/sessions/core/tab_restore_service_observer.h"
 
@@ -60,13 +61,23 @@ class ContainersServiceDelegate
   void GetReferencedContainerIds(
       OnReferencedContainerIdsReadyCallback callback) override;
 
-  // Clears the container's storage partition, then deletes its on-disk
-  // directory under the profile. |callback| receives whether deletion
-  // succeeded.
+  // Clears a loaded partition without deleting its active backing directory.
+  // Removes the on-disk directory only when the partition is not loaded.
+  // |callback| reports logical clearing or directory removal completion.
   void DeleteContainerStorage(const std::string& id,
                               DeleteContainerStorageCallback callback) override;
 
  private:
+  void DeleteUnreferencedContainerStorage(
+      const std::string& id,
+      DeleteContainerStorageCallback callback);
+#if BUILDFLAG(IS_ANDROID)
+  void OnAndroidReferencesReady(const base::flat_set<std::string>& ids);
+  void OnAndroidDeleteReferencesReady(const std::string& id,
+                                      DeleteContainerStorageCallback callback,
+                                      const base::flat_set<std::string>& ids);
+  bool got_persistent_container_references_ = false;
+#endif
 #if BUILDFLAG(ENABLE_SESSION_SERVICE)
   // SessionServiceBaseObserver:
   void OnDestroying(SessionServiceBase* service) override;

@@ -40,16 +40,6 @@ public class BraveMostVisitedTilesMediator extends MostVisitedTilesMediator {
     }
 
     @Override
-    void updateMvtWidth(int totalWidth, int mvtWidth) {
-        // BraveNewTabPageLayout#initializeSiteSectionView detaches the tiles container from the
-        // NTP layout tree and reparents it as a RecyclerView item (see BraveNtpAdapter), which
-        // owns its width/margins from then on. Letting upstream's width/margin logic keep running
-        // here fights that ownership on every measure pass — with no `gravity="center_horizontal"`
-        // parent left to honor a WRAP_CONTENT width, and a different margin than the one
-        // BraveNtpAdapter applies — leaving the tile row mis-margined and never centered.
-    }
-
-    @Override
     public void onConfigurationChanged() {
         // Upstream never refreshes this UiConfig's cached display style on a config change
         // (crbug.com/515150822). maybeSetPortraitIntervalPaddings() reads it the first time the

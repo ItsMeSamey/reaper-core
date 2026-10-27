@@ -1,0 +1,107 @@
+diff --git a/chrome/test/data/extensions/api_test/declarative_net_request/test_match_outcome_response_headers/background.js b/chrome/test/data/extensions/api_test/declarative_net_request/test_match_outcome_response_headers/background.js
+--- a/chrome/test/data/extensions/api_test/declarative_net_request/test_match_outcome_response_headers/background.js
++++ b/chrome/test/data/extensions/api_test/declarative_net_request/test_match_outcome_response_headers/background.js
+@@ -8,7 +8,7 @@
+   });
+ }
+ 
+-chrome.test.runTests([
++const tests = [
+   function setup() {
+     // Enable the extension's rulesets here, instead of by default in the
+     // manifest, to ensure that the rulesets are ready before running the tests
+@@ -154,4 +154,93 @@
+ 
+     chrome.test.succeed();
+   },
+-]);
++];
++
++chrome.test.getConfig(config => {
++  // This additional regression is selected only by the Android native test.
++  if (config.customArg === 'android-valid-header-values') {
++    tests.push(async function testValidResponseHeaderValues() {
++      const ruleIds = [3, 4, 5];
++      const condition = {
++        requestDomains: ['header-values.example'],
++        resourceTypes: ['main_frame'],
++      };
++      await chrome.declarativeNetRequest.updateSessionRules({
++        addRules: [
++          {
++            id: 3,
++            priority: 1,
++            action: {type: 'block'},
++            condition: {
++              ...condition,
++              responseHeaders: [{
++                header: 'content-type',
++                values: ['text/html; charset=utf-8'],
++              }],
++            },
++          },
++          {
++            id: 4,
++            priority: 1,
++            action: {type: 'block'},
++            condition: {
++              ...condition,
++              responseHeaders: [{
++                header: 'example-header',
++                values: ['value with spaces', 'value; parameter=ok', 'value'],
++              }],
++            },
++          },
++          {
++            id: 5,
++            priority: 1,
++            action: {type: 'block'},
++            condition: {
++              ...condition,
++              responseHeaders: [{header: 'empty-header'}],
++            },
++          },
++        ],
++      });
++      try {
++        const cases = [
++          {
++            responseHeaders: {'content-type': ['text/html; charset=utf-8']},
++            ruleId: 3,
++          },
++          {
++            responseHeaders: {'example-header': ['value with spaces']},
++            ruleId: 4,
++          },
++          {
++            responseHeaders: {'example-header': ['value; parameter=ok']},
++            ruleId: 4,
++          },
++          {responseHeaders: {'example-header': ['value']}, ruleId: 4},
++          {responseHeaders: {'empty-header': ['']}, ruleId: 5},
++          {responseHeaders: {'empty-header': []}, ruleId: 5},
++          {
++            responseHeaders: {'content-type': ['application/json; charset=utf-8']},
++          },
++        ];
++        for (const {responseHeaders, ruleId} of cases) {
++          const result = await chrome.declarativeNetRequest.testMatchOutcome({
++            url: 'https://header-values.example/path',
++            type: 'main_frame',
++            method: 'get',
++            responseHeaders,
++          });
++          const matchedRules = ruleId === undefined ? [] :
++              [{ruleId, rulesetId: chrome.declarativeNetRequest.SESSION_RULESET_ID}];
++          chrome.test.assertEq({matchedRules}, result);
++        }
++      } finally {
++        await chrome.declarativeNetRequest.updateSessionRules({
++          removeRuleIds: ruleIds,
++        });
++      }
++      chrome.test.succeed();
++    });
++  }
++  chrome.test.runTests(tests);
++});

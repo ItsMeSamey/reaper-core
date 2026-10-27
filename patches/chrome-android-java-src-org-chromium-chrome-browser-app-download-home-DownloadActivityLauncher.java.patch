@@ -1,0 +1,215 @@
+diff --git a/chrome/android/java/src/org/chromium/chrome/browser/app/download/home/DownloadActivityLauncher.java b/chrome/android/java/src/org/chromium/chrome/browser/app/download/home/DownloadActivityLauncher.java
+index 1da3eaaf96512038bdd2388b1b03f258d2af073e..2de4ce1ae01938e99d78827dbcd1236b6c14698e 100644
+--- a/chrome/android/java/src/org/chromium/chrome/browser/app/download/home/DownloadActivityLauncher.java
++++ b/chrome/android/java/src/org/chromium/chrome/browser/app/download/home/DownloadActivityLauncher.java
+@@ -5,8 +5,10 @@
+ package org.chromium.chrome.browser.app.download.home;
+ 
+ import android.app.Activity;
++import android.content.ActivityNotFoundException;
+ import android.content.Context;
+ import android.content.Intent;
++import android.util.LongSparseArray;
+ 
+ import androidx.annotation.IntDef;
+ 
+@@ -19,13 +21,19 @@ import org.chromium.base.ThreadUtils;
+ import org.chromium.build.annotations.NullMarked;
+ import org.chromium.build.annotations.Nullable;
+ import org.chromium.chrome.browser.download.DownloadUtils;
++import org.chromium.chrome.browser.download.home.DownloadManagerCoordinator;
+ import org.chromium.chrome.browser.profiles.OtrProfileId;
++import org.chromium.chrome.browser.profiles.Profile;
++import org.chromium.chrome.browser.profiles.ProfileManager;
++import org.chromium.components.offline_items_collection.ContentId;
+ import org.chromium.ui.modaldialog.ModalDialogManagerHolder;
+ 
+ import java.lang.annotation.Retention;
+ import java.lang.annotation.RetentionPolicy;
++import java.lang.ref.WeakReference;
+ import java.util.ArrayList;
+ import java.util.List;
++import java.util.Objects;
+ 
+ /**
+  * Class for launching the DownloadActivity and monitoring its status so dialogs could be shown on
+@@ -36,6 +44,10 @@ public class DownloadActivityLauncher implements ApplicationStatus.ActivityState
+     private static @Nullable DownloadActivityLauncher sInstance;
+     private static final String EXTRA_SHOW_PREFETCHED_CONTENT =
+             "org.chromium.chrome.browser.download.SHOW_PREFETCHED_CONTENT";
++    private static final String EXTRA_REVEAL_REQUEST =
++            "org.chromium.chrome.browser.download.REVEAL_REQUEST";
++    private final LongSparseArray<RevealRequest> mRevealRequests = new LongSparseArray<>();
++    private long mNextRevealRequest = 1;
+     private @DownloadActivityStatus int mActivityStatus = DownloadActivityStatus.NOT_CREATED;
+     private final List<Callback<Activity>> mActivityCallbacks = new ArrayList<>();
+ 
+@@ -110,6 +122,168 @@ public class DownloadActivityLauncher implements ApplicationStatus.ActivityState
+         }
+     }
+ 
++    /**
++     * Reveals an authorized item in the browser's Downloads UI. The native caller owns a deadline
++     * and must cancel the returned request if its extension context shuts down.
++     */
++    public long showDownloadItem(
++            Activity host, Profile itemProfile, ContentId id, Callback<Boolean> completion) {
++        ThreadUtils.assertOnUiThread();
++        if (host.isFinishing()
++                || host.isDestroyed()
++                || ApplicationStatus.getStateForActivity(host) != ActivityState.RESUMED
++                || !isRevealProfileAvailable(itemProfile)) {
++            completion.onResult(false);
++            return 0;
++        }
++        long token = mNextRevealRequest++;
++        if (token == 0) token = mNextRevealRequest++;
++        RevealRequest request = new RevealRequest(token, itemProfile, id, completion);
++        mRevealRequests.put(token, request);
++        ProfileManager.addObserver(request);
++        Intent intent = new Intent(host, DownloadActivity.class);
++        intent.putExtra(EXTRA_REVEAL_REQUEST, token);
++        OtrProfileId otrProfileId = itemProfile.getOtrProfileId();
++        if (otrProfileId != null) {
++            intent.putExtra(
++                    DownloadUtils.EXTRA_OTR_PROFILE_ID, OtrProfileId.serialize(otrProfileId));
++        }
++        try {
++            // A fresh internal Activity gives each reveal its own profile and lifetime, on both
++            // phones and tablets. Do not reuse a differently profiled SINGLE_TOP Activity.
++            host.startActivity(intent);
++        } catch (ActivityNotFoundException | SecurityException exception) {
++            finishReveal(request, false);
++            return 0;
++        }
++        return token;
++    }
++
++    /**
++     * Retires a native-owned request and consumes its completion with false. The native caller
++     * invalidates its weak callback first; invoking it still releases the JNI OnceCallback wrapper.
++     */
++    public void cancelDownloadItem(long token) {
++        ThreadUtils.assertOnUiThread();
++        RevealRequest request = mRevealRequests.get(token);
++        if (request != null) finishReveal(request, false);
++    }
++
++    static boolean isDownloadItemIntent(Intent intent) {
++        return intent.hasExtra(EXTRA_REVEAL_REQUEST);
++    }
++
++    private @Nullable RevealRequest getRevealRequest(DownloadActivity activity) {
++        long token = IntentUtils.safeGetLongExtra(activity.getIntent(), EXTRA_REVEAL_REQUEST, 0);
++        return mRevealRequests.get(token);
++    }
++
++    // Called before the normal factory can create an OTR profile. A restored Activity without a
++    // live in-process request must close instead of silently displaying the downloads collection.
++    boolean prepareDownloadItemActivity(DownloadActivity activity) {
++        RevealRequest request = getRevealRequest(activity);
++        if (request == null) return false;
++        DownloadActivity owner = request.activity.get();
++        if (owner != null && owner != activity) return false;
++        request.activity = new WeakReference<>(activity);
++        if (!isRevealProfileAvailable(request.profile)
++                || !Objects.equals(
++                        OtrProfileId.serialize(request.profile.getOtrProfileId()),
++                        IntentUtils.safeGetStringExtra(
++                                activity.getIntent(), DownloadUtils.EXTRA_OTR_PROFILE_ID))) {
++            finishReveal(request, false);
++            return false;
++        }
++        return true;
++    }
++
++    void revealDownloadItem(
++            DownloadActivity activity, DownloadManagerCoordinator coordinator) {
++        RevealRequest request = getRevealRequest(activity);
++        if (request == null || request.activity.get() != activity) {
++            activity.finish();
++            return;
++        }
++        if (!isRevealProfileAvailable(request.profile)) {
++            finishReveal(request, false);
++            return;
++        }
++        request.coordinator = coordinator;
++        coordinator.revealItem(
++                request.id,
++                accepted -> {
++                    if (mRevealRequests.get(request.token) != request) return;
++                    finishReveal(request, accepted && isRevealProfileAvailable(request.profile));
++                });
++    }
++
++    void onDownloadItemActivityClosed(DownloadActivity activity) {
++        RevealRequest request = getRevealRequest(activity);
++        if (request != null
++                && (request.activity.get() == null || request.activity.get() == activity)) {
++            finishReveal(request, false);
++        }
++    }
++
++    private static boolean isRevealProfileAvailable(Profile profile) {
++        if (profile.shutdownStarted() || !ProfileManager.isInitialized()) return false;
++        Profile regular = ProfileManager.getLastUsedRegularProfile();
++        if (regular.shutdownStarted() || profile.getOriginalProfile() != regular) return false;
++        OtrProfileId otr = profile.getOtrProfileId();
++        return otr == null
++                ? profile == regular
++                : otr.isPrimaryOtrId()
++                        && regular.getOffTheRecordProfile(otr, false) == profile;
++    }
++
++    private void finishReveal(RevealRequest request, boolean accepted) {
++        // Retire ownership before cancelling the coordinator: cancellation may synchronously call
++        // its result callback. Removing the observer also releases the retained Profile on finish.
++        if (mRevealRequests.get(request.token) != request) return;
++        mRevealRequests.remove(request.token);
++        ProfileManager.removeObserver(request);
++        DownloadActivity activity = request.activity.get();
++        if (!accepted) {
++            if (request.coordinator != null) request.coordinator.cancelRevealItem();
++            if (activity != null && !activity.isDestroyed()) activity.finish();
++        } else if (activity != null) {
++            // The completed Downloads surface now follows ordinary Activity recreation. Only
++            // unresolved in-process requests must reject orphaned/restored request tokens.
++            activity.getIntent().removeExtra(EXTRA_REVEAL_REQUEST);
++        }
++        request.coordinator = null;
++        request.activity.clear();
++        request.completion.onResult(accepted);
++    }
++
++    private final class RevealRequest implements ProfileManager.Observer {
++        final long token;
++        final Profile profile;
++        final Profile originalProfile;
++        final ContentId id;
++        final Callback<Boolean> completion;
++        WeakReference<DownloadActivity> activity = new WeakReference<>(null);
++        @Nullable DownloadManagerCoordinator coordinator;
++
++        RevealRequest(long token, Profile profile, ContentId id, Callback<Boolean> completion) {
++            this.token = token;
++            this.profile = profile;
++            this.originalProfile = profile.getOriginalProfile();
++            this.id = new ContentId(id.namespace, id.id);
++            this.completion = completion;
++        }
++
++        @Override
++        public void onProfileAdded(Profile profile) {}
++
++        @Override
++        public void onProfileDestroyed(Profile profile) {
++            if (profile == this.profile || profile == originalProfile) {
++                finishReveal(this, false);
++            }
++        }
++    }
++
+     /**
+      * @return Whether or not the prefetched content section should be expanded on launch of the
+      *     DownloadActivity.

@@ -1,0 +1,97 @@
+# Copyright 2026 The Reaper Authors.
+# Use of this source code is governed by the Mozilla Public License, v. 2.0.
+
+substitutions:
+- description: Test Android physical raster geometry at source line 4
+  regex:
+    re_pattern: '\#include\ <optional>\
+
+      \#include\ <utility>\
+
+      \
+
+      \#include\ "base/containers/span\.h"\
+
+      \#include\ "base/files/file_util\.h"\
+
+      \#include\ "base/functional/bind\.h"\
+
+      '
+    replace: '#include <array>
+
+      #include <limits>
+
+      #include <optional>
+
+      #include <utility>
+
+
+      #include "base/containers/span.h"
+
+      #include "base/files/file_util.h"
+
+      #include "base/functional/bind.h"
+
+      '
+- description: Test Android physical raster geometry at source line 13
+  regex:
+    re_pattern: '\#include\ "build/chromeos_buildflags\.h"\
+
+      \#include\ "pdf/pdf\.h"\
+
+      \#include\ "pdf/pdf_watermark_overlayer\.h"\
+
+      \#include\ "pdf/pdfium/pdfium_api_wrappers\.h"\
+
+      \#include\ "pdf/pdfium/pdfium_engine\.h"\
+
+      \#include\ "services/screen_ai/buildflags/buildflags\.h"\
+
+      '
+    replace: '#include "build/build_config.h"
+
+      #include "build/chromeos_buildflags.h"
+
+      #include "pdf/pdf.h"
+
+      #include "pdf/pdf_watermark_overlayer.h"
+
+      #include "pdf/pdfium/pdfium_api_wrappers.h"
+
+      #include "pdf/pdfium/pdfium_engine.h"
+
+      #include "services/screen_ai/buildflags/buildflags.h"
+
+      '
+- description: Test Android physical raster geometry at source line 53
+  regex:
+    re_pattern: '\
+
+      \#if\ BUILDFLAG\(IS_CHROMEOS\)\ \&\&\ BUILDFLAG\(ENABLE_SCREEN_AI_SERVICE\)\
+
+      \
+
+      //\ Returns\ all\ characters\ in\ the\ page\.\
+
+      std::string\ GetText\(base::span<const\ uint8_t>\ pdf,\ int\ page_index\)\ \{\
+
+      \ \ ScopedFPDFDocument\ document\ =\ LoadPdfData\(pdf\);\
+
+      '
+    replace: "\n#if BUILDFLAG(IS_ANDROID)\n// A black marker occupies the middle 80% of each physical page dimension.\n// Pixel samples well away from its boundary do not depend on antialiasing.\nbool AddPrinterGeometryMarker(FPDF_PAGE page) {\n  const float width = FPDF_GetPageWidthF(page);\n  const float height = FPDF_GetPageHeightF(page);\n  ScopedFPDFPageObject marker(FPDFPageObj_CreateNewRect(\n      width * 0.1f, height * 0.1f, width * 0.8f, height * 0.8f));\n  if (!marker || !FPDFPageObj_SetFillColor(marker.get(), 0, 0, 0, 255) ||\n      !FPDFPath_SetDrawMode(marker.get(), FPDF_FILLMODE_WINDING, false)) {\n    return false;\n  }\n  FPDFPage_InsertObject(page, marker.release());\n  return FPDFPage_GenerateContent(page);\n}\n#endif  // BUILDFLAG(IS_ANDROID)\n\n#if BUILDFLAG(IS_CHROMEOS) && BUILDFLAG(ENABLE_SCREEN_AI_SERVICE)\n\n// Returns all characters in the page.\nstd::string GetText(base::span<const uint8_t> pdf, int page_index) {\n  ScopedFPDFDocument document = LoadPdfData(pdf);\n"
+- description: Test Android physical raster geometry at source line 123
+  regex:
+    re_pattern: '\
+
+      TEST_F\(PDFiumEngineExportsTest,\ GetPDFDocInfo\)\ \{\
+
+      \ \ base::FilePath\ pdf_path\ =\
+
+      \ \ \ \ \ \ pdf_data_dir\(\)\.Append\(FILE_PATH_LITERAL\("hello_world2\.pdf"\)\);\
+
+      \ \ std::optional<std::vector<uint8_t>>\ pdf_data\ =\
+
+      \ \ \ \ \ \ base::ReadFileToBytes\(pdf_path\);\
+
+      '
+    replace: "\n#if BUILDFLAG(IS_ANDROID)\nTEST_F(PDFiumEngineExportsTest, PrinterDeviceBoundsPreservePhysicalGeometry) {\n  ScopedLibraryInitializer initializer;\n  const std::array<gfx::Size, 3> resolutions = {\n      gfx::Size(150, 300), gfx::Size(300, 150), gfx::Size(150, 150)};\n  for (const bool landscape : {false, true}) {\n    ScopedFPDFDocument document(FPDF_CreateNewDocument());\n    ASSERT_TRUE(document);\n    const int width_inches = landscape ? 2 : 1;\n    const int height_inches = landscape ? 1 : 2;\n    ScopedFPDFPage page(\n        FPDFPage_New(document.get(), 0, width_inches * 72, height_inches * 72));\n    ASSERT_TRUE(page);\n    ASSERT_TRUE(AddPrinterGeometryMarker(page.get()));\n    for (const auto& dpi : resolutions) {\n      SCOPED_TRACE(dpi.ToString());\n      SCOPED_TRACE(landscape);\n      const int width = width_inches * dpi.width();\n      const int height = height_inches * dpi.height();\n      const gfx::Rect bounds(width, height);\n      PDFiumEngineExports::RenderingSettings settings(\n          dpi, bounds, /*fit_to_bounds=*/true, /*stretch_to_bounds=*/false,\n          /*keep_aspect_ratio=*/true, /*center_in_bounds=*/true,\n          /*autorotate=*/true, /*use_color=*/true,\n          /*render_for_printing=*/true);\n      settings.bounds_are_device_units = true;\n      std::vector<uint32_t> pixels(width * height, 0);\n      ASSERT_TRUE(RenderPageToBitmap(page.get(), settings, pixels.data()));\n      const auto sample = [&](int x_percent, int y_percent) {\n        return pixels[(height * y_percent / 100) * width +\n                      width * x_percent / 100];\n      };\n      for (const int y : {15, 50, 85}) {\n        for (const int x : {15, 50, 85})\n          EXPECT_EQ(0xff000000u, sample(x, y));\n      }\n      EXPECT_EQ(0xffffffffu, sample(5, 50));\n      EXPECT_EQ(0xffffffffu, sample(95, 50));\n      EXPECT_EQ(0xffffffffu, sample(50, 5));\n      EXPECT_EQ(0xffffffffu, sample(50, 95));\n      if (dpi.width() == dpi.height()) {\n        // Opting in must preserve the established square-DPI output exactly.\n        settings.bounds_are_device_units = false;\n        std::vector<uint32_t> legacy_pixels(width * height, 0);\n        ASSERT_TRUE(\n            RenderPageToBitmap(page.get(), settings, legacy_pixels.data()));\n        EXPECT_EQ(legacy_pixels, pixels);\n      }\n    }\n  }\n}\n\nTEST_F(PDFiumEngineExportsTest,\n       PrinterDeviceBoundsRejectOverflowBeforeDrawing) {\n  ScopedLibraryInitializer initializer;\n  ScopedFPDFDocument document(FPDF_CreateNewDocument());\n  ASSERT_TRUE(document);\n  ScopedFPDFPage page(FPDFPage_New(document.get(), 0, 72, 144));\n  ASSERT_TRUE(page);\n  ASSERT_TRUE(AddPrinterGeometryMarker(page.get()));\n  const int maximum = std::numeric_limits<int>::max();\n  const std::array<gfx::Size, 2> resolutions = {\n      gfx::Size(maximum, 1), gfx::Size(maximum / 4, maximum / 4)};\n  for (const auto& dpi : resolutions) {\n    SCOPED_TRACE(dpi.ToString());\n    PDFiumEngineExports::RenderingSettings settings(\n        dpi, gfx::Rect(8, 8), /*fit_to_bounds=*/true,\n        /*stretch_to_bounds=*/false, /*keep_aspect_ratio=*/true,\n        /*center_in_bounds=*/true, /*autorotate=*/true, /*use_color=*/true,\n        /*render_for_printing=*/true);\n    settings.bounds_are_device_units = true;\n    std::array<uint32_t, 64> pixels;\n    pixels.fill(0x12345678u);\n    const auto untouched = pixels;\n    EXPECT_FALSE(RenderPageToBitmap(page.get(), settings, pixels.data()));\n    EXPECT_EQ(untouched, pixels);\n  }\n}\n#endif  // BUILDFLAG(IS_ANDROID)\n\nTEST_F(PDFiumEngineExportsTest, GetPDFDocInfo) {\n  base::FilePath pdf_path =\n      pdf_data_dir().Append(FILE_PATH_LITERAL(\"hello_world2.pdf\"));\n  std::optional<std::vector<uint8_t>> pdf_data =\n      base::ReadFileToBytes(pdf_path);\n"

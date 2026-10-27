@@ -30,7 +30,6 @@
 #include "chrome/browser/sync/sync_service_factory.h"
 #include "components/sync/service/sync_service.h"
 #include "components/sync/service/sync_user_settings.h"
-#include "components/unified_consent/unified_consent_metrics.h"
 #include "content/public/browser/browser_thread.h"
 #include "ui/base/l10n/time_format.h"
 
@@ -71,9 +70,13 @@ void BraveSyncWorker::Destroy(JNIEnv* env) {
 base::android::ScopedJavaLocalRef<jstring> BraveSyncWorker::GetSyncCodeWords(
     JNIEnv* env) {
   auto* sync_service = GetSyncService();
-  std::string sync_code;
-  if (sync_service)
-    sync_code = sync_service->GetOrCreateSyncCode();
+  if (!sync_service) {
+    return ConvertUTF8ToJavaString(env, "");
+  }
+  std::string sync_code = sync_service->GetOrCreateSyncCode();
+  if (sync_code.empty()) {
+    return ConvertUTF8ToJavaString(env, "");
+  }
 
   CHECK(brave_sync::crypto::IsPassphraseValid(sync_code));
 
@@ -108,8 +111,11 @@ syncer::BraveSyncServiceImpl* BraveSyncWorker::GetSyncService() const {
 
 void BraveSyncWorker::RequestSync(JNIEnv* env) {
   syncer::SyncService* service = SyncServiceFactory::GetForProfile(profile_);
+  if (!service) {
+    return;
+  }
 
-  if (service && !sync_service_observer_.IsObservingSource(service)) {
+  if (!sync_service_observer_.IsObservingSource(service)) {
     sync_service_observer_.AddObservation(service);
   }
 
@@ -132,9 +138,6 @@ void BraveSyncWorker::MarkFirstSetupComplete() {
   if (service->GetUserSettings()->IsInitialSyncFeatureSetupComplete()) {
     return;
   }
-
-  unified_consent::metrics::RecordSyncSetupDataTypesHistrogam(
-      service->GetUserSettings());
 
   // We're done configuring, so notify SyncService that it is OK to start
   // syncing.
@@ -256,7 +259,13 @@ void BraveSyncWorker::PermanentlyDeleteAccount(
     const base::android::JavaRef<jobject>& callback) {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
   auto* sync_service = GetSyncService();
-  CHECK_NE(sync_service, nullptr);
+  if (!sync_service) {
+    Java_BraveSyncWorker_onPermanentlyDeleteAccountResult(
+        env, callback,
+        base::android::ConvertUTF8ToJavaString(
+            env, "Sync service is not available"));
+    return;
+  }
 
   base::android::ScopedJavaGlobalRef<jobject> java_callback;
   java_callback.Reset(env, callback);
@@ -292,7 +301,11 @@ void BraveSyncWorker::SetJoinSyncChainCallback(
     const base::android::JavaRef<jobject>& callback) {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
   auto* sync_service = GetSyncService();
-  CHECK_NE(sync_service, nullptr);
+  if (!sync_service) {
+    Java_BraveSyncWorker_onJoinSyncChainResult(env, callback,
+                                             GetJavaBoolean(env, false));
+    return;
+  }
 
   base::android::ScopedJavaGlobalRef<jobject> java_callback;
   java_callback.Reset(env, callback);

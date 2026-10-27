@@ -1,0 +1,203 @@
+diff --git a/chrome/android/junit/src/org/chromium/chrome/browser/fullscreen/FullscreenHtmlApiHandlerCompatUnitTest.java b/chrome/android/junit/src/org/chromium/chrome/browser/fullscreen/FullscreenHtmlApiHandlerCompatUnitTest.java
+--- a/chrome/android/junit/src/org/chromium/chrome/browser/fullscreen/FullscreenHtmlApiHandlerCompatUnitTest.java
++++ b/chrome/android/junit/src/org/chromium/chrome/browser/fullscreen/FullscreenHtmlApiHandlerCompatUnitTest.java
+@@ -4,6 +4,8 @@
+ 
+ package org.chromium.chrome.browser.fullscreen;
+ 
++import androidx.core.view.WindowInsetsControllerCompat;
++import androidx.core.view.WindowCompat;
+ import static android.view.Display.INVALID_DISPLAY;
+ 
+ import static org.junit.Assert.assertEquals;
+@@ -107,6 +109,13 @@
+     @Implements(Activity.class)
+     public static class FullscreenShadowActivity extends ShadowActivity {
+         public HashMap<Integer, Integer> counters = new HashMap<>();
++        public boolean inMultiWindowMode;
++
++        @Override
++        @Implementation
++        protected boolean isInMultiWindowMode() {
++            return inMultiWindowMode;
++        }
+ 
+         public FullscreenShadowActivity() {}
+ 
+@@ -689,4 +698,176 @@
+ 
+         assertEqualNumberOfEnterAndExitActivityFullscreenMode(1);
+     }
++
++    @Test
++    @Config(
++            shadows = {FullscreenShadowActivity.class},
++            sdk = Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
++    public void browserFullscreenUsesRealCompatBarsWithoutEnteringDomFullscreen() {
++        mFullscreenHtmlApiHandlerCompat.setBrowserFullscreenMode(true);
++        assertTrue(mFullscreenHtmlApiHandlerCompat.getBrowserFullscreenMode());
++        assertTrue(mFullscreenHtmlApiHandlerCompat.getFullscreenUiModeSupplier().get());
++        assertFalse(mFullscreenHtmlApiHandlerCompat.getPersistentFullscreenMode());
++        var controller =
++                WindowCompat.getInsetsController(
++                        mActivity.getWindow(), mActivity.getWindow().getDecorView());
++        assertEquals(
++                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE,
++                controller.getSystemBarsBehavior());
++        mFullscreenHtmlApiHandlerCompat.setBrowserFullscreenMode(false);
++        assertFalse(mFullscreenHtmlApiHandlerCompat.getFullscreenUiModeSupplier().get());
++        assertEquals(
++                WindowInsetsControllerCompat.BEHAVIOR_DEFAULT, controller.getSystemBarsBehavior());
++        assertEqualNumberOfEnterAndExitActivityFullscreenMode(0);
++    }
++
++    @Test
++    @Config(
++            shadows = {FullscreenShadowActivity.class},
++            sdk = Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
++    public void browserExpansionTransfersFromTabUntilBothOrdinaryOwnersExit() {
++        ((FullscreenShadowActivity) Shadows.shadowOf(mActivity)).inMultiWindowMode = true;
++        doReturn(null).when(mTab).getWebContents();
++        doReturn(true).when(mTab).isUserInteractable();
++        mFullscreenHtmlApiHandlerCompat.setTabForTesting(mTab);
++        mFullscreenHtmlApiHandlerCompat.onEnterFullscreen(
++                mTab, new FullscreenOptions(false, false, INVALID_DISPLAY));
++        mFullscreenHtmlApiHandlerCompat.setBrowserFullscreenMode(true);
++        mFullscreenHtmlApiHandlerCompat.exitPersistentFullscreenMode();
++        var shadow = (FullscreenShadowActivity) Shadows.shadowOf(mActivity);
++        assertEquals(1, (int) shadow.counters.get(Activity.FULLSCREEN_MODE_REQUEST_ENTER));
++        assertFalse(shadow.counters.containsKey(Activity.FULLSCREEN_MODE_REQUEST_EXIT));
++        assertFalse(mFullscreenHtmlApiHandlerCompat.getPersistentFullscreenMode());
++        assertTrue(mFullscreenHtmlApiHandlerCompat.getFullscreenUiModeSupplier().get());
++        mFullscreenHtmlApiHandlerCompat.setBrowserFullscreenMode(false);
++        assertEqualNumberOfEnterAndExitActivityFullscreenMode(1);
++        assertFalse(mFullscreenHtmlApiHandlerCompat.getFullscreenUiModeSupplier().get());
++    }
++
++    @Test
++    @Config(
++            shadows = {FullscreenShadowActivity.class},
++            sdk = Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
++    public void browserFullscreenRequestsAndReleasesActualActivityExpansion() {
++        var shadow = (FullscreenShadowActivity) Shadows.shadowOf(mActivity);
++        shadow.inMultiWindowMode = true;
++        mFullscreenHtmlApiHandlerCompat.setBrowserFullscreenMode(true);
++        assertEquals(1, (int) shadow.counters.get(Activity.FULLSCREEN_MODE_REQUEST_ENTER));
++        assertTrue(mFullscreenHtmlApiHandlerCompat.getFullscreenUiModeSupplier().get());
++        assertFalse(mFullscreenHtmlApiHandlerCompat.getPersistentFullscreenMode());
++        mFullscreenHtmlApiHandlerCompat.setBrowserFullscreenMode(false);
++        assertEqualNumberOfEnterAndExitActivityFullscreenMode(1);
++        assertFalse(mFullscreenHtmlApiHandlerCompat.getFullscreenUiModeSupplier().get());
++    }
++
++    @Test
++    public void tabEventPreservesBrowserFullscreenAndUsesTabDelegate() {
++        var delegate = Mockito.mock(FullscreenManager.FullscreenManagerDelegate.class);
++        mFullscreenHtmlApiHandlerCompat.setFullscreenManagerDelegate(delegate);
++        mFullscreenHtmlApiHandlerCompat.setBrowserFullscreenMode(true);
++
++        mFullscreenHtmlApiHandlerCompat.exitFullscreenForTabEvent(mTab);
++
++        verify(delegate).onExitFullscreen(mTab);
++        verify(delegate, never()).onExitFullscreen(null);
++        assertTrue(mFullscreenHtmlApiHandlerCompat.getBrowserFullscreenMode());
++        assertTrue(mFullscreenHtmlApiHandlerCompat.getFullscreenUiModeSupplier().get());
++        assertFalse(mFullscreenHtmlApiHandlerCompat.getPersistentFullscreenMode());
++    }
++
++    @Test
++    public void tabEventClearsPendingDomAfterActiveTabChanges() {
++        doReturn(null).when(mTab).getWebContents();
++        doReturn(true).when(mTab).isUserInteractable();
++        mFullscreenHtmlApiHandlerCompat.setTabForTesting(mTab);
++        mFullscreenHtmlApiHandlerCompat.setBrowserFullscreenMode(true);
++        mFullscreenHtmlApiHandlerCompat.onEnterFullscreen(
++                mTab, new FullscreenOptions(false, false, INVALID_DISPLAY));
++        assertTrue(mFullscreenHtmlApiHandlerCompat.getPersistentFullscreenMode());
++        var nextTab = Mockito.mock(Tab.class);
++        doReturn(new UserDataHost()).when(nextTab).getUserDataHost();
++        mFullscreenHtmlApiHandlerCompat.setTabForTesting(nextTab);
++        TabBrowserControlsConstraintsHelper.setForTesting(
++                nextTab, mTabBrowserControlsConstraintsHelper);
++        var delegate = Mockito.mock(FullscreenManager.FullscreenManagerDelegate.class);
++        mFullscreenHtmlApiHandlerCompat.setFullscreenManagerDelegate(delegate);
++
++        mFullscreenHtmlApiHandlerCompat.exitFullscreenForTabEvent(mTab);
++        mAreControlsHidden.set(true);
++
++        verify(delegate).onExitFullscreen(mTab);
++        verify(delegate, never()).onExitFullscreen(null);
++        assertFalse(mFullscreenHtmlApiHandlerCompat.getPersistentFullscreenMode());
++        assertTrue(mFullscreenHtmlApiHandlerCompat.getBrowserFullscreenMode());
++        assertTrue(mFullscreenHtmlApiHandlerCompat.getFullscreenUiModeSupplier().get());
++    }
++
++    @Test
++    public void unrelatedTabEventPreservesCurrentPendingDomRequest() {
++        doReturn(null).when(mTab).getWebContents();
++        doReturn(true).when(mTab).isUserInteractable();
++        mFullscreenHtmlApiHandlerCompat.setTabForTesting(mTab);
++        mFullscreenHtmlApiHandlerCompat.setBrowserFullscreenMode(true);
++        mFullscreenHtmlApiHandlerCompat.onEnterFullscreen(
++                mTab, new FullscreenOptions(false, false, INVALID_DISPLAY));
++        var otherTab = Mockito.mock(Tab.class);
++        doReturn(new UserDataHost()).when(otherTab).getUserDataHost();
++        var delegate = Mockito.mock(FullscreenManager.FullscreenManagerDelegate.class);
++        mFullscreenHtmlApiHandlerCompat.setFullscreenManagerDelegate(delegate);
++
++        mFullscreenHtmlApiHandlerCompat.exitFullscreenForTabEvent(otherTab);
++
++        verify(delegate).onExitFullscreen(otherTab);
++        verify(delegate, never()).onExitFullscreen(null);
++        assertTrue(mFullscreenHtmlApiHandlerCompat.getPersistentFullscreenMode());
++        assertTrue(mFullscreenHtmlApiHandlerCompat.getBrowserFullscreenMode());
++        assertTrue(mFullscreenHtmlApiHandlerCompat.getFullscreenUiModeSupplier().get());
++    }
++
++    @Test
++    public void tabEventCancelsOnlyItsDeferredDomEntry() {
++        doReturn(false).when(mTab).isUserInteractable();
++        mFullscreenHtmlApiHandlerCompat.setTabForTesting(mTab);
++        mFullscreenHtmlApiHandlerCompat.setBrowserFullscreenMode(true);
++        mFullscreenHtmlApiHandlerCompat.onEnterFullscreen(
++                mTab, new FullscreenOptions(false, false, INVALID_DISPLAY));
++        var delegate = Mockito.mock(FullscreenManager.FullscreenManagerDelegate.class);
++        mFullscreenHtmlApiHandlerCompat.setFullscreenManagerDelegate(delegate);
++
++        mFullscreenHtmlApiHandlerCompat.exitFullscreenForTabEvent(mTab);
++        doReturn(true).when(mTab).isUserInteractable();
++        mFullscreenHtmlApiHandlerCompat.onTabInteractable(mTab);
++
++        verify(delegate).onExitFullscreen(mTab);
++        assertFalse(mFullscreenHtmlApiHandlerCompat.getPersistentFullscreenMode());
++        assertTrue(mFullscreenHtmlApiHandlerCompat.getBrowserFullscreenMode());
++        assertTrue(mFullscreenHtmlApiHandlerCompat.getFullscreenUiModeSupplier().get());
++    }
++
++    @Test
++    public void shownDomTabEventPreservesBrowserFullscreen() {
++        doReturn(mWebContents).when(mTab).getWebContents();
++        doReturn(mContentView).when(mTab).getContentView();
++        doReturn(true).when(mTab).isUserInteractable();
++        doReturn(true).when(mTab).isHidden();
++        doReturn(true).when(mContentView).hasWindowFocus();
++        doReturn(VISIBLE_SYSTEM_BARS_WINDOW_INSETS.toWindowInsets())
++                .when(mContentView)
++                .getRootWindowInsets();
++        mAreControlsHidden.set(true);
++        mFullscreenHtmlApiHandlerCompat.setTabForTesting(mTab);
++        mFullscreenHtmlApiHandlerCompat.setBrowserFullscreenMode(true);
++        mFullscreenHtmlApiHandlerCompat.onEnterFullscreen(
++                mTab, new FullscreenOptions(false, false, INVALID_DISPLAY));
++        var delegate = Mockito.mock(FullscreenManager.FullscreenManagerDelegate.class);
++        mFullscreenHtmlApiHandlerCompat.setFullscreenManagerDelegate(delegate);
++
++        mFullscreenHtmlApiHandlerCompat.exitFullscreenForTabEvent(mTab);
++
++        verify(delegate).onExitFullscreen(mTab);
++        verify(mWebContents).exitFullscreen();
++        assertFalse(mFullscreenHtmlApiHandlerCompat.getPersistentFullscreenMode());
++        assertTrue(mFullscreenHtmlApiHandlerCompat.getBrowserFullscreenMode());
++        assertTrue(mFullscreenHtmlApiHandlerCompat.getFullscreenUiModeSupplier().get());
++    }
+ }

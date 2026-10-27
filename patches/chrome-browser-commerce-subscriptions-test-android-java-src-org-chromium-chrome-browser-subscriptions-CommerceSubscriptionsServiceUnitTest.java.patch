@@ -1,0 +1,113 @@
+diff --git a/chrome/browser/commerce/subscriptions/test/android/java/src/org/chromium/chrome/browser/subscriptions/CommerceSubscriptionsServiceUnitTest.java b/chrome/browser/commerce/subscriptions/test/android/java/src/org/chromium/chrome/browser/subscriptions/CommerceSubscriptionsServiceUnitTest.java
+--- a/chrome/browser/commerce/subscriptions/test/android/java/src/org/chromium/chrome/browser/subscriptions/CommerceSubscriptionsServiceUnitTest.java
++++ b/chrome/browser/commerce/subscriptions/test/android/java/src/org/chromium/chrome/browser/subscriptions/CommerceSubscriptionsServiceUnitTest.java
+@@ -7,11 +7,10 @@
+ import static androidx.test.espresso.matcher.ViewMatchers.assertThat;
+
+ import static org.hamcrest.CoreMatchers.equalTo;
++import static org.junit.Assert.assertTrue;
+ import static org.mockito.ArgumentMatchers.any;
+-import static org.mockito.ArgumentMatchers.anyLong;
+ import static org.mockito.ArgumentMatchers.eq;
+ import static org.mockito.Mockito.doNothing;
+-import static org.mockito.Mockito.doReturn;
+ import static org.mockito.Mockito.times;
+ import static org.mockito.Mockito.verify;
+ import static org.mockito.Mockito.when;
+@@ -34,7 +33,6 @@
+ import org.chromium.base.shared_preferences.SharedPreferencesManager;
+ import org.chromium.base.test.BaseRobolectricTestRunner;
+ import org.chromium.chrome.browser.commerce.ShoppingServiceFactory;
+-import org.chromium.chrome.browser.commerce.ShoppingServiceFactoryJni;
+ import org.chromium.chrome.browser.flags.ChromeFeatureList;
+ import org.chromium.chrome.browser.lifecycle.ActivityLifecycleDispatcher;
+ import org.chromium.chrome.browser.lifecycle.PauseResumeWithNativeObserver;
+@@ -49,8 +47,6 @@
+ import org.chromium.components.browser_ui.notifications.BaseNotificationManagerProxyFactory;
+ import org.chromium.components.browser_ui.notifications.MockNotificationManagerProxy;
+ import org.chromium.components.browser_ui.notifications.NotificationProxyUtils;
+-import org.chromium.components.commerce.core.CommerceFeatureUtils;
+-import org.chromium.components.commerce.core.CommerceFeatureUtilsJni;
+ import org.chromium.components.commerce.core.ShoppingService;
+ import org.chromium.components.prefs.PrefService;
+ import org.chromium.components.user_prefs.UserPrefs;
+@@ -69,8 +65,6 @@
+     @Mock private Profile mProfile;
+     @Mock private PrefService mPrefService;
+     @Mock private UserPrefs.Natives mUserPrefsJni;
+-    @Mock private CommerceFeatureUtils.Natives mCommerceFeatureUtilsJniMock;
+-    @Mock private ShoppingServiceFactory.Natives mShoppingServiceFactoryJniMock;
+
+     @Captor
+     private ArgumentCaptor<PauseResumeWithNativeObserver> mPauseResumeWithNativeObserverCaptor;
+@@ -82,11 +76,8 @@
+
+     @Before
+     public void setUp() {
+-        CommerceFeatureUtilsJni.setInstanceForTesting(mCommerceFeatureUtilsJniMock);
+-        doReturn(true).when(mCommerceFeatureUtilsJniMock).isShoppingListEligible(anyLong());
+
+-        ShoppingServiceFactoryJni.setInstanceForTesting(mShoppingServiceFactoryJniMock);
+-        doReturn(mShoppingService).when(mShoppingServiceFactoryJniMock).getForProfile(any());
++        ShoppingServiceFactory.setShoppingServiceForTesting(mShoppingService);
+
+         doNothing().when(mActivityLifecycleDispatcher).register(any());
+         mSharedPreferencesManager = ChromeSharedPreferences.getInstance();
+@@ -131,27 +122,34 @@
+
+     @Test
+     @SmallTest
+-    public void testOnResume() {
++    public void testOnResume_UnavailableShopping() {
++        long expiredTimestamp =
++                mSharedPreferencesManager.readLong(
++                        CommerceSubscriptionsService.CHROME_MANAGED_SUBSCRIPTIONS_TIMESTAMP, -1);
+         setupTestOnResume();
++        assertTrue(
++                mSharedPreferencesManager.readLong(
++                                CommerceSubscriptionsService.CHROME_MANAGED_SUBSCRIPTIONS_TIMESTAMP,
++                                -1)
++                        > expiredTimestamp);
+         assertThat(
+                 RecordHistogram.getHistogramTotalCountForTesting(
+                         PriceDropNotificationManagerImpl.NOTIFICATION_ENABLED_HISTOGRAM),
+-                equalTo(1));
++                equalTo(0));
+         assertThat(
+                 RecordHistogram.getHistogramTotalCountForTesting(
+                         PriceDropNotificationManagerImpl
+                                 .NOTIFICATION_CHROME_MANAGED_COUNT_HISTOGRAM),
+-                equalTo(1));
++                equalTo(0));
+         assertThat(
+                 RecordHistogram.getHistogramTotalCountForTesting(
+                         PriceDropNotificationManagerImpl.NOTIFICATION_USER_MANAGED_COUNT_HISTOGRAM),
+-                equalTo(1));
++                equalTo(0));
+     }
+
+     @Test
+     @SmallTest
+     public void testOnResume_FeatureDisabled() {
+-        doReturn(false).when(mCommerceFeatureUtilsJniMock).isShoppingListEligible(anyLong());
+
+         setupTestOnResume();
+         assertThat(
+@@ -163,11 +161,16 @@
+     @Test
+     @SmallTest
+     public void testOnResume_TooFrequent() {
++        long recentTimestamp = System.currentTimeMillis() - TimeUnit.SECONDS.toMillis(1);
+         mSharedPreferencesManager.writeLong(
+                 CommerceSubscriptionsService.CHROME_MANAGED_SUBSCRIPTIONS_TIMESTAMP,
+-                System.currentTimeMillis());
++                recentTimestamp);
+
+         setupTestOnResume();
++        assertThat(
++                mSharedPreferencesManager.readLong(
++                        CommerceSubscriptionsService.CHROME_MANAGED_SUBSCRIPTIONS_TIMESTAMP, -1),
++                equalTo(recentTimestamp));
+         assertThat(
+                 RecordHistogram.getHistogramTotalCountForTesting(
+                         PriceDropNotificationManagerImpl.NOTIFICATION_ENABLED_HISTOGRAM),

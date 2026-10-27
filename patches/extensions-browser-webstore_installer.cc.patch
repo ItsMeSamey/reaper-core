@@ -1,0 +1,325 @@
+diff --git a/extensions/browser/webstore_installer.cc b/extensions/browser/webstore_installer.cc
+--- a/extensions/browser/webstore_installer.cc
++++ b/extensions/browser/webstore_installer.cc
+@@ -232,7 +232,16 @@
+ 
+ void WebstoreInstaller::Start() {
+   DCHECK_CURRENTLY_ON(BrowserThread::UI);
++#if BUILDFLAG(IS_ANDROID)
++  if (completed_ || start_ref_held_) {
++    return;
++  }
++  scoped_refptr<WebstoreInstaller> keep_alive(this);
++#endif
+   AddRef();  // Balanced in ReportSuccess and ReportFailure.
++#if BUILDFLAG(IS_ANDROID)
++  start_ref_held_ = true;
++#endif
+ 
+   if (!crx_file::id_util::IdIsValid(id_)) {
+     ReportFailure(kInvalidIdError, FAILURE_REASON_OTHER);
+@@ -264,6 +273,11 @@
+   ExtensionsBrowserClient::Get()
+       ->GetInstallVerifier(browser_context_)
+       ->AddProvisional(ids);
++#if BUILDFLAG(IS_ANDROID)
++  if (completed_ || !browser_context_) {
++    return;
++  }
++#endif
+ 
+   const std::string* name =
+       approval_->manifest->available_values().FindString(manifest_keys::kName);
+@@ -276,8 +290,18 @@
+       id_, *name, approval_->installing_icon, approval_->manifest->is_app(),
+       approval_->manifest->is_platform_app());
+   tracker->OnBeginExtensionInstall(params);
++#if BUILDFLAG(IS_ANDROID)
++  if (completed_ || !browser_context_) {
++    return;
++  }
++#endif
+ 
+   tracker->OnBeginExtensionDownload(id_);
++#if BUILDFLAG(IS_ANDROID)
++  if (completed_ || !browser_context_) {
++    return;
++  }
++#endif
+ 
+   // TODO(crbug.com/41064141): Query manifest of dependencies before
+   // downloading & installing those dependencies.
+@@ -286,6 +310,11 @@
+ 
+ void WebstoreInstaller::OnInstallerDone(
+     const std::optional<CrxInstallError>& error) {
++#if BUILDFLAG(IS_ANDROID)
++  if (completed_) {
++    return;
++  }
++#endif
+   if (!error) {
+     return;
+   }
+@@ -303,6 +332,12 @@
+     content::BrowserContext* browser_context,
+     const Extension* extension,
+     bool is_update) {
++#if BUILDFLAG(IS_ANDROID)
++  if (completed_ || !browser_context_) {
++    return;
++  }
++  scoped_refptr<WebstoreInstaller> keep_alive(this);
++#endif
+   CHECK(ExtensionsBrowserClient::Get()->IsSameContext(browser_context_,
+                                                       browser_context));
+   if (pending_modules_.empty()) {
+@@ -316,9 +351,18 @@
+ 
+   // Clean up local state from the current download.
+   if (download_item_) {
++#if BUILDFLAG(IS_ANDROID)
++    DownloadItem* item = std::exchange(download_item_, nullptr);
++    item->RemoveObserver(this);
++    item->Remove();
++    if (completed_ || !browser_context_) {
++      return;
++    }
++#else
+     download_item_->RemoveObserver(this);
+     download_item_->Remove();
+     download_item_ = nullptr;
++#endif
+   }
+   crx_installer_.reset();
+ 
+@@ -344,6 +388,18 @@
+   }
+ }
+ 
++#if BUILDFLAG(IS_ANDROID)
++void WebstoreInstaller::OnShutdown(ExtensionRegistry* registry) {
++  if (completed_) {
++    return;
++  }
++  DCHECK(extension_registry_observation_.IsObservingSource(registry));
++  extension_registry_observation_.Reset();
++  browser_context_ = nullptr;
++  ReportFailure(kDownloadCanceledError, FAILURE_REASON_CANCELLED);
++}
++#endif
++
+ void WebstoreInstaller::SetDownloadDirectoryForTests(  // IN-TEST
+     base::FilePath* directory) {
+   g_download_directory_for_tests = directory;
+@@ -360,6 +416,14 @@
+     const ExtensionId& extension_id,
+     DownloadItem* item,
+     download::DownloadInterruptReason interrupt_reason) {
++#if BUILDFLAG(IS_ANDROID)
++  if (completed_ || !browser_context_) {
++    if (item && item->GetState() == DownloadItem::IN_PROGRESS) {
++      item->Cancel(/*user_cancel=*/false);
++    }
++    return;
++  }
++#endif
+   if (!item || interrupt_reason != download::DOWNLOAD_INTERRUPT_REASON_NONE) {
+     if (item) {
+       item->Remove();
+@@ -415,9 +479,24 @@
+   if (!download_started_) {
+     download_started_ = true;
+   }
++#if BUILDFLAG(IS_ANDROID)
++  // DownloadManager can deliver an already-interrupted item with a successful
++  // started callback. Its state notification predates our observer, so consume
++  // terminal errors now instead of leaving the install operation pending.
++  const auto state = item->GetState();
++  if (state == DownloadItem::INTERRUPTED || state == DownloadItem::CANCELLED) {
++    OnDownloadUpdated(item);
++  }
++#endif
+ }
+ 
+ void WebstoreInstaller::OnDownloadUpdated(DownloadItem* download) {
++#if BUILDFLAG(IS_ANDROID)
++  if (completed_ || !browser_context_) {
++    return;
++  }
++  scoped_refptr<WebstoreInstaller> keep_alive(this);
++#endif
+   CHECK_EQ(download_item_, download);
+ 
+   switch (download->GetState()) {
+@@ -445,6 +524,11 @@
+       }
+ 
+       StartCrxInstaller(*download);
++#if BUILDFLAG(IS_ANDROID)
++      if (completed_) {
++        return;
++      }
++#endif
+ 
+       if (pending_modules_.size() == 1) {
+         // The download is the last module - the extension main module.
+@@ -464,9 +548,22 @@
+ }
+ 
+ void WebstoreInstaller::OnDownloadDestroyed(DownloadItem* download) {
++#if BUILDFLAG(IS_ANDROID)
++  if (download != download_item_) {
++    return;
++  }
++#endif
+   CHECK_EQ(download_item_, download);
+   download_item_->RemoveObserver(this);
+   download_item_ = nullptr;
++#if BUILDFLAG(IS_ANDROID)
++  // If the item disappears before CRX installation takes ownership, no further
++  // download update can complete the operation. Clear the item before reporting
++  // failure so retirement never touches the object currently being destroyed.
++  if (!completed_ && !crx_installer_) {
++    ReportFailure(kDownloadCanceledError, FAILURE_REASON_CANCELLED);
++  }
++#endif
+ }
+ 
+ void WebstoreInstaller::DownloadNextPendingModule() {
+@@ -509,6 +606,12 @@
+ void WebstoreInstaller::StartDownload(const ExtensionId& extension_id,
+                                       const base::FilePath& file) {
+   DCHECK_CURRENTLY_ON(BrowserThread::UI);
++#if BUILDFLAG(IS_ANDROID)
++  if (completed_ || !browser_context_) {
++    // GetDownloadFilePath only chooses an unused path; no file is owned yet.
++    return;
++  }
++#endif
+ 
+   if (file.empty()) {
+     ReportFailure(kDownloadDirectoryError, FAILURE_REASON_OTHER);
+@@ -612,6 +715,13 @@
+ }
+ 
+ void WebstoreInstaller::UpdateDownloadProgress() {
++#if BUILDFLAG(IS_ANDROID)
++  if (completed_ || !browser_context_) {
++    download_progress_timer_.Stop();
++    return;
++  }
++  scoped_refptr<WebstoreInstaller> keep_alive(this);
++#endif
+   // If the download has gone away, or isn't in progress (in which case we can't
+   // give a good progress estimate), stop any running timers and return.
+   if (!download_item_ ||
+@@ -632,6 +742,11 @@
+     InstallTracker* tracker =
+         ExtensionsBrowserClient::Get()->GetInstallTracker(browser_context_);
+     tracker->OnDownloadProgress(id_, percent);
++#if BUILDFLAG(IS_ANDROID)
++    if (completed_ || !download_item_) {
++      return;
++    }
++#endif
+   }
+ 
+   // If there's enough time remaining on the download to warrant an update,
+@@ -648,6 +763,11 @@
+ }
+ 
+ void WebstoreInstaller::StartCrxInstaller(const DownloadItem& download) {
++#if BUILDFLAG(IS_ANDROID)
++  if (completed_ || !browser_context_) {
++    return;
++  }
++#endif
+   DCHECK_CURRENTLY_ON(BrowserThread::UI);
+   DCHECK(!crx_installer_.get());
+ 
+@@ -670,8 +790,52 @@
+   crx_installer_->InstallCrx(download.GetFullPath());
+ }
+ 
++#if BUILDFLAG(IS_ANDROID)
++bool WebstoreInstaller::RetireOperation(bool report_failure) {
++  completed_ = true;
++  const bool release_start_ref = std::exchange(start_ref_held_, false);
++  extension_registry_observation_.Reset();
++  content::BrowserContext* context = std::exchange(browser_context_, nullptr);
++  download_progress_timer_.Stop();
++  weak_ptr_factory_.InvalidateWeakPtrs();
++  approval_.reset();
++  pending_modules_.clear();
++  crx_installer_.reset();
++
++  // Shutdown clears the context before arriving here. During ordinary failure,
++  // notify the tracker before callbacks or download cancellation can retire it.
++  if (report_failure && context) {
++    ExtensionsBrowserClient::Get()->GetInstallTracker(context)->OnInstallFailure(
++        id_);
++  }
++  // OnDownloadDestroyed can clear this member during the tracker notification.
++  if (download_item_) {
++    DownloadItem* item = std::exchange(download_item_, nullptr);
++    item->RemoveObserver(this);
++    if (item->GetState() == DownloadItem::IN_PROGRESS) {
++      item->Cancel(/*user_cancel=*/false);
++    }
++  }
++  return release_start_ref;
++}
++#endif
++
+ void WebstoreInstaller::ReportFailure(const std::string& error,
+                                       FailureReason reason) {
++#if BUILDFLAG(IS_ANDROID)
++  if (completed_) {
++    return;
++  }
++  scoped_refptr<WebstoreInstaller> keep_alive(this);
++  CHECK(failure_callback_);
++  const bool release_start_ref = RetireOperation(/*report_failure=*/true);
++  auto callback = std::move(failure_callback_);
++  success_callback_ = base::NullCallback();
++  std::move(callback).Run(id_, error, reason);
++  if (release_start_ref) {
++    Release();  // Balanced in Start().
++  }
++#else
+   CHECK(failure_callback_);
+   std::move(failure_callback_).Run(id_, error, reason);
+   success_callback_ = base::NullCallback();
+@@ -682,15 +846,31 @@
+   tracker->OnInstallFailure(id_);
+ 
+   Release();  // Balanced in Start().
++#endif
+ }
+ 
+ void WebstoreInstaller::ReportSuccess() {
++#if BUILDFLAG(IS_ANDROID)
++  if (completed_) {
++    return;
++  }
++  scoped_refptr<WebstoreInstaller> keep_alive(this);
++  CHECK(success_callback_);
++  const bool release_start_ref = RetireOperation(/*report_failure=*/false);
++  auto callback = std::move(success_callback_);
++  failure_callback_ = base::NullCallback();
++  std::move(callback).Run(id_);
++  if (release_start_ref) {
++    Release();  // Balanced in Start().
++  }
++#else
+   CHECK(success_callback_);
+   std::move(success_callback_).Run(id_);
+   failure_callback_ = base::NullCallback();
+   extension_registry_observation_.Reset();
+ 
+   Release();  // Balanced in Start().
++#endif
+ }
+ 
+ }  // namespace extensions

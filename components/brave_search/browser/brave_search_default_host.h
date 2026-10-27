@@ -10,6 +10,7 @@
 
 #include "base/memory/raw_ptr.h"
 #include "brave/components/brave_search/common/brave_search_default.mojom.h"
+#include "build/build_config.h"
 
 class TemplateURLService;
 class TemplateURL;
@@ -42,7 +43,9 @@ class BraveSearchDefaultHost final
   uint64_t GetMaxDailyCanAskCount();
   uint64_t GetMaxTotalCanAskCount();
 
+#if !BUILDFLAG(IS_ANDROID)
   bool can_always_set_default_ = false;
+#endif  // !BUILDFLAG(IS_ANDROID)
   bool can_set_default_ = false;
   const std::string host_;
   raw_ptr<TemplateURLService> template_url_service_ = nullptr;

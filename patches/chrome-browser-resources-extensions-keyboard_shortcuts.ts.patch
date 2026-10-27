@@ -1,0 +1,123 @@
+diff --git a/chrome/browser/resources/extensions/keyboard_shortcuts.ts b/chrome/browser/resources/extensions/keyboard_shortcuts.ts
+index 16bc3f88fb86fa1d081f152ac96e996d4d495367..8c99830a150b46fc5addc1c2a7874e51f1f9a77e 100644
+--- a/chrome/browser/resources/extensions/keyboard_shortcuts.ts
++++ b/chrome/browser/resources/extensions/keyboard_shortcuts.ts
+@@ -3,6 +3,10 @@
+ // found in the LICENSE file.
+ 
+ import 'chrome://resources/cr_components/cr_shortcut_input/cr_shortcut_input.js';
++// <if expr="is_android">
++import type {CrShortcutInputElement} from 'chrome://resources/cr_components/cr_shortcut_input/cr_shortcut_input.js';
++import type {PropertyValues} from 'chrome://resources/lit/v3_0/lit.rollup.js';
++// </if>
+ 
+ import {I18nMixinLit} from 'chrome://resources/cr_elements/i18n_mixin_lit.js';
+ import {loadTimeData} from 'chrome://resources/js/load_time_data.js';
+@@ -44,12 +48,93 @@
+   protected accessor showGlobalScopeOption_: boolean =
+       loadTimeData.getBoolean('enableGlobalScopedShortcuts');
+ 
++  // <if expr="is_android">
++  private captureOwner_: {
++    input: CrShortcutInputElement,
++    delegate: KeyboardShortcutDelegate,
++  }|null = null;
++  private captureAllowed_: boolean = true;
++
++  override disconnectedCallback() {
++    this.cancelShortcutCaptures_();
++    super.disconnectedCallback();
++  }
++
++  // </if>
+   override firstUpdated() {
+     this.addEventListener('view-enter-start', this.onViewEnter_);
+-  }
++    // <if expr="is_android">
++    this.addEventListener('view-exit-start', () => {
++      this.captureAllowed_ = false;
++      this.cancelShortcutCaptures_();
++    });
++    // </if>
++  }
++  // <if expr="is_android">
++
++  override updated(changedProperties: PropertyValues<this>) {
++    super.updated(changedProperties);
++    if (changedProperties.has('delegate')) {
++      this.cancelShortcutCaptures_();
++      return;
++    }
++    const owner = this.captureOwner_;
++    if (owner && (!owner.input.isConnected ||
++                  !this.shadowRoot.contains(owner.input) ||
++                  owner.input.inputDisabled)) {
++      this.releaseCapture_();
++    }
++  }
++
++  private releaseCapture_(nextDelegate?: KeyboardShortcutDelegate) {
++    const owner = this.captureOwner_;
++    this.captureOwner_ = null;
++    if (owner) {
++      owner.input.cancelCapture();
++      // Moving directly to another editor must keep its delegate suspended.
++      if (owner.delegate !== nextDelegate) {
++        owner.delegate.setShortcutHandlingSuspended(false);
++      }
++    }
++  }
++
++  private cancelShortcutCaptures_() {
++    this.releaseCapture_();
++    // A start event can still be awaiting the child's updateComplete.
++    this.shadowRoot.querySelectorAll('cr-shortcut-input').forEach(input => {
++      input.cancelCapture();
++    });
++  }
++  // </if>
+ 
+   protected onInputCaptureChange_(event: CustomEvent<boolean>) {
++    // <if expr="is_android">
++    const input = event.currentTarget as CrShortcutInputElement;
++    if (event.detail) {
++      if (!this.captureAllowed_ || !this.isConnected || !input.isConnected ||
++          !this.shadowRoot.contains(input) || input.inputDisabled ||
++          !input.isCapturing()) {
++        input.cancelCapture();
++        return;
++      }
++      if (this.captureOwner_?.input === input &&
++          this.captureOwner_.delegate === this.delegate) {
++        return;
++      }
++      const nextDelegate =
++          this.captureOwner_?.input !== input ? this.delegate : undefined;
++      this.releaseCapture_(nextDelegate);
++      if (input.isCapturing()) {
++        this.captureOwner_ = {input, delegate: this.delegate};
++        this.delegate.setShortcutHandlingSuspended(true);
++      }
++    } else if (this.captureOwner_?.input === input && !input.isCapturing()) {
++      this.releaseCapture_();
++    }
++    // </if>
++    // <if expr="not is_android">
+     this.delegate.setShortcutHandlingSuspended(event.detail);
++    // </if>
+   }
+ 
+   protected onShortcutUpdated_(
+@@ -59,7 +144,12 @@
+   }
+ 
+   private onViewEnter_() {
++    // <if expr="is_android">
++    this.captureAllowed_ = true;
++    // </if>
++    // <if expr="not is_android">
+     chrome.metricsPrivate.recordUserAction('Options_ExtensionCommands');
++    // </if>
+   }
+ 
+   protected calculateShownItems_(): chrome.developerPrivate.ExtensionInfo[] {

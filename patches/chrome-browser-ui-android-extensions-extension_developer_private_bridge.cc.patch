@@ -1,0 +1,317 @@
+diff --git a/chrome/browser/ui/android/extensions/extension_developer_private_bridge.cc b/chrome/browser/ui/android/extensions/extension_developer_private_bridge.cc
+index 137c45cf552f674bd1c8505d18c5f0d3c6e98e52..af4ff424774960a4dfc3490dd2acdfb6c27faa98 100644
+--- a/chrome/browser/ui/android/extensions/extension_developer_private_bridge.cc
++++ b/chrome/browser/ui/android/extensions/extension_developer_private_bridge.cc
+@@ -4,11 +4,307 @@
+ 
+ #include "chrome/browser/ui/android/extensions/extension_developer_private_bridge.h"
+ 
++#include <map>
++#include <utility>
++
++#include "base/android/content_uri_utils.h"
+ #include "base/android/jni_android.h"
+ #include "base/android/jni_string.h"
++#include "base/feature_list.h"
++#include "base/files/file_util.h"
++#include "base/functional/bind.h"
++#include "base/functional/callback_helpers.h"
++#include "base/memory/weak_ptr.h"
++#include "base/no_destructor.h"
++#include "base/strings/utf_string_conversions.h"
++#include "base/task/bind_post_task.h"
++#include "base/uuid.h"
++#include "chrome/browser/android/tab_android.h"
++#include "chrome/browser/extensions/extension_management.h"
++#include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/supervised_user/supervised_user_browser_utils.h"
+ #include "chrome/browser/ui/android/extensions/jni_headers/ExtensionDeveloperPrivateBridge_jni.h"
++#include "chrome/browser/ui/android/extensions/jni_headers/ReaperExtensionImportCoordinator_jni.h"
++#include "chrome/browser/ui/select_file_policy/chrome_select_file_policy.h"
++#include "chrome/common/pref_names.h"
++#include "chrome/common/url_constants.h"
++#include "components/prefs/pref_service.h"
++#include "content/public/browser/browser_thread.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/common/url_constants.h"
++#include "extensions/browser/unpacked_installer.h"
++#include "ui/android/ui_android_features.h"
++#include "ui/android/window_android.h"
+ 
+ namespace extensions {
++namespace {
++
++// Only live-process callbacks reside here. Neither a pointer nor this map is
++// serialized.
++struct PendingUnpackedImport {
++  base::WeakPtr<content::WebContents> source;
++  ExtensionDeveloperPrivateBridge::UnpackedSelectionCallback callback;
++};
++
++std::map<std::string, PendingUnpackedImport>& PendingImports() {
++  static base::NoDestructor<std::map<std::string, PendingUnpackedImport>>
++      pending;
++  return *pending;
++}
++
++void CompleteJavaImport(const std::string& id, std::string error) {
++  Java_ReaperExtensionImportCoordinator_onNativeComplete(
++      base::android::AttachCurrentThread(), id, error);
++}
++
++bool IsExtensionsManager(content::WebContents* source) {
++  if (!source || source->IsBeingDestroyed())
++    return false;
++  auto* frame = source->GetPrimaryMainFrame();
++  if (!frame || !frame->IsActive() || !frame->IsRenderFrameLive())
++    return false;
++  const GURL& url = source->GetLastCommittedURL();
++  return url.SchemeIs(content::kChromeUIScheme) &&
++         url.host() == chrome::kChromeUIExtensionsHost;
++}
++
++void FinishImportError(const std::string& id, const std::string& error) {
++  auto node = PendingImports().extract(id);
++  if (!node.empty()) {
++    const bool original_can_report =
++        IsExtensionsManager(node.mapped().source.get());
++    if (!original_can_report)
++      CompleteJavaImport(id, error);
++    const std::string display_error =
++        Java_ReaperExtensionImportCoordinator_localizeError(
++            base::android::AttachCurrentThread(), error);
++    std::move(node.mapped().callback).Run(base::FilePath(), display_error);
++    // A live original WebUI reports the error; a destroyed page cannot do so.
++    if (original_can_report)
++      CompleteJavaImport(id, std::string());
++  } else {
++    CompleteJavaImport(id, error);
++  }
++}
++
++}  // namespace
++
++ExtensionDeveloperPrivateBridge::UnpackedInstallCompletion
++ExtensionDeveloperPrivateBridge::MakeUnpackedImportCompletion(
++    base::OnceCallback<void(std::string)> terminal) {
++  auto callbacks = base::SplitOnceCallback(std::move(terminal));
++  base::ScopedClosureRunner abandoned(base::BindPostTaskToCurrentDefault(
++      base::BindOnce(std::move(callbacks.second),
++                     std::string("reaper.import.interrupted"))));
++  return base::BindOnce(
++      [](base::OnceCallback<void(std::string)> completed,
++         base::ScopedClosureRunner abandoned, const Extension* extension,
++         const base::FilePath& path, const std::u16string& error) {
++        static_cast<void>(abandoned.Release());
++        std::move(completed).Run(extension ? std::string()
++                                           : base::UTF16ToUTF8(error));
++      },
++      std::move(callbacks.first), std::move(abandoned));
++}
++
++// Shared with the ordinary developerPrivate entry so restoration cannot omit
++// its checks.
++std::string ExtensionDeveloperPrivateBridge::UnpackedImportPolicyError(
++    Profile* profile) {
++  if (!profile)
++    return "Could not find the original profile.";
++  if (supervised_user::AreExtensionsPermissionsEnabled(profile)) {
++    return "Child account users cannot load unpacked extensions.";
++  }
++  if (!profile->GetPrefs()->GetBoolean(prefs::kExtensionsUIDeveloperMode)) {
++    return "Must be in developer mode to load unpacked extensions.";
++  }
++  if (ExtensionManagementFactory::GetForBrowserContext(profile)
++          ->BlocklistedByDefault()) {
++    return "Extension installation is blocked by policy.";
++  }
++  return {};
++}
++
++bool ExtensionDeveloperPrivateBridge::StartUnpackedImport(
++    content::WebContents* source,
++    UnpackedSelectionCallback callback,
++    std::string* request_id) {
++  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
++  auto* tab = source ? TabAndroid::FromWebContents(source) : nullptr;
++  auto* window = source ? source->GetTopLevelNativeWindow() : nullptr;
++  auto* profile = source
++                      ? Profile::FromBrowserContext(source->GetBrowserContext())
++                      : nullptr;
++  if (!tab || !window || !IsExtensionsManager(source) || !profile ||
++      profile->IsOffTheRecord() ||
++      !UnpackedImportPolicyError(profile).empty()) {
++    return false;
++  }
++  ChromeSelectFilePolicy picker_policy(source);
++  if (!picker_policy.CanOpenSelectFileDialog()) {
++    picker_policy.SelectFileDenied();
++    return false;
++  }
++  const std::string id = base::Uuid::GenerateRandomV4().AsLowercaseString();
++  PendingImports().emplace(
++      id, PendingUnpackedImport{source->GetWeakPtr(), std::move(callback)});
++  const bool started = Java_ReaperExtensionImportCoordinator_start(
++      base::android::AttachCurrentThread(), window->GetJavaObject(),
++      source->GetJavaWebContents(), id, profile->GetBaseName().AsUTF8Unsafe(),
++      profile->GetCreationTime().ToDeltaSinceWindowsEpoch().InMicroseconds(),
++      tab->GetAndroidId(),
++      base::FeatureList::IsEnabled(ui::kCheckIntentCallerPermission));
++  if (!started) {
++    PendingImports().erase(id);
++    return false;
++  }
++  *request_id = id;
++  return true;
++}
++
++void ExtensionDeveloperPrivateBridge::ForgetUnpackedImport(
++    const std::string& id) {
++  PendingImports().erase(id);
++}
++
++void ExtensionDeveloperPrivateBridge::CompleteUnpackedImport(
++    const std::string& id,
++    const std::string& error) {
++  PendingImports().erase(id);
++  if (!id.empty())
++    CompleteJavaImport(id, error);
++}
++
++// Java calls only for its own recorded request and a matching RESULT_OK
++// receipt, never because a persisted URI grant happens to exist. DISPATCHING
++// after process loss is an interrupted operation, not permission to repeat an
++// install of uncertain outcome.
++static int32_t JNI_ReaperExtensionImportCoordinator_Resume(
++    JNIEnv* env,
++    content::WebContents* source,
++    int32_t tab_id,
++    const std::string& id,
++    const std::string& profile_name,
++    int64_t profile_creation,
++    int32_t state,
++    const std::string& uri) {
++  constexpr int kDeferred = 0;
++  constexpr int kStarted = 1;
++  constexpr int kFinished = 2;
++  constexpr int kApproved = 2;
++  constexpr int kCancelled = 3;
++  constexpr int kFailed = 4;
++  constexpr int kInterrupted = 5;
++  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
++  auto* tab = source ? TabAndroid::FromWebContents(source) : nullptr;
++  auto* profile = source
++                      ? Profile::FromBrowserContext(source->GetBrowserContext())
++                      : nullptr;
++  if (!source || source->IsBeingDestroyed() || !tab || !profile ||
++      tab->GetAndroidId() != tab_id ||
++      profile->GetBaseName().AsUTF8Unsafe() != profile_name ||
++      profile->GetCreationTime().ToDeltaSinceWindowsEpoch().InMicroseconds() !=
++          profile_creation) {
++    return kDeferred;
++  }
++  // A restored tab may not have created/committed its WebUI yet. The activity
++  // tab observer retries on content/page readiness; do not mislabel startup as
++  // a changed source.
++  auto* frame = source->GetPrimaryMainFrame();
++  if (!frame || !frame->IsRenderFrameLive() ||
++      source->GetLastCommittedURL().is_empty()) {
++    return kDeferred;
++  }
++  if (!base::Uuid::ParseLowercase(id).is_valid() || profile->IsOffTheRecord() ||
++      !IsExtensionsManager(source)) {
++    FinishImportError(id, "reaper.import.source_changed");
++    return kFinished;
++  }
++  if (state != kApproved) {
++    if (state == kCancelled) {
++      auto cancelled = PendingImports().extract(id);
++      if (!cancelled.empty()) {
++        std::move(cancelled.mapped().callback)
++            .Run(base::FilePath(), "File selection was canceled.");
++      }
++      CompleteJavaImport(id, std::string());
++      return kFinished;
++    }
++    if (state == kFailed || state == kInterrupted) {
++      FinishImportError(id, "reaper.import.interrupted");
++      return kFinished;
++    }
++    return kDeferred;
++  }
++  const std::string policy_error =
++      ExtensionDeveloperPrivateBridge::UnpackedImportPolicyError(profile);
++  if (!policy_error.empty()) {
++    FinishImportError(id, policy_error);
++    return kFinished;
++  }
++  if (!ChromeSelectFilePolicy::FileSelectDialogsAllowed()) {
++    FinishImportError(id, "reaper.import.file_policy_blocked");
++    return kFinished;
++  }
++  const base::FilePath selected(uri);
++  if (!selected.IsContentUri()) {
++    FinishImportError(id, "reaper.import.folder_unavailable");
++    return kFinished;
++  }
++  auto live = PendingImports().extract(id);
++  if (!live.empty() && live.mapped().source.get() == source) {
++    std::move(live.mapped().callback).Run(selected, std::string());
++    return kStarted;
++  }
++  if (!live.empty()) {
++    // Notify the resumed manager before retiring the old callback: its Finish()
++    // also clears the receipt and the old page may no longer render any error.
++    CompleteJavaImport(id, "reaper.import.source_changed");
++    std::move(live.mapped().callback)
++        .Run(base::FilePath(), "The original extension page was recreated.");
++    return kFinished;
++  }
++  auto virtual_path = base::ResolveToVirtualDocumentPath(selected);
++  if (!virtual_path) {
++    FinishImportError(id, "reaper.import.folder_unavailable");
++    return kFinished;
++  }
++  auto installer = UnpackedInstaller::Create(profile);
++  installer->set_be_noisy_on_failure(false);
++  // Shutdown may drop rather than invoke UnpackedInstaller's callback.
++  installer->set_completion_callback(
++      ExtensionDeveloperPrivateBridge::MakeUnpackedImportCompletion(
++          base::BindOnce(&CompleteJavaImport, id)));
++  installer->Load(*virtual_path);
++  return kStarted;
++}
++
++// Retire-only operation, invoked only after Java's explicit cancellation
++// confirmation. A closed/replaced original tab must not permanently block all
++// future imports. This path never resolves a URI, creates an installer or
++// activates the old profile.
++static bool JNI_ReaperExtensionImportCoordinator_Discard(
++    JNIEnv* env,
++    content::WebContents* source,
++    int32_t current_tab_id,
++    const std::string& id) {
++  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
++  auto* tab = source ? TabAndroid::FromWebContents(source) : nullptr;
++  if (!tab || tab->GetAndroidId() != current_tab_id ||
++      !IsExtensionsManager(source) ||
++      !base::Uuid::ParseLowercase(id).is_valid()) {
++    return false;
++  }
++  auto node = PendingImports().extract(id);
++  if (!node.empty()) {
++    std::move(node.mapped().callback)
++        .Run(base::FilePath(), "File selection was canceled.");
++  }
++  CompleteJavaImport(id, std::string());
++  return true;
++}
+ 
+ // static
+ void ExtensionDeveloperPrivateBridge::ShowSiteSettings(
+@@ -20,3 +316,4 @@ void ExtensionDeveloperPrivateBridge::ShowSiteSettings(
+ }  // namespace extensions
+ 
+ DEFINE_JNI(ExtensionDeveloperPrivateBridge)
++DEFINE_JNI(ReaperExtensionImportCoordinator)

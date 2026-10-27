@@ -257,16 +257,18 @@ const update = () => {
       'text_defaults_md.css',
     ),
   ])
-  // Replace chrome dark logo with channel specific brave logo.
+  // Use Reaper's product mark on Android; keep desktop channel branding.
   fileMap.add([
-    path.join(
-      config.braveCoreDir,
-      'node_modules',
-      '@brave',
-      'leo',
-      'icons',
-      config.getBraveLogoIconName(),
-    ),
+    config.targetOS === 'android'
+      ? path.join(config.braveCoreDir, 'android', 'reaper', 'reaper_mark.svg')
+      : path.join(
+          config.braveCoreDir,
+          'node_modules',
+          '@brave',
+          'leo',
+          'icons',
+          config.getBraveLogoIconName(),
+        ),
     path.join(
       config.srcDir,
       'ui',

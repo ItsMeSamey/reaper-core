@@ -1,0 +1,239 @@
+diff --git a/chrome/android/java/src/org/chromium/chrome/browser/modaldialog/TabModalLifetimeHandler.java b/chrome/android/java/src/org/chromium/chrome/browser/modaldialog/TabModalLifetimeHandler.java
+--- a/chrome/android/java/src/org/chromium/chrome/browser/modaldialog/TabModalLifetimeHandler.java
++++ b/chrome/android/java/src/org/chromium/chrome/browser/modaldialog/TabModalLifetimeHandler.java
+@@ -18,6 +18,7 @@
+ import org.chromium.build.annotations.Nullable;
+ import org.chromium.chrome.browser.back_press.BackPressManager;
+ import org.chromium.chrome.browser.browser_controls.BrowserControlsVisibilityManager;
++import org.chromium.chrome.browser.compositor.SplitTabCoordinator;
+ import org.chromium.chrome.browser.fullscreen.FullscreenManager;
+ import org.chromium.chrome.browser.lifecycle.ActivityLifecycleDispatcher;
+ import org.chromium.chrome.browser.lifecycle.DestroyObserver;
+@@ -26,6 +27,7 @@
+ import org.chromium.chrome.browser.tab.TabObscuringHandler;
+ import org.chromium.chrome.browser.tab.TabObserver;
+ import org.chromium.chrome.browser.tab.TabSelectionType;
++import org.chromium.chrome.browser.tab.TabUtils;
+ import org.chromium.chrome.browser.tabmodel.TabModelSelector;
+ import org.chromium.chrome.browser.tabmodel.TabModelSelectorTabModelObserver;
+ import org.chromium.chrome.browser.toolbar.ToolbarManager;
+@@ -33,14 +35,18 @@
+ import org.chromium.components.browser_ui.util.ComposedBrowserControlsVisibilityDelegate;
+ import org.chromium.components.browser_ui.widget.gesture.BackPressHandler;
+ import org.chromium.components.browser_ui.widget.scrim.ScrimManager;
++import org.chromium.content_public.browser.WebContents;
+ import org.chromium.ui.modaldialog.DialogDismissalCause;
+ import org.chromium.ui.modaldialog.ModalDialogManager;
+ import org.chromium.ui.modaldialog.ModalDialogManager.ModalDialogManagerObserver;
+ import org.chromium.ui.modaldialog.ModalDialogManager.ModalDialogType;
++import org.chromium.ui.modaldialog.ModalDialogProperties;
+ import org.chromium.ui.modelutil.PropertyModel;
+ import org.chromium.ui.util.TokenHolder;
+ import org.chromium.url.GURL;
+ 
++import java.util.ArrayList;
++import java.util.IdentityHashMap;
+ import java.util.function.Supplier;
+ 
+ /**
+@@ -63,19 +69,8 @@
+ 
+                 @Override
+                 public void onDestroyed(Tab tab) {
+-                    if (mActiveTab == tab) {
+-                        mManager.dismissDialogsOfType(
+-                                ModalDialogType.TAB, DialogDismissalCause.TAB_DESTROYED);
+-                        mActiveTab = null;
+-                    }
+-                }
+-
+-                @Override
+-                public void onPageLoadStarted(Tab tab, GURL url) {
+-                    if (mActiveTab == tab) {
+-                        mManager.dismissDialogsOfType(
+-                                ModalDialogType.TAB, DialogDismissalCause.NAVIGATE);
+-                    }
++                    // Each displayed or queued dialog observes its own requesting tab.
++                    if (mActiveTab == tab) mActiveTab = null;
+                 }
+             };
+ 
+@@ -101,6 +96,130 @@
+     private final Runnable mHideContextualSearch;
+     private @Nullable Tab mActiveTab;
+     private int mTabModalSuspendedToken;
++    private boolean mDestroyed;
++    private final IdentityHashMap<PropertyModel, QueuedDialogObserver> mQueuedDialogObservers =
++            new IdentityHashMap<>();
++
++    private final class QueuedDialogObserver implements TabObserver {
++        private final PropertyModel mModel;
++        private final Tab mOwner;
++        private final @Nullable WebContents mContents;
++        private final boolean mHasOwnerMetadata;
++
++        QueuedDialogObserver(
++                PropertyModel model,
++                Tab owner,
++                @Nullable WebContents contents,
++                boolean hasOwnerMetadata) {
++            mModel = model;
++            mOwner = owner;
++            mContents = contents;
++            mHasOwnerMetadata = hasOwnerMetadata;
++        }
++
++        void onSelectedTabChanged(@Nullable Tab selected) {
++            if (selected == mOwner) return;
++            WebContents selectedContents = selected == null ? null : selected.getWebContents();
++            SplitTabCoordinator coordinator =
++                    mContents == null ? null : SplitTabCoordinator.fromWebContents(mContents);
++            // A modal APP dialog can suspend the presenter while its original split
++            // stays visible. Preserve each queued request independently of that presenter.
++            if (mHasOwnerMetadata
++                    && coordinator != null
++                    && coordinator.isShown()
++                    && selectedContents != null
++                    && coordinator.contains(selectedContents)) return;
++            // Custom models cannot carry their captured owner into presentation and
++            // therefore keep the ordinary switch-to-dismiss behavior.
++            dismiss(DialogDismissalCause.TAB_SWITCHED);
++        }
++
++        @Override
++        public void onPageLoadStarted(Tab tab, GURL url) {
++            if (tab == mOwner) dismiss(DialogDismissalCause.NAVIGATE);
++        }
++
++        @Override
++        public void onDestroyed(Tab tab) {
++            if (tab == mOwner) dismiss(DialogDismissalCause.TAB_DESTROYED);
++        }
++
++        @Override
++        public void onContentChanged(Tab tab) {
++            if (tab == mOwner && tab.getWebContents() != mContents) {
++                dismiss(DialogDismissalCause.WEB_CONTENTS_DESTROYED);
++            }
++        }
++
++        private void dismiss(@DialogDismissalCause int cause) {
++            stopObservingQueuedDialog(mModel);
++            mManager.dismissDialog(mModel, cause);
++        }
++
++        void detach() {
++            mOwner.removeObserver(this);
++        }
++    }
++
++    private void stopObservingQueuedDialog(PropertyModel model) {
++        QueuedDialogObserver observer = mQueuedDialogObservers.remove(model);
++        if (observer != null) observer.detach();
++    }
++
++    private void stopObservingQueuedDialogs() {
++        var observers = new ArrayList<>(mQueuedDialogObservers.values());
++        mQueuedDialogObservers.clear();
++        for (QueuedDialogObserver observer : observers) observer.detach();
++    }
++
++    private void dismissQueuedDialogsOutsideSelectedTab(@Nullable Tab selected) {
++        for (QueuedDialogObserver observer : new ArrayList<>(mQueuedDialogObservers.values())) {
++            observer.onSelectedTabChanged(selected);
++        }
++    }
++
++    @Override
++    public void onDialogQueued(PropertyModel model, @ModalDialogType int dialogType) {
++        if (dialogType != ModalDialogType.TAB || mQueuedDialogObservers.containsKey(model)) return;
++        if (mDestroyed) {
++            mManager.dismissDialog(model, DialogDismissalCause.ACTIVITY_DESTROYED);
++            return;
++        }
++        boolean supportsOwner = model.containsKey(ModalDialogProperties.TAB_MODAL_OWNER);
++        Object requestedOwner =
++                supportsOwner ? model.get(ModalDialogProperties.TAB_MODAL_OWNER) : null;
++        Tab owner;
++        WebContents contents;
++        if (requestedOwner == null) {
++            TabModelSelector selector = mTabModelSelectorSupplier.get();
++            owner = selector == null ? null : selector.getCurrentTab();
++            contents = owner == null ? null : owner.getWebContents();
++        } else if (requestedOwner instanceof WebContents requestedContents
++                && !requestedContents.isDestroyed()) {
++            contents = requestedContents;
++            owner = TabUtils.fromWebContents(contents);
++        } else {
++            mManager.dismissDialog(model, DialogDismissalCause.WEB_CONTENTS_DESTROYED);
++            return;
++        }
++        if (owner == null
++                || owner.isDestroyed()
++                || (contents != null
++                        && (contents.isDestroyed() || owner.getWebContents() != contents))) {
++            mManager.dismissDialog(model, DialogDismissalCause.TAB_DESTROYED);
++            return;
++        }
++        // Capture legacy models at queue entry, before peer activation can change
++        // which tab the presenter's ordinary current-tab fallback would resolve.
++        boolean hasOwnerMetadata = supportsOwner && contents != null;
++        if (hasOwnerMetadata && requestedOwner == null) {
++            model.set(ModalDialogProperties.TAB_MODAL_OWNER, contents);
++        }
++        QueuedDialogObserver observer =
++                new QueuedDialogObserver(model, owner, contents, hasOwnerMetadata);
++        mQueuedDialogObservers.put(model, observer);
++        owner.addObserver(observer);
++    }
+ 
+     /**
+      * @param activity The {@link Activity} that this handler is attached to.
+@@ -183,11 +302,13 @@
+ 
+     @Override
+     public void onDialogAdded(PropertyModel model) {
++        stopObservingQueuedDialog(model);
+         mHandleBackPressChangedSupplier.set(shouldInterceptBackPress());
+     }
+ 
+     @Override
+     public void onDialogDismissed(PropertyModel model) {
++        stopObservingQueuedDialog(model);
+         mHandleBackPressChangedSupplier.set(shouldInterceptBackPress());
+     }
+ 
+@@ -227,6 +348,7 @@
+     private boolean shouldInterceptBackPress() {
+         return mPresenter != null
+                 && mPresenter.getDialogModel() != null
++                && mPresenter.shouldHandleBackPress()
+                 && mTabModalSuspendedToken == TokenHolder.INVALID_TOKEN;
+     }
+ 
+@@ -234,7 +356,12 @@
+         // Do not use lastId here since it can be the selected tab's ID if model is switched
+         // inside tab switcher.
+         if (tab != mActiveTab) {
+-            mManager.dismissDialogsOfType(ModalDialogType.TAB, DialogDismissalCause.TAB_SWITCHED);
++            dismissQueuedDialogsOutsideSelectedTab(tab);
++            if (mPresenter != null
++                    && mPresenter.getDialogModel() != null
++                    && !mPresenter.canKeepDialogForTab(tab)) {
++                mPresenter.dismissCurrentDialog(DialogDismissalCause.TAB_SWITCHED);
++            }
+             if (mActiveTab != null) mActiveTab.removeObserver(mTabObserver);
+ 
+             mActiveTab = tab;
+@@ -248,8 +375,11 @@
+     @Override
+     @SuppressWarnings("NullAway")
+     public void onDestroy() {
++        mDestroyed = true;
+         if (mTabModelObserver != null) mTabModelObserver.destroy();
+         if (mPresenter != null) mPresenter.destroy();
++        mManager.dismissDialogsOfType(ModalDialogType.TAB, DialogDismissalCause.ACTIVITY_DESTROYED);
++        stopObservingQueuedDialogs();
+ 
+         if (mActiveTab != null) {
+             mActiveTab.removeObserver(mTabObserver);

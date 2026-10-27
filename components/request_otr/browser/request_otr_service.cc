@@ -3,6 +3,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+#include "build/build_config.h"
+
 #include "brave/components/request_otr/browser/request_otr_service.h"
 
 #include <utility>
@@ -10,7 +12,9 @@
 #include "base/containers/flat_set.h"
 #include "base/logging.h"
 #include "brave/components/request_otr/browser/request_otr_component_installer.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/request_otr/browser/request_otr_p3a.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/request_otr/common/pref_names.h"
 #include "components/prefs/pref_registry_simple.h"
 #include "components/prefs/pref_service.h"
@@ -22,13 +26,20 @@ namespace request_otr {
 
 namespace {
 
+#if !BUILDFLAG(IS_ANDROID)
 constexpr base::TimeDelta kP3AUpdateInterval = base::Days(1);
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 }  // namespace
 
 RequestOTRService::RequestOTRService(PrefService* profile_prefs)
-    : profile_prefs_(profile_prefs) {
+#if !BUILDFLAG(IS_ANDROID)
+    : profile_prefs_(profile_prefs)
+#endif  // !BUILDFLAG(IS_ANDROID)
+{
+#if !BUILDFLAG(IS_ANDROID)
   UpdateP3AMetrics();
+#endif  // !BUILDFLAG(IS_ANDROID)
 }
 
 RequestOTRService::~RequestOTRService() = default;
@@ -63,18 +74,22 @@ bool RequestOTRService::ShouldBlock(const GURL& url) const {
   return false;
 }
 
+#if !BUILDFLAG(IS_ANDROID)
 void RequestOTRService::UpdateP3AMetrics() {
   p3a::UpdateMetrics(profile_prefs_);
   p3a_timer_.Start(FROM_HERE, base::Time::Now() + kP3AUpdateInterval,
                    base::BindRepeating(&RequestOTRService::UpdateP3AMetrics,
                                        base::Unretained(this)));
 }
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 // static
 void RequestOTRService::RegisterProfilePrefs(PrefRegistrySimple* registry) {
   registry->RegisterIntegerPref(kRequestOTRActionOption,
                                 static_cast<int>(RequestOTRActionOption::kAsk));
+#if !BUILDFLAG(IS_ANDROID)
   p3a::RegisterProfilePrefs(registry);
+#endif  // !BUILDFLAG(IS_ANDROID)
 }
 
 }  // namespace request_otr

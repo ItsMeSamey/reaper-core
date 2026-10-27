@@ -12,6 +12,13 @@
 #include <string>
 
 #include "base/functional/callback.h"
+#include "build/build_config.h"
+
+#if BUILDFLAG(IS_ANDROID)
+#include "base/memory/weak_ptr.h"
+#include "base/time/time.h"
+#include "brave/browser/extensions/api/identity/android_oauth_response_parser.h"
+#endif
 #include "chrome/browser/extensions/api/identity/extension_token_key.h"
 #include "chrome/browser/extensions/api/identity/identity_get_auth_token_error.h"
 #include "chrome/browser/extensions/api/identity/web_auth_flow.h"
@@ -49,10 +56,34 @@ class BraveWebAuthFlow : public WebAuthFlow::Delegate {
       bool interactive,
       bool user_gesture);
 
+#if BUILDFLAG(IS_ANDROID)
+  // The caller cancels its mint-queue entry and responds during profile
+  // shutdown. Retire this fallback without invoking either callback again.
+  void CancelAndroidWebAuthFlow();
+
+  // Accept only requests whose existing scopes can expose a trusted subject.
+  // The returned token is verified before completion and is never default-cached.
+  bool ConfigureAndroidRequestedAccount(
+      const std::string& gaia_id,
+      const std::set<std::string>& requested_scopes);
+  bool HasAndroidRequestedAccount() const;
+#endif
+
  private:
+#if BUILDFLAG(IS_ANDROID)
+  friend class BraveWebAuthFlowAndroidTest;
+  class AndroidAccountVerifier;
+  void BeginAndroidAccountVerification(
+      internal::ParsedAndroidOAuthResponse response);
+  void OnAndroidAccountVerified(
+      std::optional<base::TimeDelta> remaining_lifetime);
+  void FinishAndroidWebAuthFlow(
+      base::expected<internal::ParsedAndroidOAuthResponse,
+                     IdentityGetAuthTokenError> result);
+#endif
   static std::optional<std::string> token_for_testing_;
 
-  raw_ptr<Profile> profile_;
+  raw_ptr<Profile> profile_ = nullptr;
   ExtensionTokenKey token_key_{/*extension_id=*/"",
                                /*account_info=*/CoreAccountInfo(),
                                /*scopes=*/{}};
@@ -62,6 +93,18 @@ class BraveWebAuthFlow : public WebAuthFlow::Delegate {
   std::unique_ptr<WebAuthFlow> web_auth_flow_;
   std::string redirect_scheme_;
   base::OnceClosure complete_mint_token_flow_callback_;
+#if BUILDFLAG(IS_ANDROID)
+  bool android_flow_active_ = false;
+  GURL android_redirect_url_;
+  std::string android_oauth_state_;
+  std::string android_requested_gaia_id_;
+  std::string android_oauth_client_id_;
+  std::optional<internal::ParsedAndroidOAuthResponse>
+      android_pending_oauth_response_;
+  base::TimeTicks android_account_verification_started_;
+  std::unique_ptr<AndroidAccountVerifier> android_account_verifier_;
+  base::WeakPtrFactory<BraveWebAuthFlow> android_weak_factory_{this};
+#endif
 };
 
 }  // namespace extensions

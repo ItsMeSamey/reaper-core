@@ -1,13 +1,523 @@
 diff --git a/chrome/android/java/src/org/chromium/chrome/browser/toolbar/ToolbarManager.java b/chrome/android/java/src/org/chromium/chrome/browser/toolbar/ToolbarManager.java
-index 1d8b14d51be39faacd0433ce2ca82c0ad375bf2f..50bb991b955e75dc1cfc2a3b81c22bb998a46e3e 100644
 --- a/chrome/android/java/src/org/chromium/chrome/browser/toolbar/ToolbarManager.java
 +++ b/chrome/android/java/src/org/chromium/chrome/browser/toolbar/ToolbarManager.java
-@@ -1993,7 +1993,7 @@ public class ToolbarManager
+@@ -103,9 +103,6 @@
+ import org.chromium.chrome.browser.gesturenav.GestureNavigationUtils;
+ import org.chromium.chrome.browser.gesturenav.OverscrollGlowCoordinator;
+ import org.chromium.chrome.browser.gesturenav.TabOnBackGestureHandler;
+-import org.chromium.chrome.browser.glic.GlicButtonDelegate;
+-import org.chromium.chrome.browser.glic.GlicKeyedService.GlicInvocationSource;
+-import org.chromium.chrome.browser.glic.GlicUtils;
+ import org.chromium.chrome.browser.history.HistoryManagerUtils;
+ import org.chromium.chrome.browser.homepage.HomepageManager;
+ import org.chromium.chrome.browser.homepage.HomepageManager.HomepageStateListener;
+@@ -118,8 +115,6 @@
+ import org.chromium.chrome.browser.layouts.LayoutType;
+ import org.chromium.chrome.browser.lifecycle.ActivityLifecycleDispatcher;
+ import org.chromium.chrome.browser.media.PictureInPictureWindowManagerBridge;
+-import org.chromium.chrome.browser.merchant_viewer.MerchantTrustSignalsCoordinator;
+-import org.chromium.chrome.browser.merchant_viewer.PageInfoStoreInfoController.StoreInfoActionHandler;
+ import org.chromium.chrome.browser.metrics.UmaActivityObserver;
+ import org.chromium.chrome.browser.multiwindow.MultiInstanceManager.PersistedInstanceType;
+ import org.chromium.chrome.browser.multiwindow.MultiWindowModeStateDispatcher;
+@@ -140,7 +135,6 @@
+ import org.chromium.chrome.browser.omnibox.OmniboxStub;
+ import org.chromium.chrome.browser.omnibox.OverrideUrlLoadingDelegateImpl;
+ import org.chromium.chrome.browser.omnibox.UrlFocusChangeListener;
+-import org.chromium.chrome.browser.omnibox.fusebox.FuseboxControls;
+ import org.chromium.chrome.browser.omnibox.status.SiteControlsIphController;
+ import org.chromium.chrome.browser.omnibox.suggestions.OmniboxSuggestionsDropdownScrollListener;
+ import org.chromium.chrome.browser.omnibox.suggestions.action.OmniboxActionDelegateImpl;
+@@ -164,8 +158,6 @@
+ import org.chromium.chrome.browser.tab.TabFavicon;
+ import org.chromium.chrome.browser.tab.TabObscuringHandler;
+ import org.chromium.chrome.browser.tab.TabSelectionType;
+-import org.chromium.chrome.browser.tab_bottom_sheet.TabBottomSheetManager;
+-import org.chromium.chrome.browser.tab_bottom_sheet.TabBottomSheetUtils;
+ import org.chromium.chrome.browser.tab_ui.TabContentManager;
+ import org.chromium.chrome.browser.tab_ui.TabModelDotInfo;
+ import org.chromium.chrome.browser.tab_ui.TabSwitcherUtils;
+@@ -220,12 +212,10 @@
+ import org.chromium.chrome.browser.ui.actions.ActionProperties;
+ import org.chromium.chrome.browser.ui.actions.ActionRegistry;
+ import org.chromium.chrome.browser.ui.actions.appmenu.MenuButtonState;
+-import org.chromium.chrome.browser.ui.actions.glic.GlicActionCoordinator;
+ import org.chromium.chrome.browser.ui.actions.tabswitcher.TabSwitcherActionProvider;
+ import org.chromium.chrome.browser.ui.appmenu.AppMenuCoordinator;
+ import org.chromium.chrome.browser.ui.appmenu.AppMenuDelegate;
+ import org.chromium.chrome.browser.ui.appmenu.MenuButtonDelegate;
+-import org.chromium.chrome.browser.ui.bottombar.AiModeActionCoordinator;
+ import org.chromium.chrome.browser.ui.bottombar.BottomBarConfigUtils;
+ import org.chromium.chrome.browser.ui.bottombar.BottomBarHostManager;
+ import org.chromium.chrome.browser.ui.browser_window.ChromeAndroidTask;
+@@ -309,8 +299,7 @@
+                 ThemeColorObserver,
+                 TintObserver,
+                 MenuButtonDelegate,
+-                TabObscuringHandler.Observer,
+-                FuseboxControls {
++                TabObscuringHandler.Observer {
+     private final LocationBarEmbedderUiOverrides mLocationBarEmbedderUiOverrides =
+             new LocationBarEmbedderUiOverrides().setIsMainBrowserOmnibox();
+     private final IncognitoStateProvider mIncognitoStateProvider;
+@@ -443,6 +432,8 @@
+     private @MonotonicNonNull BackButtonCoordinator mBackButtonCoordinator;
+     private @MonotonicNonNull ForwardButtonCoordinator mForwardButtonCoordinator;
+     private @Nullable ExtensionsToolbarCoordinator mExtensionsToolbarCoordinator;
++    private @Nullable ChromeAndroidTaskFeatureKey mExtensionsToolbarFeatureKey;
++    private @Nullable Runnable mUpdateExtensionsToolbar;
+
+     private final BrowserStateBrowserControlsVisibilityDelegate mControlsVisibilityDelegate;
+     private int mFullscreenFocusToken = TokenHolder.INVALID_TOKEN;
+@@ -465,9 +456,6 @@
+     private final ScrimManager mScrimManager;
+
+     private final OneshotSupplier<Boolean> mPromoShownOneshotSupplier;
+-    private final GlicButtonDelegate mToggleGlicCallback;
+-    private @Nullable GlicActionCoordinator mGlicActionCoordinator;
+-    private @Nullable AiModeActionCoordinator mAiModeActionCoordinator;
+
+     private final TabStripTopControlLayer mTabStripTopControlLayer;
+     private final @Nullable DesktopWindowStateManager mDesktopWindowStateManager;
+@@ -771,8 +759,6 @@
+      *     UI and DataSharing services.
+      * @param tabContentManager Manages the content of tabs.
+      * @param tabCreatorManager Manages the creation of tabs.
+-     * @param merchantTrustSignalsCoordinatorSupplier Supplier of {@link
+-     *     MerchantTrustSignalsCoordinator}.
+      * @param ephemeralTabCoordinatorSupplier Supplies the {@link EphemeralTabCoordinator}.
+      * @param initializeWithIncognitoColors Whether the toolbar should be initialized with incognito
+      * @param backPressManager The {@link BackPressManager} handling back press gesture.
+@@ -833,8 +819,6 @@
+             @Nullable DataSharingTabManager dataSharingTabManager,
+             TabContentManager tabContentManager,
+             TabCreatorManager tabCreatorManager,
+-            MonotonicObservableSupplier<MerchantTrustSignalsCoordinator>
+-                    merchantTrustSignalsCoordinatorSupplier,
+             OmniboxActionDelegateImpl omniboxActionDelegate,
+             MonotonicObservableSupplier<EphemeralTabCoordinator> ephemeralTabCoordinatorSupplier,
+             boolean initializeWithIncognitoColors,
+@@ -853,13 +837,11 @@
+             @Nullable BottomBarHostManager bottomBarHostManager,
+             @Nullable ActionRegistry actionRegistry,
+             @Nullable OneshotSupplier<String> countrySupplier,
+-            GlicButtonDelegate toggleGlicCallback,
+             boolean suppressTabStripAtStart,
+             @Nullable OneshotSupplier<HubManager> hubManagerSupplier) {
+         TraceEvent.begin("ToolbarManager.ToolbarManager");
+         mActionRegistry = actionRegistry;
+         mCountrySupplier = countrySupplier;
+-        mToggleGlicCallback = toggleGlicCallback;
+         mActivity = activity;
+         mWindowAndroid = windowAndroid;
+         mCompositorViewHolder = compositorViewHolder;
+@@ -929,8 +911,6 @@
+                         /* matchTrustedCdnUrl= */ mIsCustomTab);
+         mControlContainer = controlContainer;
+         mControlContainer.setToolbarRightMarginCallback(this::onToolbarRightMarginChanged);
+-        mLocationBarEmbedderUiOverrides.setIsFullWidthExpansionAllowedSupplier(
+-                () -> !mControlContainer.isToolbarInAppHeader());
+         mToolbarHairline = mControlContainer.findViewById(R.id.toolbar_hairline);
+
+         mBookmarkModelSupplier = bookmarkModelSupplier;
+@@ -1047,7 +1027,7 @@
+                         appMenuCoordinatorSupplier,
+                         mControlsVisibilityDelegate,
+                         mWindowAndroid,
+-                        this::endFuseboxInput,
++                        this::endInput,
+                         requestFocusRunnable,
+                         canShowUpdateBadge,
+                         isInOverviewModeSupplier,
+@@ -1068,7 +1048,7 @@
+                         appMenuCoordinatorSupplier,
+                         mControlsVisibilityDelegate,
+                         mWindowAndroid,
+-                        this::endFuseboxInput,
++                        this::endInput,
+                         requestFocusRunnable,
+                         canShowUpdateBadge,
+                         isInOverviewModeSupplier,
+@@ -1117,7 +1097,7 @@
+                                     BrowserUiUtils.recordModuleClickHistogram(
+                                             ModuleTypeOnStartAndNtp.HOME_BUTTON);
+                                 }
+-                                endFuseboxInput();
++                                endInput();
+
+                                 boolean hasControl = KeyEventUtils.isCtrlOn(metaState);
+                                 boolean hasShift = KeyEventUtils.isShiftOn(metaState);
+@@ -1133,14 +1113,6 @@
+                                 } else if (hasShift) {
+                                     mToolbarTabController.openHomepageInNewWindow();
+                                 } else {
+-                                    // TODO(crbug.com/518852349): Revisit this approach to handle
+-                                    // the case form GLIC.
+-                                    TabBottomSheetManager tabBottomSheetManager =
+-                                            TabBottomSheetUtils.getManagerFromWindow(
+-                                                    mWindowAndroid);
+-                                    if (tabBottomSheetManager != null) {
+-                                        tabBottomSheetManager.setSheetExpanded(false);
+-                                    }
+                                     runOrDeferAfterHubExit(mToolbarTabController::openHomepage);
+                                 }
+
+@@ -1314,9 +1286,6 @@
+                             modalDialogManagerSupplier,
+                             null,
+                             OpenedFromSource.TOOLBAR,
+-                            SupplierUtils.upcast(
+-                                    merchantTrustSignalsCoordinatorSupplier,
+-                                    StoreInfoActionHandler.class),
+                             mEphemeralTabCoordinatorSupplier,
+                             mTabCreatorManager.getTabCreator(
+                                     mIncognitoStateProvider.isIncognitoSelected()));
+@@ -1448,7 +1417,6 @@
+                         refreshSelectedTab(tab);
+                         onTabOrModelChanged();
+                         maybeTriggerCacheRefreshForZeroSuggest(tab.getUrl());
+-                        maybeShowGlicIph(tab);
+                     }
+
+                     /**
+@@ -1518,13 +1486,6 @@
+                         updateTabLoadingState(true);
+                         mLocationBarModel.onPageLoadStopped();
+                         mToolbar.onPageLoadStopped();
+-                    }
+-
+-                    @Override
+-                    public void onPageLoadFinished(Tab tab, GURL url) {
+-                        if (tab == mActivityTabProvider.get()) {
+-                            maybeShowGlicIph(tab);
+-                        }
+                     }
+
+                     @Override
+@@ -1993,7 +1954,7 @@
          }
      }
- 
+
 -    private boolean shouldSuppressToolbarLongPress() {
 +    protected boolean shouldSuppressToolbarLongPress() {
          return mOmniboxFocusStateSupplier.get()
                  || (mToolbarPositionController != null
                          && mToolbarPositionController.doesPrefMismatchPosition())
+@@ -2001,7 +1962,7 @@
+     }
+
+     private void back(int metaState, int buttonState) {
+-        endFuseboxInput();
++        endInput();
+         boolean hasControl = KeyEventUtils.isCtrlOn(metaState);
+         boolean hasShift = KeyEventUtils.isShiftOn(metaState);
+         boolean isMiddleClick = MotionEventUtils.isTertiaryButton(buttonState);
+@@ -2232,7 +2193,7 @@
+                         mBottomSheetController,
+                         mModalDialogManagerSupplier.get(),
+                         snackbarManager,
+-                        this::endFuseboxInput,
++                        this::endInput,
+                         suppressTabStripAtStart);
+
+         mHomepageStateListener =
+@@ -2704,79 +2665,16 @@
+                     });
+         }
+
+-        if (mActionRegistry != null) {
+-            mGlicActionCoordinator =
+-                    new GlicActionCoordinator(
+-                            mActivity,
+-                            mActionRegistry,
+-                            mToggleGlicCallback,
+-                            mActivityTabProvider.asObservable(),
+-                            mChromeAndroidTaskSupplier,
+-                            mBrowserControlsSizer,
+-                            mTabModelSelectorSupplier,
+-                            mSnackbarManager,
+-                            mUserEducationHelper);
+-            mAiModeActionCoordinator =
+-                    new AiModeActionCoordinator(
+-                            mActivity,
+-                            mActionRegistry,
+-                            mActivityTabProvider.asObservable(),
+-                            mUserEducationHelper);
+-        }
+-
+         Profile profile = tabModelSelector.getModel(false).getProfile();
+         assert profile != null;
+
+         mOverrideUrlLoadingDelegate.setOpenGridTabSwitcherCallback(openGridTabSwitcherHandler);
+
+-        ViewStub extensionsToolbarStub =
+-                mControlContainer.findViewById(R.id.extensions_toolbar_container_stub);
+-        if (extensionsToolbarStub != null) {
+-            ChromeAndroidTask task = mChromeAndroidTaskSupplier.get();
+-            // ChromeAndroidTask is available only on Desktop Android.
+-            if (task != null) {
+-                Profile tabModelProfile =
+-                        assertNonNull(mTabModelSelector.getCurrentModel().getProfile());
+-                // Register as an Activity-scoped feature of {@link ChromeAndroidTask}. This ensures
+-                // its C++ UnownedUserData objects are destroyed prior to the host (BWI) when a
+-                // Profile is destroyed on mobile Android. Explicit destruction in
+-                // ToolbarManager.destroy() is also preserved for standard Activity teardown.
+-                Runnable cleanup =
+-                        () -> {
+-                            if (mToolbar != null) {
+-                                mToolbar.setExtensionsToolbarCoordinator(null);
+-                            }
+-                            mExtensionsToolbarCoordinator = null;
+-                        };
+-                mExtensionsToolbarCoordinator =
+-                        (ExtensionsToolbarCoordinator)
+-                                task.addFeature(
+-                                        new ChromeAndroidTaskFeatureKey(
+-                                                ExtensionsToolbarCoordinator.class,
+-                                                tabModelProfile,
+-                                                (ActivityWindowAndroid) mWindowAndroid),
+-                                        () ->
+-                                                ExtensionsToolbarCoordinator.maybeCreate(
+-                                                        mActivity,
+-                                                        extensionsToolbarStub,
+-                                                        mWindowAndroid,
+-                                                        task,
+-                                                        tabModelProfile,
+-                                                        mActivityTabProvider.asObservable(),
+-                                                        mTabCreatorManager.getTabCreator(false),
+-                                                        getBrowsingModeThemeColorProvider(),
+-                                                        (ToolbarTablet) mToolbarLayout,
+-                                                        contextMenuPopulatorFactory,
+-                                                        selectionDropdownMenuDelegate,
+-                                                        mTabModelSelector,
+-                                                        mModalDialogManagerSupplier.get(),
+-                                                        cleanup,
+-                                                        /* isWebApp= */ false));
+-                if (mExtensionsToolbarCoordinator != null) {
+-                    mToolbar.setExtensionsToolbarCoordinator(mExtensionsToolbarCoordinator);
+-                }
+-            }
+-        }
++        mUpdateExtensionsToolbar =
++                () ->
++                        updateExtensionsToolbarCoordinator(
++                                contextMenuPopulatorFactory, selectionDropdownMenuDelegate);
++        mUpdateExtensionsToolbar.run();
+
+         // Must be initialized before Toolbar attempts to use it.
+         mLocationBarModel.initializeWithNative();
+@@ -2834,8 +2732,7 @@
+                 mSuppressToolbarSceneLayerSupplier,
+                 mToolbarProgressBarLayer::onProgressBarInfoUpdate,
+                 mCaptureResourceIdSupplier,
+-                mTabStripTopControlLayer,
+-                this::onGlicToggled);
++                mTabStripTopControlLayer);
+
+         // This call is mainly to ensure the tab strip height stays the same as the internal value
+         // from TabStripTransitionCoordinator. When canForceTopChromeHeightAdjustmentOnStartup()
+@@ -2908,25 +2805,6 @@
+         TraceEvent.end("ToolbarManager.initializeWithNative");
+     }
+
+-    private void onGlicToggled() {
+-        mToggleGlicCallback.onClick(/* preventClose= */ false, GlicInvocationSource.TOOLBAR_BUTTON);
+-    }
+-
+-    private void maybeShowGlicIph(@Nullable Tab tab) {
+-        if (tab == null || tab.isIncognitoBranded()) return;
+-        if (!mToolbar.shouldShowGlicToolbarButton()) return;
+-        if (!GlicUtils.isTabEligibleForGlicIph(tab)) return;
+-
+-        View anchorView = mToolbar.getGlicActionChipView();
+-        if (anchorView == null
+-                || anchorView.getVisibility() != View.VISIBLE
+-                || !anchorView.isAttachedToWindow()) {
+-            return;
+-        }
+-
+-        mIphController.showGlicIph(anchorView);
+-    }
+-
+     /**
+      * @return The toolbar interface that this manager handles.
+      */
+@@ -2983,6 +2861,7 @@
+     public void destroy() {
+         if (mIsDestroyed) return;
+         mIsDestroyed = true;
++        mUpdateExtensionsToolbar = null;
+
+         if (mAppInstalledDelegate != null) {
+             mAppInstalledDelegate.destroy();
+@@ -3127,19 +3006,9 @@
+             mTabSwitcherActionProvider = null;
+         }
+
+-        if (mGlicActionCoordinator != null) {
+-            mGlicActionCoordinator.destroy();
+-            mGlicActionCoordinator = null;
+-        }
+-
+-        if (mAiModeActionCoordinator != null) {
+-            mAiModeActionCoordinator.destroy();
+-            mAiModeActionCoordinator = null;
+-        }
+-
+-        if (mExtensionsToolbarCoordinator != null) {
+-            mExtensionsToolbarCoordinator.destroy();
+-            mExtensionsToolbarCoordinator = null;
++        ChromeAndroidTask task = mChromeAndroidTaskSupplier.get();
++        if (task != null && mExtensionsToolbarFeatureKey != null) {
++            task.removeFeature(mExtensionsToolbarFeatureKey);
+         }
+
+         if (mCallbackController != null) {
+@@ -3510,29 +3379,26 @@
+     }
+
+     /**
+-     * Begin a new fusebox input session.
++     * Begin a new Omnibox input session.
+      *
+      * <p>If an existing session is in progress, it will be updated with supplied `input`
+      * parameters.
+      *
+      * @param input The AutocompleteInput to start the session with.
+      */
+-    @Override
+-    public void beginFuseboxInput(AutocompleteInput input) {
++    public void beginInput(AutocompleteInput input) {
+         if (mIsDestroyed || mLocationBar == null || mLocationBar.getOmniboxStub() == null) return;
+         assumeNonNull(mLocationBar.getOmniboxStub()).beginInput(input);
+     }
+
+-    /** End the current fusebox input session. */
+-    @Override
+-    public void endFuseboxInput() {
++    /** End the current Omnibox input session. */
++    public void endInput() {
+         if (mIsDestroyed || mLocationBar == null || mLocationBar.getOmniboxStub() == null) return;
+         assumeNonNull(mLocationBar.getOmniboxStub()).endInput();
+     }
+
+-    /** Suspend the current fusebox input session. */
+-    @Override
+-    public void suspendFuseboxInput() {
++    /** Suspend the current Omnibox input session. */
++    public void suspendInput() {
+         if (mIsDestroyed || mLocationBar == null || mLocationBar.getOmniboxStub() == null) return;
+         assumeNonNull(mLocationBar.getOmniboxStub()).suspendInput();
+     }
+@@ -3617,6 +3483,9 @@
+
+     /** Triggered when the selected tab has changed. */
+     private void refreshSelectedTab(@Nullable Tab tab) {
++        if (mUpdateExtensionsToolbar != null) {
++            mUpdateExtensionsToolbar.run();
++        }
+         boolean wasIncognitoBranded = mLocationBarModel.isIncognitoBranded();
+         Tab previousTab = mLocationBarModel.getTab();
+
+@@ -4083,7 +3952,101 @@
+      *     if extensions are not supported on this build.
+      */
+     public @Nullable ExtensionsToolbarCoordinator getExtensionsToolbarCoordinator() {
++        if (mUpdateExtensionsToolbar != null) {
++            mUpdateExtensionsToolbar.run();
++        }
+         return mExtensionsToolbarCoordinator;
++    }
++
++    private void updateExtensionsToolbarCoordinator(
++            @Nullable ContextMenuPopulatorFactory contextMenuPopulatorFactory,
++            @Nullable SelectionDropdownMenuDelegate selectionDropdownMenuDelegate) {
++        if (mIsDestroyed || mTabModelSelector == null) return;
++        ChromeAndroidTask task = mChromeAndroidTaskSupplier.get();
++        if (task == null || task.isDestroyed()) return;
++
++        TabModel tabModel = mTabModelSelector.getCurrentModel();
++        Profile profile = tabModel.getProfile();
++        Tab activeTab = mActivityTabProvider.get();
++        ActivityWindowAndroid activityWindow = (ActivityWindowAndroid) mWindowAndroid;
++        boolean hasBrowserWindow =
++                profile != null
++                        && !profile.shutdownStarted()
++                        // Tab and model suppliers notify separately during a profile switch.
++                        // Wait until both agree before binding native UI to the active tab.
++                        && (activeTab == null || activeTab.getProfile() == profile)
++                        && task.getValidProfilesForActivity(activityWindow).contains(profile);
++        ChromeAndroidTaskFeatureKey key =
++                hasBrowserWindow
++                        ? new ChromeAndroidTaskFeatureKey(
++                                ExtensionsToolbarCoordinator.class,
++                                profile,
++                                activityWindow,
++                                tabModel.isIncognito() ? tabModel : null)
++                        : null;
++        if (key != null && key.equals(mExtensionsToolbarFeatureKey)) return;
++        if (mExtensionsToolbarFeatureKey != null) {
++            task.removeFeature(mExtensionsToolbarFeatureKey);
++        }
++        if (key == null || profile == null) return;
++
++        ViewStub stub = mControlContainer.findViewById(R.id.extensions_toolbar_container_stub);
++        if (stub == null || !(stub.getParent() instanceof ViewGroup parent)) return;
++        int index = parent.indexOfChild(stub);
++        ViewGroup.LayoutParams layoutParams = stub.getLayoutParams();
++        mExtensionsToolbarFeatureKey = key;
++        Runnable cleanup =
++                () -> {
++                    if (!key.equals(mExtensionsToolbarFeatureKey)) return;
++                    mExtensionsToolbarFeatureKey = null;
++                    mExtensionsToolbarCoordinator = null;
++                    mToolbar.setExtensionsToolbarCoordinator(null);
++                    // ViewStub.inflate() consumes the stub. Restore one for the next profile.
++                    View container = parent.findViewById(R.id.extensions_toolbar_container);
++                    if (container != null) {
++                        parent.removeView(container);
++                        ViewStub replacement = new ViewStub(stub.getContext());
++                        replacement.setId(R.id.extensions_toolbar_container_stub);
++                        replacement.setInflatedId(R.id.extensions_toolbar_container);
++                        parent.addView(
++                                replacement, Math.min(index, parent.getChildCount()), layoutParams);
++                    }
++                    // The task invokes cleanup before destroying the native coordinator. Defer
++                    // recreation until its BrowserWindow/Profile teardown has completed.
++                    if (!mIsDestroyed) {
++                        mHandler.post(
++                                () -> {
++                                    if (mUpdateExtensionsToolbar != null) {
++                                        mUpdateExtensionsToolbar.run();
++                                    }
++                                });
++                    }
++                };
++        mExtensionsToolbarCoordinator =
++                (ExtensionsToolbarCoordinator)
++                        task.addFeature(
++                                key,
++                                () ->
++                                        ExtensionsToolbarCoordinator.maybeCreate(
++                                                mActivity,
++                                                stub,
++                                                mWindowAndroid,
++                                                task,
++                                                profile,
++                                                mActivityTabProvider.asObservable(),
++                                                mTabCreatorManager.getTabCreator(false),
++                                                getBrowsingModeThemeColorProvider(),
++                                                mToolbarLayout,
++                                                contextMenuPopulatorFactory,
++                                                selectionDropdownMenuDelegate,
++                                                mTabModelSelector,
++                                                mModalDialogManagerSupplier.get(),
++                                                cleanup,
++                                                /* isWebApp= */ false));
++        if (mExtensionsToolbarCoordinator == null) {
++            mExtensionsToolbarFeatureKey = null;
++        }
++        mToolbar.setExtensionsToolbarCoordinator(mExtensionsToolbarCoordinator);
+     }
+
+     /**

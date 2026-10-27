@@ -1,0 +1,167 @@
+# Copyright (c) 2026 The Reaper Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+substitutions:
+- description: Integrate reviewed Android extension UI, MV3 lifecycle, authenticated native messaging and artifact-parser source with retained desktop behavior
+  regex:
+    re_pattern: '\#include\ "base/time/time\.h"\
+
+      \#include\ "base/trace_event/trace_event\.h"\
+
+      \#include\ "base/uuid\.h"\
+
+      \#include\ "components/back_forward_cache/back_forward_cache_disable\.h"\
+
+      \#include\ "components/back_forward_cache/disabled_reason_id\.h"\
+
+      \#include\ "content/public/browser/browser_context\.h"\
+
+      '
+    replace: '#include "base/time/time.h"
+
+      #include "base/trace_event/trace_event.h"
+
+      #include "base/uuid.h"
+
+      #include "build/build_config.h"
+
+      #include "components/back_forward_cache/back_forward_cache_disable.h"
+
+      #include "components/back_forward_cache/disabled_reason_id.h"
+
+      #include "content/public/browser/browser_context.h"
+
+      '
+- description: Integrate reviewed Android extension UI, MV3 lifecycle, authenticated native messaging and artifact-parser source with retained desktop behavior
+  regex:
+    re_pattern: '\ \ DCHECK\(background_hosts_\.empty\(\)\);\
+
+      \ \ content::DevToolsAgentHost::RemoveObserver\(this\);\
+
+      \
+
+      \ \ for\ \(auto\&\ observer\ :\ observer_list_\)\
+
+      \ \ \ \ observer\.OnProcessManagerShutdown\(this\);\
+
+      \}\
+
+      '
+    replace: "  DCHECK(background_hosts_.empty());\n  content::DevToolsAgentHost::RemoveObserver(this);\n\n#if BUILDFLAG(IS_ANDROID)\n  service_worker_keepalives_.clear();\n#endif\n  for (auto& observer : observer_list_)\n    observer.OnProcessManagerShutdown(this);\n}\n"
+- description: Integrate reviewed Android extension UI, MV3 lifecycle, authenticated native messaging and artifact-parser source with retained desktop behavior
+  regex:
+    re_pattern: '\ \ auto\ iter\ =\ service_worker_keepalives_\.find\(request_uuid\);\
+
+      \ \ CHECK\(iter\ !=\ service_worker_keepalives_\.end\(\)\);\
+
+      \ \ CHECK_EQ\(iter\->second\.worker_id,\ worker_id\);\
+
+      \ \ CHECK_EQ\(iter\->second\.activity_type,\ activity_type\);\
+
+      \ \ CHECK_EQ\(iter\->second\.extra_data,\ extra_data\);\
+
+      \ \ service_worker_keepalives_\.erase\(iter\);\
+
+      '
+    replace: "  auto iter = service_worker_keepalives_.find(request_uuid);\n  CHECK(iter != service_worker_keepalives_.end());\n  CHECK_EQ(iter->second.worker_id, worker_id);\n#if BUILDFLAG(IS_ANDROID)\n  CHECK(iter->second.worker_id.start_token == worker_id.start_token);\n#endif\n  CHECK_EQ(iter->second.activity_type, activity_type);\n  CHECK_EQ(iter->second.extra_data, extra_data);\n  service_worker_keepalives_.erase(iter);\n"
+- description: Integrate reviewed Android extension UI, MV3 lifecycle, authenticated native messaging and artifact-parser source with retained desktop behavior
+  regex:
+    re_pattern: '\}\
+
+      \
+
+      void\ ProcessManager::UnregisterExtension\(const\ ExtensionId\&\ extension_id\)\ \{\
+
+      \ \ //\ The\ lazy_keepalive_count\ may\ be\ greater\ than\ zero\ at\ this\ point\ because\
+
+      \ \ //\ RenderFrameHosts\ are\ still\ alive\.\ During\ extension\ reloading,\ they\ will\
+
+      \ \ //\ decrement\ the\ lazy_keepalive_count\ to\ negative\ for\ the\ new\ extension\
+
+      '
+    replace: "}\n\nvoid ProcessManager::UnregisterExtension(const ExtensionId& extension_id) {\n#if BUILDFLAG(IS_ANDROID)\n  // Frame observers can close owners or reactivate an extension. Snapshot the\n  // unloading ownership before invoking them, rather than selecting new state.\n  const auto workers_at_unload =\n      all_running_extension_workers_.GetAllForExtension(extension_id);\n  std::vector<base::Uuid> keepalives_at_unload;\n  for (const auto& [uuid, data] : service_worker_keepalives_) {\n    if (data.worker_id.extension_id == extension_id) {\n      keepalives_at_unload.push_back(uuid);\n    }\n  }\n#endif\n  // The lazy_keepalive_count may be greater than zero at this point because\n  // RenderFrameHosts are still alive. During extension reloading, they will\n  // decrement the lazy_keepalive_count to negative for the new extension\n"
+- description: Integrate reviewed Android extension UI, MV3 lifecycle, authenticated native messaging and artifact-parser source with retained desktop behavior
+  regex:
+    re_pattern: '\
+
+      \ \ background_page_data_\.erase\(extension_id\);\
+
+      \
+
+      \ \ for\ \(const\ WorkerId\&\ worker_id\ :\
+
+      \ \ \ \ \ \ \ all_running_extension_workers_\.GetAllForExtension\(extension_id\)\)\ \{\
+
+      \ \ \ \ StopTrackingServiceWorkerRunningInstance\(worker_id\);\
+
+      \ \ \}\
+
+      \#if\ DCHECK_IS_ON\(\)\
+
+      \ \ //\ Sanity\ check:\ No\ worker\ entry\ should\ exist\ for\ \|extension_id\|\.\
+
+      \ \ DCHECK\(\
+
+      \ \ \ \ \ \ all_running_extension_workers_\.GetAllForExtension\(extension_id\)\.empty\(\)\);\
+
+      \#endif\
+
+      \}\
+
+      \
+
+      '
+    replace: "\n  background_page_data_.erase(extension_id);\n\n#if BUILDFLAG(IS_ANDROID)\n  for (const WorkerId& worker_id : workers_at_unload) {\n#else\n  for (const WorkerId& worker_id :\n       all_running_extension_workers_.GetAllForExtension(extension_id)) {\n#endif\n    StopTrackingServiceWorkerRunningInstance(worker_id);\n  }\n#if BUILDFLAG(IS_ANDROID)\n  for (const auto& uuid : keepalives_at_unload) {\n    service_worker_keepalives_.erase(uuid);\n  }\n#if DCHECK_IS_ON()\n  for (const WorkerId& worker_id : workers_at_unload) {\n    DCHECK(!GetServiceWorkerRunningInstance(worker_id));\n  }\n#endif\n#else\n#if DCHECK_IS_ON()\n  // Sanity check: No worker entry should exist for |extension_id|.\n  DCHECK(\n      all_running_extension_workers_.GetAllForExtension(extension_id).empty());\n#endif\n#endif\n}\n\n"
+- description: Integrate reviewed Android extension UI, MV3 lifecycle, authenticated native messaging and artifact-parser source with retained desktop behavior
+  regex:
+    re_pattern: '\ \ //\ TODO\(crbug\.com/40936639\):\ Remove\ the\ ability\ for\ multiple\ workers\ to\ be\
+
+      \ \ //\ stored\ for\ an\ extension\ and\ then\ remove\ all\ these\ similar\ checks\ and\ loops\
+
+      \ \ //\ that\ are\ assuming\ there\ can\ be\ more\ than\ one\.\
+
+      \ \ if\ \(!all_running_extension_workers_\.Contains\(worker_id\)\)\ \{\
+
+      \ \ \ \ //\ Multiple\ notifications\ can\ try\ to\ remove\ a\ worker\ when\ the\ worker\
+
+      \ \ \ \ //\ stops\ \(DidStopServiceWorkerContext\(\),\
+
+      \ \ \ \ //\ ProcessManager::RenderProcessExit\(\),\ or\ extension\ uninstall/disable\)\.\
+
+      \ \ \ \ return;\
+
+      \ \ \}\
+
+      \
+
+      \ \ all_running_extension_workers_\.Remove\(worker_id\);\
+
+      \ \ worker_context_ids_\.erase\(worker_id\);\
+
+      \ \ for\ \(auto\&\ observer\ :\ observer_list_\)\
+
+      \ \ \ \ observer\.OnStoppedTrackingServiceWorkerInstance\(\*browser_context\(\),\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ worker_id\);\
+
+      '
+    replace: "  // TODO(crbug.com/40936639): Remove the ability for multiple workers to be\n  // stored for an extension and then remove all these similar checks and loops\n  // that are assuming there can be more than one.\n#if BUILDFLAG(IS_ANDROID)\n  // WorkerId ordering ignores start_token. A delayed stop must not retire a\n  // newer incarnation with otherwise identical fields.\n  if (!worker_id.start_token ||\n      !GetServiceWorkerRunningInstance(worker_id)) {\n    return;\n  }\n#else\n  if (!all_running_extension_workers_.Contains(worker_id)) {\n    // Multiple notifications can try to remove a worker when the worker\n    // stops (DidStopServiceWorkerContext(),\n    // ProcessManager::RenderProcessExit(), or extension uninstall/disable).\n    return;\n  }\n#endif\n\n  all_running_extension_workers_.Remove(worker_id);\n  worker_context_ids_.erase(worker_id);\n#if BUILDFLAG(IS_ANDROID)\n  // Remove membership before metadata and callbacks so late owners observe\n  // retirement even if the task queue has not yet processed this stop.\n  std::erase_if(service_worker_keepalives_, [&worker_id](const auto& entry) {\n    const WorkerId& recorded_worker = entry.second.worker_id;\n    return recorded_worker == worker_id &&\n           recorded_worker.start_token == worker_id.start_token;\n  });\n#endif\n  for (auto& observer : observer_list_)\n    observer.OnStoppedTrackingServiceWorkerInstance(*browser_context(),\n                                                    worker_id);\n"
+- description: Integrate reviewed Android extension UI, MV3 lifecycle, authenticated native messaging and artifact-parser source with retained desktop behavior
+  regex:
+    re_pattern: '\ \ \ \ \ \ StopTrackingServiceWorkerRunningInstance\(worker_id\);\
+
+      \ \ \ \ \}\
+
+      \ \ \}\
+
+      \}\
+
+      \
+
+      bool\ ProcessManager::HasServiceWorker\(const\ WorkerId\&\ worker_id\)\ const\ \{\
+
+      \ \ return\ all_running_extension_workers_\.Contains\(worker_id\);\
+
+      '
+    replace: "      StopTrackingServiceWorkerRunningInstance(worker_id);\n    }\n  }\n#if BUILDFLAG(IS_ANDROID)\n  // A direct C++ owner may register a full-token keepalive before PM tracking.\n  // The ordinary token-bearing stop still retires only that incarnation.\n  std::erase_if(service_worker_keepalives_,\n                [&](const auto& entry) {\n                  const WorkerId& worker = entry.second.worker_id;\n                  return worker.extension_id == extension_id &&\n                         worker.version_id == worker_version_id &&\n                         worker.start_token == service_worker_token;\n                });\n#endif\n}\n\n#if BUILDFLAG(IS_ANDROID)\nstd::optional<WorkerId> ProcessManager::GetServiceWorkerRunningInstance(\n    const WorkerId& worker_id) const {\n  for (const WorkerId& running_worker :\n       all_running_extension_workers_.GetAllForExtension(\n           worker_id.extension_id)) {\n    if (running_worker == worker_id &&\n        (!worker_id.start_token ||\n         running_worker.start_token == worker_id.start_token)) {\n      return running_worker;\n    }\n  }\n  return std::nullopt;\n}\n#endif\n\nbool ProcessManager::HasServiceWorker(const WorkerId& worker_id) const {\n  return all_running_extension_workers_.Contains(worker_id);\n"

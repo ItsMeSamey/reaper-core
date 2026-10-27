@@ -1,0 +1,135 @@
+diff --git a/extensions/browser/api/power/power_api.cc b/extensions/browser/api/power/power_api.cc
+--- a/extensions/browser/api/power/power_api.cc
++++ b/extensions/browser/api/power/power_api.cc
+@@ -9,6 +9,7 @@
+ #include "base/lazy_instance.h"
+ #include "content/public/browser/device_service.h"
+ #include "extensions/browser/api/power/activity_reporter_delegate.h"
++#include "extensions/browser/api/extensions_api_client.h"
+ #include "extensions/browser/extension_registry.h"
+ #include "extensions/common/api/power.h"
+ #include "extensions/common/extension.h"
+@@ -41,7 +42,10 @@
+   std::optional<api::power::RequestKeepAwake::Params> params =
+       api::power::RequestKeepAwake::Params::Create(args());
+   EXTENSION_FUNCTION_VALIDATE(params);
+-  PowerAPI::Get(browser_context())->AddRequest(extension_id(), params->level);
++  if (auto error = PowerAPI::Get(browser_context())->AddRequest(
++          extension_id(), params->level)) {
++    return RespondNow(Error(*error));
++  }
+   return RespondNow(NoArguments());
+ }
+ 
+@@ -71,10 +75,22 @@
+   return g_factory.Pointer();
+ }
+ 
+-void PowerAPI::AddRequest(const ExtensionId& extension_id,
+-                          api::power::Level level) {
++std::optional<std::string> PowerAPI::AddRequest(
++    const ExtensionId& extension_id,
++    api::power::Level level) {
++  auto previous = extension_levels_.find(extension_id);
++  std::optional<api::power::Level> previous_level;
++  if (previous != extension_levels_.end()) previous_level = previous->second;
+   extension_levels_[extension_id] = level;
+-  UpdateWakeLock();
++  if (auto error = UpdateWakeLock(level == api::power::Level::kDisplay, true)) {
++    if (previous_level) {
++      extension_levels_[extension_id] = *previous_level;
++    } else {
++      extension_levels_.erase(extension_id);
++    }
++    return error;
++  }
++  return std::nullopt;
+ }
+ 
+ void PowerAPI::RemoveRequest(const ExtensionId& extension_id) {
+@@ -85,6 +101,10 @@
+ void PowerAPI::SetWakeLockFunctionsForTesting(
+     ActivateWakeLockFunction activate_function,
+     CancelWakeLockFunction cancel_function) {
++#if BUILDFLAG(IS_ANDROID)
++  use_custom_wake_lock_functions_for_testing_ =
++      !activate_function.is_null() || !cancel_function.is_null();
++#endif
+   activate_wake_lock_function_ =
+       !activate_function.is_null()
+           ? std::move(activate_function)
+@@ -118,10 +138,40 @@
+ 
+ PowerAPI::~PowerAPI() = default;
+ 
+-void PowerAPI::UpdateWakeLock() {
++std::optional<std::string> PowerAPI::UpdateWakeLock(
++    [[maybe_unused]] bool require_foreground_display,
++    [[maybe_unused]] bool transactional) {
++#if BUILDFLAG(IS_ANDROID)
++  if (!use_custom_wake_lock_functions_for_testing_) {
++    if (extension_levels_.empty()) {
++      CancelWakeLock();
++      return std::nullopt;
++    }
++    if (!android_delegate_ && ExtensionsAPIClient::Get()) {
++      android_delegate_ =
++          ExtensionsAPIClient::Get()->CreateAndroidPowerDelegate(browser_context_);
++    }
++    if (!android_delegate_) return "Android power support is unavailable.";
++    bool system = false;
++    bool display = false;
++    for (const auto& [id, level] : extension_levels_) {
++      system |= level == api::power::Level::kSystem;
++      display |= level == api::power::Level::kDisplay;
++    }
++    if (auto error = android_delegate_->Apply(system, display,
++                                               require_foreground_display,
++                                               transactional)) {
++      return error;
++    }
++    is_wake_lock_active_ = true;
++    current_level_ = display ? api::power::Level::kDisplay
++                             : api::power::Level::kSystem;
++    return std::nullopt;
++  }
++#endif
+   if (extension_levels_.empty()) {
+     cancel_wake_lock_function_.Run();
+-    return;
++    return std::nullopt;
+   }
+ 
+   api::power::Level new_level = api::power::Level::kSystem;
+@@ -137,6 +187,7 @@
+     activate_wake_lock_function_.Run(type);
+     current_level_ = new_level;
+   }
++  return std::nullopt;
+ }
+ 
+ void PowerAPI::Shutdown() {
+@@ -144,6 +195,9 @@
+   // the already-deleted ExtensionRegistry.
+   ExtensionRegistry::Get(browser_context_)->RemoveObserver(this);
+   cancel_wake_lock_function_.Run();
++#if BUILDFLAG(IS_ANDROID)
++  android_delegate_.reset();
++#endif
+ }
+ 
+ void PowerAPI::ActivateWakeLock(device::mojom::WakeLockType type) {
+@@ -155,6 +209,13 @@
+ }
+ 
+ void PowerAPI::CancelWakeLock() {
++#if BUILDFLAG(IS_ANDROID)
++  if (!use_custom_wake_lock_functions_for_testing_) {
++    if (android_delegate_) android_delegate_->Cancel();
++    is_wake_lock_active_ = false;
++    return;
++  }
++#endif
+   if (is_wake_lock_active_) {
+     GetWakeLock()->CancelWakeLock();
+     is_wake_lock_active_ = false;

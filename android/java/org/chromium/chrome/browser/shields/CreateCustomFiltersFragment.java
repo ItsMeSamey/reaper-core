@@ -8,8 +8,11 @@ package org.chromium.chrome.browser.shields;
 import static org.chromium.build.NullUtil.assumeNonNull;
 
 import android.os.Bundle;
+import android.text.Editable;
+import android.text.Html;
 import android.text.SpannableString;
 import android.text.Spanned;
+import android.text.TextWatcher;
 import android.text.method.LinkMovementMethod;
 import android.view.LayoutInflater;
 import android.view.Menu;
@@ -28,7 +31,6 @@ import org.chromium.brave_shields.mojom.FilterListAndroidHandler;
 import org.chromium.build.annotations.NullMarked;
 import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.R;
-import org.chromium.chrome.browser.BraveRewardsHelper;
 import org.chromium.chrome.browser.customtabs.CustomTabActivity;
 import org.chromium.chrome.browser.settings.BottomInsetViewProvider;
 import org.chromium.chrome.browser.settings.BravePreferenceFragment;
@@ -42,8 +44,14 @@ public class CreateCustomFiltersFragment extends BravePreferenceFragment
     public static final String BRAVE_ADBLOCK_FILTER_SYNTAX_PAGE =
             "https://support.brave.app/hc/en-us/articles/6449369961741";
 
+    private static final String CUSTOM_FILTERS_DRAFT = "custom_filters_draft";
+
     private @Nullable FilterListAndroidHandler mFilterListAndroidHandler;
-    private EditText mEtCustomFilters;
+    private @Nullable EditText mEtCustomFilters;
+    private @Nullable Button mSaveButton;
+    // Null means the initial model has not arrived and the user has not edited.
+    private @Nullable String mCustomFiltersDraft;
+    private @Nullable TextWatcher mCustomFiltersTextWatcher;
     private final SettableMonotonicObservableSupplier<String> mPageTitle =
             ObservableSuppliers.createMonotonic();
 
@@ -69,6 +77,50 @@ public class CreateCustomFiltersFragment extends BravePreferenceFragment
     }
 
     @Override
+    public void onViewStateRestored(@Nullable Bundle savedInstanceState) {
+        super.onViewStateRestored(savedInstanceState);
+        EditText editor = mEtCustomFilters;
+        if (editor == null) return;
+
+        if (mCustomFiltersDraft == null && savedInstanceState != null) {
+            mCustomFiltersDraft = savedInstanceState.getString(CUSTOM_FILTERS_DRAFT);
+        }
+        if (mCustomFiltersDraft != null
+                && !mCustomFiltersDraft.contentEquals(editor.getText())) {
+            editor.setText(mCustomFiltersDraft);
+        }
+        updateSaveButtonState();
+        // Observe after hierarchy restoration so an untouched loading placeholder
+        // is not mistaken for an intentionally empty draft.
+        mCustomFiltersTextWatcher =
+                new TextWatcher() {
+                    @Override
+                    public void beforeTextChanged(CharSequence text, int start, int count, int after) {}
+
+                    @Override
+                    public void onTextChanged(CharSequence text, int start, int before, int count) {}
+
+                    @Override
+                    public void afterTextChanged(Editable text) {
+                        if (mEtCustomFilters == editor) {
+                            mCustomFiltersDraft = text.toString();
+                            updateSaveButtonState();
+                        }
+                    }
+                };
+        editor.addTextChangedListener(mCustomFiltersTextWatcher);
+        if (mCustomFiltersDraft == null) getCustomFilters();
+    }
+
+    @Override
+    public void onSaveInstanceState(Bundle outState) {
+        super.onSaveInstanceState(outState);
+        if (mCustomFiltersDraft != null) {
+            outState.putString(CUSTOM_FILTERS_DRAFT, mCustomFiltersDraft);
+        }
+    }
+
+    @Override
     public MonotonicObservableSupplier<String> getPageTitle() {
         return mPageTitle;
     }
@@ -81,7 +133,7 @@ public class CreateCustomFiltersFragment extends BravePreferenceFragment
                 String.format(
                         getResources().getString(R.string.create_custom_filter_summary),
                         getResources().getString(R.string.adblock_filter_syntax));
-        Spanned summaryTextSpanned = BraveRewardsHelper.spannedFromHtmlString(summaryText);
+        Spanned summaryTextSpanned = Html.fromHtml(summaryText, Html.FROM_HTML_MODE_LEGACY);
         SpannableString summaryTextSpannableString =
                 new SpannableString(summaryTextSpanned.toString());
 
@@ -96,23 +148,34 @@ public class CreateCustomFiltersFragment extends BravePreferenceFragment
                                         getActivity(), BRAVE_ADBLOCK_FILTER_SYNTAX_PAGE);
                             });
 
-            BraveRewardsHelper.setSpan(
-                    getActivity(),
-                    summaryText,
-                    summaryTextSpannableString,
-                    R.string.adblock_filter_syntax,
-                    summaryTextClickableSpan);
+            String linkText = getString(R.string.adblock_filter_syntax);
+            int linkStart = summaryTextSpannableString.toString().indexOf(linkText);
+            if (linkStart >= 0) {
+                summaryTextSpannableString.setSpan(
+                        summaryTextClickableSpan,
+                        linkStart,
+                        linkStart + linkText.length(),
+                        Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            }
             tvSummary.setMovementMethod(LinkMovementMethod.getInstance());
             tvSummary.setText(summaryTextSpannableString);
         }
 
         Button saveBtn = getView().findViewById(R.id.btn_save);
+        mSaveButton = saveBtn;
+        updateSaveButtonState();
         BraveDynamicColors.applyToFilledButtonIfEnabled(saveBtn);
         saveBtn.setOnClickListener(
                 view -> {
                     updateCustomFilters();
                 });
-        getCustomFilters();
+    }
+
+    private void updateSaveButtonState() {
+        Button saveButton = mSaveButton;
+        if (saveButton != null) {
+            saveButton.setEnabled(mCustomFiltersDraft != null);
+        }
     }
 
     private void initFilterListAndroidHandler() {
@@ -126,19 +189,25 @@ public class CreateCustomFiltersFragment extends BravePreferenceFragment
     }
 
     private void getCustomFilters() {
-        if (mFilterListAndroidHandler != null) {
+        EditText editor = mEtCustomFilters;
+        if (mFilterListAndroidHandler != null && editor != null) {
             mFilterListAndroidHandler.getCustomFilters(
                     customFilters -> {
-                        mEtCustomFilters.setText(customFilters);
+                        if (mEtCustomFilters != editor || mCustomFiltersDraft != null) return;
+                        mCustomFiltersDraft = customFilters;
+                        editor.setText(customFilters);
+                        updateSaveButtonState();
                     });
         }
     }
 
     private void updateCustomFilters() {
-        if (mFilterListAndroidHandler != null) {
+        EditText editor = mEtCustomFilters;
+        if (mFilterListAndroidHandler != null && editor != null && mCustomFiltersDraft != null) {
             mFilterListAndroidHandler.updateCustomFilters(
-                    mEtCustomFilters.getText().toString(),
+                    editor.getText().toString(),
                     isUpdated -> {
+                        if (mEtCustomFilters != editor) return;
                         int messageId =
                                 isUpdated
                                         ? R.string.saved_changes_success
@@ -156,6 +225,22 @@ public class CreateCustomFiltersFragment extends BravePreferenceFragment
         if (closeItem != null) {
             closeItem.setVisible(false);
         }
+    }
+
+    @Override
+    public void onDestroyView() {
+        // Retire this editor before proxy closure can deliver any outstanding reply.
+        if (mEtCustomFilters != null && mCustomFiltersTextWatcher != null) {
+            mEtCustomFilters.removeTextChangedListener(mCustomFiltersTextWatcher);
+        }
+        mCustomFiltersTextWatcher = null;
+        mEtCustomFilters = null;
+        mSaveButton = null;
+        if (mFilterListAndroidHandler != null) {
+            mFilterListAndroidHandler.close();
+            mFilterListAndroidHandler = null;
+        }
+        super.onDestroyView();
     }
 
     @Override

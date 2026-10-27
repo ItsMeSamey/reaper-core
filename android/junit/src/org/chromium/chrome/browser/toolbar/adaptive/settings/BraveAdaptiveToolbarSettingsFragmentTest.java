@@ -5,11 +5,10 @@
 
 package org.chromium.chrome.browser.toolbar.adaptive.settings;
 
-import static org.mockito.Mockito.any;
-import static org.mockito.Mockito.doReturn;
-
 import static org.chromium.chrome.browser.preferences.ChromePreferenceKeys.ADAPTIVE_TOOLBAR_CUSTOMIZATION_ENABLED;
 import static org.chromium.chrome.browser.preferences.ChromePreferenceKeys.ADAPTIVE_TOOLBAR_CUSTOMIZATION_SETTINGS;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.doReturn;
 
 import android.os.Bundle;
 import android.util.Pair;
@@ -20,6 +19,26 @@ import androidx.fragment.app.FragmentFactory;
 import androidx.fragment.app.testing.FragmentScenario;
 import androidx.test.filters.SmallTest;
 
+import org.chromium.base.Callback;
+import org.chromium.base.ContextUtils;
+import org.chromium.base.test.BaseRobolectricTestRunner;
+import org.chromium.chrome.browser.omnibox.voice.VoiceRecognitionUtil;
+import org.chromium.chrome.browser.preferences.ChromeSharedPreferences;
+import org.chromium.chrome.browser.profiles.Profile;
+import org.chromium.chrome.browser.search_engines.TemplateUrlServiceFactory;
+import org.chromium.chrome.browser.settings.ProfileDependentSetting;
+import org.chromium.chrome.browser.signin.services.UnifiedConsentServiceBridge;
+import org.chromium.chrome.browser.toolbar.R;
+import org.chromium.chrome.browser.toolbar.adaptive.AdaptiveToolbarBehavior;
+import org.chromium.chrome.browser.toolbar.adaptive.AdaptiveToolbarButtonVariant;
+import org.chromium.chrome.browser.toolbar.adaptive.AdaptiveToolbarStatePredictor;
+import org.chromium.chrome.browser.toolbar.adaptive.BraveAdaptiveToolbarPrefs;
+import org.chromium.chrome.browser.toolbar.adaptive.BraveAdaptiveToolbarStatePredictor;
+import org.chromium.components.browser_ui.settings.ChromeSwitchPreference;
+import org.chromium.components.browser_ui.widget.RadioButtonWithDescription;
+import org.chromium.components.prefs.PrefService;
+import org.chromium.components.search_engines.TemplateUrlService;
+import org.chromium.components.user_prefs.UserPrefsJni;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
@@ -31,26 +50,8 @@ import org.mockito.junit.MockitoJUnit;
 import org.mockito.junit.MockitoRule;
 import org.robolectric.annotation.Config;
 
-import org.chromium.base.test.BaseRobolectricTestRunner;
-import org.chromium.chrome.browser.glic.GlicEnabling;
-import org.chromium.chrome.browser.glic.GlicEnablingJni;
-import org.chromium.chrome.browser.omnibox.voice.VoiceRecognitionUtil;
-import org.chromium.chrome.browser.preferences.ChromeSharedPreferences;
-import org.chromium.chrome.browser.profiles.Profile;
-import org.chromium.chrome.browser.search_engines.TemplateUrlServiceFactory;
-import org.chromium.chrome.browser.settings.ProfileDependentSetting;
-import org.chromium.chrome.browser.signin.services.UnifiedConsentServiceBridge;
-import org.chromium.chrome.browser.toolbar.R;
-import org.chromium.chrome.browser.toolbar.adaptive.AdaptiveToolbarButtonVariant;
-import org.chromium.chrome.browser.toolbar.adaptive.AdaptiveToolbarStatePredictor;
-import org.chromium.chrome.browser.toolbar.adaptive.BraveAdaptiveToolbarPrefs;
-import org.chromium.components.browser_ui.settings.ChromeSwitchPreference;
-import org.chromium.components.browser_ui.widget.RadioButtonWithDescription;
-import org.chromium.components.prefs.PrefService;
-import org.chromium.components.search_engines.TemplateUrlService;
-import org.chromium.components.user_prefs.UserPrefsJni;
-
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 
 /** Tests for {@link AdaptiveToolbarSettingsFragment}. */
 @RunWith(BaseRobolectricTestRunner.class)
@@ -62,7 +63,7 @@ public class BraveAdaptiveToolbarSettingsFragmentTest {
     @Mock private UserPrefsJni mUserPrefsNatives;
     @Mock private PrefService mPrefService;
     @Mock private TemplateUrlService mTemplateUrlService;
-    @Mock private GlicEnabling.Natives mGlicEnablingNatives;
+    @Mock private AdaptiveToolbarBehavior mToolbarBehavior;
 
     private ChromeSwitchPreference mSwitchPreference;
     private RadioButtonGroupAdaptiveToolbarPreference mRadioPreference;
@@ -71,8 +72,6 @@ public class BraveAdaptiveToolbarSettingsFragmentTest {
     public void setUpTest() throws Exception {
         UserPrefsJni.setInstanceForTesting(mUserPrefsNatives);
         doReturn(mPrefService).when(mUserPrefsNatives).get(any());
-
-        GlicEnablingJni.setInstanceForTesting(mGlicEnablingNatives);
 
         ChromeSharedPreferences.getInstance().removeKey(ADAPTIVE_TOOLBAR_CUSTOMIZATION_ENABLED);
         ChromeSharedPreferences.getInstance().removeKey(ADAPTIVE_TOOLBAR_CUSTOMIZATION_SETTINGS);
@@ -87,7 +86,6 @@ public class BraveAdaptiveToolbarSettingsFragmentTest {
         UnifiedConsentServiceBridge.setUrlKeyedAnonymizedDataCollectionEnabled(true);
 
         TemplateUrlServiceFactory.setInstanceForTesting(mTemplateUrlService);
-        BraveRadioButtonGroupAdaptiveToolbarPreference.setIsJunitTesting(true);
     }
 
     @After
@@ -242,34 +240,122 @@ public class BraveAdaptiveToolbarSettingsFragmentTest {
                             AdaptiveToolbarButtonVariant.DOWNLOADS,
                             ChromeSharedPreferences.getInstance()
                                     .readInt(ADAPTIVE_TOOLBAR_CUSTOMIZATION_SETTINGS));
-
-                    // Test Leo AI button
-                    Assert.assertEquals(
-                            R.id.adaptive_option_brave_leo,
-                            getButton(AdaptiveToolbarButtonVariant.LEO).getId());
-                    selectButton(AdaptiveToolbarButtonVariant.LEO);
-                    assertButtonCheckedCorrectly("Leo AI", AdaptiveToolbarButtonVariant.LEO);
-                    Assert.assertEquals(
-                            AdaptiveToolbarButtonVariant.LEO, mRadioPreference.getSelection());
-                    Assert.assertEquals(
-                            AdaptiveToolbarButtonVariant.LEO,
-                            ChromeSharedPreferences.getInstance()
-                                    .readInt(ADAPTIVE_TOOLBAR_CUSTOMIZATION_SETTINGS));
-
-                    // Test Wallet button
-                    Assert.assertEquals(
-                            R.id.adaptive_option_brave_wallet,
-                            getButton(AdaptiveToolbarButtonVariant.WALLET).getId());
-                    selectButton(AdaptiveToolbarButtonVariant.WALLET);
-                    assertButtonCheckedCorrectly(
-                            "Brave Wallet", AdaptiveToolbarButtonVariant.WALLET);
-                    Assert.assertEquals(
-                            AdaptiveToolbarButtonVariant.WALLET, mRadioPreference.getSelection());
-                    Assert.assertEquals(
-                            AdaptiveToolbarButtonVariant.WALLET,
-                            ChromeSharedPreferences.getInstance()
-                                    .readInt(ADAPTIVE_TOOLBAR_CUSTOMIZATION_SETTINGS));
                 });
+    }
+
+    @Test
+    @SmallTest
+    @Config(qualifiers = "sw360dp")
+    public void testPersistedLeoUpgradeOnPhone() {
+        assertRemovedOverrideMigrated(
+                AdaptiveToolbarButtonVariant.LEO, AdaptiveToolbarButtonVariant.NEW_TAB);
+    }
+
+    @Test
+    @SmallTest
+    @Config(qualifiers = "sw360dp")
+    public void testPersistedWalletUpgradeOnPhone() {
+        assertRemovedOverrideMigrated(
+                AdaptiveToolbarButtonVariant.WALLET, AdaptiveToolbarButtonVariant.NEW_TAB);
+    }
+
+    @Test
+    @SmallTest
+    @Config(qualifiers = "sw600dp")
+    public void testPersistedLeoUpgradeOnTablet() {
+        assertRemovedOverrideMigrated(
+                AdaptiveToolbarButtonVariant.LEO, AdaptiveToolbarButtonVariant.SHARE);
+    }
+
+    @Test
+    @SmallTest
+    @Config(qualifiers = "sw600dp")
+    public void testPersistedWalletUpgradeOnTablet() {
+        assertRemovedOverrideMigrated(
+                AdaptiveToolbarButtonVariant.WALLET, AdaptiveToolbarButtonVariant.SHARE);
+    }
+
+    @Test
+    @SmallTest
+    public void testValidPersistedOverrideIsPreserved() {
+        ChromeSharedPreferences.getInstance()
+                .writeInt(
+                        ADAPTIVE_TOOLBAR_CUSTOMIZATION_SETTINGS,
+                        AdaptiveToolbarButtonVariant.BOOKMARKS);
+        Assert.assertEquals(
+                AdaptiveToolbarButtonVariant.BOOKMARKS,
+                BraveAdaptiveToolbarPrefs.getCustomizationSetting());
+        Assert.assertEquals(
+                AdaptiveToolbarButtonVariant.BOOKMARKS,
+                ChromeSharedPreferences.getInstance()
+                        .readInt(ADAPTIVE_TOOLBAR_CUSTOMIZATION_SETTINGS));
+        Assert.assertFalse(
+                ChromeSharedPreferences.getInstance()
+                        .contains(ADAPTIVE_TOOLBAR_CUSTOMIZATION_ENABLED));
+    }
+
+    @Test
+    @SmallTest
+    public void testDelayedLeoSegmentationResultIsRejected() {
+        assertDelayedRemovedSegmentRejected(AdaptiveToolbarButtonVariant.LEO);
+    }
+
+    @Test
+    @SmallTest
+    public void testDelayedWalletSegmentationResultIsRejected() {
+        assertDelayedRemovedSegmentRejected(AdaptiveToolbarButtonVariant.WALLET);
+    }
+
+    private void assertRemovedOverrideMigrated(int removedVariant, int expectedDefault) {
+        ChromeSharedPreferences.getInstance()
+                .writeInt(ADAPTIVE_TOOLBAR_CUSTOMIZATION_SETTINGS, removedVariant);
+        ChromeSharedPreferences.getInstance()
+                .writeBoolean(ADAPTIVE_TOOLBAR_CUSTOMIZATION_ENABLED, true);
+        Assert.assertEquals(expectedDefault, BraveAdaptiveToolbarPrefs.getCustomizationSetting());
+        Assert.assertEquals(
+                expectedDefault,
+                ChromeSharedPreferences.getInstance()
+                        .readInt(ADAPTIVE_TOOLBAR_CUSTOMIZATION_SETTINGS));
+        Assert.assertTrue(BraveAdaptiveToolbarPrefs.isCustomizationPreferenceEnabled());
+        Assert.assertFalse(BraveAdaptiveToolbarStatePredictor.isValidSegment(removedVariant));
+        // A second settings read must retain the already migrated choice.
+        Assert.assertEquals(expectedDefault, BraveAdaptiveToolbarPrefs.getCustomizationSetting());
+    }
+
+    private void assertDelayedRemovedSegmentRejected(int removedVariant) {
+        AdaptiveToolbarStatePredictor.setSegmentationResultsForTesting(null);
+        ChromeSharedPreferences.getInstance()
+                .writeInt(
+                        ADAPTIVE_TOOLBAR_CUSTOMIZATION_SETTINGS,
+                        AdaptiveToolbarButtonVariant.UNKNOWN);
+        ChromeSharedPreferences.getInstance()
+                .writeBoolean(ADAPTIVE_TOOLBAR_CUSTOMIZATION_ENABLED, true);
+        List<Integer> staleResults = List.of(removedVariant, AdaptiveToolbarButtonVariant.SHARE);
+        doReturn(AdaptiveToolbarButtonVariant.SHARE)
+                .when(mToolbarBehavior)
+                .getSegmentationDefault(mProfile);
+        doReturn(removedVariant).when(mToolbarBehavior).resultFilter(staleResults);
+        AtomicReference<Callback<List<Integer>>> pending = new AtomicReference<>();
+        AtomicReference<AdaptiveToolbarStatePredictor.UiState> state = new AtomicReference<>();
+        AdaptiveToolbarStatePredictor predictor =
+                new AdaptiveToolbarStatePredictor(
+                        ContextUtils.getApplicationContext(), mProfile, null, mToolbarBehavior) {
+                    @Override
+                    public void readFromSegmentationPlatform(Callback<List<Integer>> callback) {
+                        pending.set(callback);
+                    }
+                };
+        predictor.recomputeUiState(state::set);
+        Assert.assertNull(state.get());
+        Assert.assertNotNull(pending.get());
+        // Deliver the old result after recomputation has returned, as the native backend does.
+        pending.get().onResult(staleResults);
+        Assert.assertNotNull(state.get());
+        Assert.assertEquals(
+                List.of(AdaptiveToolbarButtonVariant.SHARE), state.get().rankedToolbarButtonStates);
+        Assert.assertEquals(AdaptiveToolbarButtonVariant.AUTO, state.get().preferenceSelection);
+        Assert.assertEquals(AdaptiveToolbarButtonVariant.SHARE, state.get().autoButtonCaption);
+        Assert.assertFalse(BraveAdaptiveToolbarStatePredictor.isValidSegment(removedVariant));
     }
 
     private RadioButtonWithDescription getButton(@AdaptiveToolbarButtonVariant int type) {
@@ -313,5 +399,27 @@ public class BraveAdaptiveToolbarSettingsFragmentTest {
                         return fragment;
                     }
                 });
+    }
+
+    @Test
+    @SmallTest
+    @Config(qualifiers = "sw360dp")
+    public void testPersistedGlicUpgradeOnPhone() {
+        assertRemovedOverrideMigrated(
+                AdaptiveToolbarButtonVariant.GLIC, AdaptiveToolbarButtonVariant.NEW_TAB);
+    }
+
+    @Test
+    @SmallTest
+    @Config(qualifiers = "sw600dp")
+    public void testPersistedGlicUpgradeOnTablet() {
+        assertRemovedOverrideMigrated(
+                AdaptiveToolbarButtonVariant.GLIC, AdaptiveToolbarButtonVariant.SHARE);
+    }
+
+    @Test
+    @SmallTest
+    public void testDelayedGlicSegmentationResultIsRejected() {
+        assertDelayedRemovedSegmentRejected(AdaptiveToolbarButtonVariant.GLIC);
     }
 }

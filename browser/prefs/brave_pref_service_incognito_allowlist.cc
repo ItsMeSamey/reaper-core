@@ -10,7 +10,9 @@
 #include "base/containers/span.h"
 #include "base/strings/cstring_view.h"
 #include "brave/browser/ui/bookmark/brave_bookmark_prefs.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/ai_chat/core/common/pref_names.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_wallet/common/buildflags/buildflags.h"
 #include "brave/components/constants/pref_names.h"
 #include "build/build_config.h"
@@ -52,8 +54,10 @@ base::span<const base::cstring_view> GetBravePersistentPrefNames() {
       brave_tabs::kScrollableHorizontalTabStrip,
       brave_tabs::kShowHorizontalTabScrollButtons,
 #endif
+#if !BUILDFLAG(IS_ANDROID)
       ai_chat::prefs::kLastAcceptedDisclaimer,
       ai_chat::prefs::kBraveChatAutocompleteProviderEnabled,
+#endif  // !BUILDFLAG(IS_ANDROID)
       brave::bookmarks::prefs::kShowAllBookmarksButton,
   });
 

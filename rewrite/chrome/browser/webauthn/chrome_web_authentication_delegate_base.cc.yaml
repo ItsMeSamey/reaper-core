@@ -1,0 +1,42 @@
+{
+  "substitutions": [
+    {
+      "description": "Expose the same permission-aware proxy lookup to Android extension requests.",
+      "regex": {
+        "pattern": "#include \"components/prefs/pref_service.h\"",
+        "replace": "#include \"components/prefs/pref_service.h\"\n#include \"extensions/buildflags/buildflags.h\"\n\n#if BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_EXTENSIONS_CORE)\n#include \"chrome/browser/extensions/api/web_authentication_proxy/web_authentication_proxy_service.h\"\n#endif"
+      }
+    },
+    {
+      "description": "Reuse shared attachment, incognito and origin policy before Android WebAuthn forwarding.",
+      "regex": {
+        "pattern": "ChromeWebAuthenticationDelegateBase::MaybeGetRequestProxy(\n    content::BrowserContext* browser_context,\n    const url::Origin& caller_origin) {\n  NOTIMPLEMENTED();\n  return nullptr;\n}",
+        "replace": "ChromeWebAuthenticationDelegateBase::MaybeGetRequestProxy(\n    content::BrowserContext* browser_context,\n    const url::Origin& caller_origin) {\n#if BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_EXTENSIONS_CORE)\n  auto* service = extensions::WebAuthenticationProxyService::GetIfProxyAttached(\n      Profile::FromBrowserContext(browser_context));\n  return service && service->IsActive(caller_origin) ? service : nullptr;\n#else\n  NOTIMPLEMENTED();\n  return nullptr;\n#endif\n}"
+      }
+    },
+    {
+      "description": "Reuse the existing desktop extension origin and RP authorization for Android WebAuthn.",
+      "regex": {
+        "re_pattern": "\\#if\\ BUILDFLAG\\(IS_ANDROID\\)\\ \\&\\&\\ BUILDFLAG\\(ENABLE_EXTENSIONS_CORE\\)\\\n\\#include\\ \"chrome/browser/extensions/api/web_authentication_proxy/web_authentication_proxy_service\\.h\"\\\n\\#endif\\\n",
+        "replace": "#if BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_EXTENSIONS_CORE)\n#include \"base/strings/strcat.h\"\n#include \"base/strings/string_util.h\"\n#include \"chrome/browser/extensions/api/web_authentication_proxy/web_authentication_proxy_service.h\"\n#include \"extensions/browser/extension_registry.h\"\n#include \"extensions/common/constants.h\"\n#include \"extensions/common/extension.h\"\n#include \"extensions/common/permissions/permissions_data.h\"\n#include \"net/base/registry_controlled_domains/registry_controlled_domain.h\"\n#include \"net/base/url_util.h\"\n#include \"url/gurl.h\"\n#include \"url/url_constants.h\"\n#endif\n"
+      },
+      "count": 1
+    },
+    {
+      "description": "Reuse the existing desktop extension origin and RP authorization for Android WebAuthn.",
+      "regex": {
+        "re_pattern": "namespace\\ \\{\\\n\\\n",
+        "replace": "namespace {\n\n#if BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_EXTENSIONS_CORE)\n// Returns true if |extension| is allowed to create and assert |rp_id|.\nbool ExtensionCanAssertRpId(const extensions::Extension& extension,\n                            const std::string& rp_id) {\n  // Extensions are always allowed to assert their own extension identifier.\n  // This has special handling in\n  // ChromeWebAuthenticationDelegate::MaybeGetRelyingPartyIdOverride, the\n  // RP ID will be prefixed with the extension scheme to isolate it from web\n  // origins.\n  if (extension.id() == rp_id) {\n    return true;\n  }\n\n  // Extensions may not claim eTLDs as RP IDs, even if WebAuthn does not\n  // forbid origins from doing so if they are eTLDs themselves.\n  if (!net::registry_controlled_domains::HostHasRegistryControlledDomain(\n          base::TrimString(rp_id, \".\", base::TrimPositions::TRIM_TRAILING),\n          net::registry_controlled_domains::INCLUDE_UNKNOWN_REGISTRIES,\n          net::registry_controlled_domains::INCLUDE_PRIVATE_REGISTRIES) &&\n      !net::HostStringIsLocalhost(rp_id)) {\n    return false;\n  }\n\n  // http origins are allowed to claim localhost, so this needs special\n  // handling.\n  if (rp_id == \"localhost\" && extension.permissions_data()->HasHostPermission(\n                                  GURL(\"http://localhost\"))) {\n    return true;\n  }\n\n  // Extension permissions logic operates on URLs. Convert the RP ID into a\n  // https URL, and make sure the host matches the rp_id (to disallow RP IDs\n  // like example.com/site).\n  GURL rp_id_url(\n      base::StrCat({url::kHttpsScheme, url::kStandardSchemeSeparator, rp_id}));\n  if (!rp_id_url.is_valid() || rp_id_url.host() != rp_id) {\n    return false;\n  }\n\n  // RP IDs must not be IP origins.\n  if (rp_id_url.HostIsIPAddress()) {\n    return false;\n  }\n\n  // Allow claiming an RP ID if an extension can access this page. This is more\n  // restrictive than WebAuthn on the web:\n  // * Subdomains are not allowed to claim domains up.\n  // * Non-default ports are not allowed to claim their domains.\n  return extension.permissions_data()->HasHostPermission(rp_id_url);\n}\n#endif  // BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_EXTENSIONS_CORE)\n\n"
+      },
+      "count": 1
+    },
+    {
+      "description": "Reuse the existing desktop extension origin and RP authorization for Android WebAuthn.",
+      "regex": {
+        "re_pattern": "bool\\ ChromeWebAuthenticationDelegateBase::\\\n\\ \\ \\ \\ OverrideCallerOriginAndRelyingPartyIdValidation\\(\\\n\\ \\ \\ \\ \\ \\ \\ \\ content::BrowserContext\\*\\ browser_context,\\\n\\ \\ \\ \\ \\ \\ \\ \\ const\\ url::Origin\\&\\ caller_origin,\\\n\\ \\ \\ \\ \\ \\ \\ \\ const\\ std::string\\&\\ relying_party_id\\)\\ \\{\\\n\\ \\ NOTIMPLEMENTED\\(\\);\\\n\\ \\ return\\ false;\\\n\\}\\\n",
+        "replace": "bool ChromeWebAuthenticationDelegateBase::\n    OverrideCallerOriginAndRelyingPartyIdValidation(\n        content::BrowserContext* browser_context,\n        const url::Origin& caller_origin,\n        const std::string& relying_party_id) {\n#if BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_EXTENSIONS_CORE)\n  // Allow chrome-extensions:// origins to make WebAuthn requests.\n  // `MaybeGetRelyingPartyId` will override the RP ID if it matches the\n  // extension origin.\n  if (caller_origin.scheme() != extensions::kExtensionScheme) {\n    return false;\n  }\n  const extensions::Extension* extension =\n      extensions::ExtensionRegistry::Get(browser_context)\n          ->enabled_extensions()\n          .GetByID(caller_origin.host());\n  if (!extension) {\n    return false;\n  }\n  return ExtensionCanAssertRpId(*extension, relying_party_id);\n#else\n  NOTIMPLEMENTED();\n  return false;\n#endif\n}\n"
+      },
+      "count": 1
+    }
+  ]
+}

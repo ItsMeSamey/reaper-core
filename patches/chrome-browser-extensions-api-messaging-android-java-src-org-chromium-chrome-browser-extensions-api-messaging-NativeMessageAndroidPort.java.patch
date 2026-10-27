@@ -1,0 +1,161 @@
+diff --git a/chrome/browser/extensions/api/messaging/android/java/src/org/chromium/chrome/browser/extensions/api/messaging/NativeMessageAndroidPort.java b/chrome/browser/extensions/api/messaging/android/java/src/org/chromium/chrome/browser/extensions/api/messaging/NativeMessageAndroidPort.java
+index e5ba63961845aebde8d4a263829d3e89bae6e993..4977a300eb6c1a25c72ffb71f0d95b37bbd2464e 100644
+--- a/chrome/browser/extensions/api/messaging/android/java/src/org/chromium/chrome/browser/extensions/api/messaging/NativeMessageAndroidPort.java
++++ b/chrome/browser/extensions/api/messaging/android/java/src/org/chromium/chrome/browser/extensions/api/messaging/NativeMessageAndroidPort.java
+@@ -5,6 +5,7 @@
+ package org.chromium.chrome.browser.extensions.api.messaging;
+ 
+ import android.os.Bundle;
++import android.os.Parcel;
+ import android.os.RemoteException;
+ import android.os.TransactionTooLargeException;
+ 
+@@ -22,7 +23,7 @@
+ import org.chromium.build.annotations.Nullable;
+ import org.chromium.chrome.browser.profiles.Profile;
+ 
+-import java.nio.charset.StandardCharsets;
++import java.io.IOException;
+ import java.util.ArrayList;
+ import java.util.List;
+ 
+@@ -103,9 +104,17 @@
+             @JniType("std::string") String packageName,
+             @JniType("std::string") String extensionId,
+             boolean isVerifiedExtension,
++            boolean requireAuthorizedCompanion,
+             byte[][] certificates) {
+-        NativeMessagingManager manager = NativeMessagingManager.getForProfile(profile);
+-        return manager.addPort(packageName, extensionId, isVerifiedExtension, certificates, this);
++        NativeMessagingManager manager =
++                NativeMessagingManager.getForProfile(profile, requireAuthorizedCompanion);
++        return manager.addPort(
++                packageName,
++                extensionId,
++                isVerifiedExtension,
++                requireAuthorizedCompanion,
++                certificates,
++                this);
+     }
+ 
+     // Sets the active callback for this port.
+@@ -144,6 +153,7 @@
+     @CalledByNative
+     public void destroy() {
+         mNativePtr = 0;
++        mPendingMessages.clear();
+         if (mObserver != null) {
+             mObserver.onPortDestroying(this);
+             mObserver = null;
+@@ -157,7 +167,7 @@
+         if (mRemotePort != null) {
+             try {
+                 mRemotePort.disconnect();
+-            } catch (RemoteException e) {
++            } catch (RemoteException | SecurityException e) {
+                 Log.w(TAG, "Failed to disconnect from the app", e);
+             } finally {
+                 mRemotePort = null;
+@@ -194,32 +204,51 @@
+ 
+     private void send(String message) {
+         assert mRemotePort != null;
+-        byte[] bytes = message.getBytes(StandardCharsets.UTF_8);
+-        try {
+-            // TODO(crbug.com/515159909): Handle messages that exceed Binder transaction size limits
+-            // by putting them into SharedMemory instead of byte[].
+-            MessagePayload payload = new MessagePayload();
+-            payload.setInlineBytes(bytes);
+-            Bundle extras = new Bundle();
+-            mRemotePort.postMessage(payload, extras);
++        int byteLength = 0;
++        try (NativeMessagePayloadCodec.Encoded encoded =
++                NativeMessagePayloadCodec.encodeToHost(message)) {
++            byteLength = encoded.byteLength;
++            IExtensionNativeMessagePort target = mRemotePort;
++            // A direct local call does not marshal a recipient-owned descriptor.
++            // Transfer a fresh clone so an admitted local delegate may retain it.
++            boolean localTarget = target.asBinder().queryLocalInterface(
++                    IExtensionNativeMessagePort.DESCRIPTOR) == target;
++            MessagePayload outgoing = localTarget
++                    ? duplicateForLocalRecipient(encoded.payload) : encoded.payload;
++            // The local target consumes its clone even on rejection or exception.
++            // A generated remote Proxy marshals its own copy before returning.
++            target.postMessage(outgoing, new Bundle());
+             RecordHistogram.recordCustomCountHistogram(
+                     "Extensions.NativeMessaging.Android.SentMessageSize.Success",
+-                    bytes.length,
++                    byteLength,
+                     1,
+                     MAX_SUCCESS_MESSAGE_SIZE_BYTES,
+                     50);
+         } catch (TransactionTooLargeException e) {
+             RecordHistogram.recordCustomCountHistogram(
+                     "Extensions.NativeMessaging.Android.SentMessageSize.TooLarge",
+-                    bytes.length,
++                    byteLength,
+                     1,
+                     MAX_TOO_LARGE_MESSAGE_SIZE_BYTES,
+                     50);
+-            Log.w(TAG, "Failed to post message to external app: message too large", e);
++            Log.w(TAG, "Failed to post native message: Binder transaction too large", e);
+             closeChannel("Error when communicating with the native messaging host.");
+-        } catch (RemoteException e) {
+-            Log.w(TAG, "Failed to post message to external app", e);
++        } catch (IOException | RemoteException | SecurityException e) {
++            Log.w(TAG, "Failed to encode or post native message", e);
+             closeChannel("Error when communicating with the native messaging host.");
++        }
++    }
++
++    // The recipient owns the returned frame at invocation, including on error.
++    // Keep the Parcel live until SharedMemory.CREATOR has duplicated its descriptor.
++    private static MessagePayload duplicateForLocalRecipient(MessagePayload payload) {
++        Parcel parcel = Parcel.obtain();
++        try {
++            payload.writeToParcel(parcel, 0);
++            parcel.setDataPosition(0);
++            return MessagePayload.CREATOR.createFromParcel(parcel);
++        } finally {
++            parcel.recycle();
+         }
+     }
+ 
+@@ -252,18 +281,25 @@
+         // binder thread so post a task to the UI thread where `mPort` lives.
+         @Override
+         public void onMessage(MessagePayload payload, Bundle extras) {
+-            if (payload != null) {
+-                // TODO(crbug.com/515159909): Support extracting messages from SharedMemory.
+-                byte[] messageBytes = payload.getInlineBytes();
+-                if (messageBytes != null) {
+-                    String message = new String(messageBytes, StandardCharsets.UTF_8);
+-                    ThreadUtils.postOnUiThread(
+-                            () -> {
+-                                if (mPort != null) {
+-                                    mPort.postMessageFromApp(message);
+-                                }
+-                            });
+-                }
++            try {
++                String message = NativeMessagePayloadCodec.decodeFromHost(payload);
++                ThreadUtils.postOnUiThread(
++                        () -> {
++                            if (mPort != null) {
++                                mPort.postMessageFromApp(message);
++                            }
++                        });
++            } catch (IOException e) {
++                Log.w(TAG, "Invalid native message payload", e);
++                ThreadUtils.postOnUiThread(
++                        () -> {
++                            NativeMessageAndroidPort port = mPort;
++                            mPort = null;
++                            if (port != null) {
++                                port.closeChannel(
++                                        "Error when communicating with the native messaging host.");
++                            }
++                        });
+             }
+         }
+ 

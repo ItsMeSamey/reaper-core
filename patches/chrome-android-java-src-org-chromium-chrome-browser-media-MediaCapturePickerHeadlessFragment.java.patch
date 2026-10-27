@@ -1,0 +1,87 @@
+diff --git a/chrome/android/java/src/org/chromium/chrome/browser/media/MediaCapturePickerHeadlessFragment.java b/chrome/android/java/src/org/chromium/chrome/browser/media/MediaCapturePickerHeadlessFragment.java
+--- a/chrome/android/java/src/org/chromium/chrome/browser/media/MediaCapturePickerHeadlessFragment.java
++++ b/chrome/android/java/src/org/chromium/chrome/browser/media/MediaCapturePickerHeadlessFragment.java
+@@ -55,6 +55,7 @@
+     private MediaProjectionManager mMediaProjectionManager;
+     private ActivityResultLauncher<Intent> mLauncher;
+     /* package */ @Nullable Delegate mNextDelegate;
++    private boolean mPromptOutstanding;
+ 
+     public static MediaCapturePickerHeadlessFragment getInstance(FragmentActivity activity) {
+         FragmentManager fragmentManager = activity.getSupportFragmentManager();
+@@ -75,6 +76,9 @@
+     @Override
+     public void onCreate(@Nullable Bundle savedInstanceState) {
+         super.onCreate(savedInstanceState);
++        mPromptOutstanding =
++                savedInstanceState != null
++                        && savedInstanceState.getBoolean("capture_prompt_outstanding");
+ 
+         mMediaProjectionManager =
+                 (MediaProjectionManager)
+@@ -84,23 +88,57 @@
+                 registerForActivityResult(
+                         new ActivityResultContracts.StartActivityForResult(),
+                         result -> {
+-                            assert mNextDelegate != null;
++                            Delegate delegate = mNextDelegate;
++                            mNextDelegate = null;
++                            mPromptOutstanding = false;
++                            if (delegate == null) return;
+                             if (result.getResultCode() == Activity.RESULT_OK
+                                     && result.getData() != null) {
+                                 // There is currently no way to differentiate between window and
+                                 // screen sharing.
+-                                mNextDelegate.onPicked(CaptureAction.CAPTURE_WINDOW, result);
++                                delegate.onPicked(CaptureAction.CAPTURE_WINDOW, result);
+                             } else {
+-                                mNextDelegate.onPicked(CaptureAction.CAPTURE_CANCELLED, result);
++                                delegate.onPicked(CaptureAction.CAPTURE_CANCELLED, result);
+                             }
+-                            mNextDelegate = null;
+                         });
+     }
+ 
+-    public void startAndroidCapturePrompt(Delegate delegate, @Nullable Intent intent) {
+-        assert mNextDelegate == null;
++    public boolean startAndroidCapturePrompt(Delegate delegate, @Nullable Intent intent) {
++        if (mPromptOutstanding || !isAdded()) return false;
+         mNextDelegate = delegate;
+-        mLauncher.launch(
+-                intent != null ? intent : mMediaProjectionManager.createScreenCaptureIntent());
++        mPromptOutstanding = true;
++        try {
++            mLauncher.launch(
++                    intent != null ? intent : mMediaProjectionManager.createScreenCaptureIntent());
++            return true;
++        } catch (RuntimeException error) {
++            mNextDelegate = null;
++            mPromptOutstanding = false;
++            throw error;
++        }
++    }
++
++    public void cancelPrompt(Delegate delegate) {
++        if (mNextDelegate == delegate) mNextDelegate = null;
++        // Keep the prompt reserved until its real result arrives. Otherwise an old
++        // OS result could authorize a different request launched in the same Activity.
++    }
++
++    @Override
++    public void onSaveInstanceState(Bundle state) {
++        state.putBoolean("capture_prompt_outstanding", mPromptOutstanding);
++        super.onSaveInstanceState(state);
++    }
++
++    @Override
++    public void onDestroy() {
++        Delegate delegate = mNextDelegate;
++        mNextDelegate = null;
++        if (delegate != null) {
++            delegate.onPicked(
++                    CaptureAction.CAPTURE_CANCELLED,
++                    new ActivityResult(Activity.RESULT_CANCELED, null));
++        }
++        super.onDestroy();
+     }
+ }

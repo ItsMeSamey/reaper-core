@@ -52,14 +52,9 @@ import org.chromium.chrome.browser.ActivityTabProvider;
 import org.chromium.chrome.browser.RecentlyClosedEntriesManager;
 import org.chromium.chrome.browser.app.appmenu.AppMenuPropertiesDelegateImpl.MenuGroup;
 import org.chromium.chrome.browser.bookmarks.BookmarkModel;
-import org.chromium.chrome.browser.bookmarks.PowerBookmarkUtils;
-import org.chromium.chrome.browser.commerce.ShoppingServiceFactory;
 import org.chromium.chrome.browser.enterprise.util.ManagedBrowserUtils;
 import org.chromium.chrome.browser.enterprise.util.ManagedBrowserUtilsJni;
-import org.chromium.chrome.browser.feed.FeedFeatures;
 import org.chromium.chrome.browser.flags.ChromeFeatureList;
-import org.chromium.chrome.browser.glic.GlicEnabling;
-import org.chromium.chrome.browser.glic.GlicEnablingJni;
 import org.chromium.chrome.browser.hub.HubManager;
 import org.chromium.chrome.browser.hub.Pane;
 import org.chromium.chrome.browser.hub.PaneId;
@@ -72,7 +67,6 @@ import org.chromium.chrome.browser.layouts.LayoutType;
 import org.chromium.chrome.browser.multiwindow.MultiWindowModeStateDispatcher;
 import org.chromium.chrome.browser.multiwindow.MultiWindowTestUtils;
 import org.chromium.chrome.browser.offlinepages.OfflinePageUtils;
-import org.chromium.chrome.browser.preferences.BravePref;
 import org.chromium.chrome.browser.preferences.ChromeSharedPreferences;
 import org.chromium.chrome.browser.profiles.Profile;
 import org.chromium.chrome.browser.profiles.ProfileManager;
@@ -99,10 +93,8 @@ import org.chromium.components.browser_ui.site_settings.WebsitePreferenceBridge;
 import org.chromium.components.browser_ui.site_settings.WebsitePreferenceBridgeJni;
 import org.chromium.components.commerce.core.CommerceFeatureUtils;
 import org.chromium.components.commerce.core.CommerceFeatureUtilsJni;
-import org.chromium.components.commerce.core.ShoppingService;
 import org.chromium.components.content_settings.ContentSetting;
 import org.chromium.components.dom_distiller.core.DomDistillerFeatures;
-import org.chromium.components.power_bookmarks.PowerBookmarkMeta;
 import org.chromium.components.prefs.PrefService;
 import org.chromium.components.signin.identitymanager.IdentityManager;
 import org.chromium.components.sync.SyncService;
@@ -125,18 +117,13 @@ import java.util.List;
 /** Unit tests for {@link BraveTabbedAppMenuPropertiesDelegate}. */
 @RunWith(BaseRobolectricTestRunner.class)
 @DisableFeatures({
-    BraveFeatureList.BRAVE_PLAYLIST,
     ChromeFeatureList.ANDROID_PAGE_INFO_AS_APP_MENU_ITEM,
-    ChromeFeatureList.FEED_AUDIO_OVERVIEWS,
     ChromeFeatureList.GLIC,
     ChromeFeatureList.LENS_OVERLAY_ANDROID,
     ChromeFeatureList.SUBMENUS_IN_APP_MENU,
     ChromeFeatureList.SUBMENUS_IN_APP_MENU_LFF,
     DomDistillerFeatures.READER_MODE_DISTILL_IN_APP,
     BraveFeatureList.BRAVE_SHRED,
-})
-@EnableFeatures({
-    BraveFeatureList.AI_CHAT,
 })
 public class BraveTabbedAppMenuPropertiesDelegateUnitTest {
     @Rule public final MockitoRule mMockitoRule = MockitoJUnit.rule();
@@ -165,7 +152,6 @@ public class BraveTabbedAppMenuPropertiesDelegateUnitTest {
     @Mock public WebsitePreferenceBridge.Natives mWebsitePreferenceBridgeJniMock;
     @Mock private IncognitoReauthController mIncognitoReauthControllerMock;
     @Mock private CommerceFeatureUtils.Natives mCommerceFeatureUtilsJniMock;
-    @Mock private ShoppingService mShoppingService;
     @Mock private AppBannerManager.Natives mAppBannerManagerJniMock;
     @Mock private ReadAloudController mReadAloudController;
     @Mock private UserPrefs.Natives mUserPrefsNatives;
@@ -179,7 +165,6 @@ public class BraveTabbedAppMenuPropertiesDelegateUnitTest {
     @Mock private Pane mPane;
     @Mock private RecentlyClosedEntriesManager mRecentlyClosedEntriesManager;
     @Mock private SideUiStateProvider mSideUiStateProvider;
-    @Mock private GlicEnabling.Natives mGlicEnablingJniMock;
 
     private ShadowPackageManager mShadowPackageManager;
 
@@ -241,9 +226,7 @@ public class BraveTabbedAppMenuPropertiesDelegateUnitTest {
         when(mIdentityService.getIdentityManager(any(Profile.class))).thenReturn(mIdentityManager);
         when(mIdentityManager.hasPrimaryAccount()).thenReturn(true);
 
-        GlicEnabling.setEnabledForTesting(false);
         PageZoomUtils.setShouldShowMenuItemForTesting(TriState.FALSE);
-        FeedFeatures.setFakePrefsForTest(mPrefService);
         AppBannerManagerJni.setInstanceForTesting(mAppBannerManagerJniMock);
         Mockito.when(mAppBannerManagerJniMock.getInstallableWebAppManifestId(any()))
                 .thenReturn(null);
@@ -261,7 +244,6 @@ public class BraveTabbedAppMenuPropertiesDelegateUnitTest {
 
         IncognitoUtilsJni.setInstanceForTesting(mIncognitoUtilsJniMock);
 
-        GlicEnablingJni.setInstanceForTesting(mGlicEnablingJniMock);
 
         TranslateBridgeJni.setInstanceForTesting(mTranslateBridgeJniMock);
         Mockito.when(mTranslateBridgeJniMock.canManuallyTranslate(any(), anyBoolean()))
@@ -273,8 +255,6 @@ public class BraveTabbedAppMenuPropertiesDelegateUnitTest {
                 .thenReturn(ObservableSuppliers.createMonotonic(mPane));
         when(mPane.getPaneId()).thenReturn(PaneId.TAB_SWITCHER);
 
-        PowerBookmarkUtils.setPriceTrackingEligibleForTesting(false);
-        PowerBookmarkUtils.setPowerBookmarkMetaForTesting(PowerBookmarkMeta.newBuilder().build());
         BraveTabbedAppMenuPropertiesDelegate delegate =
                 new BraveTabbedAppMenuPropertiesDelegate(
                         context,
@@ -300,7 +280,6 @@ public class BraveTabbedAppMenuPropertiesDelegateUnitTest {
                                 false),
                         /* canActivateTabLayoutToggleMenu= */ () ->
                                 mCanActivateTabLayoutToggleMenu);
-        delegate.setIsJunitTesting(true);
         BaseRobolectricTestRule.runAllBackgroundAndUi();
         mTabbedAppMenuPropertiesDelegate = Mockito.spy(delegate);
         mSaveAndShareItemBuilder =
@@ -312,7 +291,6 @@ public class BraveTabbedAppMenuPropertiesDelegateUnitTest {
         MultiWindowTestUtils.resetInstanceInfo();
 
         CommerceFeatureUtilsJni.setInstanceForTesting(mCommerceFeatureUtilsJniMock);
-        ShoppingServiceFactory.setShoppingServiceForTesting(mShoppingService);
         DefaultBrowserPromoUtils.setInstanceForTesting(mDefaultBrowserPromoUtilsMock);
     }
 
@@ -369,15 +347,11 @@ public class BraveTabbedAppMenuPropertiesDelegateUnitTest {
             // (shouldShowPageInfoItem returns false for NTP pages).
             R.id.downloads_menu_id,
             R.id.all_bookmarks_menu_id,
-            R.id.brave_wallet_id,
-            R.id.brave_leo_id,
             R.id.recent_tabs_menu_id,
             R.id.divider_line_id,
             R.id.preferences_id,
             R.id.divider_line_id,
             R.id.default_browser_promo_menu_id,
-            R.id.brave_news_id,
-            R.id.request_brave_vpn_id,
             R.id.brave_customize_menu_id,
             R.id.exit_id,
         };
@@ -411,15 +385,11 @@ public class BraveTabbedAppMenuPropertiesDelegateUnitTest {
             R.id.open_history_menu_id,
             R.id.downloads_menu_id,
             R.id.all_bookmarks_menu_id,
-            R.id.brave_wallet_id,
-            R.id.brave_leo_id,
             R.id.recent_tabs_menu_id,
             R.id.divider_line_id,
             R.id.preferences_id,
             R.id.divider_line_id,
             R.id.default_browser_promo_menu_id,
-            R.id.brave_news_id,
-            R.id.request_brave_vpn_id,
             R.id.brave_customize_menu_id,
             R.id.exit_id,
         };
@@ -483,8 +453,6 @@ public class BraveTabbedAppMenuPropertiesDelegateUnitTest {
         expectedItems.add(R.id.open_history_menu_id);
         expectedItems.add(R.id.downloads_menu_id);
         expectedItems.add(R.id.all_bookmarks_menu_id);
-        expectedItems.add(R.id.brave_wallet_id);
-        expectedItems.add(R.id.brave_leo_id);
         expectedItems.add(R.id.recent_tabs_menu_id);
         expectedItems.add(R.id.divider_line_id);
         expectedItems.add(R.id.find_in_page_id);
@@ -497,8 +465,6 @@ public class BraveTabbedAppMenuPropertiesDelegateUnitTest {
         expectedItems.add(R.id.preferences_id);
         expectedItems.add(R.id.divider_line_id);
         expectedItems.add(R.id.default_browser_promo_menu_id);
-        expectedItems.add(R.id.brave_news_id);
-        expectedItems.add(R.id.request_brave_vpn_id);
         expectedItems.add(R.id.brave_customize_menu_id);
         expectedItems.add(R.id.exit_id);
 
@@ -568,30 +534,12 @@ public class BraveTabbedAppMenuPropertiesDelegateUnitTest {
                 .when(mTabbedAppMenuPropertiesDelegate)
                 .shouldShowTranslateMenuItem(any(Tab.class));
 
-        // Set features as disabled by policy via UserPrefs
-        // News: BRAVE_NEWS_DISABLED_BY_POLICY = true means disabled
-        when(mPrefService.isManagedPreference(BravePref.BRAVE_NEWS_DISABLED_BY_POLICY))
-                .thenReturn(true);
-        when(mPrefService.getBoolean(BravePref.BRAVE_NEWS_DISABLED_BY_POLICY)).thenReturn(true);
-        // Leo: ENABLED_BY_POLICY = false means disabled (inverted)
-        when(mPrefService.isManagedPreference(BravePref.ENABLED_BY_POLICY)).thenReturn(true);
-        when(mPrefService.getBoolean(BravePref.ENABLED_BY_POLICY)).thenReturn(false);
-        // Rewards: DISABLED_BY_POLICY = true means disabled
-        when(mPrefService.isManagedPreference(BravePref.DISABLED_BY_POLICY)).thenReturn(true);
-        when(mPrefService.getBoolean(BravePref.DISABLED_BY_POLICY)).thenReturn(true);
-        // VPN: MANAGED_BRAVE_VPN_DISABLED = true means disabled
-        when(mPrefService.isManagedPreference(BravePref.MANAGED_BRAVE_VPN_DISABLED))
-                .thenReturn(true);
-        when(mPrefService.getBoolean(BravePref.MANAGED_BRAVE_VPN_DISABLED)).thenReturn(true);
-        // Wallet: BRAVE_WALLET_DISABLED_BY_POLICY = true means disabled
-        when(mPrefService.isManagedPreference(BravePref.BRAVE_WALLET_DISABLED_BY_POLICY))
-                .thenReturn(true);
-        when(mPrefService.getBoolean(BravePref.BRAVE_WALLET_DISABLED_BY_POLICY)).thenReturn(true);
+        // Product services and menu entries are absent at compile time.
 
         assertEquals(MenuGroup.PAGE_MENU, mTabbedAppMenuPropertiesDelegate.getMenuGroup());
         MVCListAdapter.ModelList modelList = mTabbedAppMenuPropertiesDelegate.getMenuItems();
 
-        // Policy-disabled items should NOT be in the menu
+        // Compiled-out items are absent with ordinary profile preferences.
         Integer[] expectedItems = {
             R.id.new_tab_menu_id,
             R.id.new_incognito_tab_menu_id,
@@ -602,16 +550,12 @@ public class BraveTabbedAppMenuPropertiesDelegateUnitTest {
             // (shouldShowPageInfoItem returns false for NTP pages).
             R.id.downloads_menu_id,
             R.id.all_bookmarks_menu_id,
-            // R.id.brave_wallet_id is NOT included - disabled by policy
-            // R.id.brave_leo_id is NOT included - disabled by policy
             // R.id.brave_rewards_id is NOT included - disabled by policy
             R.id.recent_tabs_menu_id,
             R.id.divider_line_id,
             R.id.preferences_id,
             R.id.divider_line_id,
             R.id.default_browser_promo_menu_id,
-            // R.id.brave_news_id is NOT included - disabled by policy
-            // R.id.request_brave_vpn_id is NOT included - disabled by policy
             R.id.brave_customize_menu_id,
             R.id.exit_id,
         };

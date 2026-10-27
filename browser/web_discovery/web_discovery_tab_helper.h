@@ -8,6 +8,7 @@
 
 #include "base/gtest_prod_util.h"
 #include "brave/components/web_discovery/buildflags/buildflags.h"
+#include "build/build_config.h"
 #include "content/public/browser/web_contents_observer.h"
 #include "content/public/browser/web_contents_user_data.h"
 
@@ -37,7 +38,9 @@ class WebDiscoveryTabHelper
   void DidFinishLoad(content::RenderFrameHost* render_frame_host,
                      const GURL& validated_url) override;
 
+#if !BUILDFLAG(IS_ANDROID)
   void ShowInfoBar(PrefService* prefs);
+#endif
 
 #if BUILDFLAG(ENABLE_WEB_DISCOVERY_NATIVE)
   void MaybeExtractFromPage(content::RenderFrameHost* render_frame_host,

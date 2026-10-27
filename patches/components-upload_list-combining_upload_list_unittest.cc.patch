@@ -1,0 +1,58 @@
+diff --git a/components/upload_list/combining_upload_list_unittest.cc b/components/upload_list/combining_upload_list_unittest.cc
+--- a/components/upload_list/combining_upload_list_unittest.cc
++++ b/components/upload_list/combining_upload_list_unittest.cc
+@@ -5,6 +5,7 @@
+ #include "components/upload_list/combining_upload_list.h"
+
+ #include <array>
++#include <string>
+
+ #include "base/files/file_path.h"
+ #include "base/files/file_util.h"
+@@ -282,6 +283,46 @@
+   ~MockUploadList() override = default;
+ };
+
++TEST_F(CombiningUploadListTest, SingleUnsortedListMostRecentLimit) {
++  auto local_list = base::MakeRefCounted<MockUploadList>();
++  EXPECT_CALL(*local_list, LoadUploadList()).WillOnce([] {
++    std::vector<std::unique_ptr<UploadList::UploadInfo>> entries;
++    // Ascending input deliberately puts the newest entry beyond the UI limit.
++    for (int i = 1; i <= 51; ++i) {
++      const base::Time time =
++          base::Time::FromSecondsSinceUnixEpoch(1614000000 + i);
++      auto entry = std::make_unique<UploadList::UploadInfo>(std::to_string(i),
++                                                          time);
++      if (i % 2 == 0) {
++        // Capture time takes precedence over a later upload time.
++        entry->capture_time = time;
++        entry->upload_time = time + base::Days(1);
++      }
++      entries.push_back(std::move(entry));
++    }
++    return entries;
++  });
++  auto combined_list = base::MakeRefCounted<CombiningUploadList>(
++      std::vector<scoped_refptr<UploadList>>{local_list});
++
++  base::RunLoop run_loop;
++  combined_list->Load(run_loop.QuitClosure());
++  run_loop.Run();
++
++  const auto actual = combined_list->GetUploads(50);
++  ASSERT_EQ(actual.size(), 50u);
++  for (size_t i = 0; i < actual.size(); ++i) {
++    const int expected = 51 - static_cast<int>(i);
++    const base::Time time =
++        base::Time::FromSecondsSinceUnixEpoch(1614000000 + expected);
++    EXPECT_EQ(actual[i]->upload_id, std::to_string(expected));
++    EXPECT_EQ(actual[i]->capture_time,
++              expected % 2 == 0 ? time : base::Time());
++    EXPECT_EQ(actual[i]->upload_time,
++              expected % 2 == 0 ? time + base::Days(1) : time);
++  }
++}
++
+ TEST_F(CombiningUploadListTest, RequestSingleUpload) {
+   auto mock_list1 = base::MakeRefCounted<MockUploadList>();
+   auto mock_list2 = base::MakeRefCounted<MockUploadList>();

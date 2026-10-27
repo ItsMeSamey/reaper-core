@@ -1,0 +1,196 @@
+diff --git a/chrome/android/java/src/org/chromium/chrome/browser/selection/TextSelectionActionMenuDelegate.java b/chrome/android/java/src/org/chromium/chrome/browser/selection/TextSelectionActionMenuDelegate.java
+--- a/chrome/android/java/src/org/chromium/chrome/browser/selection/TextSelectionActionMenuDelegate.java
++++ b/chrome/android/java/src/org/chromium/chrome/browser/selection/TextSelectionActionMenuDelegate.java
+@@ -14,26 +14,18 @@
+ import android.view.View;
+ import android.widget.TextView;
+ 
+-import androidx.annotation.VisibleForTesting;
+ import androidx.core.widget.TextViewCompat;
+ 
+-import org.chromium.base.DeviceInfo;
+ import org.chromium.base.SelectionActionMenuClientWrapper.MenuType;
+ import org.chromium.build.annotations.NullMarked;
+ import org.chromium.build.annotations.Nullable;
+ import org.chromium.chrome.R;
+ import org.chromium.chrome.browser.dom_distiller.ReaderModeManager;
+ import org.chromium.chrome.browser.flags.ChromeFeatureList;
+-import org.chromium.chrome.browser.glic.GlicEnabling;
+-import org.chromium.chrome.browser.glic.GlicKeyedService.GlicInvocationSource;
+-import org.chromium.chrome.browser.glic.GlicKeyedServiceHandler;
+-import org.chromium.chrome.browser.glic.GlicMetrics;
+ import org.chromium.chrome.browser.profiles.Profile;
+ import org.chromium.chrome.browser.search_engines.TemplateUrlServiceFactory;
+ import org.chromium.chrome.browser.share.link_to_text.LinkToTextCoordinator;
+ import org.chromium.chrome.browser.tab.Tab;
+-import org.chromium.chrome.browser.tab_bottom_sheet.TabBottomSheetUtils;
+-import org.chromium.chrome.browser.ui.side_panel.AndroidSidePanelEnabledFn;
+ import org.chromium.components.browser_ui.widget.BrowserUiListMenuUtils;
+ import org.chromium.components.dom_distiller.core.DomDistillerUrlUtils;
+ import org.chromium.components.embedder_support.util.UrlUtilities;
+@@ -56,20 +48,9 @@
+  */
+ @NullMarked
+ public class TextSelectionActionMenuDelegate implements SelectionActionMenuDelegate {
+-    @VisibleForTesting static final String PARAM_SHOW_ASK_GEMINI_ON_SELECTION = "show_on_selection";
+-
+-    @VisibleForTesting
+-    static final String PARAM_ASK_GEMINI_SELECTION_MENU_POSITION = "selection_menu_position";
+-
+-    @VisibleForTesting
+-    static final String PARAM_ASK_GEMINI_SEND_SELECTED_TEXT = "send_selected_text";
+-
+-    @VisibleForTesting static final String ASK_GEMINI_POSITION_SECONDARY = "secondary";
+-
+-    @VisibleForTesting static final String ASK_GEMINI_POSITION_ASSIST = "assist";
+ 
+     private final Tab mTab;
+-    private @Nullable String mSelectedText;
++    private @Nullable ReaperSelectionMenu mExtensionSelectionMenu;
+ 
+     public TextSelectionActionMenuDelegate(Tab tab) {
+         mTab = tab;
+@@ -81,8 +62,18 @@
+             boolean isSelectionPassword,
+             boolean isSelectionReadOnly,
+             String selectedText) {
+-        mSelectedText = selectedText;
+         List<SelectionMenuItem> items = new ArrayList<>();
++        if (mExtensionSelectionMenu != null) mExtensionSelectionMenu.destroy();
++        mExtensionSelectionMenu = ReaperSelectionMenu.create(
++                mTab, selectedText, isSelectionPassword, isSelectionReadOnly);
++        if (mExtensionSelectionMenu != null) {
++            items.add(new SelectionMenuItem.Builder(R.string.reaper_selection_extensions)
++                    .setId(R.id.reaper_selection_extensions)
++                    .setGroupId(org.chromium.content.R.id.select_action_menu_delegate_items)
++                    .setOrderAndCategory(0, ItemGroupOffset.ALTERNATIVE_ITEMS)
++                    .setShowAsActionFlags(MenuItem.SHOW_AS_ACTION_NEVER | MenuItem.SHOW_AS_ACTION_WITH_TEXT)
++                    .build());
++        }
+         if (shouldShowReadingMode(menuType, isSelectionReadOnly)) {
+             items.add(
+                     new SelectionMenuItem.Builder(R.string.contextmenu_open_in_reading_mode)
+@@ -96,21 +87,7 @@
+                                             | MenuItem.SHOW_AS_ACTION_WITH_TEXT)
+                             .build());
+         }
+-        if (shouldShowAskGeminiForSelection(isSelectionPassword, selectedText)) {
+-            SelectionMenuItem.Builder builder =
+-                    new SelectionMenuItem.Builder(R.string.glic_button_entrypoint_ask_gemini_label)
+-                            .setId(R.id.contextmenu_ask_gemini)
+-                            .setGroupId(R.id.select_action_menu_delegate_items);
+-            if (menuType == MenuType.DROPDOWN) {
+-                builder.setShowAsActionFlags(
+-                        MenuItem.SHOW_AS_ACTION_NEVER | MenuItem.SHOW_AS_ACTION_WITH_TEXT);
+-            } else {
+-                builder.setShowAsActionFlags(
+-                        MenuItem.SHOW_AS_ACTION_ALWAYS | MenuItem.SHOW_AS_ACTION_WITH_TEXT);
+-            }
+-            setAskGeminiOrderAndCategory(builder);
+-            items.add(builder.build());
+-        }
++
+         if (menuType == MenuType.DROPDOWN
+                 && ChromeFeatureList.isEnabled(ChromeFeatureList.COPY_LINK_TO_HIGHLIGHT)
+                 && isSelectionReadOnly) {
+@@ -138,13 +115,16 @@
+ 
+     @Override
+     public boolean canReuseCachedSelectionMenu(@MenuType int menuType) {
+-        return true;
++        return false;
+     }
+ 
+     @Override
+     public boolean handleMenuItemClick(
+             SelectionMenuItem item, WebContents webContents, @Nullable View containerView) {
+         if (!item.isEnabled) return false;
++        if (item.id == R.id.reaper_selection_extensions) {
++            return mExtensionSelectionMenu != null && mExtensionSelectionMenu.show(containerView);
++        }
+         if (item.id == R.id.contextmenu_open_in_reading_mode) {
+             ReaderModeManager readerModeManager =
+                     mTab.getUserDataHost().getUserData(ReaderModeManager.class);
+@@ -158,30 +138,6 @@
+                 LinkToTextCoordinator.copyLinkToText(mTab, rfh);
+                 return true;
+             }
+-        } else if (item.id == R.id.contextmenu_ask_gemini) {
+-            if (mTab.isDestroyed()) return false;
+-            Profile profile = mTab.getProfile();
+-            if (profile == null) return false;
+-            GURL url = mTab.getUrl();
+-            boolean isNtp = url != null && UrlUtilities.isNtpUrl(url);
+-            GlicMetrics.recordEntryPointClick(
+-                    GlicInvocationSource.WEB_CONTENTS_CONTEXT_MENU, isNtp);
+-            if (ChromeFeatureList.getFieldTrialParamByFeatureAsBoolean(
+-                    ChromeFeatureList.CLANK_GLIC_CONTEXT_MENU,
+-                    PARAM_ASK_GEMINI_SEND_SELECTED_TEXT,
+-                    true)) {
+-                String text = mSelectedText != null ? mSelectedText : "";
+-                boolean sent =
+-                        GlicKeyedServiceHandler.invokeWithPrompt(
+-                                profile,
+-                                mTab,
+-                                text,
+-                                GlicInvocationSource.WEB_CONTENTS_CONTEXT_MENU);
+-                GlicMetrics.recordSendSelectedTextSucceeded(sent);
+-                return sent;
+-            }
+-            return GlicKeyedServiceHandler.invoke(
+-                    profile, mTab, GlicInvocationSource.WEB_CONTENTS_CONTEXT_MENU);
+         }
+         return false;
+     }
+@@ -253,51 +209,6 @@
+         return maxMenuWidthPx - itemPadding - safetyBufferPx;
+     }
+ 
+-    // TODO(b/543135302): Move Ask Gemini menu enabling checks and feature params into GlicEnabling
+-    // as helper methods.
+-    /**
+-     * Whether to show the "Ask Gemini" item in the text selection menu. Supports both mobile
+-     * (floating action mode with bottom sheet) and desktop Android (right-click dropdown menu with
+-     * side panel).
+-     */
+-    private boolean shouldShowAskGeminiForSelection(
+-            boolean isSelectionPassword, String selectedText) {
+-        boolean isContainerAvailable =
+-                AndroidSidePanelEnabledFn.isEnabled()
+-                        || TabBottomSheetUtils.isTabBottomSheetEnabled();
+-        if (!isContainerAvailable) return false;
+-        if (TextUtils.isEmpty(selectedText) || isSelectionPassword) return false;
+-        if (mTab.isDestroyed() || mTab.isIncognito()) return false;
+-        Profile profile = mTab.getProfile();
+-        if (profile == null) return false;
+-        return ChromeFeatureList.isEnabled(ChromeFeatureList.CLANK_GLIC_CONTEXT_MENU)
+-                && ChromeFeatureList.getFieldTrialParamByFeatureAsBoolean(
+-                        ChromeFeatureList.CLANK_GLIC_CONTEXT_MENU,
+-                        PARAM_SHOW_ASK_GEMINI_ON_SELECTION,
+-                        true)
+-                && !DeviceInfo.isAutomotive()
+-                && GlicEnabling.isEnabledForProfile(profile);
+-    }
+-
+-    private void setAskGeminiOrderAndCategory(SelectionMenuItem.Builder builder) {
+-        String position =
+-                ChromeFeatureList.getFieldTrialParamByFeature(
+-                        ChromeFeatureList.CLANK_GLIC_CONTEXT_MENU,
+-                        PARAM_ASK_GEMINI_SELECTION_MENU_POSITION);
+-        // By default "Ask Gemini" is interposed among the default items, in the gap just before
+-        // Web Search (see SelectionMenuItem.ItemOrder.ASK_GEMINI). The field trial can opt into
+-        // the primary assist slot ("assist", shown first) or the secondary assist section
+-        // ("secondary", shown after Web Search) instead.
+-        if (ASK_GEMINI_POSITION_ASSIST.equals(position)) {
+-            builder.setOrderAndCategory(0, ItemGroupOffset.ASSIST_ITEMS);
+-        } else if (ASK_GEMINI_POSITION_SECONDARY.equals(position)) {
+-            builder.setOrderAndCategory(0, ItemGroupOffset.SECONDARY_ASSIST_ITEMS);
+-        } else {
+-            builder.setOrderAndCategory(
+-                    SelectionMenuItem.ItemOrder.ASK_GEMINI, ItemGroupOffset.DEFAULT_ITEMS);
+-        }
+-    }
+-
+     private boolean shouldShowReadingMode(@MenuType int menuType, boolean isSelectionReadOnly) {
+         if (mTab.isDestroyed() || !isSelectionReadOnly) return false;
+ 

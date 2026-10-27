@@ -1,0 +1,140 @@
+diff --git a/chrome/browser/resources/extensions/error_page.ts b/chrome/browser/resources/extensions/error_page.ts
+index 18f3dbde27df984bb2e98875d3a601a63fc14673..7fe2b5e7ed16b05a33dc5a48260a9967574881a7 100644
+--- a/chrome/browser/resources/extensions/error_page.ts
++++ b/chrome/browser/resources/extensions/error_page.ts
+@@ -122,10 +122,20 @@
+   private accessor selectedEntry_: number = -1;
+   private accessor selectedStackFrame_: chrome.developerPrivate.StackFrame|
+       null = null;
++  // <if expr="is_android">
++  private sourceRequestId_: number = 0;
++  // </if>
+ 
+   override willUpdate(changedProperties: PropertyValues<this>) {
+     super.willUpdate(changedProperties);
+ 
++    // <if expr="is_android">
++    if (changedProperties.has('data') && !this.data) {
++      this.entries_ = [];
++      this.selectedEntry_ = -1;
++      this.onSelectedErrorChanged_();
++    }
++    // </if>
+     if (changedProperties.has('data') && this.data) {
+       /**
+        * Watches for changes to |data| in order to fetch the corresponding
+@@ -160,7 +170,9 @@
+    */
+   private onViewEnterStart_() {
+     this.updateComplete.then(() => focusWithoutInk(this.$.closeButton));
++    // <if expr="not is_android">
+     chrome.metricsPrivate.recordUserAction('Options_ViewExtensionErrors');
++    // </if>
+   }
+ 
+   protected getContextUrl_(error: ManifestError|RuntimeError): string {
+@@ -205,6 +217,10 @@
+    * Fetches the source for the selected error and populates the code section.
+    */
+   private onSelectedErrorChanged_() {
++    // <if expr="is_android">
++    const requestId = ++this.sourceRequestId_;
++    this.selectedStackFrame_ = null;
++    // </if>
+     this.code_ = null;
+ 
+     if (this.selectedEntry_ < 0) {
+@@ -236,6 +252,16 @@
+           // crbug.com/40200545.
+           return;
+         }
++        // <if expr="is_android">
++        this.selectedStackFrame_ = runtimeError.stackTrace?.find(
++            frame => this.shouldDisplayFrame_(frame.url)) || null;
++        args.lineNumber = this.selectedStackFrame_?.lineNumber || 0;
++        if (this.selectedStackFrame_) {
++          args.pathSuffix =
++              getRelativeUrl(this.selectedStackFrame_.url, runtimeError);
++        }
++        // </if>
++        // <if expr="not is_android">
+         args.lineNumber =
+             runtimeError.stackTrace && runtimeError.stackTrace[0] ?
+             runtimeError.stackTrace[0].lineNumber :
+@@ -244,12 +270,22 @@
+             runtimeError.stackTrace && runtimeError.stackTrace[0] ?
+             runtimeError.stackTrace[0] :
+             null;
++        // </if>
+         break;
+       default:
+         assertNotReachedCase(error.type);
+     }
+     assert(this.delegate);
++    // <if expr="is_android">
++    this.delegate.requestFileSource(args).then(code => {
++      if (requestId === this.sourceRequestId_) {
++        this.code_ = code;
++      }
++    });
++    // </if>
++    // <if expr="not is_android">
+     this.delegate.requestFileSource(args).then(code => this.code_ = code);
++    // </if>
+   }
+ 
+   protected computeIsRuntimeError_(item: ManifestError|RuntimeError): boolean {
+@@ -296,6 +332,10 @@
+   }
+ 
+   private updateSelected_(frame: chrome.developerPrivate.StackFrame) {
++    // <if expr="is_android">
++    const requestId = ++this.sourceRequestId_;
++    this.code_ = null;
++    // </if>
+     this.selectedStackFrame_ = frame;
+ 
+     const selectedError = this.getSelectedError();
+@@ -308,7 +348,16 @@
+           pathSuffix: getRelativeUrl(frame.url, selectedError),
+           lineNumber: frame.lineNumber,
+         })
++        // <if expr="is_android">
++        .then(code => {
++          if (requestId === this.sourceRequestId_) {
++            this.code_ = code;
++          }
++        });
++        // </if>
++        // <if expr="not is_android">
+         .then(code => this.code_ = code);
++        // </if>
+   }
+ 
+   protected onStackFrameClick_(e: Event) {
+@@ -341,11 +390,25 @@
+         const index =
+             Number((e.currentTarget as HTMLElement).dataset['errorIndex']);
+         const item = this.entries_[index] as RuntimeError;
++        // <if expr="is_android">
++        let nextIndex = i + direction;
++        while (nextIndex >= 0 && nextIndex < item.stackTrace.length &&
++               !this.shouldDisplayFrame_(item.stackTrace[nextIndex]!.url)) {
++          nextIndex += direction;
++        }
++        const frame = item.stackTrace[nextIndex];
++        if (frame) {
++          this.updateSelected_(frame);
++          list[nextIndex]!.focus();  // Preserve focus.
++        }
++        // </if>
++        // <if expr="not is_android">
+         const frame = item.stackTrace[i + direction];
+         if (frame) {
+           this.updateSelected_(frame);
+           list[i + direction]!.focus();  // Preserve focus.
+         }
++        // </if>
+         return;
+       }
+     }

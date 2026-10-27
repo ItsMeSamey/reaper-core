@@ -96,11 +96,9 @@ ProfileMiscMetricsService::ProfileMiscMetricsService(
                             base::Unretained(local_state)));
   }
 #if BUILDFLAG(IS_ANDROID)
-  auto* search_engine_tracker =
-      SearchEngineTrackerFactory::GetInstance()->GetForBrowserContext(context);
   misc_android_metrics_ = std::make_unique<MiscAndroidMetrics>(
       local_state, g_brave_browser_process->process_misc_metrics(),
-      search_engine_tracker, template_url_service, page_metrics_.get());
+      template_url_service, page_metrics_.get());
 #else
   extensions::ExtensionRegistry* extension_registry =
       extensions::ExtensionRegistryFactory::GetForBrowserContext(context);

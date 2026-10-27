@@ -1,0 +1,88 @@
+diff --git a/chrome/android/java/src/org/chromium/chrome/browser/tabmodel/TabCollectionsTabModelObserversUnitTest.java b/chrome/android/java/src/org/chromium/chrome/browser/tabmodel/TabCollectionsTabModelObserversUnitTest.java
+--- a/chrome/android/java/src/org/chromium/chrome/browser/tabmodel/TabCollectionsTabModelObserversUnitTest.java
++++ b/chrome/android/java/src/org/chromium/chrome/browser/tabmodel/TabCollectionsTabModelObserversUnitTest.java
+@@ -5,6 +5,8 @@
+ package org.chromium.chrome.browser.tabmodel;
+
+ import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertTrue;
+ import static org.mockito.ArgumentMatchers.any;
+ import static org.mockito.ArgumentMatchers.anyBoolean;
+ import static org.mockito.ArgumentMatchers.anyInt;
+@@ -12,6 +14,7 @@
+ import static org.mockito.Mockito.atLeastOnce;
+ import static org.mockito.Mockito.doAnswer;
+ import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.never;
+ import static org.mockito.Mockito.reset;
+ import static org.mockito.Mockito.verify;
+ import static org.mockito.Mockito.when;
+@@ -33,7 +36,6 @@
+ import org.chromium.chrome.browser.flags.ChromeFeatureList;
+ import org.chromium.chrome.browser.media.MediaCaptureDevicesDispatcherAndroid;
+ import org.chromium.chrome.browser.media.MediaCaptureDevicesDispatcherAndroidJni;
+-import org.chromium.chrome.browser.price_tracking.PriceTrackingFeatures;
+ import org.chromium.chrome.browser.profiles.Profile;
+ import org.chromium.chrome.browser.tab.MockTab;
+ import org.chromium.chrome.browser.tab.ScopedStorageBatch;
+@@ -90,8 +92,6 @@
+     @Before
+     public void setUp() {
+         // Required to use MockTab.
+-        PriceTrackingFeatures.setIsSignedInAndSyncEnabledForTesting(false);
+-        PriceTrackingFeatures.setPriceAnnotationsEnabledForTesting(false);
+
+         MediaCaptureDevicesDispatcherAndroidJni.setInstanceForTesting(
+                 mMediaCaptureDevicesDispatcherAndroidJni);
+@@ -869,6 +869,50 @@
+         verify(mTabModelObserver).onTabGroupRemoving(eq(groupId));
+     }
+
++    @Test
++    public void testOnTabGroupRemoving_reparentLastMemberBeforeNativeDetach() {
++        MockTab first = createMockTab(101, mProfile);
++        MockTab last = createMockTab(102, mProfile);
++        MockTab ungrouped = createMockTab(103, mProfile);
++        mTabModel.addTab(first, 0, TabLaunchType.FROM_CHROME_UI, TabCreationState.LIVE_IN_FOREGROUND);
++        mTabModel.addTab(last, 1, TabLaunchType.FROM_CHROME_UI, TabCreationState.LIVE_IN_FOREGROUND);
++        mTabModel.addTab(ungrouped, 2, TabLaunchType.FROM_CHROME_UI, TabCreationState.LIVE_IN_FOREGROUND);
++        Token groupId = new Token(1L, 2L);
++        first.setTabGroupId(groupId);
++        last.setTabGroupId(groupId);
++
++        reset(mTabModelObserver);
++        mTabModel.removeTab(first);
++        verify(mTabModelObserver, never()).onTabGroupRemoving(any());
++        assertTrue(mTabModel.tabGroupExists(groupId));
++
++        doAnswer(
++                        invocation -> {
++                            assertTrue(mTabModel.tabGroupExists(groupId));
++                            assertEquals(List.of(last), mTabModel.getTabsInGroup(groupId));
++                            return null;
++                        })
++                .when(mTabModelObserver)
++                .onTabGroupRemoving(eq(groupId));
++        mTabModel.removeTab(last);
++
++        verify(mTabModelObserver).onTabGroupRemoving(eq(groupId));
++        assertFalse(mTabModel.tabGroupExists(groupId));
++        assertEquals(List.of(ungrouped), mTabs);
++    }
++
++    @Test
++    public void testOnTabGroupRemoving_noEventForUngroupedTransfer() {
++        MockTab first = createMockTab(101, mProfile);
++        MockTab second = createMockTab(102, mProfile);
++        mTabModel.addTab(first, 0, TabLaunchType.FROM_CHROME_UI, TabCreationState.LIVE_IN_FOREGROUND);
++        mTabModel.addTab(second, 1, TabLaunchType.FROM_CHROME_UI, TabCreationState.LIVE_IN_FOREGROUND);
++
++        reset(mTabModelObserver);
++        mTabModel.removeTab(first);
++        verify(mTabModelObserver, never()).onTabGroupRemoving(any());
++    }
++
+     // 27. onTabGroupMoved
+
+     @Test

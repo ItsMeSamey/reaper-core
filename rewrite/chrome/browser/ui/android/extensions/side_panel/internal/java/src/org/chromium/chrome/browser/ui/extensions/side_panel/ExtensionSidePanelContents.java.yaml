@@ -1,0 +1,181 @@
+# Preserve extension side-panel compositor isolation and dialog window routing.
+substitutions:
+- description: Check the authorized Android activity before constructing its isolated panel window
+  count: 1
+  regex:
+    re_pattern: import\ android\.content\.Context;
+    replace: 'import android.app.Activity;
+
+      import android.content.Context;'
+- description: Reuse the existing popup-style isolated Android window
+  count: 1
+  regex:
+    re_pattern: import\ org\.chromium\.ui\.base\.IntentRequestTracker;
+    replace: 'import org.chromium.ui.base.ActivityWindowAndroid;
+
+      import org.chromium.ui.base.IntentRequestTracker;'
+- description: Forward the real browser window dialog manager
+  count: 1
+  regex:
+    re_pattern: import\ org\.chromium\.ui\.base\.WindowAndroid;
+    replace: 'import org.chromium.ui.base.WindowAndroid;
+
+      import org.chromium.ui.modaldialog.ModalDialogManager;'
+- description: Own the panel-only window separately from the shared browser window
+  count: 1
+  regex:
+    re_pattern: \ \ \ \ private\ final\ ThinWebView\ mThinWebView;
+    replace: "    private final ThinWebView mThinWebView;\n    private final ActivityWindowAndroid mPanelWindowAndroid;\n    private boolean mDestroyed;"
+- description: Create an isolated compositor window that forwards dialogs only to the live authorized owner
+  count: 1
+  regex:
+    re_pattern: \ \ \ \ \ \ \ \ ContentView\ contentView\ =\ ContentView\.createContentView\(context,\ webContents\);
+    replace: "        Activity activity = windowAndroid.getActivity().get();\n        if (windowAndroid.isDestroyed() || activity == null || activity.isFinishing()\n                || activity.isDestroyed()) {\n            return null;\n        }\n\n        // ThinWebView requires an isolated compositor window. As for action popups,\n        // share only the authorized Activity's intent tracker and dialog manager;\n        // reusing its main WindowAndroid could detach the browser compositor.\n        ActivityWindowAndroid panelWindowAndroid =\n                new ActivityWindowAndroid(\n                        context,\n                        /* listenToActivityState= */ true,\n                        intentRequestTracker,\n                        /* insetObserver= */ null,\n                        /* occlusionTrackingAllowed= */ true) {\n                    @Override\n                    public @Nullable ModalDialogManager getModalDialogManager() {\n                        return isDestroyed() || windowAndroid.isDestroyed() ? null\n                                : windowAndroid.getModalDialogManager();\n                    }\n                };\n        ContentView contentView = ContentView.createContentView(context, webContents);"
+- description: Attach fresh extension contents to the panel-owned window
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ windowAndroid,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ WebContents\.createDefaultInternalsHolder\(\)\);'
+    replace: "                    panelWindowAndroid,\n                    WebContents.createDefaultInternalsHolder());"
+- description: Attach reused extension contents to the panel-owned window
+  count: 1
+  regex:
+    re_pattern: \ \ \ \ \ \ \ \ \ \ \ \ webContents\.setTopLevelNativeWindow\(windowAndroid\);
+    replace: '            webContents.setTopLevelNativeWindow(panelWindowAndroid);'
+- description: Use the supplied isolated window overload, which keeps permission requests disabled
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ new\ ThinWebViewConstraints\(\),\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ intentRequestTracker,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ /\*\ enablePermissionRequests=\ \*/\ false\);'
+    replace: "                        new ThinWebViewConstraints(),\n                        panelWindowAndroid);"
+- description: Transfer ownership of the isolated window to the panel wrapper
+  count: 1
+  regex:
+    re_pattern: \ \ \ \ \ \ \ \ return\ new\ ExtensionSidePanelContents\(webContents,\ thinWebView\);
+    replace: '        return new ExtensionSidePanelContents(webContents, thinWebView, panelWindowAndroid);'
+- description: Retain only the window owned by this panel for teardown
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ private\ ExtensionSidePanelContents\(WebContents\ webContents,\ ThinWebView\ thinWebView\)\ \{\
+
+      \ \ \ \ \ \ \ \ mWebContents\ =\ webContents;\
+
+      \ \ \ \ \ \ \ \ mThinWebView\ =\ thinWebView;\
+
+      \ \ \ \ \}'
+    replace: "    private ExtensionSidePanelContents(\n            WebContents webContents, ThinWebView thinWebView, ActivityWindowAndroid panelWindowAndroid) {\n        mWebContents = webContents;\n        mThinWebView = thinWebView;\n        mPanelWindowAndroid = panelWindowAndroid;\n    }"
+- description: Make window and content teardown once-only
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ public\ void\ destroy\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ mThinWebView\.destroy\(\);'
+    replace: "    public void destroy() {\n        if (mDestroyed) return;\n        mDestroyed = true;\n        mThinWebView.destroy();"
+- description: Release the isolated compositor window after detaching live contents
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ viewDelegate\.setContainerView\(null\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ public\ WebContents'
+    replace: "                viewDelegate.setContainerView(null);\n            }\n        }\n        // The supplied-window ThinWebView overload does not own this window.\n        // Never destroy the browser's shared WindowAndroid or dialog manager.\n        mPanelWindowAndroid.destroy();\n    }\n\n    public WebContents"
+- description: Format changed Java with the pinned Chromium formatter
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ return\ null;\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ Activity\ activity\ =\ windowAndroid\.getActivity\(\)\.get\(\);\
+
+      \ \ \ \ \ \ \ \ if\ \(windowAndroid\.isDestroyed\(\)\ \|\|\ activity\ ==\ null\ \|\|\ activity\.isFinishing\(\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \|\|\ activity\.isDestroyed\(\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ return\ null;\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      '
+    replace: "            return null;\n        }\n\n        Activity activity = windowAndroid.getActivity().get();\n        if (windowAndroid.isDestroyed()\n                || activity == null\n                || activity.isFinishing()\n                || activity.isDestroyed()) {\n            return null;\n        }\n\n"
+- description: Format changed Java with the pinned Chromium formatter
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ /\*\ insetObserver=\ \*/\ null,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ /\*\ occlusionTrackingAllowed=\ \*/\ true\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ @Override\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ public\ @Nullable\ ModalDialogManager\ getModalDialogManager\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ return\ isDestroyed\(\)\ \|\|\ windowAndroid\.isDestroyed\(\)\ \?\ null\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ :\ windowAndroid\.getModalDialogManager\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \};\
+
+      \ \ \ \ \ \ \ \ ContentView\ contentView\ =\ ContentView\.createContentView\(context,\ webContents\);\
+
+      '
+    replace: "                        /* insetObserver= */ null,\n                        /* occlusionTrackingAllowed= */ true) {\n                    @Override\n                    public @Nullable ModalDialogManager getModalDialogManager() {\n                        return isDestroyed() || windowAndroid.isDestroyed()\n                                ? null\n                                : windowAndroid.getModalDialogManager();\n                    }\n                };\n        ContentView contentView = ContentView.createContentView(context, webContents);\n"
+- description: Format changed Java with the pinned Chromium formatter
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ ThinWebView\ thinWebView\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ ThinWebViewFactory\.create\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ context,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ new\ ThinWebViewConstraints\(\),\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ panelWindowAndroid\);\
+
+      \ \ \ \ \ \ \ \ thinWebView\.attachWebContents\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ webContents,\ contentView,\ new\ ThinWebViewAttachParams\.Builder\(\)\.build\(\)\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ return\ new\ ExtensionSidePanelContents\(webContents,\ thinWebView,\ panelWindowAndroid\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ private\ ExtensionSidePanelContents\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ WebContents\ webContents,\ ThinWebView\ thinWebView,\ ActivityWindowAndroid\ panelWindowAndroid\)\ \{\
+
+      \ \ \ \ \ \ \ \ mWebContents\ =\ webContents;\
+
+      \ \ \ \ \ \ \ \ mThinWebView\ =\ thinWebView;\
+
+      \ \ \ \ \ \ \ \ mPanelWindowAndroid\ =\ panelWindowAndroid;\
+
+      \ \ \ \ \}\
+
+      '
+    replace: "        }\n\n        ThinWebView thinWebView =\n                ThinWebViewFactory.create(\n                        context, new ThinWebViewConstraints(), panelWindowAndroid);\n        thinWebView.attachWebContents(\n                webContents, contentView, new ThinWebViewAttachParams.Builder().build());\n\n        return new ExtensionSidePanelContents(webContents, thinWebView, panelWindowAndroid);\n    }\n\n    private ExtensionSidePanelContents(\n            WebContents webContents,\n            ThinWebView thinWebView,\n            ActivityWindowAndroid panelWindowAndroid) {\n        mWebContents = webContents;\n        mThinWebView = thinWebView;\n        mPanelWindowAndroid = panelWindowAndroid;\n    }\n"

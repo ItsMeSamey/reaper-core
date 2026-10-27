@@ -1,0 +1,755 @@
+diff --git a/chrome/browser/extensions/api/downloads/downloads_api_browsertest.cc b/chrome/browser/extensions/api/downloads/downloads_api_browsertest.cc
+--- a/chrome/browser/extensions/api/downloads/downloads_api_browsertest.cc
++++ b/chrome/browser/extensions/api/downloads/downloads_api_browsertest.cc
+@@ -36,6 +36,29 @@
+ #include "base/uuid.h"
+ #include "base/values.h"
+ #include "build/build_config.h"
++#if BUILDFLAG(IS_ANDROID)
++#include "base/android/jni_android.h"
++#include "base/android/jni_array.h"
++#include "base/android/scoped_java_ref.h"
++#include "base/auto_reset.h"
++#include "base/memory/weak_ptr.h"
++#include "base/test/simple_test_tick_clock.h"
++#include "chrome/browser/download/android/download_manager_service.h"
++#include "chrome/grit/generated_resources.h"
++#include "content/public/browser/download_item_utils.h"
++#include "content/public/test/service_worker_test_helpers.h"
++#include "extensions/browser/background_script_executor.h"
++#include "extensions/browser/extension_function_registry.h"
++#include "extensions/browser/extension_registry.h"
++#include "extensions/browser/permissions/permissions_updater.h"
++#include "extensions/browser/service_worker/service_worker_test_utils.h"
++#include "extensions/browser/service_worker/worker_id.h"
++#include "extensions/common/manifest_handlers/permissions_parser.h"
++#include "extensions/common/permissions/permission_set.h"
++#include "extensions/common/permissions/permissions_data.h"
++#include "ui/android/window_android.h"
++#include "ui/base/l10n/l10n_util.h"
++#endif
+ #include "chrome/browser/download/download_core_service.h"
+ #include "chrome/browser/download/download_core_service_factory.h"
+ #include "chrome/browser/download/download_file_icon_extractor.h"
+@@ -104,6 +127,8 @@
+
+ #if BUILDFLAG(IS_ANDROID)
+ #include "base/android/content_uri_utils.h"
++#include "base/test/run_until.h"
++#include "brave/browser/extensions/android/extension_test_utils.h"
+ #endif
+
+ #if BUILDFLAG(ENABLE_EXTENSIONS)
+@@ -870,6 +895,18 @@
+
+   const Extension* extension() { return extension_; }
+
++#if BUILDFLAG(IS_ANDROID)
++  // Reload replaces the object; keep this fixture's non-owning selector current.
++  const Extension* ReloadCurrentExtension() {
++    const std::string id = extension_->id();
++    ReloadExtension(id);
++    extension_ = ExtensionRegistry::Get(current_profile())
++                     ->enabled_extensions()
++                     .GetByID(id);
++    return extension_;
++  }
++#endif
++
+  private:
+   void SetUpExtensionFunction(const Extension* extension,
+                               scoped_refptr<ExtensionFunction> function) {
+@@ -1106,6 +1143,367 @@
+       RunFunction(new DownloadsSearchFunction, "[{\"totalBytesGreater\":2}]"));
+ }
+
++#if BUILDFLAG(IS_ANDROID)
++namespace {
++base::android::ScopedJavaLocalRef<jobject> CaptureDownloadOpenDialog(
++    content::WebContents* web_contents,
++    bool include_pending = false) {
++  return android_test::CaptureDownloadOpenDialogForTesting(
++      base::android::AttachCurrentThread(), web_contents,
++      l10n_util::GetStringUTF16(IDS_DOWNLOAD_OPEN_CONFIRMATION_DIALOG_TITLE),
++      include_pending);
++}
++}  // namespace
++
++// Exercises the actual extension function and held Android DialogModel. The
++// synthetic native invocation has no sender frame; it does not execute JS.
++class DownloadOpenPermissionTest : public DownloadExtensionTest {
++ protected:
++  void SetUpOnMainThread() override {
++    DownloadExtensionTest::SetUpOnMainThread();
++    extension_dir_.WriteManifest(R"({
++      "name": "Optional download open",
++      "version": "1.0",
++      "manifest_version": 3,
++      "permissions": ["downloads"],
++      "optional_permissions": ["downloads.open"]
++    })");
++    open_extension_ =
++        ExtensionBrowserTest::LoadExtension(extension_dir_.UnpackedPath());
++    ASSERT_TRUE(open_extension_);
++    base::test::TestFuture<void> granted;
++    PermissionsUpdater(current_profile())
++        .GrantOptionalPermissions(
++            *open_extension_,
++            PermissionsParser::GetOptionalPermissions(open_extension_.get()),
++            granted.GetCallback());
++    ASSERT_TRUE(granted.Wait());
++    ASSERT_TRUE(open_extension_->permissions_data()->HasAPIPermission(
++        mojom::APIPermissionID::kDownloadsOpen));
++  }
++
++  void StartPendingOpen() {
++    static const HistoryDownloadInfo history[] = {
++        {FILE_PATH_LITERAL("file.txt"), DownloadItem::COMPLETE,
++         download::DOWNLOAD_DANGER_TYPE_NOT_DANGEROUS}};
++    DownloadManager::DownloadVector items;
++    ASSERT_TRUE(CreateHistoryDownloads(history, &items));
++    ASSERT_EQ(1u, items.size());
++    item_ = items[0].get();
++    ASSERT_TRUE(item_);
++    ASSERT_TRUE(base::test::RunUntil(
++        [&] { return GetOnRecordManager()->IsManagerInitialized(); }));
++    ASSERT_TRUE(GetActiveWebContents());
++    ui::WindowAndroid* window =
++        GetActiveWebContents()->GetTopLevelNativeWindow();
++    ASSERT_TRUE(window);
++    sender_ = GetActiveWebContents()->GetWeakPtr();
++    ASSERT_TRUE(
++        CaptureDownloadOpenDialog(sender_.get(), /*include_pending=*/true)
++            .is_null());
++
++    open_function_ = base::MakeRefCounted<DownloadsOpenFunction>();
++    open_function_->set_extension(open_extension_);
++    open_function_->set_user_gesture(true);
++    base::ListValue args;
++    args.Append(static_cast<int>(item_->GetId()));
++    open_function_->SetArgs(std::move(args));
++    dispatcher_ =
++        std::make_unique<ExtensionFunctionDispatcher>(current_profile());
++    open_function_->SetDispatcher(dispatcher_->AsWeakPtr());
++    response_ = std::make_unique<api_test_utils::SendResponseHelper>(
++        open_function_.get());
++    open_function_->RunWithValidation().Execute();
++    const bool captured = base::test::RunUntil([&] {
++      if (sender_) {
++        modal_.Reset(CaptureDownloadOpenDialog(sender_.get()));
++      }
++      return !modal_.is_null() || response_->has_response();
++    });
++    ASSERT_TRUE(captured);
++    ASSERT_FALSE(response_->has_response());
++    ASSERT_FALSE(modal_.is_null());
++    ASSERT_FALSE(
++        android_test::GetDownloadOpenDialogParagraphsForTesting(
++            base::android::AttachCurrentThread(), modal_)
++            .empty());
++    ASSERT_FALSE(item_->GetOpened());
++  }
++
++  void AcceptAndExpectDenial() {
++    ASSERT_TRUE(response_);
++    ASSERT_FALSE(response_->has_response());
++    ASSERT_TRUE(android_test::ClickDownloadOpenDialogForTesting(
++        base::android::AttachCurrentThread(), modal_, /*accept=*/true));
++    response_->WaitForResponse();
++    EXPECT_FALSE(response_->GetResponse());
++    EXPECT_EQ(errors::kOpenPermission, open_function_->GetError());
++    EXPECT_FALSE(item_->GetOpened());
++    // Retiring the captured model again must not produce a second response.
++    android_test::DismissDownloadOpenDialogForTesting(
++        base::android::AttachCurrentThread(), modal_);
++    base::RunLoop().RunUntilIdle();
++  }
++
++  void TearDownOnMainThread() override {
++    if (response_ && !response_->has_response()) {
++      // Keep the Unretained response helper alive until the real request ends.
++      // A failed current-model assertion may leave our dialog in the TAB queue.
++      CHECK(base::test::RunUntil([&] {
++        if (modal_.is_null() && sender_) {
++          modal_.Reset(CaptureDownloadOpenDialog(sender_.get(),
++                                                 /*include_pending=*/true));
++        }
++        return !modal_.is_null() || response_->has_response();
++      }));
++      if (!response_->has_response()) {
++        android_test::DismissDownloadOpenDialogForTesting(
++            base::android::AttachCurrentThread(), modal_);
++        CHECK(base::test::RunUntil([&] { return response_->has_response(); }));
++      }
++    }
++    if (!modal_.is_null()) {
++      android_test::DismissDownloadOpenDialogForTesting(
++          base::android::AttachCurrentThread(), modal_);
++    }
++    modal_.Reset();
++    base::RunLoop().RunUntilIdle();
++    response_.reset();
++    open_function_.reset();
++    dispatcher_.reset();
++    item_ = nullptr;
++    open_extension_.reset();
++    DownloadExtensionTest::TearDownOnMainThread();
++  }
++
++  TestExtensionDir extension_dir_;
++  scoped_refptr<const Extension> open_extension_;
++  raw_ptr<DownloadItem> item_ = nullptr;
++  std::unique_ptr<ExtensionFunctionDispatcher> dispatcher_;
++  scoped_refptr<DownloadsOpenFunction> open_function_;
++  std::unique_ptr<api_test_utils::SendResponseHelper> response_;
++  base::WeakPtr<content::WebContents> sender_;
++  base::android::ScopedJavaGlobalRef<jobject> modal_;
++};
++
++IN_PROC_BROWSER_TEST_F(DownloadOpenPermissionTest,
++                       RevokedOptionalPermissionRejectsHeldConsent) {
++  ASSERT_NO_FATAL_FAILURE(StartPendingOpen());
++  base::test::TestFuture<void> revoked;
++  PermissionsUpdater(current_profile())
++      .RevokeOptionalPermissions(
++          *open_extension_,
++          PermissionsParser::GetOptionalPermissions(open_extension_.get()),
++          PermissionsUpdater::RemoveType::kSoft, revoked.GetCallback());
++  ASSERT_TRUE(revoked.Wait());
++  ASSERT_FALSE(open_extension_->permissions_data()->HasAPIPermission(
++      mojom::APIPermissionID::kDownloadsOpen));
++  AcceptAndExpectDenial();
++}
++
++IN_PROC_BROWSER_TEST_F(DownloadOpenPermissionTest,
++                       DisabledExtensionRejectsHeldConsent) {
++  ASSERT_NO_FATAL_FAILURE(StartPendingOpen());
++  DisableExtension(open_extension_->id());
++  ASSERT_FALSE(ExtensionRegistry::Get(current_profile())
++                   ->enabled_extensions()
++                   .Contains(open_extension_->id()));
++  AcceptAndExpectDenial();
++}
++
++IN_PROC_BROWSER_TEST_F(DownloadOpenPermissionTest,
++                       ReloadedExtensionCannotAuthorizeOldConsent) {
++  ASSERT_NO_FATAL_FAILURE(StartPendingOpen());
++  ReloadExtension(open_extension_->id());
++  const Extension* replacement = ExtensionRegistry::Get(current_profile())
++                                     ->enabled_extensions()
++                                     .GetByID(open_extension_->id());
++  ASSERT_TRUE(replacement);
++  ASSERT_NE(open_extension_.get(), replacement);
++  ASSERT_TRUE(replacement->permissions_data()->HasAPIPermission(
++      mojom::APIPermissionID::kDownloadsOpen));
++  AcceptAndExpectDenial();
++}
++#endif  // BUILDFLAG(IS_ANDROID)
++
++#if BUILDFLAG(IS_ANDROID)
++namespace {
++class ObservedDownloadsOpenFunction;
++using DownloadsOpenStartedCallback =
++    base::OnceCallback<void(scoped_refptr<ObservedDownloadsOpenFunction>)>;
++DownloadsOpenStartedCallback* g_downloads_open_started = nullptr;
++
++// Observes dispatch without replacing the actual validation, modal, permission
++// checks, response or production worker policy.
++class ObservedDownloadsOpenFunction : public DownloadsOpenFunction {
++ public:
++  ResponseAction RunInternal() override {
++    ResponseAction result = DownloadsOpenFunction::RunInternal();
++    CHECK(g_downloads_open_started);
++    CHECK(*g_downloads_open_started);
++    std::move(*g_downloads_open_started).Run(base::WrapRefCounted(this));
++    return result;
++  }
++
++  base::WeakPtr<ObservedDownloadsOpenFunction> GetWeakPtrForTesting() {
++    return weak_factory_.GetWeakPtr();
++  }
++
++ private:
++  ~ObservedDownloadsOpenFunction() override = default;
++  base::WeakPtrFactory<ObservedDownloadsOpenFunction> weak_factory_{this};
++};
++}  // namespace
++
++class DownloadOpenWorkerLifetimeTest : public DownloadExtensionTest {
++ protected:
++  void TearDownOnMainThread() override {
++    if (request_dispatched_ && !dispatch_observed_) {
++      // The start callback belongs to this fixture, including failed
++      // assertions.
++      CHECK(started_.Wait());
++      auto function = started_.Take();
++      function_ = function->GetWeakPtrForTesting();
++      dispatch_observed_ = true;
++    }
++    if (function_ && !function_->did_respond()) {
++      CHECK(base::test::RunUntil([&] {
++        if (modal_.is_null() && sender_) {
++          modal_.Reset(CaptureDownloadOpenDialog(sender_.get(),
++                                                 /*include_pending=*/true));
++        }
++        return !modal_.is_null() || !function_ || function_->did_respond();
++      }));
++      if (function_ && !function_->did_respond()) {
++        android_test::DismissDownloadOpenDialogForTesting(
++            base::android::AttachCurrentThread(), modal_);
++        CHECK(base::test::RunUntil(
++            [&] { return !function_ || function_->did_respond(); }));
++      }
++    }
++    if (!modal_.is_null()) {
++      android_test::DismissDownloadOpenDialogForTesting(
++          base::android::AttachCurrentThread(), modal_);
++    }
++    modal_.Reset();
++    base::RunLoop().RunUntilIdle();
++    // ServiceWorkerVersion must not retain a pointer to this fixture's clock.
++    content::ResetTickClockToDefaultForAllLiveServiceWorkerVersions(
++        GetServiceWorkerContext());
++    DownloadExtensionTest::TearDownOnMainThread();
++  }
++
++  base::SimpleTestTickClock tick_clock_;
++  base::test::TestFuture<scoped_refptr<ObservedDownloadsOpenFunction>> started_;
++  DownloadsOpenStartedCallback started_callback_ = started_.GetCallback();
++  base::AutoReset<DownloadsOpenStartedCallback*> reset_started_{
++      &g_downloads_open_started, &started_callback_};
++  bool request_dispatched_ = false;
++  bool dispatch_observed_ = false;
++  base::WeakPtr<ObservedDownloadsOpenFunction> function_;
++  base::WeakPtr<content::WebContents> sender_;
++  base::android::ScopedJavaGlobalRef<jobject> modal_;
++};
++
++IN_PROC_BROWSER_TEST_F(DownloadOpenWorkerLifetimeTest,
++                       HeldConfirmationKeepsRealWorkerRequestAlive) {
++  TestExtensionDir extension_dir;
++  extension_dir.WriteManifest(R"({
++    "name": "Download open worker lifetime",
++    "version": "1.0",
++    "manifest_version": 3,
++    "permissions": ["downloads", "downloads.open"],
++    "background": {"service_worker": "background.js"}
++  })");
++  extension_dir.WriteFile(FILE_PATH_LITERAL("background.js"), "// blank");
++  service_worker_test_utils::TestServiceWorkerContextObserver registered(
++      current_profile());
++  const Extension* extension =
++      ExtensionBrowserTest::LoadExtension(extension_dir.UnpackedPath());
++  ASSERT_TRUE(extension);
++  const int64_t version_id = registered.WaitForWorkerActivated();
++
++  static const HistoryDownloadInfo history[] = {
++      {FILE_PATH_LITERAL("held.txt"), DownloadItem::COMPLETE,
++       download::DOWNLOAD_DANGER_TYPE_NOT_DANGEROUS}};
++  DownloadManager::DownloadVector items;
++  ASSERT_TRUE(CreateHistoryDownloads(history, &items));
++  ASSERT_EQ(1u, items.size());
++  ASSERT_TRUE(base::test::RunUntil(
++      [&] { return GetOnRecordManager()->IsManagerInitialized(); }));
++  ASSERT_TRUE(GetActiveWebContents());
++  ui::WindowAndroid* window = GetActiveWebContents()->GetTopLevelNativeWindow();
++  ASSERT_TRUE(window);
++  sender_ = GetActiveWebContents()->GetWeakPtr();
++  ASSERT_TRUE(CaptureDownloadOpenDialog(sender_.get(), /*include_pending=*/true)
++                  .is_null());
++
++  auto& registry = ExtensionFunctionRegistry::GetInstance();
++  const auto original = registry.GetFactoriesForTesting().at("downloads.open");
++  ASSERT_TRUE(registry.OverrideFunctionForTesting(
++      "downloads.open", &NewExtensionFunction<ObservedDownloadsOpenFunction>));
++  base::ScopedClosureRunner restore_factory(base::BindOnce(
++      [](ExtensionFunctionRegistry::FactoryEntry entry) {
++        ExtensionFunctionRegistry::GetInstance().Register(entry);
++      },
++      original));
++  ExtensionTestMessageListener canceled(errors::kOpenPermission);
++  canceled.set_extension_id(extension->id());
++  const std::string script = base::StringPrintf(R"(
++    chrome.test.runWithUserGesture(() => {
++      chrome.downloads.open(%d).then(
++        () => chrome.test.sendMessage('unexpected open'),
++        error => chrome.test.sendMessage(error.message));
++      chrome.test.sendScriptResult('started');
++    });)",
++                                                items[0]->GetId());
++  request_dispatched_ = true;
++  const auto script_result = BackgroundScriptExecutor::ExecuteScript(
++      current_profile(), extension->id(), script,
++      BackgroundScriptExecutor::ResultCapture::kSendScriptResult);
++  EXPECT_EQ("started", script_result);
++  ASSERT_TRUE(started_.Wait());
++  auto function = started_.Take();
++  function_ = function->GetWeakPtrForTesting();
++  dispatch_observed_ = true;
++  const bool captured = base::test::RunUntil([&] {
++    if (sender_) {
++      modal_.Reset(CaptureDownloadOpenDialog(sender_.get()));
++    }
++    return !modal_.is_null() || function->did_respond();
++  });
++  ASSERT_TRUE(captured);
++  ASSERT_TRUE(function->is_from_service_worker());
++  ASSERT_FALSE(function->did_respond());
++  ASSERT_FALSE(modal_.is_null());
++  ASSERT_FALSE(
++      android_test::GetDownloadOpenDialogParagraphsForTesting(
++          base::android::AttachCurrentThread(), modal_)
++          .empty());
++  // The test must not retain the request when checking keepalive release.
++  function.reset();
++  base::RunLoop().RunUntilIdle();
++
++  content::ServiceWorkerContext* context = GetServiceWorkerContext();
++  service_worker_test_utils::TestServiceWorkerContextObserver stopped(
++      context, extension->id());
++  stopped.SetRunningId(version_id);
++  content::AdvanceClockAfterRequestTimeout(context, version_id, &tick_clock_);
++  ASSERT_TRUE(content::TriggerTimeoutAndCheckRunningState(context, version_id));
++
++  // Cancel the real held dialog; its actual API response must still reach JS.
++  ASSERT_TRUE(android_test::ClickDownloadOpenDialogForTesting(
++      base::android::AttachCurrentThread(), modal_, /*accept=*/false));
++  ASSERT_TRUE(canceled.WaitUntilSatisfied());
++  EXPECT_FALSE(items[0]->GetOpened());
++  base::RunLoop().RunUntilIdle();
++  content::AdvanceClockAfterRequestTimeout(context, version_id, &tick_clock_);
++  ASSERT_FALSE(
++      content::TriggerTimeoutAndCheckRunningState(context, version_id));
++  stopped.WaitForWorkerStopped();
++}
++#endif  // BUILDFLAG(IS_ANDROID)
++
+ IN_PROC_BROWSER_TEST_F(DownloadExtensionTest, DownloadExtensionTest_Open) {
+   platform_util::internal::DisableShellOperationsForTesting();
+
+@@ -1509,12 +1907,289 @@
+ #if !BUILDFLAG(IS_CHROMEOS)
+ IN_PROC_BROWSER_TEST_F(DownloadExtensionTest,
+                        DownloadsShowFunction) {
++#if BUILDFLAG(IS_ANDROID)
++  // Android must acknowledge the actual Downloads row, not a disabled shell
++  // API.
++  LoadExtension("downloads_split");
++#else
+   platform_util::internal::DisableShellOperationsForTesting();
++#endif
+   ScopedCancellingItem item(CreateFirstSlowTestDownload());
+   ASSERT_TRUE(item.get());
+
++#if BUILDFLAG(IS_ANDROID)
++  EXPECT_TRUE(RunFunction(base::MakeRefCounted<DownloadsShowFunction>(),
++                          DownloadItemIdAsArgList(item.get())));
++#else
+   RunFunction(base::MakeRefCounted<DownloadsShowFunction>(),
+               DownloadItemIdAsArgList(item.get()));
++#endif
++}
++#endif
++
++#if BUILDFLAG(IS_ANDROID)
++namespace {
++
++// The real API's host/profile checks run before this boundary. Hold the native
++// completion so authorization and shutdown races are independent of UI timing.
++class AndroidDownloadRevealBoundary {
++ public:
++  AndroidDownloadRevealBoundary()
++      : callbacks_{base::BindRepeating(&AndroidDownloadRevealBoundary::Show,
++                                       base::Unretained(this)),
++                   base::BindRepeating(&AndroidDownloadRevealBoundary::Cancel,
++                                       base::Unretained(this))},
++        override_(
++            DownloadManagerService::SetDownloadItemRevealCallbacksForTesting(
++                &callbacks_)) {}
++
++  bool shown = true;
++  bool synchronous = false;
++  bool suppress_reply = false;
++  int show_count = 0;
++  int cancel_count = 0;
++  int consumed_count = 0;
++  std::string guid;
++  raw_ptr<content::BrowserContext> item_context = nullptr;
++  base::OnceClosure before_reply;
++
++ private:
++  int64_t Show(DownloadItem* item, base::OnceCallback<void(bool)> callback) {
++    ++show_count;
++    guid = item->GetGuid();
++    item_context = content::DownloadItemUtils::GetBrowserContext(item);
++    callback_ = std::move(callback);
++    if (synchronous) {
++      Reply();
++    } else if (!suppress_reply) {
++      base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
++          FROM_HERE, base::BindOnce(&AndroidDownloadRevealBoundary::Reply,
++                                    weak_factory_.GetWeakPtr()));
++    }
++    return 41;
++  }
++
++  void Reply() {
++    if (before_reply) {
++      std::move(before_reply).Run();
++    }
++    if (callback_) {
++      ++consumed_count;
++      std::move(callback_).Run(shown);
++    }
++  }
++
++  void Cancel(int64_t token) {
++    EXPECT_EQ(41, token);
++    ++cancel_count;
++    // Java also consumes the JNI callback after request retirement. It must be
++    // harmless when the native function has already cancelled or shut down.
++    if (callback_) {
++      ++consumed_count;
++      std::move(callback_).Run(false);
++    }
++  }
++
++  DownloadManagerService::DownloadItemRevealCallbacksForTesting callbacks_;
++  base::AutoReset<
++      const DownloadManagerService::DownloadItemRevealCallbacksForTesting*>
++      override_;
++  base::OnceCallback<void(bool)> callback_;
++  base::WeakPtrFactory<AndroidDownloadRevealBoundary> weak_factory_{this};
++};
++
++class ShutdownDownloadsShowFunction : public DownloadsShowFunction {
++ public:
++  void SimulateContextShutdown() { OnBrowserContextShutdown(); }
++
++ protected:
++  ~ShutdownDownloadsShowFunction() override = default;
++};
++
++}  // namespace
++
++IN_PROC_BROWSER_TEST_F(DownloadExtensionTest, AndroidShowRejectsInvalidId) {
++  LoadExtension("downloads_split");
++  AndroidDownloadRevealBoundary boundary;
++  EXPECT_EQ(download_extension_errors::kInvalidId,
++            RunFunctionAndReturnError(
++                base::MakeRefCounted<DownloadsShowFunction>(), "[-1]"));
++  EXPECT_EQ(0, boundary.show_count);
++}
++
++IN_PROC_BROWSER_TEST_F(DownloadExtensionTest,
++                       AndroidShowWorkerUsesForegroundProfileWithoutGesture) {
++  LoadExtension("downloads_split");
++  ScopedCancellingItem item(CreateFirstSlowTestDownload());
++  ASSERT_TRUE(item.get());
++  AndroidDownloadRevealBoundary boundary;
++  auto function = base::MakeRefCounted<DownloadsShowFunction>();
++  function->set_extension(extension());
++  // Use a real function with an explicitly initialized synthetic worker ID and
++  // no sender WebContents or associated dispatcher window. This isolates native
++  // foreground selection; it does not execute JavaScript or a service worker.
++  function->set_worker_id(
++      WorkerId(extension()->id(), content::ChildProcessId::FromUnsafeValue(1),
++               /*version_id=*/1, /*thread_id=*/1));
++  EXPECT_FALSE(function->user_gesture());
++  EXPECT_TRUE(api_test_utils::RunFunction(
++      function, DownloadItemIdAsArgList(item.get()), current_profile()));
++  EXPECT_EQ(1, boundary.show_count);
++  EXPECT_EQ(item.get()->GetGuid(), boundary.guid);
++  EXPECT_EQ(current_profile(), boundary.item_context);
++  EXPECT_EQ(1, boundary.consumed_count);
++}
++
++IN_PROC_BROWSER_TEST_F(DownloadExtensionTest,
++                       AndroidShowSynchronousFailureRespondsOnce) {
++  LoadExtension("downloads_split");
++  ScopedCancellingItem item(CreateFirstSlowTestDownload());
++  ASSERT_TRUE(item.get());
++  AndroidDownloadRevealBoundary boundary;
++  boundary.synchronous = true;
++  boundary.shown = false;
++  EXPECT_EQ(
++      download_extension_errors::kInvisibleContext,
++      RunFunctionAndReturnError(base::MakeRefCounted<DownloadsShowFunction>(),
++                                DownloadItemIdAsArgList(item.get())));
++  EXPECT_EQ(1, boundary.show_count);
++  EXPECT_EQ(1, boundary.consumed_count);
++  EXPECT_EQ(1, boundary.cancel_count);
++}
++
++IN_PROC_BROWSER_TEST_F(DownloadExtensionTest,
++                       AndroidShowRechecksDownloadsPermission) {
++  LoadExtension("downloads_split");
++  ScopedCancellingItem item(CreateFirstSlowTestDownload());
++  ASSERT_TRUE(item.get());
++  const auto* permissions = extension()->permissions_data();
++  auto active = permissions->active_permissions().Clone();
++  auto withheld = permissions->withheld_permissions().Clone();
++  AndroidDownloadRevealBoundary boundary;
++  boundary.before_reply = base::BindLambdaForTesting([&] {
++    permissions->SetPermissions(std::make_unique<const PermissionSet>(),
++                                permissions->withheld_permissions().Clone());
++  });
++  EXPECT_EQ(
++      download_extension_errors::kInvisibleContext,
++      RunFunctionAndReturnError(base::MakeRefCounted<DownloadsShowFunction>(),
++                                DownloadItemIdAsArgList(item.get())));
++  permissions->SetPermissions(std::move(active), std::move(withheld));
++  EXPECT_EQ(1, boundary.consumed_count);
++  EXPECT_EQ(1, boundary.cancel_count);
++}
++
++IN_PROC_BROWSER_TEST_F(DownloadExtensionTest,
++                       AndroidShowRejectsUnloadedExtensionAtAck) {
++  LoadExtension("downloads_split");
++  ScopedCancellingItem item(CreateFirstSlowTestDownload());
++  ASSERT_TRUE(item.get());
++  scoped_refptr<const Extension> retained(extension());
++  ExtensionRegistry* registry = ExtensionRegistry::Get(current_profile());
++  AndroidDownloadRevealBoundary boundary;
++  boundary.before_reply = base::BindLambdaForTesting(
++      [&] { registry->RemoveEnabled(retained->id()); });
++  EXPECT_EQ(
++      download_extension_errors::kInvisibleContext,
++      RunFunctionAndReturnError(base::MakeRefCounted<DownloadsShowFunction>(),
++                                DownloadItemIdAsArgList(item.get())));
++  registry->AddEnabled(retained);
++  EXPECT_EQ(1, boundary.consumed_count);
++}
++
++IN_PROC_BROWSER_TEST_F(
++    DownloadExtensionTest,
++    AndroidShowReloadedExtensionCannotAuthorizeOldCompletion) {
++  LoadExtension("downloads_split");
++  ScopedCancellingItem item(CreateFirstSlowTestDownload());
++  ASSERT_TRUE(item.get());
++  scoped_refptr<const Extension> retained(extension());
++  auto function = base::MakeRefCounted<DownloadsShowFunction>();
++  const Extension* replacement = nullptr;
++  AndroidDownloadRevealBoundary boundary;
++  boundary.before_reply = base::BindLambdaForTesting([&] {
++    replacement = ReloadCurrentExtension();
++    ASSERT_TRUE(replacement);
++    ASSERT_EQ(retained->id(), replacement->id());
++    ASSERT_NE(retained.get(), replacement);
++    ASSERT_TRUE(replacement->permissions_data()->HasAPIPermission(
++        mojom::APIPermissionID::kDownloads));
++    // Reload retired the old extension, not the request's browser context or
++    // pending response. The held acknowledgment still belongs to that instance.
++    ASSERT_EQ(current_profile(), function->browser_context());
++    ASSERT_FALSE(current_profile()->ShutdownStarted());
++    ASSERT_FALSE(function->did_respond());
++  });
++  EXPECT_EQ(
++      download_extension_errors::kInvisibleContext,
++      RunFunctionAndReturnError(function, DownloadItemIdAsArgList(item.get())));
++  EXPECT_EQ(1, boundary.show_count);
++  EXPECT_EQ(1, boundary.consumed_count);
++  EXPECT_EQ(1, boundary.cancel_count);
++
++  // Reload keeps ordinary downloads.show usable by the replacement itself.
++  ASSERT_TRUE(replacement);
++  auto fresh_function = base::MakeRefCounted<DownloadsShowFunction>();
++  fresh_function->set_extension(replacement);
++  EXPECT_TRUE(api_test_utils::RunFunction(
++      fresh_function, DownloadItemIdAsArgList(item.get()), current_profile()));
++  EXPECT_EQ(2, boundary.show_count);
++  EXPECT_EQ(2, boundary.consumed_count);
++  EXPECT_EQ(2, boundary.cancel_count);
++  EXPECT_EQ(item.get()->GetGuid(), boundary.guid);
++  EXPECT_EQ(current_profile(), boundary.item_context);
++}
++
++IN_PROC_BROWSER_TEST_F(DownloadExtensionTest,
++                       AndroidShowRechecksRemovedIdAtAck) {
++  LoadExtension("downloads_split");
++  const HistoryDownloadInfo history[] = {
++      {FILE_PATH_LITERAL("show-item"), DownloadItem::COMPLETE,
++       download::DOWNLOAD_DANGER_TYPE_NOT_DANGEROUS}};
++  DownloadManager::DownloadVector items;
++  ASSERT_TRUE(CreateHistoryDownloads(history, &items));
++  ASSERT_EQ(1u, items.size());
++  const std::string args = DownloadItemIdAsArgList(items[0]);
++  AndroidDownloadRevealBoundary boundary;
++  boundary.before_reply =
++      base::BindLambdaForTesting([&] { items[0]->Remove(); });
++  EXPECT_EQ(download_extension_errors::kInvalidId,
++            RunFunctionAndReturnError(
++                base::MakeRefCounted<DownloadsShowFunction>(), args));
++  EXPECT_EQ(1, boundary.consumed_count);
++}
++
++IN_PROC_BROWSER_TEST_F(DownloadExtensionTest,
++                       AndroidShowShutdownConsumesLateCallbackOnce) {
++  LoadExtension("downloads_split");
++  ScopedCancellingItem item(CreateFirstSlowTestDownload());
++  ASSERT_TRUE(item.get());
++  auto function = base::MakeRefCounted<ShutdownDownloadsShowFunction>();
++  AndroidDownloadRevealBoundary boundary;
++  boundary.before_reply =
++      base::BindLambdaForTesting([&] { function->SimulateContextShutdown(); });
++  EXPECT_EQ(
++      download_extension_errors::kInvisibleContext,
++      RunFunctionAndReturnError(function, DownloadItemIdAsArgList(item.get())));
++  base::RunLoop().RunUntilIdle();
++  EXPECT_EQ(1, boundary.cancel_count);
++  EXPECT_EQ(1, boundary.consumed_count);
++}
++
++IN_PROC_BROWSER_TEST_F(DownloadExtensionTest,
++                       AndroidShowTimeoutConsumesCallbackOnce) {
++  LoadExtension("downloads_split");
++  ScopedCancellingItem item(CreateFirstSlowTestDownload());
++  ASSERT_TRUE(item.get());
++  AndroidDownloadRevealBoundary boundary;
++  boundary.suppress_reply = true;
++  // Exercise the production bounded timer, not a synthesized completion.
++  EXPECT_EQ(
++      download_extension_errors::kInvisibleContext,
++      RunFunctionAndReturnError(base::MakeRefCounted<DownloadsShowFunction>(),
++                                DownloadItemIdAsArgList(item.get())));
++  EXPECT_EQ(1, boundary.cancel_count);
++  EXPECT_EQ(1, boundary.consumed_count);
+ }
+ #endif
+
+@@ -5048,6 +5723,35 @@
+           ->IsDownloadUiEnabled());
+ }
+
++#if BUILDFLAG(IS_ANDROID)
++IN_PROC_BROWSER_TEST_F(DownloadExtensionTest,
++                       AndroidUiPolicyKeepsOtherDisablersUntilLastUnload) {
++  LoadExtension("downloads_split");
++  LoadSecondExtension("downloads_spanning");
++  auto* service =
++      DownloadCoreServiceFactory::GetForBrowserContext(current_profile());
++  ASSERT_TRUE(RunFunction(base::MakeRefCounted<DownloadsSetUiOptionsFunction>(),
++                          R"([{"enabled": false}])"));
++  ASSERT_TRUE(RunFunctionInSecondExtension(
++      base::MakeRefCounted<DownloadsSetUiOptionsFunction>(),
++      R"([{"enabled": false}])"));
++  EXPECT_FALSE(service->IsDownloadUiEnabled());
++  EXPECT_STREQ(errors::kUiDisabled,
++               RunFunctionAndReturnErrorInSecondExtension(
++                   base::MakeRefCounted<DownloadsSetUiOptionsFunction>(),
++                   R"([{"enabled": true}])")
++                   .c_str());
++  EXPECT_FALSE(service->IsDownloadUiEnabled());
++  ASSERT_TRUE(RunFunctionInSecondExtension(
++      base::MakeRefCounted<DownloadsSetUiOptionsFunction>(),
++      R"([{"enabled": false}])"));
++  DisableExtension(GetExtensionId());
++  EXPECT_FALSE(service->IsDownloadUiEnabled());
++  DisableExtension(GetSecondExtensionId());
++  EXPECT_TRUE(service->IsDownloadUiEnabled());
++}
++#endif
++
+ class DownloadsApiTest : public ExtensionApiTest {
+  public:
+   DownloadsApiTest() = default;

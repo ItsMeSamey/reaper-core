@@ -5,11 +5,24 @@
 
 #include "brave/components/brave_policy/brave_profile_policy_provider.h"
 
+#include "build/build_config.h"
+
 #include <memory>
 
 #include "base/test/task_environment.h"
+#if BUILDFLAG(IS_ANDROID)
+#include "base/test/scoped_feature_list.h"
+#include "brave/components/brave_policy/ad_block_only_mode/buildflags/buildflags.h"
+#include "brave/components/brave_shields/core/common/features.h"
+#include "brave/components/brave_shields/core/common/pref_names.h"
+#include "components/content_settings/core/common/content_settings.h"
+#include "components/policy/policy_constants.h"
+#include "components/prefs/pref_registry_simple.h"
+#endif
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_origin/brave_origin_policy_manager.h"
 #include "brave/components/brave_origin/brave_origin_prefs.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "components/policy/core/common/policy_bundle.h"
 #include "components/policy/core/common/policy_namespace.h"
 #include "components/policy/core/common/policy_types.h"
@@ -22,16 +35,23 @@ namespace brave_policy {
 class BraveProfilePolicyProviderTest : public ::testing::Test {
  public:
   BraveProfilePolicyProviderTest() {
+#if !BUILDFLAG(IS_ANDROID)
     brave_origin::RegisterLocalStatePrefs(local_state_.registry());
+#endif  // !BUILDFLAG(IS_ANDROID)
   }
   ~BraveProfilePolicyProviderTest() override = default;
 
   void TearDown() override {
     provider_.Shutdown();
+#if BUILDFLAG(IS_ANDROID)
+    AdBlockOnlyModePolicyManager::GetInstance()->Shutdown();
+#endif
+#if !BUILDFLAG(IS_ANDROID)
     // Reset the process-wide singleton so its state does not leak between
     // tests. `BraveOriginPolicyManager::Shutdown()` is safe to call even if
     // `Init()` was never called.
     brave_origin::BraveOriginPolicyManager::GetInstance()->Shutdown();
+#endif  // !BUILDFLAG(IS_ANDROID)
   }
 
  protected:
@@ -62,6 +82,36 @@ TEST_F(BraveProfilePolicyProviderTest, InitAndPolicyLoadComplete) {
       provider_.IsFirstPolicyLoadComplete(policy::POLICY_DOMAIN_CHROME));
 }
 
+#if BUILDFLAG(IS_ANDROID)
+TEST_F(BraveProfilePolicyProviderTest, NoOriginInitializationGate) {
+  base::test::ScopedFeatureList features;
+  features.InitAndEnableFeature(brave_shields::features::kAdblockOnlyMode);
+  local_state_.registry()->RegisterBooleanPref(
+      brave_shields::prefs::kAdBlockOnlyModeEnabled, false);
+  auto* manager = AdBlockOnlyModePolicyManager::GetInstance();
+  manager->Init(&local_state_);
+
+  EXPECT_TRUE(provider_.IsInitializationComplete(policy::POLICY_DOMAIN_CHROME));
+  provider_.Init(&schema_registry_);
+  EXPECT_FALSE(provider_.IsFirstPolicyLoadComplete(policy::POLICY_DOMAIN_CHROME));
+  provider_.SetProfileID("test-profile-id");
+  EXPECT_TRUE(provider_.IsInitializationComplete(policy::POLICY_DOMAIN_CHROME));
+  EXPECT_TRUE(provider_.IsFirstPolicyLoadComplete(policy::POLICY_DOMAIN_CHROME));
+
+  const policy::PolicyNamespace chrome_namespace(policy::POLICY_DOMAIN_CHROME,
+                                                  std::string());
+  EXPECT_TRUE(provider_.policies().Get(chrome_namespace).empty());
+  local_state_.SetBoolean(brave_shields::prefs::kAdBlockOnlyModeEnabled, true);
+#if BUILDFLAG(ENABLE_AD_BLOCK_ONLY_MODE_POLICIES)
+  const auto* value = provider_.policies().Get(chrome_namespace).GetValue(
+      policy::key::kDefaultBraveAdblockSetting, base::Value::Type::INTEGER);
+  ASSERT_TRUE(value);
+  EXPECT_EQ(value->GetInt(), CONTENT_SETTING_BLOCK);
+#endif
+  local_state_.SetBoolean(brave_shields::prefs::kAdBlockOnlyModeEnabled, false);
+  EXPECT_TRUE(provider_.policies().Get(chrome_namespace).empty());
+}
+#else
 TEST_F(BraveProfilePolicyProviderTest, IsInitializationCompleteGated) {
   auto* manager = brave_origin::BraveOriginPolicyManager::GetInstance();
   // On desktop/Android the override short-circuits to true when the manager
@@ -94,6 +144,8 @@ TEST_F(BraveProfilePolicyProviderTest, IsInitializationCompleteGated) {
       << "After SetProfileID: first refresh has run and manager is "
          "initialised";
 }
+
+#endif
 
 TEST_F(BraveProfilePolicyProviderTest, EmptyPolicyBundle) {
   // Initialize the provider

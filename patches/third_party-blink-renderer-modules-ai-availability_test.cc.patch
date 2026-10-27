@@ -1,0 +1,204 @@
+diff --git a/third_party/blink/renderer/modules/ai/availability_test.cc b/third_party/blink/renderer/modules/ai/availability_test.cc
+index 91bf37e8c..359dbb23a 100644
+--- a/third_party/blink/renderer/modules/ai/availability_test.cc
++++ b/third_party/blink/renderer/modules/ai/availability_test.cc
+@@ -5,11 +5,30 @@
+ #include "third_party/blink/renderer/modules/ai/availability.h"
+ 
+ #include "testing/gtest/include/gtest/gtest.h"
++#include "third_party/blink/renderer/platform/bindings/buildflags.h"
++#if BUILDFLAG(ENABLE_WEB_AI_MODEL_APIS)
+ #include "third_party/blink/public/mojom/ai/ai_manager.mojom-blink.h"
++#endif  // BUILDFLAG(ENABLE_WEB_AI_MODEL_APIS)
+ #include "third_party/blink/renderer/modules/ai/ai_metrics.h"
+ 
++#if !BUILDFLAG(ENABLE_WEB_AI_MODEL_APIS)
++#include "base/files/file.h"
++#include "base/functional/bind.h"
++#include "base/functional/callback_helpers.h"
++#include "base/run_loop.h"
++#include "base/test/metrics/histogram_tester.h"
++#include "components/language_detection/content/common/language_detection.mojom-blink.h"
++#include "mojo/public/cpp/bindings/receiver.h"
++#include "third_party/blink/public/mojom/on_device_translation/translation_manager.mojom-blink.h"
++#include "third_party/blink/public/platform/browser_interface_broker_proxy.h"
++#include "third_party/blink/renderer/bindings/core/v8/v8_binding_for_testing.h"
++#include "third_party/blink/renderer/modules/ai/ai_interface_proxy.h"
++#include "third_party/blink/renderer/platform/testing/task_environment.h"
++#endif  // !BUILDFLAG(ENABLE_WEB_AI_MODEL_APIS)
++
+ namespace blink {
+ 
++#if BUILDFLAG(ENABLE_WEB_AI_MODEL_APIS)
+ TEST(AvailabilityTest, HandleModelAvailabilityCheckResultNullExecutionContext) {
+   EXPECT_EQ(
+       HandleModelAvailabilityCheckResult(
+@@ -19,4 +38,168 @@ TEST(AvailabilityTest, HandleModelAvailabilityCheckResultNullExecutionContext) {
+       Availability::kUnavailable);
+ }
+ 
++#endif  // BUILDFLAG(ENABLE_WEB_AI_MODEL_APIS)
++
++#if !BUILDFLAG(ENABLE_WEB_AI_MODEL_APIS)
++TEST(AvailabilityTest, AndroidTranslatorStatusesPreserveAvailability) {
++  base::HistogramTester histograms;
++  using Result = mojom::blink::CanCreateTranslatorResult;
++  struct Case {
++    Result result;
++    Availability expected;
++  };
++  const Case cases[] = {
++      {Result::kReadily, Availability::kAvailable},
++      {Result::kAfterDownloadLibraryNotReady, Availability::kDownloadable},
++      {Result::kAfterDownloadLanguagePackNotReady, Availability::kDownloadable},
++      {Result::kAfterDownloadLibraryAndLanguagePackNotReady,
++       Availability::kDownloadable},
++      {Result::kAfterDownloadTranslatorCreationRequired,
++       Availability::kDownloadable},
++      {Result::kNoNotSupportedLanguage, Availability::kUnavailable},
++      {Result::kNoServiceCrashed, Availability::kUnavailable},
++      {Result::kNoDisallowedByPolicy, Availability::kUnavailable},
++      {Result::kNoExceedsServiceCountLimitation, Availability::kUnavailable},
++      {Result::kNoInvalidStoragePartition, Availability::kUnavailable},
++  };
++  for (const auto& test_case : cases) {
++    EXPECT_EQ(
++        HandleTranslatorAvailabilityCheckResult(nullptr, test_case.result),
++        test_case.expected);
++  }
++  const auto name = AIMetrics::GetAvailabilityMetricName(
++      AIMetrics::AISessionType::kTranslator);
++  histograms.ExpectBucketCount(name, Availability::kAvailable, 1);
++  histograms.ExpectBucketCount(name, Availability::kDownloadable, 4);
++  histograms.ExpectBucketCount(name, Availability::kUnavailable, 5);
++  histograms.ExpectTotalCount(name, 10);
++}
++
++TEST(AvailabilityTest, AndroidDetectionStatusesPreserveAvailability) {
++  base::HistogramTester histograms;
++  using Result = language_detection::mojom::blink::LanguageDetectionModelStatus;
++  EXPECT_EQ(HandleLanguageDetectionModelCheckResult(nullptr, Result::kReadily),
++            Availability::kAvailable);
++  EXPECT_EQ(
++      HandleLanguageDetectionModelCheckResult(nullptr, Result::kAfterDownload),
++      Availability::kDownloadable);
++  EXPECT_EQ(
++      HandleLanguageDetectionModelCheckResult(nullptr, Result::kNotAvailable),
++      Availability::kUnavailable);
++  const auto name = AIMetrics::GetAvailabilityMetricName(
++      AIMetrics::AISessionType::kLanguageDetector);
++  histograms.ExpectBucketCount(name, Availability::kAvailable, 1);
++  histograms.ExpectBucketCount(name, Availability::kDownloadable, 1);
++  histograms.ExpectBucketCount(name, Availability::kUnavailable, 1);
++  histograms.ExpectTotalCount(name, 3);
++}
++
++namespace {
++base::ScopedClosureRunner TrapOptionalModelBinding(
++    const BrowserInterfaceBrokerProxy& broker,
++    int* bindings) {
++  EXPECT_TRUE(broker.SetBinderForTesting(
++      "blink.mojom.AIManager",
++      base::BindRepeating(
++          [](int* calls, mojo::ScopedMessagePipeHandle pipe) { ++*calls; },
++          base::Unretained(bindings))));
++  return base::ScopedClosureRunner(base::BindOnce(
++      [](const BrowserInterfaceBrokerProxy* broker) {
++        broker->SetBinderForTesting("blink.mojom.AIManager", {});
++      },
++      base::Unretained(&broker)));
++}
++
++class TestLanguageDetectionDriver final
++    : public language_detection::mojom::blink::ContentLanguageDetectionDriver {
++ public:
++  void Bind(mojo::ScopedMessagePipeHandle pipe) {
++    receiver_.Bind(
++        mojo::PendingReceiver<
++            language_detection::mojom::blink::ContentLanguageDetectionDriver>(
++            std::move(pipe)));
++  }
++  void GetLanguageDetectionModel(
++      GetLanguageDetectionModelCallback callback) override {
++    std::move(callback).Run(base::File());
++  }
++  void GetLanguageDetectionModelStatus(
++      GetLanguageDetectionModelStatusCallback callback) override {
++    ++status_requests;
++    std::move(callback).Run(language_detection::mojom::blink::
++                                LanguageDetectionModelStatus::kReadily);
++  }
++  int status_requests = 0;
++
++ private:
++  mojo::Receiver<
++      language_detection::mojom::blink::ContentLanguageDetectionDriver>
++      receiver_{this};
++};
++}  // namespace
++
++TEST(AvailabilityTest, AndroidTranslationBrokerRouteDoesNotBindModelFactory) {
++  test::TaskEnvironment task_environment;
++  V8TestingScope scope;
++  auto* context = scope.GetExecutionContext();
++  const auto& broker = context->GetBrowserInterfaceBroker();
++  int ai_bindings = 0;
++  auto reset_ai = TrapOptionalModelBinding(broker, &ai_bindings);
++  int translation_bindings = 0;
++  ASSERT_TRUE(broker.SetBinderForTesting(
++      mojom::blink::TranslationManager::Name_,
++      base::BindRepeating(
++          [](int* calls, mojo::ScopedMessagePipeHandle pipe) { ++*calls; },
++          base::Unretained(&translation_bindings))));
++  base::ScopedClosureRunner reset_translation(base::BindOnce(
++      [](const BrowserInterfaceBrokerProxy* broker) {
++        broker->SetBinderForTesting(mojom::blink::TranslationManager::Name_,
++                                    {});
++      },
++      base::Unretained(&broker)));
++  auto& remote = AIInterfaceProxy::GetTranslationManagerRemote(context);
++  EXPECT_TRUE(remote.is_bound());
++  EXPECT_EQ(&remote, &AIInterfaceProxy::GetTranslationManagerRemote(context));
++  EXPECT_EQ(translation_bindings, 1);
++  EXPECT_EQ(ai_bindings, 0);
++}
++
++TEST(AvailabilityTest, AndroidDetectionBrokerRouteDoesNotBindModelFactory) {
++  test::TaskEnvironment task_environment;
++  V8TestingScope scope;
++  auto* context = scope.GetExecutionContext();
++  const auto& broker = context->GetBrowserInterfaceBroker();
++  int ai_bindings = 0;
++  auto reset_ai = TrapOptionalModelBinding(broker, &ai_bindings);
++  TestLanguageDetectionDriver driver;
++  ASSERT_TRUE(broker.SetBinderForTesting(
++      language_detection::mojom::blink::ContentLanguageDetectionDriver::Name_,
++      base::BindRepeating(&TestLanguageDetectionDriver::Bind,
++                          base::Unretained(&driver))));
++  base::ScopedClosureRunner reset_driver(base::BindOnce(
++      [](const BrowserInterfaceBrokerProxy* broker) {
++        broker->SetBinderForTesting(language_detection::mojom::blink::
++                                        ContentLanguageDetectionDriver::Name_,
++                                    {});
++      },
++      base::Unretained(&broker)));
++  bool completed = false;
++  AIInterfaceProxy::GetLanguageDetectionModelStatus(
++      context,
++      base::BindOnce(
++          [](bool* done,
++             language_detection::mojom::blink::LanguageDetectionModelStatus
++                 status) {
++            *done = true;
++            EXPECT_EQ(status, language_detection::mojom::blink::
++                                  LanguageDetectionModelStatus::kReadily);
++          },
++          base::Unretained(&completed)));
++  base::RunLoop().RunUntilIdle();
++  EXPECT_TRUE(completed);
++  EXPECT_EQ(driver.status_requests, 1);
++  EXPECT_EQ(ai_bindings, 0);
++}
++#endif  // !BUILDFLAG(ENABLE_WEB_AI_MODEL_APIS)
++
+ }  // namespace blink

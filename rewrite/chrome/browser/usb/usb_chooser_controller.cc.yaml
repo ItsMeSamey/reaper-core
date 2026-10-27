@@ -1,0 +1,89 @@
+# Android selected-tab device chooser lifetime.
+substitutions:
+- description: Use the shared Android guard at the permission grant boundary
+  regex:
+    re_pattern: namespace\ \{
+    replace: '#if BUILDFLAG(IS_ANDROID)
+
+      #include "brave/browser/ui/android/device_chooser/active_device_chooser_request.h"
+
+      #endif
+
+
+      namespace {'
+- description: Bind pending Android USB selection to its exact original document
+  regex:
+    re_pattern: \ \ RenderFrameHost\*\ main_frame\ =\ render_frame_host\->GetMainFrame\(\);
+    replace: "#if BUILDFLAG(IS_ANDROID)\n  active_request_ = std::make_unique<ActiveDeviceChooserRequest>(render_frame_host);\n#endif\n  RenderFrameHost* main_frame = render_frame_host->GetMainFrame();"
+- description: Preserve activation tracking across asynchronous USB refresh
+  regex:
+    re_pattern: '\ \ \ \ const\ url::Origin\&\ origin,\
+
+      \ \ \ \ blink::mojom::WebUsbService::GetPermissionCallback\ callback,'
+    replace: "    const url::Origin& origin,\n#if BUILDFLAG(IS_ANDROID)\n    std::unique_ptr<ActiveDeviceChooserRequest> active_request,\n#endif\n    blink::mojom::WebUsbService::GetPermissionCallback callback,"
+- description: Never grant USB access after deselection, document change or teardown
+  regex:
+    re_pattern: \ \ if\ \(!chooser_context\ \|\|\ !device_info\)\ \{
+    replace: "#if BUILDFLAG(IS_ANDROID)\n  if (!active_request || !active_request->IsValid()) {\n    std::move(callback).Run(nullptr);\n    return;\n  }\n#endif\n  if (!chooser_context || !device_info) {"
+- description: Transfer the guard with the actual asynchronous permission grant callback
+  regex:
+    re_pattern: \ \ \ \ \ \ \&OnDeviceInfoRefreshed,\ chooser_context_,\ origin_,\ std::move\(callback_\)\);
+    replace: "      &OnDeviceInfoRefreshed, chooser_context_, origin_,\n#if BUILDFLAG(IS_ANDROID)\n      std::move(active_request_),\n#endif\n      std::move(callback_));"
+- description: Reject a queued selection before accessing or refreshing a stale device row
+  regex:
+    re_pattern: void\ UsbChooserController::Select\(const\ std::vector<size_t>\&\ indices\)\ \{
+    replace: "void UsbChooserController::Select(const std::vector<size_t>& indices) {\n#if BUILDFLAG(IS_ANDROID)\n  if (!active_request_ || !active_request_->IsValid()) {\n    std::move(callback_).Run(nullptr);\n    return;\n  }\n#endif"
+- description: Format Android chooser lifetime changes
+  regex:
+    re_pattern: '\ \ \ \ \ \ options_\(std::move\(options\)\),\
+
+      \ \ \ \ \ \ callback_\(std::move\(callback\)\),\
+
+      \ \ \ \ \ \ render_frame_host_id_\(render_frame_host\->GetGlobalId\(\)\)\ \{\
+
+      \#if\ BUILDFLAG\(IS_ANDROID\)\
+
+      \ \ active_request_\ =\ std::make_unique<ActiveDeviceChooserRequest>\(render_frame_host\);\
+
+      \#endif\
+
+      \ \ RenderFrameHost\*\ main_frame\ =\ render_frame_host\->GetMainFrame\(\);\
+
+      \ \ origin_\ =\ main_frame\->GetLastCommittedOrigin\(\);\
+
+      \ \ Profile\*\ profile\ =\
+
+      '
+    replace: "      options_(std::move(options)),\n      callback_(std::move(callback)),\n      render_frame_host_id_(render_frame_host->GetGlobalId()) {\n#if BUILDFLAG(IS_ANDROID)\n  active_request_ =\n      std::make_unique<ActiveDeviceChooserRequest>(render_frame_host);\n#endif\n  RenderFrameHost* main_frame = render_frame_host->GetMainFrame();\n  origin_ = main_frame->GetLastCommittedOrigin();\n  Profile* profile =\n"
+- description: Format Android chooser lifetime changes
+  regex:
+    re_pattern: '\
+
+      \ \ //\ The\ prompt\ is\ about\ to\ close,\ destroying\ \|this\|\ so\ all\ the\ parameters\
+
+      \ \ //\ necessary\ to\ grant\ permission\ to\ access\ the\ device\ need\ to\ be\ bound\ to\
+
+      \ \ //\ this\ callback\.\
+
+      \ \ auto\ on_device_info_refreshed\ =\ base::BindOnce\(\
+
+      \ \ \ \ \ \ \&OnDeviceInfoRefreshed,\ chooser_context_,\ origin_,\
+
+      \#if\ BUILDFLAG\(IS_ANDROID\)\
+
+      \ \ \ \ \ \ std::move\(active_request_\),\
+
+      \#endif\
+
+      \ \ \ \ \ \ std::move\(callback_\)\);\
+
+      \#if\ BUILDFLAG\(IS_ANDROID\)\
+
+      \ \ chooser_context_\->RefreshDeviceInfo\(guid,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ std::move\(on_device_info_refreshed\)\);\
+
+      \#else\
+
+      '
+    replace: "\n  // The prompt is about to close, destroying |this| so all the parameters\n  // necessary to grant permission to access the device need to be bound to\n  // this callback.\n  auto on_device_info_refreshed =\n      base::BindOnce(&OnDeviceInfoRefreshed, chooser_context_, origin_,\n#if BUILDFLAG(IS_ANDROID)\n                     std::move(active_request_),\n#endif\n                     std::move(callback_));\n#if BUILDFLAG(IS_ANDROID)\n  chooser_context_->RefreshDeviceInfo(guid,\n                                      std::move(on_device_info_refreshed));\n#else\n"

@@ -1,0 +1,120 @@
+diff --git a/tools/grit/grit/format/data_pack_unittest.py b/tools/grit/grit/format/data_pack_unittest.py
+--- a/tools/grit/grit/format/data_pack_unittest.py
++++ b/tools/grit/grit/format/data_pack_unittest.py
+@@ -85,6 +85,116 @@
+     loaded = data_pack.ReadDataPackFromString(expected_data)
+     self.assertDictEqual(expected_data_pack.__dict__, loaded.__dict__)
+ 
++  def testReadDataPackRejectsOffsetBeyondEOF(self):
++    # Actual 24-byte CLI witness: the sentinel claims byte25 exists. Python
++    # slicing previously returned an empty resource instead of rejecting it.
++    data = bytes.fromhex(
++      '05000000 00000000 01000000 140018000000 000019000000'
++    )
++    with self.assertRaises(data_pack.CorruptDataPack):
++      data_pack.ReadDataPackFromString(data)
++
++  def testReadDataPackRejectsDuplicateCanonicalIDs(self):
++    # Actual32-byte CLI witness: the second ID20 previously overwrote payload A.
++    data = bytes.fromhex(
++      '05000000 00000000 02000000 14001e000000 14001f000000 '
++      '000020000000 4142'
++    )
++    with self.assertRaises(data_pack.CorruptDataPack):
++      data_pack.ReadDataPackFromString(data)
++
++  def testReadDataPackRejectsTruncatedHeadersAndTables(self):
++    fixtures = (
++      '',
++      '050000',
++      '04000000',
++      '04000000 00000000',
++      '05000000 00000000 000000',
++      # Complete headers without the mandatory sentinel entry.
++      '04000000 00000000 00',
++      '05000000 00000000 00000000',
++      # Huge v4 count must fail before reading or iterating the table.
++      '04000000 ffffffff 00',
++      # One alias is declared, but its last byte is missing.
++      '05000000 00000000 01000100 14001c000000 00001c000000 1f0000',
++    )
++    for literal in fixtures:
++      with self.subTest(literal=literal):
++        with self.assertRaises(data_pack.CorruptDataPack):
++          data_pack.ReadDataPackFromString(bytes.fromhex(literal))
++
++  def testReadDataPackRejectsInvalidPayloadOffsets(self):
++    fixtures = (
++      # The first payload overlaps its header/index table.
++      '05000000 00000000 01000000 140000000000 000018000000',
++      # The first payload begins past EOF, even if both offsets are equal.
++      '05000000 00000000 01000000 14001a000000 00001a000000 41',
++      # In-bounds offsets decrease; slicing used to hide the malformed range.
++      '05000000 00000000 01000000 140019000000 000018000000 41',
++    )
++    for literal in fixtures:
++      with self.subTest(literal=literal):
++        with self.assertRaises(data_pack.CorruptDataPack):
++          data_pack.ReadDataPackFromString(bytes.fromhex(literal))
++
++  def testReadDataPackRejectsInvalidAliasTables(self):
++    fixtures = (
++      # Index1 cannot address a one-entry canonical table.
++      '05000000 00000000 01000100 14001c000000 00001d000000 1f000100 41',
++      # An empty canonical table cannot be aliased.
++      '05000000 00000000 00000100 000016000000 1f000000',
++      # An alias cannot overwrite a canonical payload with the same ID.
++      '05000000 00000000 01000100 14001c000000 00001d000000 14000000 41',
++      # Duplicate alias IDs cannot silently collapse in the result dictionary.
++      '05000000 00000000 01000200 140020000000 000021000000 '
++      '1f000000 1f000000 41',
++    )
++    for literal in fixtures:
++      with self.subTest(literal=literal):
++        with self.assertRaises(data_pack.CorruptDataPack):
++          data_pack.ReadDataPackFromString(bytes.fromhex(literal))
++
++  def testReadDataPackValidBoundaryFormats(self):
++    fixtures = (
++      ('04000000 00000000 00 00000f000000', 4, {}, {}),
++      ('05000000 00000000 00000000 000012000000', 5, {}, {}),
++      ('04000000 01000000 00 140015000000 000015000000',
++       4, {20: b''}, {}),
++      ('05000000 00000000 01000000 140018000000 000018000000',
++       5, {20: b''}, {}),
++      ('05000000 00000000 01000100 14001c000000 00001d000000 1f000000 41',
++       5, {20: b'A', 31: b'A'}, {31: 20}),
++      ('05000000 00000000 01000100 14001c000000 00001c000000 1f000000',
++       5, {20: b'', 31: b''}, {31: 20}),
++    )
++    for literal, version, resources, aliases in fixtures:
++      with self.subTest(literal=literal):
++        loaded = data_pack.ReadDataPackFromString(bytes.fromhex(literal))
++        self.assertEqual(loaded.version, version)
++        self.assertEqual(loaded.encoding, data_pack.BINARY)
++        self.assertEqual(loaded.resources, resources)
++        self.assertEqual(loaded.aliases, aliases)
++
++  def testReadDataPackPreservesExistingInspectionCompatibility(self):
++    # The utility fix does not adopt the auditor's stricter writer-only rules:
++    # unused trailing bytes, an ignored sentinel ID, gaps and unique unsorted
++    # IDs remain readable. These are not claims of native lookup compatibility.
++    fixtures = (
++      ('05000000 00000000 01000000 140018000000 000019000000 4142',
++       {20: b'A'}),
++      ('05000000 00000000 01000000 140018000000 ffff19000000 41',
++       {20: b'A'}),
++      ('05000000 00000000 01000000 140019000000 00001a000000 0041',
++       {20: b'A'}),
++      ('05000000 00000000 02000000 14001e000000 0a001f000000 '
++       '000020000000 4142', {20: b'A', 10: b'B'}),
++    )
++    for literal, resources in fixtures:
++      with self.subTest(literal=literal):
++        loaded = data_pack.ReadDataPackFromString(bytes.fromhex(literal))
++        self.assertEqual(loaded.resources, resources)
++        self.assertEqual(loaded.aliases, {})
++
+   def testRePackUnittest(self):
+     expected_with_allowlist = {
+       1: 'Never gonna',

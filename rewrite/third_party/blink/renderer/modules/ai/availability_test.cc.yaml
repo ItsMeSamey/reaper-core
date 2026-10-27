@@ -1,0 +1,179 @@
+# Android excludes optional built-in Web AI and retains translation/language detection.
+substitutions:
+- description: Exclude optional built-in Android Web AI code and preserve ordinary translation and detection paths
+  regex:
+    re_pattern: '\}\
+
+      \
+
+      '
+    replace: "}\n\n#endif  // !BUILDFLAG(IS_ANDROID)\n\n#if BUILDFLAG(IS_ANDROID)\nTEST(AvailabilityTest, AndroidTranslatorStatusesPreserveAvailability) {\n  base::HistogramTester histograms;\n  using Result = mojom::blink::CanCreateTranslatorResult;\n  struct Case {\n    Result result;\n    Availability expected;\n  };\n  const Case cases[] = {\n      {Result::kReadily, Availability::kAvailable},\n      {Result::kAfterDownloadLibraryNotReady, Availability::kDownloadable},\n      {Result::kAfterDownloadLanguagePackNotReady, Availability::kDownloadable},\n      {Result::kAfterDownloadLibraryAndLanguagePackNotReady,\n       Availability::kDownloadable},\n      {Result::kAfterDownloadTranslatorCreationRequired,\n       Availability::kDownloadable},\n      {Result::kNoNotSupportedLanguage, Availability::kUnavailable},\n      {Result::kNoServiceCrashed, Availability::kUnavailable},\n      {Result::kNoDisallowedByPolicy, Availability::kUnavailable},\n      {Result::kNoExceedsServiceCountLimitation, Availability::kUnavailable},\n      {Result::kNoInvalidStoragePartition, Availability::kUnavailable},\n  };\n  for (const auto& test_case : cases) {\n    EXPECT_EQ(\n        HandleTranslatorAvailabilityCheckResult(nullptr, test_case.result),\n        test_case.expected);\n  }\n  const auto name = AIMetrics::GetAvailabilityMetricName(\n      AIMetrics::AISessionType::kTranslator);\n  histograms.ExpectBucketCount(name, Availability::kAvailable, 1);\n  histograms.ExpectBucketCount(name, Availability::kDownloadable, 4);\n  histograms.ExpectBucketCount(name, Availability::kUnavailable, 5);\n  histograms.ExpectTotalCount(name, 10);\n}\n\nTEST(AvailabilityTest, AndroidDetectionStatusesPreserveAvailability) {\n  base::HistogramTester histograms;\n  using Result = language_detection::mojom::blink::LanguageDetectionModelStatus;\n  EXPECT_EQ(HandleLanguageDetectionModelCheckResult(nullptr, Result::kReadily),\n            Availability::kAvailable);\n  EXPECT_EQ(\n      HandleLanguageDetectionModelCheckResult(nullptr, Result::kAfterDownload),\n      Availability::kDownloadable);\n  EXPECT_EQ(\n      HandleLanguageDetectionModelCheckResult(nullptr, Result::kNotAvailable),\n      Availability::kUnavailable);\n  const auto name = AIMetrics::GetAvailabilityMetricName(\n      AIMetrics::AISessionType::kLanguageDetector);\n  histograms.ExpectBucketCount(name, Availability::kAvailable, 1);\n  histograms.ExpectBucketCount(name, Availability::kDownloadable, 1);\n  histograms.ExpectBucketCount(name, Availability::kUnavailable, 1);\n  histograms.ExpectTotalCount(name, 3);\n}\n\nnamespace {\nbase::ScopedClosureRunner TrapOptionalModelBinding(\n    const BrowserInterfaceBrokerProxy& broker,\n    int* bindings) {\n  EXPECT_TRUE(broker.SetBinderForTesting(\n      \"blink.mojom.AIManager\",\n      base::BindRepeating(\n          [](int* calls, mojo::ScopedMessagePipeHandle pipe) { ++*calls; },\n          base::Unretained(bindings))));\n  return base::ScopedClosureRunner(base::BindOnce(\n      [](const BrowserInterfaceBrokerProxy* broker) {\n        broker->SetBinderForTesting(\"blink.mojom.AIManager\", {});\n      },\n      base::Unretained(&broker)));\n}\n\nclass TestLanguageDetectionDriver final\n    : public language_detection::mojom::blink::ContentLanguageDetectionDriver {\n public:\n  void Bind(mojo::ScopedMessagePipeHandle pipe) {\n    receiver_.Bind(\n        mojo::PendingReceiver<\n            language_detection::mojom::blink::ContentLanguageDetectionDriver>(\n            std::move(pipe)));\n  }\n  void GetLanguageDetectionModel(\n      GetLanguageDetectionModelCallback callback) override {\n    std::move(callback).Run(base::File());\n  }\n  void GetLanguageDetectionModelStatus(\n      GetLanguageDetectionModelStatusCallback callback) override {\n    ++status_requests;\n    std::move(callback).Run(language_detection::mojom::blink::\n                                LanguageDetectionModelStatus::kReadily);\n  }\n  int status_requests = 0;\n\n private:\n  mojo::Receiver<\n      language_detection::mojom::blink::ContentLanguageDetectionDriver>\n      receiver_{this};\n};\n}  // namespace\n\nTEST(AvailabilityTest, AndroidTranslationBrokerRouteDoesNotBindModelFactory) {\n  test::TaskEnvironment task_environment;\n  V8TestingScope scope;\n  auto* context = scope.GetExecutionContext();\n  const auto& broker = context->GetBrowserInterfaceBroker();\n  int ai_bindings = 0;\n  auto reset_ai = TrapOptionalModelBinding(broker, &ai_bindings);\n  int translation_bindings = 0;\n  ASSERT_TRUE(broker.SetBinderForTesting(\n      mojom::blink::TranslationManager::Name_,\n      base::BindRepeating(\n          [](int* calls, mojo::ScopedMessagePipeHandle pipe) { ++*calls; },\n          base::Unretained(&translation_bindings))));\n  base::ScopedClosureRunner reset_translation(base::BindOnce(\n      [](const BrowserInterfaceBrokerProxy* broker) {\n        broker->SetBinderForTesting(mojom::blink::TranslationManager::Name_,\n                                    {});\n      },\n      base::Unretained(&broker)));\n  auto& remote = AIInterfaceProxy::GetTranslationManagerRemote(context);\n  EXPECT_TRUE(remote.is_bound());\n  EXPECT_EQ(&remote, &AIInterfaceProxy::GetTranslationManagerRemote(context));\n  EXPECT_EQ(translation_bindings, 1);\n  EXPECT_EQ(ai_bindings, 0);\n}\n\nTEST(AvailabilityTest, AndroidDetectionBrokerRouteDoesNotBindModelFactory) {\n  test::TaskEnvironment task_environment;\n  V8TestingScope scope;\n  auto* context = scope.GetExecutionContext();\n  const auto& broker = context->GetBrowserInterfaceBroker();\n  int ai_bindings = 0;\n  auto reset_ai = TrapOptionalModelBinding(broker, &ai_bindings);\n  TestLanguageDetectionDriver driver;\n  ASSERT_TRUE(broker.SetBinderForTesting(\n      language_detection::mojom::blink::ContentLanguageDetectionDriver::Name_,\n      base::BindRepeating(&TestLanguageDetectionDriver::Bind,\n                          base::Unretained(&driver))));\n  base::ScopedClosureRunner reset_driver(base::BindOnce(\n      [](const BrowserInterfaceBrokerProxy* broker) {\n        broker->SetBinderForTesting(language_detection::mojom::blink::\n                                        ContentLanguageDetectionDriver::Name_,\n                                    {});\n      },\n      base::Unretained(&broker)));\n  bool completed = false;\n  AIInterfaceProxy::GetLanguageDetectionModelStatus(\n      context,\n      base::BindOnce(\n          [](bool* done,\n             language_detection::mojom::blink::LanguageDetectionModelStatus\n                 status) {\n            *done = true;\n            EXPECT_EQ(status, language_detection::mojom::blink::\n                                  LanguageDetectionModelStatus::kReadily);\n          },\n          base::Unretained(&completed)));\n  base::RunLoop().RunUntilIdle();\n  EXPECT_TRUE(completed);\n  EXPECT_EQ(driver.status_requests, 1);\n  EXPECT_EQ(ai_bindings, 0);\n}\n#endif  // BUILDFLAG(IS_ANDROID)\n\n"
+- description: Exclude optional built-in Android Web AI code and preserve ordinary translation and detection paths
+  regex:
+    re_pattern: 'namespace\ blink\ \{\
+
+      \
+
+      '
+    replace: 'namespace blink {
+
+
+      #if !BUILDFLAG(IS_ANDROID)
+
+      '
+- description: Exclude optional built-in Android Web AI code and preserve ordinary translation and detection paths
+  regex:
+    re_pattern: '\#include\ "third_party/blink/renderer/modules/ai/ai_metrics\.h"\
+
+      \
+
+      '
+    replace: '#include "third_party/blink/renderer/modules/ai/ai_metrics.h"
+
+
+      #if BUILDFLAG(IS_ANDROID)
+
+      #include "base/files/file.h"
+
+      #include "base/functional/bind.h"
+
+      #include "base/functional/callback_helpers.h"
+
+      #include "base/run_loop.h"
+
+      #include "base/test/metrics/histogram_tester.h"
+
+      #include "components/language_detection/content/common/language_detection.mojom-blink.h"
+
+      #include "mojo/public/cpp/bindings/receiver.h"
+
+      #include "third_party/blink/public/mojom/on_device_translation/translation_manager.mojom-blink.h"
+
+      #include "third_party/blink/public/platform/browser_interface_broker_proxy.h"
+
+      #include "third_party/blink/renderer/bindings/core/v8/v8_binding_for_testing.h"
+
+      #include "third_party/blink/renderer/modules/ai/ai_interface_proxy.h"
+
+      #include "third_party/blink/renderer/platform/testing/task_environment.h"
+
+      #endif  // BUILDFLAG(IS_ANDROID)
+
+
+      '
+- description: Exclude optional built-in Android Web AI code and preserve ordinary translation and detection paths
+  regex:
+    re_pattern: '\#include\ "third_party/blink/public/mojom/ai/ai_manager\.mojom\-blink\.h"\
+
+      '
+    replace: '#include "third_party/blink/public/mojom/ai/ai_manager.mojom-blink.h"
+
+      #endif  // !BUILDFLAG(IS_ANDROID)
+
+      '
+- description: Exclude optional built-in Android Web AI code and preserve ordinary translation and detection paths
+  regex:
+    re_pattern: '\#include\ "testing/gtest/include/gtest/gtest\.h"\
+
+      '
+    replace: '#include "testing/gtest/include/gtest/gtest.h"
+
+      #if !BUILDFLAG(IS_ANDROID)
+
+      '
+- description: Exclude optional built-in Android Web AI code and preserve ordinary translation and detection paths
+  regex:
+    re_pattern: '\#include\ "third_party/blink/renderer/modules/ai/availability\.h"\
+
+      \
+
+      '
+    replace: '#include "third_party/blink/renderer/modules/ai/availability.h"
+
+
+      #include "build/build_config.h"
+
+      '
+
+- description: Use target-derived optional Web AI model capability for Android device and host snapshot compilation
+  regex:
+    re_pattern: '\}\
+
+      \#endif\ \ //\ BUILDFLAG\(IS_ANDROID\)\
+
+      '
+    replace: '}
+
+      #endif  // !BUILDFLAG(ENABLE_WEB_AI_MODEL_APIS)
+
+      '
+- description: Use target-derived optional Web AI model capability for Android device and host snapshot compilation
+  regex:
+    re_pattern: '\#endif\ \ //\ !BUILDFLAG\(IS_ANDROID\)\
+
+      \
+
+      \#if\ BUILDFLAG\(IS_ANDROID\)\
+
+      '
+    replace: '#endif  // BUILDFLAG(ENABLE_WEB_AI_MODEL_APIS)
+
+
+      #if !BUILDFLAG(ENABLE_WEB_AI_MODEL_APIS)
+
+      '
+- description: Use target-derived optional Web AI model capability for Android device and host snapshot compilation
+  regex:
+    re_pattern: 'namespace\ blink\ \{\
+
+      \
+
+      \#if\ !BUILDFLAG\(IS_ANDROID\)\
+
+      '
+    replace: 'namespace blink {
+
+
+      #if BUILDFLAG(ENABLE_WEB_AI_MODEL_APIS)
+
+      '
+- description: Use target-derived optional Web AI model capability for Android device and host snapshot compilation
+  regex:
+    re_pattern: '\#endif\ \ //\ BUILDFLAG\(IS_ANDROID\)\
+
+      '
+    replace: '#endif  // !BUILDFLAG(ENABLE_WEB_AI_MODEL_APIS)
+
+      '
+- description: Use target-derived optional Web AI model capability for Android device and host snapshot compilation
+  regex:
+    re_pattern: '\#if\ BUILDFLAG\(IS_ANDROID\)\
+
+      '
+    replace: '#if !BUILDFLAG(ENABLE_WEB_AI_MODEL_APIS)
+
+      '
+- description: Use target-derived optional Web AI model capability for Android device and host snapshot compilation
+  regex:
+    re_pattern: '\#endif\ \ //\ !BUILDFLAG\(IS_ANDROID\)\
+
+      '
+    replace: '#endif  // BUILDFLAG(ENABLE_WEB_AI_MODEL_APIS)
+
+      '
+- description: Use target-derived optional Web AI model capability for Android device and host snapshot compilation
+  regex:
+    re_pattern: '\#if\ !BUILDFLAG\(IS_ANDROID\)\
+
+      '
+    replace: '#include "third_party/blink/renderer/platform/bindings/buildflags.h"
+
+      #if BUILDFLAG(ENABLE_WEB_AI_MODEL_APIS)
+
+      '
+- description: Use target-derived optional Web AI model capability for Android device and host snapshot compilation
+  regex:
+    re_pattern: '\#include\ "build/build_config\.h"\
+
+      '
+    replace: ''

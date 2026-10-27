@@ -1,0 +1,71 @@
+diff --git a/tools/grit/grit/format/data_pack.py b/tools/grit/grit/format/data_pack.py
+--- a/tools/grit/grit/format/data_pack.py
++++ b/tools/grit/grit/format/data_pack.py
+@@ -135,12 +135,18 @@
+ def ReadDataPackFromString(data):
+   """Reads a data pack file and returns a dictionary."""
+   # Read the header.
++  if len(data) < 4:
++    raise CorruptDataPack('Incomplete file header')
+   version = struct.unpack('<I', data[:4])[0]
+   if version == 4:
++    if len(data) < 9:
++      raise CorruptDataPack('Incomplete v4 file header')
+     resource_count, encoding = struct.unpack('<IB', data[4:9])
+     alias_count = 0
+     header_size = 9
+   elif version == 5:
++    if len(data) < 12:
++      raise CorruptDataPack('Incomplete v5 file header')
+     encoding, resource_count, alias_count = struct.unpack('<BxxxHH', data[4:12])
+     header_size = 12
+   else:
+@@ -148,20 +154,30 @@
+ 
+   resources = {}
+   kIndexEntrySize = 2 + 4  # Each entry is a uint16 and a uint32.
++  kAliasEntrySize = 2 + 2  # uint16, uint16
++  id_table_size = (resource_count + 1) * kIndexEntrySize
++  alias_table_size = alias_count * kAliasEntrySize
++  data_offset = header_size + id_table_size + alias_table_size
++  if data_offset > len(data):
++    raise CorruptDataPack('Resource or alias table exceeds file bounds')
+ 
+   def entry_at_index(idx):
+     offset = header_size + idx * kIndexEntrySize
+     return struct.unpack('<HI', data[offset : offset + kIndexEntrySize])
+ 
+   prev_resource_id, prev_offset = entry_at_index(0)
++  if not data_offset <= prev_offset <= len(data):
++    raise CorruptDataPack('Resource offset outside payload bounds')
+   for i in range(1, resource_count + 1):
+     resource_id, offset = entry_at_index(i)
++    if not prev_offset <= offset <= len(data):
++      raise CorruptDataPack('Resource offsets exceed bounds or decrease')
++    if prev_resource_id in resources:
++      raise CorruptDataPack('Duplicate canonical resource ID')
+     resources[prev_resource_id] = data[prev_offset:offset]
+     prev_resource_id, prev_offset = resource_id, offset
+ 
+-  id_table_size = (resource_count + 1) * kIndexEntrySize
+   # Read the alias table.
+-  kAliasEntrySize = 2 + 2  # uint16, uint16
+ 
+   def alias_at_index(idx):
+     offset = header_size + id_table_size + idx * kAliasEntrySize
+@@ -170,11 +186,14 @@
+   aliases = {}
+   for i in range(alias_count):
+     resource_id, index = alias_at_index(i)
++    if index >= resource_count:
++      raise CorruptDataPack('Alias index outside canonical resource table')
++    if resource_id in resources:
++      raise CorruptDataPack('Duplicate resource ID in alias table')
+     aliased_id = entry_at_index(index)[0]
+     aliases[resource_id] = aliased_id
+     resources[resource_id] = resources[aliased_id]
+ 
+-  alias_table_size = kAliasEntrySize * alias_count
+   sizes = DataPackSizes(
+     header_size,
+     id_table_size,

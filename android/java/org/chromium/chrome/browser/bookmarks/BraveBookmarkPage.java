@@ -9,7 +9,6 @@ import android.app.Activity;
 
 import org.chromium.chrome.browser.app.BraveActivity;
 import org.chromium.chrome.browser.back_press.BackPressManager;
-import org.chromium.chrome.browser.price_tracking.PriceDropNotificationManager;
 import org.chromium.chrome.browser.profiles.Profile;
 import org.chromium.chrome.browser.ui.messages.snackbar.SnackbarManager;
 import org.chromium.chrome.browser.ui.native_page.NativePageHost;
@@ -35,7 +34,6 @@ public class BraveBookmarkPage extends BookmarkPage {
             NativePageHost host,
             BookmarkOpener bookmarkOpener,
             BookmarkManagerOpener bookmarkManagerOpener,
-            PriceDropNotificationManager priceDropNotificationManager,
             SigninAndHistorySyncActivityLauncher signinAndHistorySyncActivityLauncher,
             DeviceLockActivityLauncher deviceLockActivityLauncher,
             BackPressManager backPressManager) {
@@ -49,7 +47,6 @@ public class BraveBookmarkPage extends BookmarkPage {
                 host,
                 bookmarkOpener,
                 bookmarkManagerOpener,
-                priceDropNotificationManager,
                 signinAndHistorySyncActivityLauncher,
                 deviceLockActivityLauncher,
                 backPressManager);

@@ -3,6 +3,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+#include "build/build_config.h"
 #include "components/update_client/update_client.h"
 
 #include "base/functional/bind.h"
@@ -20,7 +21,10 @@ bool CrxInstaller::IsBraveComponent() const {
 scoped_refptr<UpdateClient> SequentialUpdateClientFactory(
     scoped_refptr<Configurator> config) {
   return base::MakeRefCounted<UpdateClientImpl>(
-      config, base::MakeRefCounted<PingManager>(config),
+      config,
+#if !BUILDFLAG(IS_ANDROID)
+      base::MakeRefCounted<PingManager>(config),
+#endif
       base::BindRepeating(&SequentialUpdateChecker::Create));
 }
 

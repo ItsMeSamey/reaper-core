@@ -1,0 +1,42 @@
+diff --git a/pdf/pdfium/pdfium_api_wrappers.cc b/pdf/pdfium/pdfium_api_wrappers.cc
+--- a/pdf/pdfium/pdfium_api_wrappers.cc
++++ b/pdf/pdfium/pdfium_api_wrappers.cc
+@@ -303,7 +303,38 @@
+   }
+ 
+   gfx::Rect dest;
++#if BUILDFLAG(IS_ANDROID)
++  PDFiumEngineExports::RenderingSettings positioning(settings);
++  if (settings.bounds_are_device_units) {
++    const int dpi_x = settings.dpi.width();
++    const int dpi_y = settings.dpi.height();
++    if (dpi_x <= 0 || dpi_y <= 0)
++      return false;
++    const int max_dpi = std::max(dpi_x, dpi_y);
++    base::CheckedNumeric<int> logical_width = settings.bounds.width();
++    base::CheckedNumeric<int> logical_height = settings.bounds.height();
++    // Use a wide intermediate: the logical page can be larger than the
++    // physical bitmap when horizontal and vertical printer DPI differ.
++    const int64_t width = int64_t{settings.bounds.width()} * max_dpi / dpi_x;
++    const int64_t height = int64_t{settings.bounds.height()} * max_dpi / dpi_y;
++    logical_width = width;
++    logical_height = height;
++    // CalculatePosition scales in int arithmetic; validate its intermediate
++    // products as well as the final logical dimensions before calling it.
++    base::CheckedNumeric<int> scaled_width = width;
++    base::CheckedNumeric<int> scaled_height = height;
++    scaled_width *= dpi_x;
++    scaled_height *= dpi_y;
++    if (!logical_width.IsValid() || !logical_height.IsValid() ||
++        !scaled_width.IsValid() || !scaled_height.IsValid())
++      return false;
++    positioning.bounds.set_size(
++        gfx::Size(logical_width.ValueOrDie(), logical_height.ValueOrDie()));
++  }
++  int rotate = CalculatePosition(page, positioning, &dest);
++#else
+   int rotate = CalculatePosition(page, settings, &dest);
++#endif
+ 
+   ScopedFPDFBitmap bitmap(
+       FPDFBitmap_CreateEx(settings.bounds.width(), settings.bounds.height(),

@@ -9,13 +9,11 @@
 #include <string_view>
 
 #include "base/check.h"
-#include "base/feature_list.h"
 #include "base/logging.h"
 #include "base/no_destructor.h"
 #include "base/strings/strcat.h"
 #include "base/strings/utf_string_conversions.h"
 #include "brave/components/ai_chat/core/common/features.h"
-#include "brave/components/brave_origin/features.h"
 #include "brave/components/skus/renderer/skus_utils.h"
 #include "brave/gin/converter_specializations.h"
 #include "build/build_config.h"
@@ -39,9 +37,10 @@ inline constexpr char kIntentParamName[] = "intent";
 inline constexpr char kIntentParamValue[] = "connect-receipt";
 inline constexpr char kIntentParamTestValue[] = "connect-receipt-test";
 inline constexpr char kProductParamName[] = "product";
+#if BUILDFLAG(ENABLE_BRAVE_VPN)
 inline constexpr char kProductVPNParamValue[] = "vpn";
+#endif
 inline constexpr char kProductLeoParamValue[] = "leo";
-inline constexpr char kProductOriginParamValue[] = "origin";
 inline constexpr char kIntentParamValueLinkOrder[] = "link-order";
 inline constexpr char kResultLandingPagePath[] = "/order-link/";
 
@@ -74,14 +73,6 @@ bool SubscriptionRenderFrameObserver::EnsureConnected() {
     bound |= ai_chat_subscription_.is_bound();
   }
 
-  if (base::FeatureList::IsEnabled(brave_origin::features::kBraveOrigin) &&
-      product_ == Product::kOrigin) {
-    if (!origin_subscription_.is_bound()) {
-      render_frame()->GetBrowserInterfaceBroker().GetInterface(
-          origin_subscription_.BindNewPipeAndPassReceiver());
-    }
-    bound |= origin_subscription_.is_bound();
-  }
   return bound;
 }
 
@@ -106,15 +97,16 @@ void SubscriptionRenderFrameObserver::DidCreateScriptContext(
     return;
   }
 
-  if (product_ == Product::kVPN) {
 #if BUILDFLAG(ENABLE_BRAVE_VPN)
+  if (product_ == Product::kVPN) {
     if (vpn_service_.is_bound()) {
       vpn_service_->GetPurchaseToken(
           base::BindOnce(&SubscriptionRenderFrameObserver::OnGetPurchaseToken,
                          weak_factory_.GetWeakPtr()));
     }
+  }
 #endif
-  } else if (product_ == Product::kLeo) {
+  if (product_ == Product::kLeo) {
     if (ai_chat_subscription_.is_bound()) {
       // Inject only linkResult object on the
       // https://account.brave.com/order-link/?product=leo page
@@ -124,16 +116,6 @@ void SubscriptionRenderFrameObserver::DidCreateScriptContext(
         AddJavaScriptObjectToFrame(context);
       } else if (page_ == Page::kInitialLandingPage) {
         ai_chat_subscription_->GetPurchaseTokenOrderId(base::BindOnce(
-            &SubscriptionRenderFrameObserver::OnGetPurchaseTokenOrderId,
-            weak_factory_.GetWeakPtr()));
-      }
-    }
-  } else if (product_ == Product::kOrigin) {
-    if (origin_subscription_.is_bound()) {
-      if (page_ == Page::kResultLandingPage) {
-        AddJavaScriptObjectToFrame(context);
-      } else if (page_ == Page::kInitialLandingPage) {
-        origin_subscription_->GetPurchaseTokenOrderId(base::BindOnce(
             &SubscriptionRenderFrameObserver::OnGetPurchaseTokenOrderId,
             weak_factory_.GetWeakPtr()));
       }
@@ -206,9 +188,6 @@ void SubscriptionRenderFrameObserver::SetLinkStatus(
   if (product_ == Product::kLeo && ai_chat_subscription_.is_bound()) {
     ai_chat_subscription_->SetLinkStatus(
         status_dict.FindInt("status").value_or(0));
-  } else if (product_ == Product::kOrigin && origin_subscription_.is_bound()) {
-    origin_subscription_->SetLinkStatus(
-        status_dict.FindInt("status").value_or(0));
   }
 }
 
@@ -219,18 +198,20 @@ std::string SubscriptionRenderFrameObserver::GetPurchaseTokenJSString(
   }
 
   std::string_view receipt_var_name;
+#if BUILDFLAG(ENABLE_BRAVE_VPN)
   if (product_ == Product::kVPN) {
     receipt_var_name = "braveVpn.receipt";
-  } else if (product_ == Product::kLeo) {
+  }
+#endif
+  if (product_ == Product::kLeo) {
     receipt_var_name = "braveLeo.receipt";
-  } else if (product_ == Product::kOrigin) {
-    receipt_var_name = "braveOrigin.receipt";
   }
 
   return base::StrCat({"window.localStorage.setItem(\"", receipt_var_name,
                        "\", \"", purchase_token, "\");"});
 }
 
+#if BUILDFLAG(ENABLE_BRAVE_VPN)
 void SubscriptionRenderFrameObserver::OnGetPurchaseToken(
     const std::string& purchase_token) {
   if (!IsAllowed()) {
@@ -244,6 +225,7 @@ void SubscriptionRenderFrameObserver::OnGetPurchaseToken(
     }
   }
 }
+#endif
 
 void SubscriptionRenderFrameObserver::OnGetPurchaseTokenOrderId(
     const std::string& purchase_token,
@@ -256,8 +238,6 @@ void SubscriptionRenderFrameObserver::OnGetPurchaseTokenOrderId(
     std::string_view order_id_key;
     if (product_ == Product::kLeo) {
       order_id_key = "braveLeo.orderId";
-    } else if (product_ == Product::kOrigin) {
-      order_id_key = "braveOrigin.orderId";
     }
     frame->ExecuteJavaScript(base::UTF8ToUTF16(base::StrCat(
         {"window.localStorage.setItem(\"", order_id_key, "\", \"", order_id,
@@ -303,22 +283,23 @@ bool SubscriptionRenderFrameObserver::IsAllowed() {
 
   std::string intent = ExtractParam(current_url, kIntentParamName);
   std::string product = ExtractParam(current_url, kProductParamName);
+  product_ = std::nullopt;
+  page_ = std::nullopt;
+#if BUILDFLAG(ENABLE_BRAVE_VPN)
   if (product == kProductVPNParamValue) {
     product_ = Product::kVPN;
-  } else if (product == kProductLeoParamValue) {
+  }
+#endif
+  if (product == kProductLeoParamValue) {
     product_ = Product::kLeo;
-  } else if (product == kProductOriginParamValue) {
-    product_ = Product::kOrigin;
-  } else {
-    product_ = std::nullopt;
   }
 
-  // For link-order products (Leo, Origin), we allow injecting the linkResult
+  // For the Leo link-order product, we allow injecting the linkResult
   // object if intent value is empty and path is /order-link/ as
   // https://account.brave.com?intent=link-order&product=<product>
   // gets redirected to https://account.brave.com/order-link/?product=<product>
   // for an actual linking where we should receive the result of linking.
-  if (product_ == Product::kLeo || product_ == Product::kOrigin) {
+  if (product_ == Product::kLeo) {
     if (intent.empty()) {
       std::string_view path = current_url.has_path() ? current_url.path() : "";
       if (path == kResultLandingPagePath) {

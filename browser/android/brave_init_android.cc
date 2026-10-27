@@ -8,17 +8,11 @@
 #include "base/android/jni_android.h"
 #include "base/android/jni_string.h"
 #include "brave/browser/android/safe_browsing/buildflags.h"
-#include "brave/browser/brave_browser_process.h"
-#include "brave/browser/brave_stats/brave_stats_updater.h"
 #include "chrome/android/chrome_jni_headers/BraveActivity_jni.h"
 
 namespace chrome {
 namespace android {
 
-static void JNI_BraveActivity_RestartStatsUpdater(JNIEnv* env) {
-  g_brave_browser_process->brave_stats_updater()->Stop();
-  g_brave_browser_process->brave_stats_updater()->Start();
-}
 
 static base::android::ScopedJavaLocalRef<jstring>
 JNI_BraveActivity_GetSafeBrowsingApiKey(JNIEnv* env) {

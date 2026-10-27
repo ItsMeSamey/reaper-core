@@ -5,9 +5,13 @@
 
 package org.chromium.chrome.browser.toolbar;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.Mockito.mock;
+
+import android.view.View;
 
 import androidx.test.filters.MediumTest;
 
@@ -22,6 +26,7 @@ import org.chromium.base.test.util.Batch;
 import org.chromium.base.test.util.CallbackHelper;
 import org.chromium.base.test.util.CommandLineFlags;
 import org.chromium.base.test.util.Restriction;
+import org.chromium.chrome.R;
 import org.chromium.chrome.browser.flags.ChromeSwitches;
 import org.chromium.chrome.browser.layouts.LayoutManager;
 import org.chromium.chrome.browser.layouts.LayoutStateProvider;
@@ -31,6 +36,9 @@ import org.chromium.chrome.browser.omnibox.OmniboxStub;
 import org.chromium.chrome.browser.profiles.Profile;
 import org.chromium.chrome.browser.search_engines.SearchEngineType;
 import org.chromium.chrome.browser.search_engines.TemplateUrlServiceFactory;
+import org.chromium.chrome.browser.tab.Tab;
+import org.chromium.chrome.browser.tab.TabObserver;
+import org.chromium.chrome.browser.toolbar.top.BraveToolbarLayoutImpl;
 import org.chromium.chrome.test.ChromeJUnit4ClassRunner;
 import org.chromium.chrome.test.ChromeTabbedActivityTestRule;
 import org.chromium.chrome.test.util.NewTabPageTestUtils;
@@ -38,10 +46,13 @@ import org.chromium.components.omnibox.AutocompleteInput;
 import org.chromium.components.omnibox.OmniboxFocusReason;
 import org.chromium.components.search_engines.TemplateUrl;
 import org.chromium.components.search_engines.TemplateUrlService;
+import org.chromium.content_public.browser.NavigationHandle;
 import org.chromium.ui.base.DeviceFormFactor;
 
+import java.lang.reflect.Field;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
 
 @RunWith(ChromeJUnit4ClassRunner.class)
 @CommandLineFlags.Add({ChromeSwitches.DISABLE_FIRST_RUN_EXPERIENCE})
@@ -125,6 +136,79 @@ public class BraveToolbarManagerTest {
         assertFalse(
                 "Accelerator input must not focus the omnibox before Hub finishes hiding.",
                 ThreadUtils.runOnUiThreadBlocking(mToolbarManager::isUrlBarFocused));
+    }
+
+    @Test
+    @MediumTest
+    @Restriction(DeviceFormFactor.PHONE)
+    public void testBackgroundTabLoadPreservesActivePipControl() {
+        Tab backgroundTab = mock(Tab.class);
+        assertPipVisibilityAfterCallback(
+                View.VISIBLE,
+                observer ->
+                        observer.onPageLoadStarted(
+                                backgroundTab, mActivityTestRule.getActivityTab().getUrl()));
+    }
+
+    @Test
+    @MediumTest
+    @Restriction(DeviceFormFactor.PHONE)
+    public void testBackgroundTabCrashPreservesActivePipControl() {
+        Tab backgroundTab = mock(Tab.class);
+        assertPipVisibilityAfterCallback(
+                View.VISIBLE, observer -> observer.onCrash(backgroundTab));
+    }
+
+    @Test
+    @MediumTest
+    @Restriction(DeviceFormFactor.PHONE)
+    public void testBackgroundTabNavigationPreservesActivePipControl() {
+        Tab backgroundTab = mock(Tab.class);
+        NavigationHandle navigation = mock(NavigationHandle.class);
+        assertPipVisibilityAfterCallback(
+                View.VISIBLE,
+                observer ->
+                        observer.onDidFinishNavigationInPrimaryMainFrame(
+                                backgroundTab, navigation));
+    }
+
+    @Test
+    @MediumTest
+    @Restriction(DeviceFormFactor.PHONE)
+    public void testActiveTabLoadHidesPipControl() {
+        assertPipVisibilityAfterCallback(
+                View.GONE,
+                observer -> {
+                    Tab activeTab = mActivityTestRule.getActivityTab();
+                    observer.onPageLoadStarted(activeTab, activeTab.getUrl());
+                });
+    }
+
+    private void assertPipVisibilityAfterCallback(
+            int expectedVisibility, Consumer<TabObserver> callback) {
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    BraveToolbarLayoutImpl toolbar =
+                            mActivityTestRule.getActivity().findViewById(R.id.toolbar);
+                    assertNotNull("The initialized activity must have a Brave toolbar.", toolbar);
+                    View pipControl = toolbar.findViewById(R.id.brave_youtube_pip_layout);
+                    assertNotNull("The phone toolbar must have its PiP control.", pipControl);
+                    TabObserver observer;
+                    try {
+                        Field observerField =
+                                BraveToolbarLayoutImpl.class.getDeclaredField(
+                                        "mTabModelSelectorTabObserver");
+                        observerField.setAccessible(true);
+                        observer = (TabObserver) observerField.get(toolbar);
+                    } catch (ReflectiveOperationException e) {
+                        throw new AssertionError("Unable to read the installed tab observer.", e);
+                    }
+                    assertNotNull("The initialized toolbar must observe its tabs.", observer);
+                    pipControl.setVisibility(View.VISIBLE);
+                    assertEquals(View.VISIBLE, pipControl.getVisibility());
+                    callback.accept(observer);
+                    assertEquals(expectedVisibility, pipControl.getVisibility());
+                });
     }
 
     private void useGoogleAsDefaultSearchEngine() throws TimeoutException {

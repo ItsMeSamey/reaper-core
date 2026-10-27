@@ -1,0 +1,246 @@
+diff --git a/extensions/browser/crx_installer.cc b/extensions/browser/crx_installer.cc
+index f683c189470a2a9234398cdbde0833800877e764..90a46865a73824edd9583b5006fa581def8545bd 100644
+--- a/extensions/browser/crx_installer.cc
++++ b/extensions/browser/crx_installer.cc
+@@ -13,8 +13,10 @@
+ #include "base/files/scoped_temp_dir.h"
+ #include "base/functional/bind.h"
+ #include "base/lazy_instance.h"
++#if !BUILDFLAG(IS_ANDROID)
+ #include "base/metrics/histogram_functions.h"
+ #include "base/metrics/histogram_macros.h"
++#endif
+ #include "base/strings/string_util.h"
+ #include "base/strings/utf_string_conversions.h"
+ #include "base/task/sequenced_task_runner.h"
+@@ -48,7 +50,9 @@
+ #include "extensions/browser/extensions_browser_client.h"
+ #include "extensions/browser/forced_extensions/install_stage_tracker.h"
+ #include "extensions/browser/install/crx_install_error.h"
++#if !BUILDFLAG(IS_ANDROID)
+ #include "extensions/browser/install/sandboxed_unpacker_failure_reason.h"
++#endif
+ #include "extensions/browser/install_approval.h"
+ #include "extensions/browser/install_flag.h"
+ #include "extensions/browser/install_stage.h"
+@@ -494,6 +498,12 @@
+ void CrxInstaller::GetContentVerifierKeyOnUI(
+     base::OnceCallback<void(ContentVerifierKey)> callback) {
+   DCHECK_CURRENTLY_ON(BrowserThread::UI);
++
++#if BUILDFLAG(IS_ANDROID)
++  if (!browser_context_) {
++    return;
++  }
++#endif
+ 
+   ContentVerifierKey key = ExtensionSystem::Get(browser_context_)
+                                ->content_verifier()
+@@ -731,8 +741,10 @@
+           l10n_util::GetStringFUTF16(IDS_EXTENSION_IS_BLOCKLISTED,
+                                      ui_util::GetFixupExtensionNameForUIDisplay(
+                                          extension()->name()))));
++#if !BUILDFLAG(IS_ANDROID)
+       UMA_HISTOGRAM_ENUMERATION("ExtensionBlacklist.BlockCRX",
+                                 extension()->location());
++#endif
+       return;
+     }
+   }
+@@ -802,6 +814,17 @@
+   current_version_ = base::Version(ExtensionPrefs::Get(browser_context_)
+                                        ->GetVersionString(extension()->id()));
+ 
++#if BUILDFLAG(IS_ANDROID)
++  // A downloaded CRX without completed approval still requires a user prompt.
++  // Missing Android UI must not select the null-client silent install path.
++  if (was_triggered_by_user_download_ && !client_ && !approved_) {
++    ReportFailureFromUIThread(
++        CrxInstallError(CrxInstallErrorType::OTHER,
++                        CrxInstallErrorDetail::USER_ABORTED));
++    return;
++  }
++
++#endif
+   if (client_ && (!allow_silent_install_ || !approved_) &&
+       !update_from_settings_page_) {
+     AddRef();  // Balanced in OnInstallPromptDone().
+@@ -825,6 +848,18 @@
+     case ExtensionInstallPromptClient::Result::ACCEPTED:
+     case ExtensionInstallPromptClient::Result::
+         ACCEPTED_WITH_WITHHELD_PERMISSIONS:
++#if BUILDFLAG(IS_ANDROID)
++      // Settings updates finish installing before the re-enable prompt. A
++      // later signed update can replace its extension while that prompt stays
++      // open. Treat consent for the old instance like cancellation, without
++      // granting or enabling the replacement, and release the prompt reference.
++      if (update_from_settings_page_ &&
++          (!browser_context_ ||
++           ExtensionRegistry::Get(browser_context_)
++                   ->GetInstalledExtension(extension()->id()) != extension())) {
++        break;
++      }
++#endif
+       if (!browser_context_) {
+         return;
+       }
+@@ -867,6 +902,17 @@
+                                                     const int initial_flags) {
+   DCHECK(extension);
+ 
++#if BUILDFLAG(IS_ANDROID)
++  DCHECK_CURRENTLY_ON(BrowserThread::UI);
++  if (is_update_ && installed_update_id_.empty()) {
++    // Both updater paths reach this before NotifyCrxInstallBegin() or any
++    // asynchronous unpack work. Pending new installs do not enter this branch.
++    installed_update_id_ = extension->id();
++    installed_update_observation_.Observe(
++        ExtensionRegistry::Get(browser_context_));
++  }
++#endif
++
+   creation_flags_ = initial_flags;
+ 
+   // If the extension was installed from or has migrated to the webstore, or
+@@ -891,6 +937,11 @@
+ 
+ void CrxInstaller::UpdateCreationFlagsAndCompleteInstall(
+     WithholdingBehavior withholding_behavior) {
++#if BUILDFLAG(IS_ANDROID)
++  if (AbortIfInstalledUpdateWasUninstalled()) {
++    return;
++  }
++#endif
+   creation_flags_ = extension()->creation_flags() | Extension::REQUIRE_KEY;
+   // If the extension was already installed and had file access, also grant file
+   // access to the updated extension.
+@@ -1012,10 +1063,12 @@
+ void CrxInstaller::ReportSuccessFromSharedFileThread() {
+   DCHECK(shared_file_task_runner_->RunsTasksInCurrentSequence());
+ 
++#if !BUILDFLAG(IS_ANDROID)
+   // Tracking number of extensions installed by users
+   if (was_triggered_by_user_download()) {
+     UMA_HISTOGRAM_ENUMERATION("Extensions.ExtensionInstalled", 1, 2);
+   }
++#endif
+ 
+   if (!content::GetUIThreadTaskRunner({})->PostTask(
+           FROM_HERE,
+@@ -1033,6 +1086,16 @@
+   if (!browser_context_) {
+     return;
+   }
++
++#if BUILDFLAG(IS_ANDROID)
++  // File work can finish after uninstall. Do not grant permissions or restore
++  // preferences/registry state for the retired install. Its final version path
++  // may now belong to a same-ID reinstall, so only clean installer-owned temp
++  // files here; ordinary extension garbage collection handles orphaned assets.
++  if (AbortIfInstalledUpdateWasUninstalled()) {
++    return;
++  }
++#endif
+ 
+   extension()->permissions_data()->BindToCurrentThread();
+ 
+@@ -1054,11 +1117,13 @@
+     }
+   }
+ 
++#if !BUILDFLAG(IS_ANDROID)
+   if (!util::AnyCurrentlyInstalledExtensionIsFromWebstore(browser_context()) &&
+       was_triggered_by_user_download()) {
+     base::UmaHistogramBoolean("Extensions.ExtensionInstalled.NewFromWebstore",
+                               true);
+   }
++#endif
+ 
+   registrar_->OnExtensionInstalled(extension(), page_ordinal_, install_flags_,
+                                    std::move(ruleset_install_prefs_));
+@@ -1132,6 +1197,7 @@
+                                                extension()->GetType());
+   }
+ 
++#if !BUILDFLAG(IS_ANDROID)
+   if (is_update_) {
+     if (success) {
+       base::UmaHistogramBoolean("Extensions.SandboxUnpackSuccessForUpdates",
+@@ -1142,6 +1208,7 @@
+                                 false);
+     }
+   }
++#endif
+ 
+   if (!success && (!expected_id_.empty() || extension())) {
+     switch (error->type()) {
+@@ -1154,12 +1221,14 @@
+       case CrxInstallErrorType::SANDBOXED_UNPACKER_FAILURE: {
+         install_stage_tracker->ReportSandboxedUnpackerFailureReason(
+             extension_id, error.value());
++#if !BUILDFLAG(IS_ANDROID)
+         if (is_update_) {
+           base::UmaHistogramEnumeration(
+               "Extensions.SandboxUnpackFailureReasonForUpdates",
+               error->sandbox_failure_detail(),
+               SandboxedUnpackerFailureReason::NUM_FAILURE_REASONS);
+         }
++#endif
+         break;
+       }
+       case CrxInstallErrorType::OTHER:
+@@ -1278,6 +1347,9 @@
+ 
+ void CrxInstaller::RunInstallerCallbacks(
+     const std::optional<CrxInstallError>& error) {
++#if BUILDFLAG(IS_ANDROID)
++  installed_update_observation_.Reset();
++#endif
+   for (InstallerResultCallback& callback : installer_callbacks_) {
+     if (!content::GetUIThreadTaskRunner({})->PostTask(
+             FROM_HERE, base::BindOnce(std::move(callback), error))) {
+@@ -1292,7 +1364,44 @@
+   expectations_verified_callback_ = std::move(callback);
+ }
+ 
++#if BUILDFLAG(IS_ANDROID)
++void CrxInstaller::OnExtensionUninstalled(
++    content::BrowserContext* browser_context,
++    const Extension* extension,
++    UninstallReason reason) {
++  DCHECK_CURRENTLY_ON(BrowserThread::UI);
++  if (extension->id() == installed_update_id_) {
++    installed_update_was_uninstalled_ = true;
++  }
++}
++
++void CrxInstaller::OnShutdown(ExtensionRegistry* registry) {
++  DCHECK_CURRENTLY_ON(BrowserThread::UI);
++  installed_update_was_uninstalled_ = true;
++  installed_update_observation_.Reset();
++}
++
++bool CrxInstaller::AbortIfInstalledUpdateWasUninstalled() {
++  DCHECK_CURRENTLY_ON(BrowserThread::UI);
++  if (installed_update_id_.empty()) {
++    return false;
++  }
++  if (!installed_update_was_uninstalled_ &&
++      ExtensionRegistry::Get(browser_context_)
++          ->GetInstalledExtension(installed_update_id_)) {
++    return false;
++  }
++  ReportFailureFromUIThread(
++      CrxInstallError(CrxInstallErrorType::OTHER,
++                      CrxInstallErrorDetail::UPDATE_NON_EXISTING_EXTENSION));
++  return true;
++}
++#endif
++
+ void CrxInstaller::Shutdown() {
++#if BUILDFLAG(IS_ANDROID)
++  installed_update_observation_.Reset();
++#endif
+   profile_keep_alive_.reset();
+   browser_context_ = nullptr;
+   // The registrar will be deleted shortly.

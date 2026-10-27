@@ -1,0 +1,196 @@
+diff --git a/chrome/browser/download/internal/android/java/src/org/chromium/chrome/browser/download/home/list/DateOrderedListMediator.java b/chrome/browser/download/internal/android/java/src/org/chromium/chrome/browser/download/home/list/DateOrderedListMediator.java
+index e2ee66a079b0c0dc5b7d66265085902373be6a3d..d5f9ccb78c2376e1bc704c349f5eb310e2f51bc8 100644
+--- a/chrome/browser/download/internal/android/java/src/org/chromium/chrome/browser/download/home/list/DateOrderedListMediator.java
++++ b/chrome/browser/download/internal/android/java/src/org/chromium/chrome/browser/download/home/list/DateOrderedListMediator.java
+@@ -38,6 +38,7 @@ import org.chromium.chrome.browser.download.home.filter.TypeOfflineItemFilter;
+ import org.chromium.chrome.browser.download.home.glue.ThumbnailRequestGlue;
+ import org.chromium.chrome.browser.download.home.list.DateOrderedListCoordinator.DateOrderedListObserver;
+ import org.chromium.chrome.browser.download.home.list.DateOrderedListCoordinator.DeleteController;
++import org.chromium.chrome.browser.download.home.list.ListItem.OfflineItemListItem;
+ import org.chromium.chrome.browser.download.home.list.mutator.DateOrderedListMutator;
+ import org.chromium.chrome.browser.download.home.list.mutator.ListMutationController;
+ import org.chromium.chrome.browser.download.home.metrics.UmaUtils;
+@@ -48,6 +49,7 @@ import org.chromium.chrome.browser.thumbnail.generator.ThumbnailProviderImpl;
+ import org.chromium.components.browser_ui.util.DownloadUtils;
+ import org.chromium.components.browser_ui.widget.gesture.BackPressHandler;
+ import org.chromium.components.browser_ui.widget.selectable_list.SelectionDelegate;
++import org.chromium.components.offline_items_collection.ContentId;
+ import org.chromium.components.offline_items_collection.LaunchLocation;
+ import org.chromium.components.offline_items_collection.OfflineContentProvider;
+ import org.chromium.components.offline_items_collection.OfflineItem;
+@@ -59,8 +61,11 @@ import java.io.Closeable;
+ import java.util.ArrayList;
+ import java.util.Collection;
+ import java.util.Collections;
++import java.util.HashSet;
+ import java.util.List;
++import java.util.Objects;
+ import java.util.Set;
++import java.util.function.Predicate;
+ 
+ /**
+  * A Mediator responsible for converting an OfflineContentProvider to a list of items in downloads
+@@ -117,6 +122,22 @@ class DateOrderedListMediator implements BackPressHandler {
+     }
+ 
+     private final Handler mHandler = new Handler();
++    private final Runnable mResolveReveal = this::resolveRevealItem;
++    private @Nullable RevealRequest mRevealRequest;
++    private boolean mDestroyed;
++
++    private static class RevealRequest {
++        final ContentId id = new ContentId();
++        final Callback<Boolean> callback;
++        final Predicate<ContentId> scrollToItem;
++
++        RevealRequest(ContentId id, Callback<Boolean> callback, Predicate<ContentId> scrollToItem) {
++            this.id.namespace = id.namespace;
++            this.id.id = id.id;
++            this.callback = callback;
++            this.scrollToItem = scrollToItem;
++        }
++    }
+ 
+     private final OfflineContentProvider mProvider;
+     private final FaviconProvider mFaviconProvider;
+@@ -279,16 +300,140 @@ class DateOrderedListMediator implements BackPressHandler {
+                         ListProperties.CALLBACK_GROUP_PAGINATION_CLICK,
+                         mListMutationController::loadMoreItemsOnCard);
+ 
++        mTypeFilter.addObserver(
++                new OfflineItemFilterObserver() {
++                    @Override
++                    public void onItemsAvailable() {
++                        scheduleReveal();
++                    }
++
++                    @Override
++                    public void onItemsAdded(Collection<OfflineItem> items) {
++                        scheduleReveal();
++                    }
++
++                    @Override
++                    public void onItemsRemoved(Collection<OfflineItem> items) {
++                        scheduleReveal();
++                    }
++
++                    @Override
++                    public void onItemUpdated(OfflineItem oldItem, OfflineItem item) {
++                        scheduleReveal();
++                    }
++                });
+         mBackPressStateSupplier.set(mSelectionDelegate.isSelectionEnabled());
+     }
+ 
+     /** Tears down this mediator. */
+     public void destroy() {
++        if (mDestroyed) return;
++        mDestroyed = true;
++        cancelRevealItem();
+         mSource.destroy();
+         mFaviconProvider.destroy();
+         mThumbnailProvider.destroy();
+     }
+ 
++    /** Resolves a reveal request through the existing filters and pagination pipeline. */
++    public void revealItem(
++            ContentId id, Callback<Boolean> callback, Predicate<ContentId> scrollToItem) {
++        if (mDestroyed) {
++            callback.onResult(false);
++            return;
++        }
++        RevealRequest request = new RevealRequest(id, callback, scrollToItem);
++        RevealRequest previous = mRevealRequest;
++        mRevealRequest = request;
++        if (previous != null) previous.callback.onResult(false);
++        // A completion callback may have replaced or canceled this request.
++        if (mRevealRequest == request) scheduleReveal();
++    }
++
++    /** Completes a pending reveal request false, including during teardown. */
++    public void cancelRevealItem() {
++        RevealRequest request = mRevealRequest;
++        if (request != null) completeReveal(request, false);
++    }
++
++    private void scheduleReveal() {
++        if (mDestroyed || mRevealRequest == null) return;
++        mHandler.removeCallbacks(mResolveReveal);
++        // OfflineItemSource notifies availability before adding the initial snapshot's items.
++        // Resolve after that stack unwinds, including when the initial snapshot is empty.
++        mHandler.post(mResolveReveal);
++    }
++
++    private void resolveRevealItem() {
++        RevealRequest request = mRevealRequest;
++        if (mDestroyed || request == null || !mSource.areItemsAvailable()) return;
++
++        boolean eligible = false;
++        for (OfflineItem item : mTypeFilter.getItems()) {
++            if (Objects.equals(request.id, item.id)) {
++                eligible = true;
++                break;
++            }
++        }
++        if (!eligible) {
++            completeReveal(request, false);
++            return;
++        }
++
++        // Reapply a paginator reset even when selecting the already-active filter emitted no
++        // item changes. Otherwise an older expanded model can make page growth look stalled.
++        mListMutator.reload();
++        if (mRevealRequest != request || mDestroyed) return;
++        OfflineItemListItem item = findRevealItem(request.id);
++        int remainingPages = mTypeFilter.getItems().size();
++        while (item == null && remainingPages-- > 0) {
++            int previousCount = countOfflineItems();
++            mListMutationController.loadMorePages();
++            if (mRevealRequest != request || mDestroyed) return;
++            item = findRevealItem(request.id);
++            if (item == null && countOfflineItems() <= previousCount) break;
++        }
++        if (item == null) {
++            completeReveal(request, false);
++            return;
++        }
++
++        // SelectionDelegate keeps and later mutates this set (for example on Back).
++        Set<ListItem> selectedItems = new HashSet<>();
++        selectedItems.add(item);
++        mSelectionDelegate.setSelectedItems(selectedItems);
++        if (mRevealRequest != request || mDestroyed) return;
++        completeReveal(
++                request,
++                mSelectionDelegate.isItemSelected(item) && request.scrollToItem.test(request.id));
++    }
++
++    private @Nullable OfflineItemListItem findRevealItem(ContentId id) {
++        for (int i = 0; i < mModel.size(); i++) {
++            ListItem item = mModel.get(i);
++            if (item instanceof OfflineItemListItem
++                    && Objects.equals(((OfflineItemListItem) item).item.id, id)) {
++                return (OfflineItemListItem) item;
++            }
++        }
++        return null;
++    }
++
++    private int countOfflineItems() {
++        int count = 0;
++        for (int i = 0; i < mModel.size(); i++) {
++            if (mModel.get(i) instanceof OfflineItemListItem) count++;
++        }
++        return count;
++    }
++
++    private void completeReveal(RevealRequest request, boolean result) {
++        if (mRevealRequest != request) return;
++        mRevealRequest = null;
++        mHandler.removeCallbacks(mResolveReveal);
++        request.callback.onResult(result);
++    }
++
+     /**
+      * To be called when this mediator should filter its content based on {@code filter}.
+      * @see TypeOfflineItemFilter#onFilterSelected(int)

@@ -13,7 +13,9 @@ namespace prefs {
 // BraveVPN is connected, otherwise this pref is empty. Final decision
 // about whether or not to override actual DNS state will be made in
 // stub_resolver_config_reader.
+#if !BUILDFLAG(IS_ANDROID)
 inline constexpr char kBraveVpnDnsConfig[] = "brave.brave_vpn.dns_config";
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 #if defined(TOOLKIT_VIEWS)
 // Whether to show the share menu on the location bar.

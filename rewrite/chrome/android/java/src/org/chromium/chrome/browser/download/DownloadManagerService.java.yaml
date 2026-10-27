@@ -1,0 +1,115 @@
+# Android download UI policy and truthful transfer lifecycle.
+substitutions:
+- description: Use a live Android Activity for collection presentation.
+  regex:
+    pattern: import android.app.DownloadManager;
+    replace: 'import android.app.Activity;
+
+      import android.app.DownloadManager;'
+- description: Reuse the tab profile and native Android window.
+  regex:
+    pattern: import org.chromium.chrome.browser.profiles.ProfileManager;
+    replace: 'import org.chromium.chrome.browser.profiles.ProfileManager;
+
+      import org.chromium.chrome.browser.tab.Tab;'
+- description: Validate the actual window before opening.
+  regex:
+    pattern: import org.chromium.ui.base.MimeTypeUtils;
+    replace: 'import org.chromium.ui.base.MimeTypeUtils;
+
+      import org.chromium.ui.base.WindowAndroid;'
+- description: Provide an error-reporting extension entry point with no profile fallback.
+  regex:
+    pattern: "    // Deprecated after new download backend.\n    @Override\n    public void resumeDownload"
+    replace: "    /** Opens Android's downloads collection in the actual extension window's profile. */\n    @CalledByNative\n    static boolean showDownloadsForExtension(@Nullable Tab tab) {\n        ThreadUtils.assertOnUiThread();\n        if (tab == null || tab.isDestroyed() || tab.isClosing()) return false;\n        WindowAndroid window = tab.getWindowAndroid();\n        Activity activity = window == null ? null : window.getActivity().get();\n        if (activity == null || activity.isFinishing() || activity.isDestroyed()) return false;\n        Profile profile = tab.getProfile();\n        if (profile.shutdownStarted()) return false;\n        try {\n            // Pass the real tab so regular-profile calls cannot inherit an unrelated\n            // last-focused incognito tab. Keep the normal download UI and permissions.\n            return DownloadUtils.showDownloadManager(\n                    activity, tab, profile.getOtrProfileId(), DownloadOpenSource.UNKNOWN);\n        } catch (ActivityNotFoundException | SecurityException exception) {\n            Log.e(TAG, \"Cannot open extension downloads collection\", exception);\n            return false;\n        }\n    }\n\n    // Deprecated after new download backend.\n    @Override\n    public void resumeDownload"
+- description: Resolve current optional UI policy without recreating a destroyed incognito profile
+  regex:
+    re_pattern: \ \ \ \ public\ static\ boolean\ hasDownloadManagerService\(\)\ \{
+    replace: "    /** Policy changes do not start a download service or create a UI controller. */\n    static void onDownloadUiPolicyChanged() {\n        ThreadUtils.assertOnUiThread();\n        DownloadManagerService service = sDownloadManagerService;\n        if (service == null || service.mMessageUiController == null) return;\n        service.mMessageUiController.onDownloadUiPolicyChanged();\n    }\n\n    /** Match the original-profile aggregator and the item's exact existing OTR profile. */\n    public static boolean shouldSuppressDownloadUi(@Nullable String serializedOtrProfileId) {\n        ThreadUtils.assertOnUiThread();\n        // Extension policy exists only after full profile initialization. Reduced-mode\n        // background downloads must keep their normal notification lifecycle.\n        if (!ProfileManager.isInitialized()) return false;\n        Profile profile = ProfileManager.getLastUsedRegularProfile();\n        if (!profile.isNativeInitialized()) return true;\n        if (serializedOtrProfileId != null) {\n            OtrProfileId otrProfileId =\n                    OtrProfileId.deserializeWithoutVerify(serializedOtrProfileId);\n            if (otrProfileId == null) return true;\n            Profile otrProfile = profile.getOffTheRecordProfile(otrProfileId, false);\n            if (otrProfile == null) return true;\n            profile = otrProfile;\n        }\n        return !profile.isNativeInitialized()\n                || DownloadManagerServiceJni.get().shouldSuppressDownloadUi(profile);\n    }\n\n    public static boolean hasDownloadManagerService() {"
+- description: Associate early download-start messages with their actual regular or OTR profile
+  regex:
+    re_pattern: \ \ \ \ \ \ \ \ if\ \(messageUiController\ !=\ null\)\ messageUiController\.onDownloadStarted\(\);
+    replace: "        if (messageUiController != null) {\n            messageUiController.onDownloadStarted(\n                    assumeNonNull(downloadItem.getDownloadInfo()).getOtrProfileId());\n        }"
+- description: Use the existing download JNI target for per-profile message policy
+  regex:
+    re_pattern: '\ \ \ \ interface\ Natives\ \{\
+
+      \ \ \ \ \ \ \ \ boolean\ isSupportedMimeType'
+    replace: "    interface Natives {\n        boolean shouldSuppressDownloadUi(@JniType(\"Profile*\") Profile profile);\n\n        boolean isSupportedMimeType"
+- description: Android Downloads exact-item reveal integration (1).
+  regex:
+    re_pattern: 'import\ org\.jni_zero\.JniType;\
+
+      import\ org\.jni_zero\.NativeMethods;\
+
+      \
+
+      import\ org\.chromium\.base\.Callback;\
+
+      import\ org\.chromium\.base\.ContentUriUtils;\
+
+      import\ org\.chromium\.base\.ContextUtils;\
+
+      '
+    replace: 'import org.jni_zero.JniType;
+
+      import org.jni_zero.NativeMethods;
+
+
+      import org.chromium.base.ActivityState;
+
+      import org.chromium.base.ApplicationStatus;
+
+      import org.chromium.base.Callback;
+
+      import org.chromium.base.ContentUriUtils;
+
+      import org.chromium.base.ContextUtils;
+
+      '
+- description: Android Downloads exact-item reveal integration (2).
+  regex:
+    re_pattern: 'import\ org\.chromium\.chrome\.browser\.pdf\.PdfUtils;\
+
+      import\ org\.chromium\.chrome\.browser\.preferences\.Pref;\
+
+      import\ org\.chromium\.chrome\.browser\.profiles\.OtrProfileId;\
+
+      import\ org\.chromium\.chrome\.browser\.profiles\.Profile;\
+
+      import\ org\.chromium\.chrome\.browser\.profiles\.ProfileKey;\
+
+      import\ org\.chromium\.chrome\.browser\.profiles\.ProfileManager;\
+
+      '
+    replace: 'import org.chromium.chrome.browser.pdf.PdfUtils;
+
+      import org.chromium.chrome.browser.preferences.Pref;
+
+      import org.chromium.chrome.browser.profiles.OtrProfileId;
+
+      import org.chromium.chrome.browser.app.download.home.DownloadActivityLauncher;
+
+      import org.chromium.chrome.browser.profiles.Profile;
+
+      import org.chromium.chrome.browser.profiles.ProfileKey;
+
+      import org.chromium.chrome.browser.profiles.ProfileManager;
+
+      '
+- description: Android Downloads exact-item reveal integration (3).
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \}\ catch\ \(ActivityNotFoundException\ e\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ Log\.e\(TAG,\ "Cannot\ find\ Downloads\ app",\ e\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ /\*\*\ Opens\ Android''s\ downloads\ collection\ in\ the\ actual\ extension\ window''s\ profile\.\ \*/\
+
+      '
+    replace: "        } catch (ActivityNotFoundException e) {\n            Log.e(TAG, \"Cannot find Downloads app\", e);\n        }\n    }\n\n    /** Checks an explicit foreground host without creating a request or an OTR profile. */\n    @CalledByNative\n    static boolean canShowDownloadItemForExtension(\n            @Nullable Tab tab, @Nullable Profile itemProfile) {\n        ThreadUtils.assertOnUiThread();\n        return getDownloadItemRevealHost(tab, itemProfile) != null;\n    }\n\n    private static @Nullable Activity getDownloadItemRevealHost(\n            @Nullable Tab tab, @Nullable Profile itemProfile) {\n        if (tab == null || !tab.isInitialized() || tab.isDestroyed() || tab.isClosing()\n                || tab.isHidden() || itemProfile == null || !itemProfile.isNativeInitialized()\n                || itemProfile.shutdownStarted()) {\n            return null;\n        }\n        Profile tabProfile = tab.getProfile();\n        if (!tabProfile.isNativeInitialized() || tabProfile.shutdownStarted()) return null;\n        Profile original = itemProfile.getOriginalProfile();\n        if (!original.isNativeInitialized() || original.shutdownStarted()\n                || tabProfile.getOriginalProfile() != original) {\n            return null;\n        }\n        if (itemProfile.isOffTheRecord()\n                && (!itemProfile.isPrimaryOtrProfile()\n                        || original.getOffTheRecordProfile(\n                                        assumeNonNull(itemProfile.getOtrProfileId()), false)\n                                != itemProfile)) {\n            return null;\n        }\n        WindowAndroid window = tab.getWindowAndroid();\n        Activity host = window == null ? null : window.getActivity().get();\n        if (host == null || host.isFinishing() || host.isDestroyed()\n                || ApplicationStatus.getStateForActivity(host) != ActivityState.RESUMED) {\n            return null;\n        }\n        return host;\n    }\n\n    /** Reveal the exact native-authorized item; acknowledgment comes from the Downloads list. */\n    @CalledByNative\n    static long showDownloadItemForExtension(\n            @Nullable Tab tab,\n            @Nullable Profile itemProfile,\n            @JniType(\"std::string\") String itemNamespace,\n            @JniType(\"std::string\") String guid,\n            @JniType(\"base::OnceCallback<void(bool)>&&\") Callback<Boolean> completion) {\n        ThreadUtils.assertOnUiThread();\n        Activity host = getDownloadItemRevealHost(tab, itemProfile);\n        if (host == null || itemNamespace.isEmpty() || guid.isEmpty()) {\n            completion.onResult(false);\n            return 0;\n        }\n        return DownloadActivityLauncher.getInstance().showDownloadItem(\n                host, assumeNonNull(itemProfile), new ContentId(itemNamespace, guid), completion);\n    }\n\n    @CalledByNative\n    static void cancelDownloadItemForExtension(long token) {\n        ThreadUtils.assertOnUiThread();\n        if (token != 0) DownloadActivityLauncher.getInstance().cancelDownloadItem(token);\n    }\n\n    /** Opens Android's downloads collection in the actual extension window's profile. */\n"

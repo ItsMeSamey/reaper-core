@@ -6,6 +6,8 @@
 #ifndef BRAVE_COMPONENTS_BRAVE_SHIELDS_CONTENT_BROWSER_AD_BLOCK_SUBSCRIPTION_SERVICE_MANAGER_H_
 #define BRAVE_COMPONENTS_BRAVE_SHIELDS_CONTENT_BROWSER_AD_BLOCK_SUBSCRIPTION_SERVICE_MANAGER_H_
 
+#include "build/build_config.h"
+
 #include <map>
 #include <memory>
 #include <optional>
@@ -21,7 +23,9 @@
 #include "base/values.h"
 #include "brave/components/brave_shields/content/browser/ad_block_subscription_download_manager.h"
 #include "brave/components/brave_shields/core/browser/ad_block_filters_provider_manager.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_shields/core/browser/ad_block_list_p3a.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_shields/core/common/adblock/rs/src/lib.rs.h"
 #include "components/component_updater/timer_update_scheduler.h"
 #include "components/prefs/pref_service.h"
@@ -35,6 +39,8 @@ class JSONValueConverter;
 }
 
 namespace brave_shields {
+
+class AdBlockListP3A;
 class AdBlockSubscriptionServiceManagerObserver;
 class AdBlockSubscriptionFiltersProvider;
 }  // namespace brave_shields
@@ -154,7 +160,9 @@ class AdBlockSubscriptionServiceManager {
   std::unique_ptr<component_updater::TimerUpdateScheduler>
       subscription_update_timer_ GUARDED_BY_CONTEXT(sequence_checker_);
 
+#if !BUILDFLAG(IS_ANDROID)
   raw_ptr<AdBlockListP3A> list_p3a_;
+#endif  // !BUILDFLAG(IS_ANDROID)
 
   base::ObserverList<AdBlockSubscriptionServiceManagerObserver> observers_
       GUARDED_BY_CONTEXT(sequence_checker_);

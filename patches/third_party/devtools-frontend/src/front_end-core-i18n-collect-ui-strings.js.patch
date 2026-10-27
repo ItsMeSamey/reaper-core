@@ -1,0 +1,81 @@
+diff --git a/front_end/core/i18n/collect-ui-strings.js b/front_end/core/i18n/collect-ui-strings.js
+index 246541e2ae13305b91d6a2c3068986ed9405a49f..6a12c39eb94539a98dc777fb204d8b0f59e55f4a 100644
+--- a/front_end/core/i18n/collect-ui-strings.js
++++ b/front_end/core/i18n/collect-ui-strings.js
+@@ -2,7 +2,7 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
+-import {globSync} from 'node:fs';
++import {globSync, readFileSync} from 'node:fs';
+ import * as path from 'node:path';
+ import yargs from 'yargs';
+ import {hideBin} from 'yargs/helpers';
+@@ -25,6 +25,18 @@
+                         .option('output-directory', {
+                           type: 'string',
+                           demandOption: true,
++                        })
++                        .option('source-files', {
++                          type: 'string',
++                        })
++                        .option('processed-sources-file', {
++                          type: 'string',
++                        })
++                        .option('root-gen-dir', {
++                          type: 'string',
++                        })
++                        .option('source-root', {
++                          type: 'string',
+                         })
+                         .option('include-en-xl', {
+                           type: 'boolean',
+@@ -58,14 +70,37 @@
+   throw new Error('Provide at least one directory!');
+ }
+ 
++const sourceFilesPath = yargsObject['source-files'];
++const processedSourcesPath = yargsObject['processed-sources-file'];
++const rootGenDir = yargsObject['root-gen-dir'];
++const sourceRoot = yargsObject['source-root'];
++if (Boolean(sourceFilesPath) !== Boolean(processedSourcesPath) || Boolean(sourceFilesPath) !== Boolean(rootGenDir) ||
++    Boolean(sourceFilesPath) !== Boolean(sourceRoot)) {
++  throw new Error('Source collection requires both GN source lists, root-gen-dir, and source-root.');
++}
++const includedFiles = sourceFilesPath ? new Set(
++    JSON.parse(readFileSync(sourceFilesPath, 'utf8')).map(file => path.resolve(file))) : undefined;
++const processedFiles = processedSourcesPath ?
++    JSON.parse(readFileSync(processedSourcesPath, 'utf8')).map(file => path.resolve(rootGenDir, file)) : [];
++
+ /** @type {Record<string, CtcMessage>} */
+ let collectedStrings = {};
+ /** @type {string[]} */
+ const files = [];
+ for (const directory of inputDirectories) {
++  const sourceOverrides = new Map();
++  if (rootGenDir) {
++    const generatedDirectory = path.resolve(rootGenDir, path.relative(path.resolve(sourceRoot), path.resolve(directory)));
++    for (const processedFile of processedFiles) {
++      const relative = path.relative(generatedDirectory, processedFile);
++      if (!relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)) {
++        sourceOverrides.set(path.resolve(directory, relative), processedFile);
++      }
++    }
++  }
+   collectedStrings = {
+     ...collectedStrings,
+-    ...collectAllStringsInDir(directory),
++    ...collectAllStringsInDir(directory, {includedFiles, sourceOverrides}),
+   };
+ 
+   const fs = globSync('**/*.{js,ts,gn}', {
+@@ -73,6 +108,9 @@
+     exclude: IGNORED_PATH_COMPONENTS,
+   });
+   files.push(...fs.map(f => path.join(directory, f)));
++}
++if (sourceFilesPath) {
++  files.push(sourceFilesPath, processedSourcesPath, ...processedFiles);
+ }
+ 
+ const outputDirectory = yargsObject['output-directory'];

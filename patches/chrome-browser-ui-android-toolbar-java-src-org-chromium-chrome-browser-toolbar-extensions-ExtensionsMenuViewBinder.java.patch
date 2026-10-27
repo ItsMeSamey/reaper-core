@@ -1,0 +1,148 @@
+diff --git a/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/extensions/ExtensionsMenuViewBinder.java b/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/extensions/ExtensionsMenuViewBinder.java
+index db202fbac66fd6af9230ffea2cdec4c9dbe8ef7c..75d3cd43400967a7d263b8e568453ca2d18efba9 100644
+--- a/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/extensions/ExtensionsMenuViewBinder.java
++++ b/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/extensions/ExtensionsMenuViewBinder.java
+@@ -25,7 +25,9 @@ import org.chromium.chrome.browser.ui.extensions.ExtensionsMenuTypes.OptionalSec
+ import org.chromium.ui.modelutil.PropertyKey;
+ import org.chromium.ui.modelutil.PropertyModel;
+ 
++import java.util.HashMap;
+ import java.util.List;
++import java.util.Map;
+ 
+ @NullMarked
+ public class ExtensionsMenuViewBinder {
+@@ -107,21 +109,12 @@ public class ExtensionsMenuViewBinder {
+                             model.get(ExtensionsMenuProperties.SITE_SETTINGS_TOGGLE_VISIBLE)
+                                     ? View.VISIBLE
+                                     : View.GONE);
++            updateSiteSettingsToggleClickListener(model, view);
+         } else if (key == ExtensionsMenuProperties.SITE_SETTINGS_TOGGLE_CHECKED) {
+             MaterialSwitch toggle = view.findViewById(R.id.extensions_menu_site_settings_toggle);
+             toggle.setChecked(model.get(ExtensionsMenuProperties.SITE_SETTINGS_TOGGLE_CHECKED));
+         } else if (key == ExtensionsMenuProperties.SITE_SETTINGS_TOGGLE_CLICK_LISTENER) {
+-            View toggleContainer = getSiteSettingsToggleContainer(view);
+-            MaterialSwitch toggle = view.findViewById(R.id.extensions_menu_site_settings_toggle);
+-            OnCheckedChangeListener listener =
+-                    model.get(ExtensionsMenuProperties.SITE_SETTINGS_TOGGLE_CLICK_LISTENER);
+-            toggleContainer.setOnClickListener(
+-                    v -> {
+-                        toggle.toggle();
+-                        if (listener != null) {
+-                            listener.onCheckedChanged(toggle, toggle.isChecked());
+-                        }
+-                    });
++            updateSiteSettingsToggleClickListener(model, view);
+         } else if (key == ExtensionsMenuProperties.OPTIONAL_SECTION_TYPE) {
+             List<ExtensionsMenuTypes.HostAccessRequest> requests =
+                     model.get(ExtensionsMenuProperties.HOST_ACCESS_REQUESTS);
+@@ -134,19 +127,7 @@ public class ExtensionsMenuViewBinder {
+             updateSectionVisibilities(
+                     view, model.get(ExtensionsMenuProperties.OPTIONAL_SECTION_TYPE), requests);
+ 
+-            // Repopulate the list
+-            LinearLayout listContainer = view.findViewById(R.id.extensions_request_access_list);
+-            listContainer.removeAllViews();
+-            if (requests != null) {
+-                LayoutInflater inflater = LayoutInflater.from(listContainer.getContext());
+-                for (ExtensionsMenuTypes.HostAccessRequest request : requests) {
+-                    View itemView =
+-                            inflater.inflate(
+-                                    R.layout.extensions_request_access_item, listContainer, false);
+-                    populateRequestView(itemView, model, request);
+-                    listContainer.addView(itemView);
+-                }
+-            }
++            updateHostAccessRequestViews(view, model, requests);
+         } else if (key == ExtensionsMenuProperties.RELOAD_CLICK_LISTENER) {
+             View reloadButton = view.findViewById(R.id.extensions_menu_reload_button);
+             reloadButton.setOnClickListener(
+@@ -193,6 +174,26 @@ public class ExtensionsMenuViewBinder {
+         }
+     }
+ 
++    private static void updateSiteSettingsToggleClickListener(PropertyModel model, View view) {
++        View toggleContainer = getSiteSettingsToggleContainer(view);
++        boolean visible = model.get(ExtensionsMenuProperties.SITE_SETTINGS_TOGGLE_VISIBLE);
++        MaterialSwitch toggle = view.findViewById(R.id.extensions_menu_site_settings_toggle);
++        OnCheckedChangeListener listener =
++                model.get(ExtensionsMenuProperties.SITE_SETTINGS_TOGGLE_CLICK_LISTENER);
++        toggleContainer.setOnClickListener(
++                visible
++                        ? v -> {
++                            toggle.toggle();
++                            if (listener != null) {
++                                listener.onCheckedChanged(toggle, toggle.isChecked());
++                            }
++                        }
++                        : null);
++        // Keep the information label readable without exposing a hidden toggle as an action.
++        toggleContainer.setClickable(visible);
++        toggleContainer.setFocusable(visible);
++    }
++
+     private static View getSiteSettingsToggleContainer(View view) {
+         return view.findViewById(R.id.extensions_menu_site_settings_toggle_container);
+     }
+@@ -219,6 +220,51 @@ public class ExtensionsMenuViewBinder {
+         }
+     }
+ 
++    private static void updateHostAccessRequestViews(
++            View view, PropertyModel model, List<ExtensionsMenuTypes.HostAccessRequest> requests) {
++        LinearLayout list = view.findViewById(R.id.extensions_request_access_list);
++        Map<String, ExtensionsMenuTypes.HostAccessRequest> requestsById = new HashMap<>();
++        if (requests != null) {
++            for (ExtensionsMenuTypes.HostAccessRequest request : requests) {
++                requestsById.put(request.extensionId, request);
++            }
++        }
++        Map<String, View> rowsById = new HashMap<>();
++        for (int i = list.getChildCount() - 1; i >= 0; --i) {
++            View row = list.getChildAt(i);
++            Object tag = row.getTag(R.id.extensions_request_access_list);
++            if (tag instanceof String id && requestsById.containsKey(id)) {
++                rowsById.put(id, row);
++            } else {
++                // Do not repurpose a removed control for another extension, including a click
++                // already queued on the old View. Let normal focus removal take its course.
++                row.findViewById(R.id.allow_button).setOnClickListener(null);
++                row.findViewById(R.id.dismiss_button).setOnClickListener(null);
++                list.removeViewAt(i);
++            }
++        }
++        if (requests == null) return;
++
++        LayoutInflater inflater = LayoutInflater.from(list.getContext());
++        for (int i = 0; i < requests.size(); ++i) {
++            ExtensionsMenuTypes.HostAccessRequest request = requests.get(i);
++            View row = rowsById.get(request.extensionId);
++            if (row == null) {
++                row = inflater.inflate(R.layout.extensions_request_access_item, list, false);
++                row.setTag(R.id.extensions_request_access_list, request.extensionId);
++            }
++            // Native updates retain the relative order of surviving IDs; additions are inserted
++            // in action order. Remove missing IDs first, then insert new rows without detaching
++            // surviving keyboard/accessibility-focused controls. Only a real reorder moves a row.
++            int oldIndex = list.indexOfChild(row);
++            if (oldIndex != i) {
++                if (oldIndex != -1) list.removeViewAt(oldIndex);
++                list.addView(row, i);
++            }
++            populateRequestView(row, model, request);
++        }
++    }
++
+     private static void populateRequestView(
+             View itemView, PropertyModel model, ExtensionsMenuTypes.HostAccessRequest request) {
+         Context context = itemView.getContext();
+@@ -227,6 +273,9 @@ public class ExtensionsMenuViewBinder {
+         ImageView iconView = itemView.findViewById(R.id.extension_icon);
+         if (request.extensionIcon != null) {
+             iconView.setImageBitmap(request.extensionIcon);
++        } else {
++            // A reused row must clear an icon that is no longer available.
++            iconView.setImageDrawable(null);
+         }
+         TextView nameView = itemView.findViewById(R.id.extension_name);
+         nameView.setText(request.extensionName);

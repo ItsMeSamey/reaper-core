@@ -3,6 +3,8 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at https://mozilla.org/MPL/2.0/.
 
+#include "build/build_config.h"
+
 #include "brave/components/brave_shields/content/browser/ad_block_service.h"
 
 #include <memory>
@@ -172,7 +174,9 @@ AdBlockService::AdBlockService(
           std::move(subscription_download_manager_getter)),
       component_update_service_(cus),
       task_runner_(task_runner),
+#if !BUILDFLAG(IS_ANDROID)
       list_p3a_(local_state),
+#endif  // !BUILDFLAG(IS_ANDROID)
       engine_wrapper_(task_runner_,
                       std::make_unique<AdBlockEngine>(true),
                       std::make_unique<AdBlockEngine>(false)) {
@@ -232,12 +236,20 @@ AdBlockService::AdBlockService(
   component_service_manager_ = std::make_unique<AdBlockComponentServiceManager>(
       local_state_, filters_provider_manager_.get(), locale_,
       component_update_service_, filter_list_catalog_provider_.get(),
+#if BUILDFLAG(IS_ANDROID)
+      nullptr);
+#else
       &list_p3a_);
+#endif  // BUILDFLAG(IS_ANDROID)
   subscription_service_manager_ =
       std::make_unique<AdBlockSubscriptionServiceManager>(
           local_state_, filters_provider_manager_.get(),
           std::move(subscription_download_manager_getter_), profile_dir_,
-          &list_p3a_);
+    #if BUILDFLAG(IS_ANDROID)
+      nullptr);
+#else
+      &list_p3a_);
+#endif  // BUILDFLAG(IS_ANDROID)
   custom_filters_provider_ = std::make_unique<AdBlockCustomFiltersProvider>(
       local_state_, filters_provider_manager_.get());
 

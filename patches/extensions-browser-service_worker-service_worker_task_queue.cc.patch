@@ -1,0 +1,344 @@
+diff --git a/extensions/browser/service_worker/service_worker_task_queue.cc b/extensions/browser/service_worker/service_worker_task_queue.cc
+index 7c5300d5399061913512bfe9e53380a7a8e5bcd0..609ac20fae131d49c8cc4eed74db3731dfcaa8ba 100644
+--- a/extensions/browser/service_worker/service_worker_task_queue.cc
++++ b/extensions/browser/service_worker/service_worker_task_queue.cc
+@@ -13,7 +13,9 @@
+ #include "base/check.h"
+ #include "base/containers/map_util.h"
+ #include "base/functional/bind.h"
++#if !BUILDFLAG(IS_ANDROID)
+ #include "base/metrics/histogram_functions.h"
++#endif
+ #include "base/strings/stringprintf.h"
+ #include "base/strings/utf_string_conversions.h"
+ #include "base/syslog_logging.h"
+@@ -308,6 +310,11 @@
+ 
+   const SequencedContextId context_id(
+       extension->id(), browser_context_->UniqueToken(), *activation_token);
++#if BUILDFLAG(IS_ANDROID)
++  if (failed_registrations_.contains(context_id)) {
++    return false;
++  }
++#endif
+   const ServiceWorkerState* worker_state = GetWorkerState(context_id);
+ 
+   return worker_state && worker_state->IsReady();
+@@ -317,12 +324,14 @@
+     const LazyContextId& lazy_context_id,
+     PendingTask task) {
+   DCHECK(lazy_context_id.IsForServiceWorker());
++#if !BUILDFLAG(IS_ANDROID)
+   base::UmaHistogramBoolean(
+       "Extensions.ServiceWorkerBackground.AddPendingTaskForRunningWorker3",
+       IsReadyToRunTasks(
+           browser_context_,
+           extensions::ExtensionRegistry::Get(browser_context_)
+               ->GetInstalledExtension(lazy_context_id.extension_id())));
++#endif
+ 
+   // TODO(lazyboy): Do we need to handle incognito context?
+ 
+@@ -335,6 +344,12 @@
+       lazy_context_id.extension_id(),
+       lazy_context_id.browser_context()->UniqueToken(), *activation_token};
+ 
++#if BUILDFLAG(IS_ANDROID)
++  if (failed_registrations_.contains(context_id)) {
++    std::move(task).Run(nullptr);
++    return;
++  }
++#endif
+   if (!worker_registered_.contains(context_id)) {
+     // If the worker hasn't finished registration, wait for it to complete. The
+     // worker can't be started until a registration is found for it in the
+@@ -462,7 +477,11 @@
+   // If there were retries attempted, emit metrics about the success.
+   ClearRetryState(
+       context_id.token, worker_start_retries_,
++#if !BUILDFLAG(IS_ANDROID)
+       "Extensions.ServiceWorkerBackground.StartWorkerRetryAttemptsResult",
++#else
++      nullptr,
++#endif
+       /*success=*/true);
+ 
+   // Track the fact that the service worker for this extension has run once.
+@@ -518,18 +537,28 @@
+   // attempted, emit metrics about the ultimate failure.
+   ClearRetryState(
+       context_id.token, worker_start_retries_,
++#if !BUILDFLAG(IS_ANDROID)
+       "Extensions.ServiceWorkerBackground.StartWorkerRetryAttemptsResult",
++#else
++      nullptr,
++#endif
+       /*success=*/false);
+ 
+   if (IsStartWorkerFailureUnexpected(status.status_code)) {
++#if !BUILDFLAG(IS_ANDROID)
+     base::UmaHistogramBoolean(
+         "Extensions.ServiceWorkerBackground.StartWorkerStatus", false);
++#endif
++#if !BUILDFLAG(IS_ANDROID)
+     base::UmaHistogramEnumeration(
+         "Extensions.ServiceWorkerBackground.StartWorker_FailStatus",
+         status.status_code);
++#endif
++#if !BUILDFLAG(IS_ANDROID)
+     base::UmaHistogramTimes(
+         "Extensions.ServiceWorkerBackground.StartWorkerTime_Fail",
+         base::Time::Now() - start_time);
++#endif
+     LOG(ERROR)
+         << "DidStartWorkerFail " << context_id.extension_id << ": "
+         << static_cast<std::underlying_type_t<blink::ServiceWorkerStatusCode>>(
+@@ -587,6 +616,10 @@
+     RegistrationReason reason,
+     const SequencedContextId& context_id,
+     const Extension& extension) {
++#if BUILDFLAG(IS_ANDROID)
++  // A fresh registration attempt can satisfy newly queued work.
++  failed_registrations_.erase(context_id);
++#endif
+   // If there is a pending unregistration for this extension, the registration
+   // may get aborted by the unregistration and fail with
+   // blink::ServiceWorkerStatusCode::kErrorAbort. Avoid this by retrying the
+@@ -649,6 +682,9 @@
+                                                        *browser_context_);
+   }
+ 
++#if BUILDFLAG(IS_ANDROID)
++  failed_registrations_.erase(context_id);
++#endif
+   RunAndClearPendingTasksWithNullContext(context_id);
+   worker_state_observations_.RemoveObservation(worker_state);
+   worker_state_map_.erase(context_id);
+@@ -726,7 +762,9 @@
+     return;
+   }
+ 
++#if !BUILDFLAG(IS_ANDROID)
+   EmitWorkerWillBeStartedHistograms(context_id.extension_id);
++#endif
+   worker_state->StartWorker(context_id);
+   if (g_test_observer) {
+     g_test_observer->RequestedWorkerStart(context_id.extension_id);
+@@ -920,9 +958,11 @@
+     return;
+   }
+ 
++#if !BUILDFLAG(IS_ANDROID)
+   if (histogram_name && it->second->backoff_entry.failure_count() > 0) {
+     base::UmaHistogramBoolean(histogram_name, success);
+   }
++#endif
+   retry_map.erase(it);
+ }
+ 
+@@ -932,8 +972,10 @@
+     base::Time start_time,
+     blink::ServiceWorkerStatusCode status_code) {
+   const bool success = IsWorkerRegistrationSuccess(status_code);
++#if !BUILDFLAG(IS_ANDROID)
+   base::UmaHistogramBoolean(
+       "Extensions.ServiceWorkerBackground.WorkerRegistrationState2", success);
++#endif
+   if (!success && g_test_observer) {
+     g_test_observer->OnWorkerRegistrationFailed(context_id.extension_id,
+                                                 status_code);
+@@ -949,8 +991,10 @@
+     // extension is deactivated when worker activation/registration request is
+     // in-flight. But if registration was successful then that could interfere
+     // with future worker registrations for the extension.
++#if !BUILDFLAG(IS_ANDROID)
+     base::UmaHistogramBoolean(
+         "Extensions.ServiceWorkerBackground.WorkerRegistrationState", !success);
++#endif
+     if (g_test_observer) {
+       g_test_observer->OnWorkerRegistered(context_id.extension_id);
+     }
+@@ -960,8 +1004,10 @@
+     // TODO(crbug.com/346732739): This shouldn't be happening since we seem to
+     // always remove extension from enabled extension before we delete the
+     // extension activation token, but lets confirm that.
++#if !BUILDFLAG(IS_ANDROID)
+     base::UmaHistogramBoolean(
+         "Extensions.ServiceWorkerBackground.WorkerRegistrationState", false);
++#endif
+     if (g_test_observer) {
+       g_test_observer->OnWorkerRegistered(context_id.extension_id);
+     }
+@@ -972,9 +1018,12 @@
+   DCHECK(worker_state);
+ 
+   if (reason == RegistrationReason::RE_REGISTER_ON_STATE_MISMATCH) {
++#if !BUILDFLAG(IS_ANDROID)
+     base::UmaHistogramBoolean(
+         "Extensions.ServiceWorkerBackground.RegistrationMismatchMitigated2",
+         success);
++#endif
++#if !BUILDFLAG(IS_ANDROID)
+     if (!success) {
+       // TODO(crbug.com/346732739): Create a test for this if it is feasible.
+       base::UmaHistogramEnumeration(
+@@ -982,6 +1031,7 @@
+           "FailStatus",
+           status_code);
+     }
++#endif
+     if (g_test_observer) {
+       g_test_observer->RegistrationMismatchMitigated(extension_id, success);
+     }
+@@ -1002,27 +1052,41 @@
+   // Clean up the retries entry for this context. If there were retries
+   // attempted, emit metrics about the ultimate result.
+   ClearRetryState(context_id.token, worker_registration_retries_,
++#if !BUILDFLAG(IS_ANDROID)
+                   "Extensions.ServiceWorkerBackground."
+                   "WorkerRegistrationRetryAttemptsResult",
++#else
++                  nullptr,
++#endif
+                   success);
+   ClearRetryState(context_id.token, worker_unregistration_wait_retries_,
+                   nullptr, success);
+ 
+   // After retries are exhausted, emit the ultimate end result.
++#if !BUILDFLAG(IS_ANDROID)
+   base::UmaHistogramBoolean(
+       "Extensions.ServiceWorkerBackground.WorkerRegistrationState", success);
+-
++#endif
++
++#if !BUILDFLAG(IS_ANDROID)
+   if (!success) {
+     base::UmaHistogramEnumeration(
+         "Extensions.ServiceWorkerBackground.Registration_FailStatus",
+         status_code);
+   }
++#endif
+ 
+   if (!success ||
+       // Still show script evaluate error to developer so that it can be fixed,
+       // despite it not being considered an internal failure.
+       status_code ==
+           blink::ServiceWorkerStatusCode::kErrorScriptEvaluateFailed) {
++#if BUILDFLAG(IS_ANDROID)
++    // Retryable failures return above. This activation has no usable worker;
++    // later requests must receive the same ordinary failed-load completion.
++    failed_registrations_.insert(context_id);
++    auto weak_this = weak_factory_.GetWeakPtr();
++#endif
+     std::string msg = base::StringPrintf(
+         "Service worker registration failed. Status code: %d",
+         static_cast<int>(status_code));
+@@ -1034,14 +1098,32 @@
+ 
+     ExtensionsBrowserClient::Get()->ReportError(browser_context_,
+                                                 std::move(error));
++#if BUILDFLAG(IS_ANDROID)
++    if (!weak_this) {
++      return;
++    }
++#endif
+     if (g_test_observer) {
+       g_test_observer->OnWorkerRegistered(context_id.extension_id);
+     }
+-    return;
+-  }
++#if BUILDFLAG(IS_ANDROID)
++    // External notifications or pending-task callbacks may retire the owner.
++    // Complete the current activation last, without touching it afterward.
++    if (weak_this &&
++        IsCurrentActivation(context_id.extension_id, context_id.token)) {
++      RunAndClearPendingTasksWithNullContext(context_id);
++    }
++#endif
++    return;
++  }
++#if !BUILDFLAG(IS_ANDROID)
+   base::UmaHistogramTimes("Extensions.ServiceWorkerBackground.RegistrationTime",
+                           base::Time::Now() - start_time);
+-
++#endif
++
++#if BUILDFLAG(IS_ANDROID)
++  failed_registrations_.erase(context_id);
++#endif
+   worker_registered_.insert(context_id);
+   pending_storage_registrations_.insert_or_assign(
+       extension->id(), *GetCurrentActivationToken(extension->id()));
+@@ -1067,12 +1149,16 @@
+   bool success =
+       IsWorkerUnregistrationSuccess(status, worker_previously_registered);
+ 
++#if !BUILDFLAG(IS_ANDROID)
+   base::UmaHistogramBoolean(
+       "Extensions.ServiceWorkerBackground.WorkerUnregistrationState", success);
++#endif
++#if !BUILDFLAG(IS_ANDROID)
+   base::UmaHistogramBoolean(
+       "Extensions.ServiceWorkerBackground.WorkerUnregistrationState_"
+       "DeactivateExtension",
+       success);
++#endif
+ 
+   // TODO(crbug.com/346732739): Handle this better than just logging an error
+   // message.
+@@ -1080,13 +1166,17 @@
+     LOG(ERROR) << "Failed to unregister service worker for extension id: "
+                << extension_id
+                << " error status was: " << std::to_underlying(status);
++#if !BUILDFLAG(IS_ANDROID)
+     base::UmaHistogramEnumeration(
+         "Extensions.ServiceWorkerBackground.WorkerUnregistrationFailureStatus",
+         status);
++#endif
++#if !BUILDFLAG(IS_ANDROID)
+     base::UmaHistogramEnumeration(
+         "Extensions.ServiceWorkerBackground.WorkerUnregistrationFailureStatus_"
+         "DeactivateExtension",
+         status);
++#endif
+   }
+ 
+   if (status == blink::ServiceWorkerStatusCode::kOk) {
+@@ -1379,9 +1469,11 @@
+     content::ServiceWorkerCapability capability) {
+   const bool is_registered =
+       capability != content::ServiceWorkerCapability::NO_SERVICE_WORKER;
++#if !BUILDFLAG(IS_ANDROID)
+   base::UmaHistogramBoolean(
+       "Extensions.ServiceWorkerBackground.RegistrationWhenExpected",
+       is_registered);
++#endif
+ 
+   if (is_registered) {
+     return;
+@@ -1406,14 +1498,17 @@
+     return;
+   }
+ 
++#if !BUILDFLAG(IS_ANDROID)
+   base::UmaHistogramEnumeration(
+       "Extensions.ServiceWorkerBackground.RegistrationMismatchLocation",
+       extension->location());
++#endif
+ 
+   RegisterServiceWorker(RegistrationReason::RE_REGISTER_ON_STATE_MISMATCH,
+                         context_id, *extension);
+ }
+ 
++#if !BUILDFLAG(IS_ANDROID)
+ void ServiceWorkerTaskQueue::EmitWorkerWillBeStartedHistograms(
+     const ExtensionId& extension_id) {
+   bool worker_is_ready_to_run_tasks = IsReadyToRunTasks(
+@@ -1424,6 +1519,7 @@
+       "RequestedWorkerStartForStartedWorker3",
+       worker_is_ready_to_run_tasks);
+ }
++#endif
+ 
+ void ServiceWorkerTaskQueue::ActivateIncognitoSplitModeExtensions(
+     ServiceWorkerTaskQueue* other) {

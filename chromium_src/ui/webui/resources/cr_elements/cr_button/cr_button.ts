@@ -19,6 +19,14 @@ export class CrButtonElement extends CrLitElement {
     return 'cr-button';
   }
 
+  // <if expr="is_android">
+  // Forward Chromium's host focus contract through the Leo button.
+  static override shadowRootOptions: ShadowRootInit = {
+    ...CrLitElement.shadowRootOptions,
+    delegatesFocus: true,
+  };
+  // </if>
+
   declare $: {
     button: HTMLElement
     prefixIcon: HTMLSlotElement

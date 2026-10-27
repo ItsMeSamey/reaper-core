@@ -21,7 +21,9 @@ public class BraveNotificationPermissionRationaleDialogController
         super(context, modalDialogManager);
     }
 
-    /** This is empty override method, to block default android 13 chromium dialog */
+    /** Show the notification rationale and report the user's decision. */
     @Override
-    public void showRationaleUi(Callback<Integer> rationaleCallback) {}
+    public void showRationaleUi(Callback<Integer> rationaleCallback) {
+        super.showRationaleUi(rationaleCallback);
+    }
 }

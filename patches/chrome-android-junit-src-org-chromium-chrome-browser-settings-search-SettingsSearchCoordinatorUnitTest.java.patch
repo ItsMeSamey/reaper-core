@@ -1,0 +1,131 @@
+diff --git a/chrome/android/junit/src/org/chromium/chrome/browser/settings/search/SettingsSearchCoordinatorUnitTest.java b/chrome/android/junit/src/org/chromium/chrome/browser/settings/search/SettingsSearchCoordinatorUnitTest.java
+--- a/chrome/android/junit/src/org/chromium/chrome/browser/settings/search/SettingsSearchCoordinatorUnitTest.java
++++ b/chrome/android/junit/src/org/chromium/chrome/browser/settings/search/SettingsSearchCoordinatorUnitTest.java
+@@ -42,6 +42,7 @@
+ import org.robolectric.Robolectric;
+ import org.robolectric.annotation.Config;
+ import org.robolectric.shadows.ShadowLooper;
++import org.robolectric.android.controller.ActivityController;
+ 
+ import org.chromium.base.supplier.ObservableSuppliers;
+ import org.chromium.base.supplier.SettableMonotonicObservableSupplier;
+@@ -58,6 +59,7 @@
+ import org.chromium.ui.base.LocalizationUtils;
+ import org.chromium.ui.modaldialog.ModalDialogManager;
+ 
++import java.util.ArrayList;
+ import java.util.HashMap;
+ 
+ /** Unit tests for {@link SettingsSearchCoordinator}. */
+@@ -66,6 +68,7 @@
+     @Rule public MockitoRule mMockitoRule = MockitoJUnit.rule();
+ 
+     private FragmentActivity mActivity;
++    private ActivityController<FragmentActivity> mActivityController;
+     private Toolbar mToolbar;
+     @Mock private MultiColumnSettings mMultiColumnSettings;
+     @Mock private Profile mProfile;
+@@ -77,7 +80,8 @@
+ 
+     @Before
+     public void setUp() {
+-        mActivity = Robolectric.buildActivity(FragmentActivity.class).create().get();
++        mActivityController = Robolectric.buildActivity(FragmentActivity.class);
++        mActivity = mActivityController.create().get();
+         mActivity.setTheme(R.style.Theme_Chromium_Settings);
+ 
+         FrameLayout rootView = new FrameLayout(mActivity);
+@@ -781,6 +785,93 @@
+     }
+ 
+     @Test
++    public void testRestoredUnavailableRecentShowsZeroStateWithoutChangingQueryOrBackStack() {
++        assertRestoredUnavailablePresentation(/* recent= */ true, /* showDetails= */ false);
++    }
++
++    @Test
++    public void testRestoredUnavailableQueryShowsNoMatchWithHelpWithoutChangingQueryOrBackStack() {
++        assertRestoredUnavailablePresentation(/* recent= */ false, /* showDetails= */ false);
++    }
++
++    @Test
++    public void testRestoredUnavailableResultsDoNotReplaceCurrentDetails() {
++        assertRestoredUnavailablePresentation(/* recent= */ false, /* showDetails= */ true);
++    }
++
++    private void assertRestoredUnavailablePresentation(boolean recent, boolean showDetails) {
++        SettingsIndexData.createInstance().resetNeedsIndexing();
++        setUpMultiColumnSettings();
++        mCoordinator.initializeSearchUi(null);
++        ShadowLooper.idleMainLooper();
++        mCoordinator.enterSearchState(/* isRestored= */ true);
++        EditText query = mActivity.findViewById(R.id.search_query);
++        query.setText("About");
++        query.setSelection(1, 4);
++        query.requestFocus();
++
++        FragmentManager fm = mActivity.getSupportFragmentManager();
++        SearchResultsPreferenceFragment original =
++                recent ? new RecentSearchesFragment() : new SearchResultsPreferenceFragment();
++        var oldEntries = new ArrayList<SettingsIndexData.Entry>();
++        oldEntries.add(new SettingsIndexData.Entry.Builder(
++                "removed_id", "removed", "About Brave", "MainSettings").build());
++        original.setPreferenceData(oldEntries);
++        fm.beginTransaction().add(R.id.preferences_detail, original,
++                SettingsSearchCoordinator.RESULT_FRAGMENT).commitNow();
++        Fragment.SavedState saved = fm.saveFragmentInstanceState(original);
++        fm.beginTransaction().remove(original).commitNow();
++
++        SearchResultsPreferenceFragment restored =
++                recent ? new RecentSearchesFragment() : new SearchResultsPreferenceFragment();
++        restored.setInitialSavedState(saved);
++        fm.beginTransaction().add(R.id.preferences_detail, restored,
++                SettingsSearchCoordinator.RESULT_FRAGMENT).commitNow();
++        TestDetailFragment detail = new TestDetailFragment();
++        if (showDetails) {
++            fm.beginTransaction().replace(R.id.preferences_detail, detail)
++                    .addToBackStack(SettingsSearchCoordinator.RESULT_BACKSTACK).commit();
++            fm.executePendingTransactions();
++            mCoordinator.setFragmentState(SettingsSearchCoordinator.FS_RESULTS);
++        }
++        int backStackCount = fm.getBackStackEntryCount();
++        // Rebind the real restored Parcelable entries before the normal resume callback.
++        mCoordinator.restoreFragmentState();
++        mActivityController.start().resume().visible();
++        fm.executePendingTransactions();
++        ShadowLooper.idleMainLooper();
++        fm.executePendingTransactions();
++
++        assertEquals("About", query.getText().toString());
++        assertEquals(backStackCount, fm.getBackStackEntryCount());
++        Fragment current = fm.findFragmentById(R.id.preferences_detail);
++        if (showDetails) {
++            assertEquals(1, backStackCount);
++            assertEquals(detail, current);
++            assertNull(fm.findFragmentByTag(SettingsSearchCoordinator.EMPTY_FRAGMENT));
++            // Ordinary Back resumes the removed result fragment. Only then may it become empty UI.
++            assertTrue(mCoordinator.handleBackAction());
++            fm.executePendingTransactions();
++            ShadowLooper.idleMainLooper();
++            fm.executePendingTransactions();
++            assertEquals(0, fm.getBackStackEntryCount());
++            current = fm.findFragmentById(R.id.preferences_detail);
++        }
++        assertTrue(restored.hasEmptyRefreshedResults());
++        assertEquals("About", query.getText().toString());
++        assertEquals(1, query.getSelectionStart());
++        assertEquals(4, query.getSelectionEnd());
++        assertTrue(query.hasFocus());
++        assertTrue(current instanceof EmptyFragment);
++        TextView title = current.requireView().findViewById(R.id.empty_state_text_title);
++        assertEquals(mActivity.getString(recent ? R.string.search_in_settings_zero_state
++                        : R.string.search_in_settings_no_match), title.getText().toString());
++        View help = current.requireView().findViewById(R.id.empty_state_text_description);
++        assertEquals(recent ? View.GONE : View.VISIBLE, help.getVisibility());
++        mCoordinator.destroy();
++    }
++
++    @Test
+     public void testSearchInMultiColumnThenExitSearchRestoresDetailFragment() {
+         // Initialize an empty SettingsIndexData and mark it as indexed to prevent
+         // enterSearchState() from attempting to build the real search index across all

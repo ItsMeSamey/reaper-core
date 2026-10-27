@@ -1,11 +1,44 @@
 diff --git a/scripts/build/typescript/typescript.gni b/scripts/build/typescript/typescript.gni
-index bc030591cfc829235d07a62e95f898f334e12df7..7016d539fcee83a96dde0491d8580a92f073a5d9 100644
+index bc030591cfc829235d07a62e95f898f334e12df7..a51fab72f60e81626e764b2fb53ed1101cd5ca70 100644
 --- a/scripts/build/typescript/typescript.gni
 +++ b/scripts/build/typescript/typescript.gni
-@@ -120,6 +120,26 @@ template("ts_library") {
-     _all_sources += invoker.additional_type_definitions
-   }
+@@ -5,6 +5,10 @@
+ import("../ninja/vars.gni")
+ import("./ts_type_check.gni")
+ import("./typescript_vars.gni")
++
++if (build_with_chromium) {
++  import("//tools/grit/preprocess_if_expr.gni")
++}
  
+ # Architecture Overview:
+ # ======================
+@@ -98,6 +102,19 @@
+   assert(defined(invoker.sources),
+          "You must specify 'sources' for $target_name")
+ 
++  # The native compiler supports this scheduling option; legacy JS tsc does not.
++  _native_tsc_paths = [
++    "//third_party/typescript/linux-amd64/src/lib/tsc",
++    "//third_party/typescript/windows-amd64/src/lib/tsc.exe",
++    "//third_party/typescript/mac-arm64/src/lib/tsc",
++    "//third_party/typescript/mac-amd64/src/lib/tsc",
++  ]
++  _tsc_thread_args = []
++  if (defined(target_os) && target_os == "android" &&
++      filter_include([ tsc_binary ], _native_tsc_paths) != []) {
++    _tsc_thread_args = [ "--singleThreaded" ]
++  }
++
+   _rootdir = "."
+   if (defined(invoker.rootdir)) {
+     _rootdir = invoker.rootdir
+@@ -118,6 +135,97 @@
+   _all_sources = invoker.sources + typescript_global_definition_files
+   if (defined(invoker.additional_type_definitions)) {
+     _all_sources += invoker.additional_type_definitions
++  }
++
 +  # Brave adds new DevTools files from //brave/..., which sit outside this
 +  # target's rootDir. run_with_restat.py hardlinks them next to the upstream
 +  # sources before tsc runs, so everything tsc is told about them -- the
@@ -21,15 +54,105 @@ index bc030591cfc829235d07a62e95f898f334e12df7..7016d539fcee83a96dde0491d8580a92
 +      _rooted_sources += [ src ]
 +    }
 +  }
++  # Only opted-in Android DevTools targets use generated conditional sources.
++  # Stage the real files first: DevTools chromium_src modules are sibling
++  # .patch.ts files, not WebUI replacement sources.
++  _android_source_deps = []
++  if (defined(target_os) && target_os == "android" &&
++      defined(invoker.android_preprocess) && invoker.android_preprocess) {
++    _android_patch_outputs = []
++    # Reference-only aliases keep raw import identities mapped to the sanitized
++    # declarations. Actual compilation below still uses generated sources.
++    _source_reference_rootdir = _rootdir
++    _input_dir = "$target_gen_dir/${target_name}_android_inputs"
++    _input_deps = []
++    _upstream_sources = filter_exclude(invoker.sources, [ "//brave/*" ])
++    if (_upstream_sources != []) {
++      _input_target = "${target_name}_android_inputs"
++      copy(_input_target) {
++        sources = _upstream_sources
++        outputs = [ "$_input_dir/{{source_target_relative}}" ]
++        forward_variables_from(invoker, [ "testonly" ])
++      }
++      _input_deps += [ ":$_input_target" ]
++    }
++    _brave_sources = filter_include(invoker.sources, [ "//brave/*" ])
++    if (_brave_sources != []) {
++      _brave_input_index = 0
++      foreach(src, _brave_sources) {
++        _brave_input_target =
++            "${target_name}_android_brave_input_${_brave_input_index}"
++        copy(_brave_input_target) {
++          sources = [ src ]
++          outputs = [ "$_input_dir/" + get_path_info(src, "file") ]
++          forward_variables_from(invoker, [ "testonly" ])
++        }
++        _input_deps += [ ":$_brave_input_target" ]
++        _brave_input_index += 1
++      }
++    }
++    if (defined(invoker.android_patch_sources) &&
++        invoker.android_patch_sources != []) {
++      _patch_index = 0
++      foreach(patch, invoker.android_patch_sources) {
++        _patch_target = "${target_name}_android_patch_${_patch_index}"
++        copy(_patch_target) {
++          sources = [ patch.source ]
++          outputs = [ "$target_gen_dir/" + patch.file ]
++          forward_variables_from(invoker, [ "testonly" ])
++        }
++        _input_deps += [ ":$_patch_target" ]
++        _android_patch_outputs += [ "$target_gen_dir/" + patch.file ]
++        _patch_index += 1
++      }
++    }
++    _preprocess_target = "${target_name}_android_preprocess"
++    preprocess_if_expr(_preprocess_target) {
++      in_folder = _input_dir
++      out_folder = target_gen_dir
++      in_files = _rooted_sources
++      deps = _input_deps
++    }
++    _rooted_sources = []
++    _rooted_sources = get_target_outputs(":$_preprocess_target")
++    _rootdir = target_gen_dir
++    _all_sources = []
++    _all_sources = _rooted_sources + typescript_global_definition_files +
++                   _android_patch_outputs
++    if (defined(invoker.additional_type_definitions)) {
++      _all_sources += invoker.additional_type_definitions
++    }
++    _android_source_deps = [ ":$_preprocess_target" ] + _input_deps
++  }
++
 +  _all_rooted_sources = _rooted_sources + typescript_global_definition_files
 +  if (defined(invoker.additional_type_definitions)) {
 +    _all_rooted_sources += invoker.additional_type_definitions
-+  }
-+
+   }
+ 
    _ts_references = []
-   _ts_deps = []
-   _sources_deps = []
-@@ -221,7 +241,7 @@ template("ts_library") {
+@@ -139,9 +247,9 @@
+     }
+   }
+ 
+-  _non_ts_deps = []
++  _non_ts_deps = _android_source_deps
+   if (defined(invoker.deps)) {
+-    _non_ts_deps = invoker.deps
++    _non_ts_deps += invoker.deps
+   }
+ 
+   # tsc resolves the module type from package.json in the build root,
+@@ -191,7 +299,7 @@
+   _runs_in_node = defined(invoker.runs_in) &&
+                   (invoker.runs_in == "node_cjs" || invoker.runs_in == "node")
+ 
+-  if (_test_only || _runs_in_node) {
++  if (_test_only || _runs_in_node || _android_source_deps != []) {
+     _compiler_options.typeRoots = [
+       rebase_path(devtools_location_prepend + "node_modules/@types",
+                   target_gen_dir),
+@@ -221,7 +329,7 @@
                                        "*.d.mts",
                                        "*.d.cts",
                                      ])
@@ -38,7 +161,7 @@ index bc030591cfc829235d07a62e95f898f334e12df7..7016d539fcee83a96dde0491d8580a92
                                      [
                                        "*.d.ts",
                                        "*.d.mts",
-@@ -253,7 +273,7 @@ template("ts_library") {
+@@ -253,7 +361,7 @@
    if (!_no_js_emit) {
      _js_outputs = []
    }
@@ -47,7 +170,19 @@ index bc030591cfc829235d07a62e95f898f334e12df7..7016d539fcee83a96dde0491d8580a92
      _ext = get_path_info(src, "extension")
      _rel_name = rebase_path(src, _rootdir)
      _rel_dir = get_path_info(_rel_name, "dir")
-@@ -305,7 +325,7 @@ template("ts_library") {
+@@ -293,8 +401,9 @@
+     outputs = _dts_outputs
+ 
+     response_file_contents =
+-        rebase_path(_dts_outputs, root_build_dir) + [ "--" ] + [
+-          rebase_path(tsc_binary, root_build_dir),
++        rebase_path(_dts_outputs, root_build_dir) + [ "--" ] +
++        [ rebase_path(tsc_binary, root_build_dir) ] + _tsc_thread_args +
++        [
+           "--ignoreConfig",
+           "--declaration",
+           "--emitDeclarationOnly",
+@@ -305,7 +414,7 @@
            rebase_path(target_gen_dir, root_build_dir),
            "--rootDir",
            rebase_path(_rootdir, root_build_dir),
@@ -56,3 +191,128 @@ index bc030591cfc829235d07a62e95f898f334e12df7..7016d539fcee83a96dde0491d8580a92
  
      args = [ "@{{response_file_name}}" ]
  
+@@ -321,6 +430,54 @@
+   _compiled_sources = rebase_path(_ref_sources, target_gen_dir)
+   if (_has_handwritten_dts) {
+     _compiled_sources += rebase_path(_copied_dts_outputs, target_gen_dir)
++  }
++
++  # Android callers may import either original or generated module paths.
++  # Advertise both identities through separate reference-only projects that
++  # resolve to the same sanitized declaration outputs. Synthetic Brave sibling
++  # paths remain owned by the generated project rather than nonexistent raw files.
++  if (_android_source_deps != []) {
++    _source_ref_target = "${target_name}_tsconfig_source_ref"
++    _source_ref_file =
++        "$target_gen_dir/$_tsconfig_name-tsconfig.source.ref.json"
++    _source_ref_sources = filter_exclude(_upstream_sources,
++                                        [
++                                          "*.d.ts",
++                                          "*.d.mts",
++                                          "*.d.cts",
++                                        ]) + typescript_global_definition_files
++    if (defined(invoker.additional_type_definitions)) {
++      _source_ref_sources += invoker.additional_type_definitions
++    }
++    _source_ref_files = rebase_path(_source_ref_sources, target_gen_dir)
++    if (_has_handwritten_dts) {
++      _source_ref_files += rebase_path(_copied_dts_outputs, target_gen_dir)
++    }
++
++    generated_file(_source_ref_target) {
++      if (defined(invoker.testonly)) {
++        testonly = invoker.testonly
++      }
++      outputs = [ _source_ref_file ]
++      output_conversion = "json"
++      contents = {
++        compilerOptions = {
++          composite = true
++          declaration = true
++          emitDeclarationOnly = true
++          skipLibCheck = true
++          rootDir = rebase_path(_source_reference_rootdir, target_gen_dir)
++          rootDirs = [
++            rebase_path(devtools_location_prepend, target_gen_dir),
++            rebase_path("$root_gen_dir/$devtools_location", target_gen_dir),
++          ]
++          outDir = "."
++          declarationDir = "."
++        }
++        files = _source_ref_files
++        references = _ts_references
++      }
++    }
+   }
+ 
+   # Sub-target 2: Generate tsconfig.ref.json for downstream consumers.
+@@ -348,6 +505,13 @@
+       }
+       files = _compiled_sources
+       references = _ts_references
++      if (_android_source_deps != []) {
++        references += [
++          {
++            path = rebase_path(_source_ref_file, target_gen_dir)
++          },
++        ]
++      }
+     }
+   }
+ 
+@@ -364,6 +528,12 @@
+       public_inputs += invoker.inputs
+     }
+     public_deps = _non_ts_deps + _sources_deps
++    if (_android_source_deps != []) {
++      metadata = {
++        android_processed_ts_files =
++            rebase_path(_rooted_sources + _android_patch_outputs, root_gen_dir)
++      }
++    }
+   }
+ 
+   # Sub-target 3: Generate tsconfig.json used by sub-target 4 for
+@@ -420,19 +590,22 @@
+       _stamp_file = "$target_gen_dir/$_tsconfig_name.stamp"
+       outputs = [ _stamp_file ]
+       response_file_contents = [
+-        "--stamp",
+-        rebase_path(_stamp_file, root_build_dir),
+-        "--",
+-        rebase_path(tsc_binary, root_build_dir),
+-        "-p",
+-        rebase_path(_tsconfig_file, root_build_dir),
+-      ]
++                                 "--stamp",
++                                 rebase_path(_stamp_file, root_build_dir),
++                                 "--",
++                                 rebase_path(tsc_binary, root_build_dir),
++                               ] + _tsc_thread_args +
++                               [
++                                 "-p",
++                                 rebase_path(_tsconfig_file, root_build_dir),
++                               ]
+     } else {
+       script = devtools_location_prepend + "scripts/build/run_with_restat.py"
+       outputs = _js_outputs
+       response_file_contents =
+-          rebase_path(_js_outputs, root_build_dir) + [ "--" ] + [
+-            rebase_path(tsc_binary, root_build_dir),
++          rebase_path(_js_outputs, root_build_dir) + [ "--" ] +
++          [ rebase_path(tsc_binary, root_build_dir) ] + _tsc_thread_args +
++          [
+             "-p",
+             rebase_path(_tsconfig_file, root_build_dir),
+           ]
+@@ -455,6 +628,10 @@
+     }
+     public_inputs = filter_include(_dts_outputs, [ "*.d.ts" ]) +
+                     _copied_dts_outputs + [ _tsconfig_ref_file ]
++    if (_android_source_deps != []) {
++      public_deps += [ ":$_source_ref_target" ]
++      public_inputs += [ _source_ref_file ]
++    }
+     if (defined(invoker.public_deps)) {
+       public_deps += invoker.public_deps
+     }

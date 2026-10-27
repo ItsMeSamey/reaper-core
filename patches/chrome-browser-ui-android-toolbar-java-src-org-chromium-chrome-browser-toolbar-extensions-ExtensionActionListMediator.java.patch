@@ -1,0 +1,215 @@
+diff --git a/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/extensions/ExtensionActionListMediator.java b/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/extensions/ExtensionActionListMediator.java
+index 2740f9c91e4191f4d985975e381bf18b87d5fbf0..33108871ecaa5f592a401a50301dec3169f2b6d2 100644
+--- a/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/extensions/ExtensionActionListMediator.java
++++ b/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/extensions/ExtensionActionListMediator.java
+@@ -18,6 +18,7 @@
+ 
+ import androidx.annotation.VisibleForTesting;
+ 
++import org.chromium.base.Callback;
+ import org.chromium.base.lifetime.Destroyable;
+ import org.chromium.base.lifetime.LifetimeAssert;
+ import org.chromium.base.supplier.NullableObservableSupplier;
+@@ -155,6 +156,15 @@
+     private final ModalDialogManager mModalDialogManager;
+ 
+     private ActionState mActionState = new ActionState.Idle();
++    // Only the latest request may consume a deferred context-menu callback.
++    private @Nullable Object mPendingContextMenuRequest;
++    private final Callback<@Nullable Tab> mCurrentTabObserver =
++            tab -> {
++                closeHoverCard();
++                closePopup();
++                closeContextMenuAndRetirePopout();
++                undoPopout();
++            };
+ 
+     @Nullable private final LifetimeAssert mLifetimeAssert = LifetimeAssert.create(this);
+ 
+@@ -201,10 +211,14 @@
+         mExtensionsToolbarBridge.setActionListDelegate(mToolbarDelegate);
+         mExtensionsToolbarBridge.addObserver(mToolbarObserver);
+         reconcileActionItems();
++        // Own tab changes here so a popup waiting for layout or its first page
++        // load is cancelled as well as one whose PopupWindow is already visible.
++        mCurrentTabSupplier.addSyncObserver(mCurrentTabObserver);
+     }
+ 
+     @Override
+     public void destroy() {
++        mCurrentTabSupplier.removeObserver(mCurrentTabObserver);
+         if (mShowHoverCardRunnable != null) {
+             mHandler.removeCallbacks(mShowHoverCardRunnable);
+             mShowHoverCardRunnable = null;
+@@ -368,17 +382,19 @@
+             return currentIndex;
+         }
+ 
+-        if (currentIndex < mModels.size() && getActionIdForIndex(currentIndex).equals(actionId)) {
+-            // We already have {@link actionId} in the correct place. We can just move onto the next
+-            // one.
+-            return currentIndex + 1;
+-        }
+-
+-        int indexInModels = findIndexForId(actionId, currentIndex + 1);
++        int indexInModels = findIndexForId(actionId, currentIndex);
+         if (indexInModels == -1) {
+             mModels.add(currentIndex, createListItem(action, webContents, isPoppedOut));
+         } else {
+-            mModels.move(indexInModels, currentIndex);
++            if (indexInModels != currentIndex) {
++                mModels.move(indexInModels, currentIndex);
++            }
++            // Reused rows can change between temporary anchors and ordinary pinned actions.
++            mModels.get(currentIndex)
++                    .model
++                    .set(
++                            ExtensionActionButtonProperties.IS_DRAGGABLE,
++                            mExtensionsToolbarBridge.isActionDraggable(actionId) && !isPoppedOut);
+         }
+         return currentIndex + 1;
+     }
+@@ -413,9 +429,7 @@
+                                 (view) -> onPrimaryClick(actionId))
+                         .with(
+                                 ExtensionActionButtonProperties.ON_HOVER_LISTENER,
+-                                (view, event) -> {
+-                                    return onHover(actionId, event, webContents);
+-                                })
++                                (view, event) -> onHover(actionId, event))
+                         .with(
+                                 ExtensionActionButtonProperties.ON_LONG_CLICK_LISTENER,
+                                 (view) -> {
+@@ -464,7 +478,8 @@
+         model.set(ExtensionActionButtonProperties.ICON, icon);
+         model.set(
+                 ExtensionActionButtonProperties.IS_DRAGGABLE,
+-                mExtensionsToolbarBridge.isActionDraggable(actionId));
++                mExtensionsToolbarBridge.isActionDraggable(actionId)
++                        && !actionId.equals(mPoppedOutActionId));
+         model.set(ExtensionActionButtonProperties.ACCESSIBLE_NAME, action.getAccessibleName());
+     }
+ 
+@@ -497,7 +512,7 @@
+         return mModels.get(index).model.get(ExtensionActionButtonProperties.ID);
+     }
+ 
+-    private boolean onHover(String actionId, MotionEvent event, @Nullable WebContents webContents) {
++    private boolean onHover(String actionId, MotionEvent event) {
+         if (!(mActionState instanceof ActionState.Idle)) {
+             return false;
+         }
+@@ -511,14 +526,14 @@
+                 mHoverCardActionId = actionId;
+                 mShowHoverCardRunnable =
+                         () -> {
+-                            showHoverCard(actionId, webContents);
++                            showHoverCard(actionId);
+                             mShowHoverCardRunnable = null;
+                         };
+                 mHandler.postDelayed(
+                         mShowHoverCardRunnable, ViewConfiguration.getLongPressTimeout());
+             } else if (!actionId.equals(mHoverCardActionId)) {
+                 closeHoverCard();
+-                showHoverCard(actionId, webContents);
++                showHoverCard(actionId);
+             }
+         } else if (event.getAction() == MotionEvent.ACTION_HOVER_EXIT) {
+             if (actionId.equals(mHoverCardActionId)) {
+@@ -534,7 +549,10 @@
+         return false;
+     }
+ 
+-    private void showHoverCard(String actionId, @Nullable WebContents webContents) {
++    private void showHoverCard(String actionId) {
++        // Action rows survive tab changes; resolve their current page when the card is shown.
++        Tab currentTab = mCurrentTabSupplier.get();
++        WebContents webContents = currentTab != null ? currentTab.getWebContents() : null;
+         if (webContents == null) {
+             return;
+         }
+@@ -718,6 +736,7 @@
+         if (activity == null) {
+             contents.destroy();
+             mActionState = new ActionState.Idle();
++            undoPopout();
+             return;
+         }
+ 
+@@ -738,9 +757,10 @@
+                         mSelectionDropdownMenuDelegate,
+                         mTabModelSelector,
+                         inspectWithDevTools);
+-        popup.loadInitialPage();
+         popup.addOnDismissListener(this::closePopup);
+         mActionState = new ActionState.PopupActive(popup, actionId);
++        // Loading can synchronously close the popup, so install its owner first.
++        popup.loadInitialPage();
+     }
+ 
+     private void closePopup() {
+@@ -781,7 +801,17 @@
+         closePopup();
+         closeContextMenu();
+ 
+-        requestActionVisibility(actionId, () -> showContextMenuOnAnchor(actionId));
++        Object request = new Object();
++        mPendingContextMenuRequest = request;
++        requestActionVisibility(
++                actionId,
++                () -> {
++                    // A popup, another context-menu request, or teardown may have superseded us.
++                    // Return before any anchor lookup or cleanup can affect its popped-out action.
++                    if (mPendingContextMenuRequest != request) return;
++                    mPendingContextMenuRequest = null;
++                    showContextMenuOnAnchor(actionId);
++                });
+     }
+ 
+     private void showContextMenuOnAnchor(String actionId) {
+@@ -826,7 +856,25 @@
+         mActionState = new ActionState.ContextMenuActive(actionId);
+     }
+ 
++    private void closeContextMenuAndRetirePopout() {
++        // Only a context-menu request can own this temporary row.
++        @Nullable String contextMenuPopout =
++                mPendingContextMenuRequest != null
++                                || mActionState instanceof ActionState.ContextMenuActive
++                        ? mPoppedOutActionId
++                        : null;
++        closeContextMenu();
++        // Remove its retired anchor before a fresh request can mistake it for a
++        // visible pinned action. Preserve unrelated pinned and popup-only rows.
++        if (contextMenuPopout != null) {
++            undoPopout();
++            int index = findIndexForId(contextMenuPopout);
++            if (index != -1) mModels.removeAt(index);
++        }
++    }
++
+     private void closeContextMenu() {
++        mPendingContextMenuRequest = null;
+         if (!(mActionState instanceof ActionState.ContextMenuActive)) {
+             return;
+         }
+@@ -880,6 +928,9 @@
+ 
+         @Override
+         public void onActionRemoved(String actionId) {
++            if (actionId.equals(mHoverCardActionId)) {
++                closeHoverCard();
++            }
+             reconcileActionItems();
+         }
+ 
+@@ -895,6 +946,9 @@
+ 
+         @Override
+         public void onActiveWebContentsChanged(WebContents webContents) {
++            // Includes navigation and WebContents replacement within the same Tab.
++            closeHoverCard();
++            closeContextMenuAndRetirePopout();
+             updateActionPropertiesForAll(webContents);
+         }
+     }

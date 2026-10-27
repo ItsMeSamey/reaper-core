@@ -1,0 +1,726 @@
+diff --git a/chrome/test/data/webui/extensions/toolbar_test.ts b/chrome/test/data/webui/extensions/toolbar_test.ts
+--- a/chrome/test/data/webui/extensions/toolbar_test.ts
++++ b/chrome/test/data/webui/extensions/toolbar_test.ts
+@@ -4,6 +4,10 @@
+ 
+ import type {ExtensionsToolbarElement} from 'chrome://extensions/extensions.js';
+ import {getToastManager} from 'chrome://extensions/extensions.js';
++// <if expr="is_android">
++import type {CrButtonElement} from 'chrome://resources/cr_elements/cr_button/cr_button.js';
++import {getDeepActiveElement} from 'chrome://resources/js/util.js';
++// </if>
+ import {assertEquals, assertFalse, assertTrue} from 'chrome://webui-test/chai_assert.js';
+ import {microtasksFinished} from 'chrome://webui-test/test_util.js';
+ 
+@@ -52,18 +56,592 @@
+ 
+     boundTestVisible('#devMode', true);
+     boundTestVisible('#loadUnpacked', false);
++    // <if expr="is_android">
++    // Local signed packages have verified-package policy, not unpacked policy.
++    boundTestVisible('#installCrx', true);
++    // </if>
+     boundTestVisible('#packExtensions', true);
+     boundTestVisible('#updateNow', true);
+   });
++
++  // <if expr="is_android">
++  test('AndroidWrappedDeveloperControls', async () => {
++    toolbar.style.width = '320px';
++    toolbar.canLoadUnpacked = true;
++    toolbar.inDevMode = true;
++    await microtasksFinished();
++    // Exercise wrapping without depending on a particular UI locale.
++    toolbar.$.loadUnpacked.textContent =
++        'Load an unpacked extension from local storage';
++    const label = toolbar.shadowRoot.querySelector<HTMLLabelElement>(
++        '#devModeLabel')!;
++    label.textContent = 'Enable developer mode for extension management';
++    const hitTarget = toolbar.shadowRoot.querySelector<HTMLLabelElement>(
++        '#devModeHitTarget')!;
++    for (const direction of ['ltr', 'rtl']) {
++      toolbar.dir = direction;
++      const bounds = toolbar.getBoundingClientRect();
++      const drawer = toolbar.$.devDrawer.getBoundingClientRect();
++      assertFalse(toolbar.$.devDrawer.hidden);
++      for (const button of [toolbar.$.loadUnpacked, toolbar.$.installCrx, toolbar.$.packExtensions,
++                            toolbar.$.updateNow]) {
++        const rect = button.getBoundingClientRect();
++        assertTrue(rect.width >= 48 && rect.height >= 48);
++        assertTrue(rect.left >= bounds.left && rect.right <= bounds.right);
++        assertTrue(rect.top >= drawer.top && rect.bottom <= drawer.bottom);
++      }
++      const toggle = toolbar.$.devMode.getBoundingClientRect();
++      assertTrue(toggle.left >= bounds.left && toggle.right <= bounds.right);
++      assertEquals(40, toggle.width);
++      assertEquals(24, toggle.height);
++      for (const target of [label, hitTarget]) {
++        const rect = target.getBoundingClientRect();
++        assertTrue(rect.width >= 48 && rect.height >= 48);
++        assertTrue(rect.left >= bounds.left && rect.right <= bounds.right);
++      }
++      const hitBounds = hitTarget.getBoundingClientRect();
++      // The switch label's padding must receive a tap, not just look larger.
++      assertEquals(
++          hitTarget,
++          toolbar.shadowRoot.elementFromPoint(
++              hitBounds.left + 2, hitBounds.top + 2));
++    }
++
++    toolbar.inDevMode = false;
++    await microtasksFinished();
++    assertTrue(toolbar.$.devDrawer.hidden);
++    assertEquals(0, toolbar.$.loadUnpacked.getBoundingClientRect().height);
++    assertEquals('devModeLabel', toolbar.$.devMode.getAttribute('aria-labelledby'));
++  });
++  // </if>
++
++  // <if expr="is_android">
++  test('AndroidLoadUnpackedPendingOutcomes', async () => {
++    toolbar.inDevMode = true;
++    await microtasksFinished();
++    const button = toolbar.$.loadUnpacked as CrButtonElement;
++    const progress = toolbar.shadowRoot.querySelector<HTMLElement>(
++        '#loadUnpackedProgress')!;
++    const toastManager = getToastManager();
++    const errors: unknown[] = [];
++    toolbar.addEventListener('load-error', event => {
++      errors.push((event as CustomEvent).detail);
++    });
++    let calls = 0;
++    let expectedErrors = 0;
++
++    // The final success proves that a rejected load does not block a retry.
++    for (const outcome of ['success', 'cancel', 'error', 'success']) {
++      toastManager.hide();
++      let resolveLoad!: (success: boolean) => void;
++      let rejectLoad!: (reason: Error) => void;
++      const pending = new Promise<boolean>((resolve, reject) => {
++        resolveLoad = resolve;
++        rejectLoad = reject;
++      });
++      mockDelegate.loadUnpacked = () => {
++        ++calls;
++        return pending;
++      };
++      const previousCalls = calls;
++      button.click();
++      // Exercise the synchronous guard before Lit updates disabled.
++      button.click();
++      assertEquals(previousCalls + 1, calls);
++      await microtasksFinished();
++
++      assertTrue(button.disabled);
++      assertEquals('true', button.getAttribute('aria-busy'));
++      testVisible(toolbar, '#loadUnpackedProgress', true);
++      assertEquals('progressbar', progress.getAttribute('role'));
++      assertEquals(
++          toolbar.i18n('toolbarLoadUnpacked'), progress.getAttribute('aria-label'));
++      assertFalse(toastManager.isToastOpen);
++      assertEquals(expectedErrors, errors.length);
++      const loadError = new Error('The selected extension could not be loaded');
++      if (outcome === 'error') {
++        rejectLoad(loadError);
++        ++expectedErrors;
++      } else {
++        resolveLoad(outcome === 'success');
++      }
++      await microtasksFinished();
++
++      assertFalse(button.disabled);
++      assertEquals('false', button.getAttribute('aria-busy'));
++      testVisible(toolbar, '#loadUnpackedProgress', false);
++      assertEquals(outcome === 'success', toastManager.isToastOpen);
++      assertEquals(expectedErrors, errors.length);
++      if (outcome === 'error') {
++        assertEquals(loadError, errors[errors.length - 1]);
++      }
++    }
++    await checkAndroidUnpackedRetryClearsPreviousCrxMessages();
++    await checkAndroidLoadUnpackedCompletionPreservesFocus();
++    await checkAndroidUnpackedErrorDialogReturnsFocus();
++    await checkAndroidDetachedUnpackedCompletion();
++  });
++  // </if>
++
++  // <if expr="is_android">
++  async function checkAndroidUnpackedRetryClearsPreviousCrxMessages() {
++    toolbar.inDevMode = true;
++    toolbar.canLoadUnpacked = true;
++    await microtasksFinished();
++    const load = toolbar.$.loadUnpacked as CrButtonElement;
++    const install = toolbar.$.installCrx as CrButtonElement;
++    const error = toolbar.shadowRoot.querySelector<HTMLElement>('#installCrxError')!;
++    const notice = toolbar.shadowRoot.querySelector<HTMLElement>('#importInterrupted')!;
++    for (const previous of ['error', 'interrupted']) {
++      getToastManager().hide();
++      if (previous === 'error') {
++        mockDelegate.installFromFile = async () => {
++          throw new Error('Previous local CRX failure');
++        };
++        install.click();
++        await microtasksFinished();
++        assertFalse(error.hidden);
++        assertEquals('Previous local CRX failure', error.textContent.trim());
++      } else {
++        toolbar.showInterruptedLocalImport();
++        await microtasksFinished();
++        assertFalse(notice.hidden);
++      }
++      let resolve!: (success: boolean) => void;
++      let calls = 0;
++      mockDelegate.loadUnpacked = () => {
++        ++calls;
++        return new Promise<boolean>(yes => { resolve = yes; });
++      };
++      load.click();
++      load.click();
++      assertEquals(1, calls);
++      await microtasksFinished();
++      assertTrue(load.disabled);
++      assertTrue(install.disabled);
++      assertEquals('true', load.getAttribute('aria-busy'));
++      testVisible(toolbar, '#loadUnpackedProgress', true);
++      assertTrue(error.hidden);
++      assertEquals('', error.textContent.trim());
++      assertTrue(notice.hidden);
++      assertFalse(getToastManager().isToastOpen);
++      resolve(true);
++      await microtasksFinished();
++      assertFalse(load.disabled);
++      assertFalse(install.disabled);
++      assertEquals('false', load.getAttribute('aria-busy'));
++      testVisible(toolbar, '#loadUnpackedProgress', false);
++      assertTrue(error.hidden);
++      assertTrue(notice.hidden);
++      assertTrue(getToastManager().isToastOpen);
++    }
++  }
++
++  async function checkAndroidDetachedUnpackedCompletion() {
++    const input = document.createElement('input');
++    document.body.appendChild(input);
++    for (const outcome of ['success', 'error']) {
++      getToastManager().hide();
++      const detachedToolbar = document.createElement('extensions-toolbar');
++      detachedToolbar.inDevMode = true;
++      detachedToolbar.canLoadUnpacked = true;
++      detachedToolbar.delegate = mockDelegate;
++      document.body.appendChild(detachedToolbar);
++      await microtasksFinished();
++      let resolve!: (success: boolean) => void;
++      let reject!: (error: Error) => void;
++      mockDelegate.loadUnpacked = () => new Promise<boolean>((yes, no) => {
++        resolve = yes;
++        reject = no;
++      });
++      const errors: unknown[] = [];
++      detachedToolbar.addEventListener('load-error', event => {
++        errors.push((event as CustomEvent).detail);
++      });
++      const button = detachedToolbar.$.loadUnpacked as CrButtonElement;
++      button.click();
++      await microtasksFinished();
++      assertTrue(button.disabled);
++      detachedToolbar.remove();
++      assertFalse(detachedToolbar.isConnected);
++      input.focus();
++      assertEquals(input, getDeepActiveElement());
++      if (outcome === 'error') {
++        reject(new Error('Unreadable detached unpacked extension'));
++      } else {
++        resolve(true);
++      }
++      await microtasksFinished();
++      assertFalse(getToastManager().isToastOpen);
++      assertEquals(0, errors.length);
++      assertEquals(input, getDeepActiveElement());
++      // Detached Lit controls need not render their final enabled state.
++    }
++    input.remove();
++  }
++
++  async function checkAndroidLoadUnpackedCompletionPreservesFocus() {
++    toolbar.inDevMode = true;
++    toolbar.canLoadUnpacked = true;
++    await microtasksFinished();
++    const button = toolbar.$.loadUnpacked as CrButtonElement;
++    for (const scenario of [
++           'blur-cancel', 'blur-success', 'blur-error',
++           'search-cancel', 'search-success', 'search-error',
++           'hidden-cancel', 'denied-cancel',
++         ]) {
++      toolbar.inDevMode = true;
++      toolbar.canLoadUnpacked = true;
++      await microtasksFinished();
++      let resolve!: (success: boolean) => void;
++      let reject!: (error: Error) => void;
++      mockDelegate.loadUnpacked = () => new Promise<boolean>((yes, no) => {
++        resolve = yes;
++        reject = no;
++      });
++      button.focus();
++      assertEquals(button, toolbar.shadowRoot.activeElement);
++      button.click();
++      await microtasksFinished();
++      assertTrue(button.disabled);
++      if (scenario.startsWith('search-')) {
++        toolbar.focusSearchInput();
++      } else if (scenario === 'hidden-cancel') {
++        toolbar.inDevMode = false;
++      } else if (scenario === 'denied-cancel') {
++        toolbar.canLoadUnpacked = false;
++      }
++      await microtasksFinished();
++      const chosenFocus = getDeepActiveElement();
++      if (scenario.startsWith('search-')) {
++        assertTrue(toolbar.isSearchFocused());
++      } else {
++        assertEquals(document.body, chosenFocus);
++      }
++      if (scenario.endsWith('-error')) {
++        reject(new Error('Unreadable unpacked extension'));
++      } else {
++        resolve(scenario.endsWith('-success'));
++      }
++      await microtasksFinished();
++      assertFalse(button.disabled);
++      if (scenario.startsWith('blur-')) {
++        assertEquals(button, toolbar.shadowRoot.activeElement);
++        const nativeButton = getDeepActiveElement();
++        assertTrue(nativeButton instanceof HTMLButtonElement);
++        assertFalse(nativeButton.disabled);
++      } else {
++        assertEquals(chosenFocus, getDeepActiveElement());
++      }
++    }
++  }
++
++  async function checkAndroidUnpackedErrorDialogReturnsFocus() {
++    toolbar.inDevMode = true;
++    toolbar.canLoadUnpacked = true;
++    await microtasksFinished();
++    let reject!: (error: Error) => void;
++    mockDelegate.loadUnpacked = () => new Promise<boolean>((_yes, no) => {
++      reject = no;
++    });
++    const dialog = document.createElement('extensions-load-error');
++    dialog.delegate = mockDelegate;
++    let opened!: () => void;
++    const shown = new Promise<void>(resolve => { opened = resolve; });
++    // Match the manager's deferred dialog presentation after load-error.
++    toolbar.addEventListener('load-error', event => {
++      setTimeout(async () => {
++        dialog.loadError = (event as CustomEvent<Error>).detail;
++        document.body.appendChild(dialog);
++        await dialog.updateComplete;
++        dialog.show();
++        opened();
++      }, 0);
++    }, {once: true});
++    const button = toolbar.$.loadUnpacked;
++    button.focus();
++    button.click();
++    await microtasksFinished();
++    reject(new Error('Unreadable unpacked extension'));
++    await shown;
++    await microtasksFinished();
++    assertTrue(dialog.$.dialog.getNative().open);
++    assertFalse(button.matches(':focus-within'));
++    dialog.close();
++    await microtasksFinished();
++    assertEquals(button, toolbar.shadowRoot.activeElement);
++    dialog.remove();
++  }
++
++  test('AndroidInstallCrxPendingCancellationErrorAndRetry', async () => {
++    toolbar.inDevMode = true;
++    toolbar.canLoadUnpacked = true;
++    await microtasksFinished();
++    const button = toolbar.$.installCrx as CrButtonElement;
++    const load = toolbar.$.loadUnpacked as CrButtonElement;
++    const error = toolbar.shadowRoot.querySelector<HTMLElement>('#installCrxError')!;
++    let calls = 0;
++    for (const outcome of ['cancel', 'error', 'installed']) {
++      getToastManager().hide();
++      let resolve!: (installed: boolean) => void;
++      let reject!: (error: Error) => void;
++      mockDelegate.installFromFile = () => {
++        ++calls;
++        return new Promise<boolean>((yes, no) => { resolve = yes; reject = no; });
++      };
++      const previous = calls;
++      button.click();
++      button.click();
++      assertEquals(previous + 1, calls);
++      await microtasksFinished();
++      assertTrue(button.disabled);
++      assertTrue(load.disabled);
++      assertEquals('true', button.getAttribute('aria-busy'));
++      testVisible(toolbar, '#installCrxProgress', true);
++      assertTrue(error.hidden);
++      assertEquals('', error.textContent.trim());
++      assertFalse(getToastManager().isToastOpen);
++      if (outcome === 'error') {
++        reject(new Error('Could not read the selected package'));
++      } else {
++        resolve(outcome === 'installed');
++      }
++      await microtasksFinished();
++      assertFalse(button.disabled);
++      assertFalse(load.disabled);
++      assertEquals('false', button.getAttribute('aria-busy'));
++      testVisible(toolbar, '#installCrxProgress', false);
++      assertEquals(outcome === 'installed', getToastManager().isToastOpen);
++      assertEquals(outcome !== 'error', error.hidden);
++      assertEquals('alert', error.getAttribute('role'));
++      if (outcome === 'error') {
++        assertEquals('Could not read the selected package', error.textContent.trim());
++      }
++      assertEquals(button, toolbar.shadowRoot.activeElement);
++      const nativeButton = getDeepActiveElement();
++      assertTrue(nativeButton instanceof HTMLButtonElement);
++      assertFalse(nativeButton.disabled);
++    }
++
++    // Ordinary picker blur restores the trigger; newer deep search focus wins.
++    for (const scenario of [
++           'blur-cancel', 'search-cancel', 'search-error', 'search-installed',
++         ]) {
++      getToastManager().hide();
++      let resolve!: (installed: boolean) => void;
++      let reject!: (error: Error) => void;
++      mockDelegate.installFromFile = () => new Promise<boolean>((yes, no) => {
++        resolve = yes;
++        reject = no;
++      });
++      button.focus();
++      assertEquals(button, toolbar.shadowRoot.activeElement);
++      button.click();
++      await microtasksFinished();
++      assertTrue(button.disabled);
++      const preserveSearch = scenario.startsWith('search-');
++      if (preserveSearch) {
++        toolbar.focusSearchInput();
++        await microtasksFinished();
++      } else {
++        button.blur();
++      }
++      const chosenFocus = getDeepActiveElement();
++      if (preserveSearch) {
++        assertTrue(toolbar.isSearchFocused());
++        assertTrue(chosenFocus instanceof HTMLInputElement);
++      } else {
++        assertEquals(document.body, chosenFocus);
++      }
++      if (scenario === 'search-error') {
++        reject(new Error('Could not read the selected package'));
++      } else {
++        resolve(scenario === 'search-installed');
++      }
++      await microtasksFinished();
++      assertFalse(button.disabled);
++      assertFalse(load.disabled);
++      testVisible(toolbar, '#installCrxProgress', false);
++      if (preserveSearch) {
++        assertEquals(chosenFocus, getDeepActiveElement());
++      } else {
++        assertEquals(button, toolbar.shadowRoot.activeElement);
++        const nativeButton = getDeepActiveElement();
++        assertTrue(nativeButton instanceof HTMLButtonElement);
++        assertFalse(nativeButton.disabled);
++      }
++    }
++    await checkAndroidCrxFailureOutsideDeveloperDrawer();
++  });
++
++  async function checkAndroidCrxFailureOutsideDeveloperDrawer() {
++    toolbar.inDevMode = true;
++    toolbar.canLoadUnpacked = true;
++    getToastManager().hide();
++    await microtasksFinished();
++    const install = toolbar.$.installCrx as CrButtonElement;
++    const load = toolbar.$.loadUnpacked as CrButtonElement;
++    const error = toolbar.shadowRoot.querySelector<HTMLElement>('#installCrxError')!;
++    let calls = 0;
++    let reject!: (error: Error) => void;
++    mockDelegate.installFromFile = () => {
++      ++calls;
++      return new Promise<boolean>((_yes, no) => { reject = no; });
++    };
++    install.click();
++    await microtasksFinished();
++    assertTrue(install.disabled);
++    toolbar.inDevMode = false;
++    await microtasksFinished();
++    toolbar.focusSearchInput();
++    await microtasksFinished();
++    const chosenFocus = getDeepActiveElement();
++    assertTrue(chosenFocus instanceof HTMLInputElement);
++    reject(new Error('Local CRX could not be read'));
++    await microtasksFinished();
++    assertTrue(toolbar.$.devDrawer.hidden);
++    assertFalse(toolbar.$.devDrawer.contains(error));
++    assertFalse(error.hidden);
++    assertTrue(error.getBoundingClientRect().height > 0);
++    assertEquals('alert', error.getAttribute('role'));
++    assertEquals('Local CRX could not be read', error.textContent.trim());
++    assertFalse(install.disabled);
++    assertFalse(load.disabled);
++    assertEquals('false', install.getAttribute('aria-busy'));
++    testVisible(toolbar, '#installCrxProgress', false);
++    assertFalse(getToastManager().isToastOpen);
++    assertEquals(chosenFocus, getDeepActiveElement());
++    assertEquals(1, calls);
++
++    toolbar.inDevMode = true;
++    await microtasksFinished();
++    assertEquals(1, calls);
++    let resolve!: (installed: boolean) => void;
++    mockDelegate.installFromFile = () => {
++      ++calls;
++      return new Promise<boolean>(yes => { resolve = yes; });
++    };
++    install.click();
++    await microtasksFinished();
++    assertEquals(2, calls);
++    assertTrue(install.disabled);
++    assertTrue(error.hidden);
++    assertEquals('', error.textContent.trim());
++    resolve(false);
++    await microtasksFinished();
++    assertFalse(install.disabled);
++    assertEquals('false', install.getAttribute('aria-busy'));
++    assertTrue(error.hidden);
++    assertFalse(getToastManager().isToastOpen);
++  }
++
++  test('AndroidInterruptedImportNoticeDoesNotResumeOrStealFocus', async () => {
++    toolbar.inDevMode = false;
++    await microtasksFinished();
++    const input = document.createElement('input');
++    document.body.appendChild(input);
++    input.focus();
++    let calls = 0;
++    mockDelegate.installFromFile = async () => { ++calls; return false; };
++    toolbar.showInterruptedLocalImport();
++    await microtasksFinished();
++    const notice = toolbar.shadowRoot.querySelector<HTMLElement>(
++        '#importInterrupted')!;
++    assertFalse(notice.hidden);
++    assertTrue(notice.getBoundingClientRect().height > 0);
++    assertEquals('alert', notice.getAttribute('role'));
++    assertEquals(toolbar.i18n('toolbarImportInterrupted'), notice.textContent.trim());
++    assertEquals(input, getDeepActiveElement());
++    assertEquals(0, calls);
++    assertFalse(getToastManager().isToastOpen);
++    toolbar.inDevMode = true;
++    await microtasksFinished();
++    const button = toolbar.$.installCrx as CrButtonElement;
++    assertFalse(button.disabled);
++    button.click();
++    await microtasksFinished();
++    assertEquals(1, calls);
++    assertTrue(notice.hidden);
++    assertFalse(button.disabled);
++    assertEquals('false', button.getAttribute('aria-busy'));
++    assertFalse(getToastManager().isToastOpen);
++    input.remove();
++  });
++
++  test('AndroidInstallCrxDetachedCompletionHasNoToast', async () => {
++    toolbar.inDevMode = true;
++    toolbar.canLoadUnpacked = true;
++    await microtasksFinished();
++    getToastManager().hide();
++    let resolve!: (installed: boolean) => void;
++    mockDelegate.installFromFile = () => new Promise<boolean>(yes => { resolve = yes; });
++    toolbar.$.installCrx.click();
++    toolbar.remove();
++    resolve(true);
++    await microtasksFinished();
++    assertFalse(getToastManager().isToastOpen);
++  });
++  // </if>
+ 
+   test('DevModeToggle', async () => {
+     const toggle = toolbar.$.devMode;
+     assertFalse(toggle.disabled);
++    // <if expr="is_android">
++    await microtasksFinished();
++    assertFalse(toggle.checked);
++    toolbar.inDevMode = true;
++    await microtasksFinished();
++    assertTrue(toggle.checked);
++    toolbar.inDevMode = false;
++    await microtasksFinished();
++    assertFalse(toggle.checked);
++    assertEquals('checkbox', toggle.type);
++    assertEquals('switch', toggle.getAttribute('role'));
++    const labels = toggle.labels;
++    assertTrue(!!labels);
++    assertEquals(2, labels.length);
++    const label = labels[0]!;
++    assertEquals(toggle, label.control);
++    assertEquals(toggle.getRootNode(), label.getRootNode());
++    assertEquals('devModeLabel', label.id);
++    assertEquals(toolbar.i18n('toolbarDevMode'), label.textContent.trim());
++    const hitTarget = labels[1]!;
++    assertEquals('devModeHitTarget', hitTarget.id);
++    assertEquals(toggle, hitTarget.control);
++    assertEquals(-1, hitTarget.tabIndex);
++    assertEquals(0, toggle.tabIndex);
++    toggle.focus();
++    assertEquals(toggle, toolbar.shadowRoot.activeElement);
++    toggle.click();
++    assertTrue(toggle.checked);
++    assertTrue(await mockDelegate.whenCalled('setProfileInDevMode'));
++    mockDelegate.reset();
++    label.click();
++    assertFalse(toggle.checked);
++    assertFalse(await mockDelegate.whenCalled('setProfileInDevMode'));
++    mockDelegate.reset();
++    hitTarget.click();
++    assertTrue(toggle.checked);
++    assertTrue(await mockDelegate.whenCalled('setProfileInDevMode'));
++    mockDelegate.reset();
++    label.click();
++    assertFalse(toggle.checked);
++    assertFalse(await mockDelegate.whenCalled('setProfileInDevMode'));
++    mockDelegate.reset();
++    // </if>
+ 
+     // Test that the dev-mode toggle is disabled when a policy exists.
+     toolbar.devModeControlledByPolicy = true;
+     await microtasksFinished();
+     assertTrue(toggle.disabled);
++    // <if expr="is_android">
++    toggle.click();
++    label.click();
++    hitTarget.click();
++    await microtasksFinished();
++    assertFalse(toggle.checked);
++    assertEquals(0, mockDelegate.getCallCount('setProfileInDevMode'));
++    // </if>
+ 
+     toolbar.devModeControlledByPolicy = false;
+     await microtasksFinished();
+@@ -73,18 +651,37 @@
+     toolbar.isChildAccount = true;
+     await microtasksFinished();
+     assertTrue(toggle.disabled);
++    // <if expr="is_android">
++    toggle.click();
++    label.click();
++    hitTarget.click();
++    await microtasksFinished();
++    assertFalse(toggle.checked);
++    assertEquals(0, mockDelegate.getCallCount('setProfileInDevMode'));
++    // </if>
+   });
+ 
+   test('ClickHandlers', async function() {
+     toolbar.inDevMode = true;
+     await microtasksFinished();
+     const toastManager = getToastManager();
++    // <if expr="is_android">
++    const devModeInput = toolbar.$.devMode;
++    devModeInput.click();
++    // </if>
++    // <if expr="not is_android">
+     toolbar.$.devMode.click();
++    // </if>
+     let arg = await mockDelegate.whenCalled('setProfileInDevMode');
+     assertFalse(arg);
+ 
+     mockDelegate.reset();
++    // <if expr="is_android">
++    devModeInput.click();
++    // </if>
++    // <if expr="not is_android">
+     toolbar.$.devMode.click();
++    // </if>
+     arg = await mockDelegate.whenCalled('setProfileInDevMode');
+     assertTrue(arg);
+ 
+@@ -155,6 +752,80 @@
+         toolbar.$.updateNow.click();
+         await proxyDelegate.whenCalled('updateAllExtensions');
+         await verifyLoadErrorFired(true);
++        // <if expr="is_android">
++        const toastManager = getToastManager();
++        assertFalse(toastManager.isToastOpen);
++        assertTrue(toastManager.duration > 0);
++
++        for (const outcome of ['success', 'error']) {
++          for (const mode of ['detached', 'replaced', 'same-label']) {
++            const pendingToolbar = document.createElement('extensions-toolbar');
++            pendingToolbar.inDevMode = true;
++            const pendingDelegate = new TestService();
++            let resolveUpdate!: () => void;
++            let rejectUpdate!: (error: Error) => void;
++            let calls = 0;
++            pendingDelegate.updateAllExtensions = () => {
++              ++calls;
++              return new Promise<void>((resolve, reject) => {
++                resolveUpdate = resolve;
++                rejectUpdate = reject;
++              });
++            };
++            pendingToolbar.delegate = pendingDelegate;
++            let errors = 0;
++            pendingToolbar.addEventListener('load-error', () => ++errors);
++            document.body.appendChild(pendingToolbar);
++            await microtasksFinished();
++            pendingToolbar.$.updateNow.click();
++            pendingToolbar.$.updateNow.click();
++            assertEquals(1, calls);
++            assertTrue(toastManager.isToastOpen);
++            assertEquals(0, toastManager.duration);
++            const marker = toastManager.$.content.lastChild!;
++            assertEquals(Node.COMMENT_NODE, marker.nodeType);
++            const updateLabel = toastManager.$.content.textContent!;
++            if (mode === 'detached') {
++              pendingToolbar.remove();
++              assertFalse(toastManager.isToastOpen);
++              assertTrue(toastManager.duration > 0);
++            }
++            const label = mode === 'same-label' ? updateLabel : 'Newer operation';
++            toastManager.duration = 3210;
++            toastManager.show(label);
++            assertEquals(null, marker.parentNode);
++            const input = document.createElement('input');
++            document.body.appendChild(input);
++            input.focus();
++            if (outcome === 'success') {
++              resolveUpdate();
++            } else {
++              rejectUpdate(new Error('Local update failed'));
++            }
++            await microtasksFinished();
++            assertEquals(mode !== 'detached' && outcome === 'error' ? 1 : 0, errors);
++            assertTrue(toastManager.isToastOpen);
++            assertEquals(label, toastManager.$.content.textContent);
++            assertEquals(3210, toastManager.duration);
++            assertEquals(input, getDeepActiveElement());
++
++            // A settled attempt releases the synchronous guard for explicit retry.
++            if (!pendingToolbar.isConnected) {
++              document.body.appendChild(pendingToolbar);
++              await microtasksFinished();
++            }
++            pendingToolbar.$.updateNow.click();
++            assertEquals(2, calls);
++            pendingToolbar.remove();
++            assertFalse(toastManager.isToastOpen);
++            assertTrue(toastManager.duration > 0);
++            resolveUpdate();
++            await microtasksFinished();
++            assertFalse(toastManager.isToastOpen);
++            input.remove();
++          }
++        }
++        // </if>
+       });
+ 
+   test('NarrowModeShowsMenu', async () => {

@@ -27,8 +27,14 @@ namespace brave_search {
 BraveSearchDefaultJSHandler::BraveSearchDefaultJSHandler(
     content::RenderFrame* render_frame,
     bool can_always_set_default)
+#if BUILDFLAG(IS_ANDROID)
+    : render_frame_(render_frame) {
+  std::ignore = can_always_set_default;
+}
+#else
     : render_frame_(render_frame),
       can_always_set_default_(can_always_set_default) {}
+#endif  // BUILDFLAG(IS_ANDROID)
 
 BraveSearchDefaultJSHandler::~BraveSearchDefaultJSHandler() = default;
 
@@ -36,8 +42,10 @@ bool BraveSearchDefaultJSHandler::EnsureConnected() {
   if (!brave_search_default_.is_bound()) {
     render_frame_->GetBrowserInterfaceBroker().GetInterface(
         brave_search_default_.BindNewPipeAndPassReceiver());
+#if !BUILDFLAG(IS_ANDROID)
     if (can_always_set_default_)
       brave_search_default_->SetCanAlwaysSetDefault();
+#endif  // !BUILDFLAG(IS_ANDROID)
   }
 
   return brave_search_default_.is_bound();

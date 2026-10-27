@@ -1,0 +1,178 @@
+diff --git a/chrome/browser/extensions/api/notifications/notifications_api.cc b/chrome/browser/extensions/api/notifications/notifications_api.cc
+--- a/chrome/browser/extensions/api/notifications/notifications_api.cc
++++ b/chrome/browser/extensions/api/notifications/notifications_api.cc
+@@ -9,7 +9,9 @@
+
+ #include <utility>
+
++#include "base/functional/bind.h"
+ #include "base/functional/callback.h"
++#include "base/location.h"
+ #include "base/rand_util.h"
+ #include "base/strings/string_number_conversions.h"
+ #include "base/strings/stringprintf.h"
+@@ -51,6 +53,16 @@
+ #include "ui/message_center/public/cpp/notifier_id.h"
+ #include "url/gurl.h"
+
++#if BUILDFLAG(IS_ANDROID)
++#include "base/android/callback_android.h"
++#include "base/android/jni_android.h"
++#include "base/android/jni_string.h"
++#include "chrome/browser/notifications/jni_headers/NotificationSystemStatusUtil_jni.h"
++#include "extensions/browser/extension_registry.h"
++#include "extensions/common/mojom/api_permission_id.mojom.h"
++#include "extensions/common/permissions/permissions_data.h"
++#endif
++
+ #if BUILDFLAG(ENABLE_PLATFORM_APPS)
+ #include "extensions/browser/app_window/app_window.h"
+ #include "extensions/browser/app_window/app_window_registry.h"
+@@ -92,11 +104,17 @@
+
+ // Given an extension id and another id, returns an id that is unique
+ // relative to other extensions.
+-std::string CreateScopedIdentifier(const ExtensionId& extension_id,
++std::string CreateScopedIdentifier(Profile* profile,
++                                   const ExtensionId& extension_id,
+                                    const std::string& id) {
++#if BUILDFLAG(IS_ANDROID)
++  return CreateProfileScopedNotificationId(profile, extension_id, id);
++#else
+   return extension_id + "-" + id;
+-}
+-
++#endif
++}
++
++#if !BUILDFLAG(IS_ANDROID)
+ // Removes the unique internal identifier to send the ID as the
+ // extension expects it.
+ std::string StripScopeFromIdentifier(const ExtensionId& extension_id,
+@@ -106,6 +124,7 @@
+
+   return scoped_id.substr(index_of_separator);
+ }
++#endif
+
+ // Converts the |notification_bitmap| (in RGBA format) to the |*return_image|
+ // (which is in ARGB format).
+@@ -353,7 +372,7 @@
+     return false;
+   }
+
+-  std::string notification_id = CreateScopedIdentifier(extension_->id(), id);
++  std::string notification_id = CreateScopedIdentifier(GetProfile(), extension_->id(), id);
+   message_center::Notification notification(
+       type, notification_id, title, message, ui::ImageModel::FromImage(icon),
+       base::UTF8ToUTF16(extension_->name()), extension_->url(),
+@@ -628,7 +647,7 @@
+   // with "false".
+   const message_center::Notification* matched_notification =
+       GetDisplayHelper()->GetByNotificationId(
+-          CreateScopedIdentifier(extension_->id(), params_->notification_id));
++          CreateScopedIdentifier(GetProfile(), extension_->id(), params_->notification_id));
+
+   if (!matched_notification) {
+     return RespondNow(WithArguments(false));
+@@ -664,7 +683,7 @@
+   EXTENSION_FUNCTION_VALIDATE(params_);
+
+   bool cancel_result = GetDisplayHelper()->Close(
+-      CreateScopedIdentifier(extension_->id(), params_->notification_id));
++      CreateScopedIdentifier(GetProfile(), extension_->id(), params_->notification_id));
+
+   return RespondNow(WithArguments(cancel_result));
+ }
+@@ -681,7 +700,14 @@
+   base::DictValue result;
+
+   for (const auto& entry : notification_ids) {
++#if BUILDFLAG(IS_ANDROID)
++    if (auto id =
++            GetUnscopedNotificationId(GetProfile(), extension_->id(), entry)) {
++      result.Set(*id, true);
++    }
++#else
+     result.Set(StripScopeFromIdentifier(extension_->id(), entry), true);
++#endif
+   }
+
+   return RespondNow(WithArguments(std::move(result)));
+@@ -699,12 +725,75 @@
+
+ ExtensionFunction::ResponseAction
+ NotificationsGetPermissionLevelFunction::RunNotificationsApi() {
++#if BUILDFLAG(IS_ANDROID)
++  if (!AreExtensionNotificationsAllowed()) {
++    return RespondNow(WithArguments("denied"));
++  }
++  waiting_for_android_status_ = true;
++  AddRef();  // Balanced by FinishAndroidQuery(), including timeout/shutdown.
++  android_status_timeout_.Start(
++      FROM_HERE, base::Seconds(10),
++      base::BindOnce(
++          &NotificationsGetPermissionLevelFunction::OnAndroidNotificationStatus,
++          weak_factory_.GetWeakPtr(), 0));
++  Java_NotificationSystemStatusUtil_getExtensionNotificationStatus(
++      base::android::AttachCurrentThread(), extension()->url().spec(),
++      base::BindOnce(
++          &NotificationsGetPermissionLevelFunction::OnAndroidNotificationStatus,
++          weak_factory_.GetWeakPtr()));
++  return did_respond() ? AlreadyResponded() : RespondLater();
++#else
+   api::notifications::PermissionLevel result =
+       AreExtensionNotificationsAllowed()
+           ? api::notifications::PermissionLevel::kGranted
+           : api::notifications::PermissionLevel::kDenied;
+
+   return RespondNow(WithArguments(api::notifications::ToString(result)));
+-}
++#endif
++}
++
++#if BUILDFLAG(IS_ANDROID)
++void NotificationsGetPermissionLevelFunction::OnAndroidNotificationStatus(
++    int status) {
++  // NotificationSystemStatusUtil uses 2 for enabled and 3 for disabled. Other
++  // values mean the query failed/timed out, not that the user denied
++  // permission.
++  if (status != 2 && status != 3) {
++    FinishAndroidQuery(Error("Unable to read Android notification settings."));
++    return;
++  }
++  // The original Extension object can outlive disable/unload or permission
++  // revocation while Android policy is read. Consult the current registry
++  // entry.
++  const Extension* current_extension = ExtensionRegistry::Get(browser_context())
++                                           ->enabled_extensions()
++                                           .GetByID(extension_id());
++  const bool allowed = current_extension &&
++                       current_extension->permissions_data()->HasAPIPermission(
++                           mojom::APIPermissionID::kNotifications) &&
++                       AreExtensionNotificationsAllowed();
++  FinishAndroidQuery(
++      WithArguments(status == 2 && allowed ? "granted" : "denied"));
++}
++
++void NotificationsGetPermissionLevelFunction::FinishAndroidQuery(
++    ResponseValue response) {
++  if (!waiting_for_android_status_)
++    return;
++  waiting_for_android_status_ = false;
++  android_status_timeout_.Stop();
++  weak_factory_.InvalidateWeakPtrs();
++  Respond(std::move(response));
++  Release();
++}
++
++void NotificationsGetPermissionLevelFunction::OnBrowserContextShutdown() {
++  if (waiting_for_android_status_) {
++    FinishAndroidQuery(
++        Error("The browser context shut down before notification settings were "
++              "read."));
++  }
++}
++#endif
+
+ }  // namespace extensions

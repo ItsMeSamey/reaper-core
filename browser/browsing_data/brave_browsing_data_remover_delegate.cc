@@ -3,6 +3,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+#include "build/build_config.h"
+
 #include "brave/browser/browsing_data/brave_browsing_data_remover_delegate.h"
 
 #include <utility>
@@ -11,18 +13,29 @@
 #include "base/containers/flat_map.h"
 #include "base/no_destructor.h"
 #include "base/notreached.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/misc_metrics/profile_misc_metrics_service.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/misc_metrics/profile_misc_metrics_service_factory.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/serp_metrics/serp_metrics_service_factory.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/ai_chat/core/common/buildflags/buildflags.h"
 #include "brave/components/brave_news/common/buildflags/buildflags.h"
 #include "brave/components/containers/buildflags/buildflags.h"
 #include "brave/components/content_settings/core/browser/brave_content_settings_pref_provider.h"
 #include "brave/components/content_settings/core/browser/brave_content_settings_utils.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/misc_metrics/page_metrics.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/serp_metrics/serp_metrics.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/serp_metrics/serp_metrics_service.h"
-#include "build/build_config.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "chrome/browser/browsing_data/chrome_browsing_data_remover_constants.h"
 #include "chrome/browser/content_settings/host_content_settings_map_factory.h"
 #include "chrome/browser/profiles/profile.h"
@@ -232,6 +245,7 @@ void BraveBrowsingDataRemoverDelegate::RemoveEmbedderData(
         website_settings_filter);
   }
 
+#if !BUILDFLAG(IS_ANDROID)
   if ((remove_mask & chrome_browsing_data_remover::DATA_TYPE_HISTORY)) {
     if (serp_metrics::SerpMetricsService* serp_metrics_service =
             serp_metrics::SerpMetricsServiceFactory::GetFor(profile_)) {
@@ -253,6 +267,7 @@ void BraveBrowsingDataRemoverDelegate::RemoveEmbedderData(
       }
     }
   }
+#endif  // !BUILDFLAG(IS_ANDROID)
 }
 
 void BraveBrowsingDataRemoverDelegate::ClearShieldsSettings(

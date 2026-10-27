@@ -1,0 +1,390 @@
+diff --git a/chrome/browser/ui/browser_window/internal/android/create_browser_window_android_browsertest.cc b/chrome/browser/ui/browser_window/internal/android/create_browser_window_android_browsertest.cc
+index 1bdac5e88d1e3e32ac9d22d4f9e724deefa94cee..9efda0201e84090764b40ec5f4011f7130f0bb82 100644
+--- a/chrome/browser/ui/browser_window/internal/android/create_browser_window_android_browsertest.cc
++++ b/chrome/browser/ui/browser_window/internal/android/create_browser_window_android_browsertest.cc
+@@ -4,11 +4,19 @@
+ 
+ #include "chrome/browser/ui/browser_window/public/create_browser_window.h"
+ 
++#include <optional>
++#include <set>
++#include <string>
+ #include <utility>
+ 
+ #include "base/android/jni_android.h"
+ #include "base/base_switches.h"
+ #include "base/command_line.h"
++#include "base/functional/bind.h"
++#include "base/functional/callback_helpers.h"
++#include "base/memory/weak_ptr.h"
++#include "base/run_loop.h"
++#include "base/test/bind.h"
+ #include "base/test/scoped_feature_list.h"
+ #include "base/test/test_future.h"
+ #include "chrome/browser/flags/android/chrome_feature_list.h"
+@@ -17,6 +25,7 @@
+ #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+ #include "chrome/browser/ui/browser_window/public/browser_window_interface_iterator.h"
+ #include "chrome/browser/ui/browser_window/test/android/browser_window_android_browsertest_base.h"
++#include "chrome/common/pref_names.h"
+ #include "chrome/test/base/android/android_browser_test.h"
+ #include "components/feed/feed_feature_list.h"
+ #include "components/policy/core/common/policy_pref_names.h"
+@@ -25,6 +34,17 @@
+ #include "content/public/browser/web_contents.h"
+ #include "content/public/browser/web_contents_observer.h"
+ #include "content/public/test/browser_test.h"
++#include "content/public/test/browser_test_utils.h"
++#include "extensions/buildflags/buildflags.h"
++#include "net/test/embedded_test_server/embedded_test_server.h"
++#include "ui/base/base_window.h"
++
++#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
++#include "chrome/browser/extensions/api/tabs/tabs_api.h"
++#include "chrome/browser/extensions/browser_extension_window_controller.h"
++#include "extensions/browser/api_test_utils.h"
++#include "extensions/common/extension_builder.h"
++#endif
+ #include "testing/gtest/include/gtest/gtest.h"
+ #include "ui/base/mojom/window_show_state.mojom.h"
+ 
+@@ -90,6 +110,28 @@
+     ASSERT_NE(tab_list_interface->GetActiveTab(), nullptr);
+   }
+ }
++
++base::ScopedClosureRunner CloseCreatedWindowOnExit(
++    BrowserWindowInterface* window) {
++  return base::ScopedClosureRunner(base::BindOnce(
++      [](base::WeakPtr<BrowserWindowInterface> window) {
++        if (window && !window->IsDeleteScheduled()) {
++          window->GetWindow()->Close();
++        }
++      },
++      window->GetWeakPtr()));
++}
++
++class ContentsDestroyedObserver : public content::WebContentsObserver {
++ public:
++  ContentsDestroyedObserver(content::WebContents* contents, bool& destroyed)
++      : content::WebContentsObserver(contents), destroyed_(destroyed) {}
++
++  void WebContentsDestroyed() override { destroyed_ = true; }
++
++ private:
++  bool& destroyed_;
++};
+ }  // namespace
+ 
+ class CreateBrowserWindowAndroidBrowserTest
+@@ -159,16 +201,17 @@
+ 
+ IN_PROC_BROWSER_TEST_F(
+     CreateBrowserWindowAndroidBrowserTest,
+-    CreateBrowserWindowSync_UnsupportedInitialShowState_ReturnsNull) {
+-  auto type = BrowserWindowInterface::Type::TYPE_NORMAL;
+-  Profile* profile = GetProfile();
+-  auto initial_show_state =
+-      ui::mojom::WindowShowState::kFullscreen;  // not supported on Android
+-
+-  BrowserWindowInterface* new_browser_window =
+-      CreateBrowserWindowSync(type, profile, initial_show_state);
+-
+-  EXPECT_EQ(new_browser_window, nullptr);
++    CreateBrowserWindowSync_Fullscreen_PublishesPendingFullscreenState) {
++  auto type = BrowserWindowInterface::Type::TYPE_NORMAL;
++  Profile* profile = GetProfile();
++  BrowserWindowInterface* window = CreateBrowserWindowSync(
++      type, profile, ui::mojom::WindowShowState::kFullscreen);
++  ASSERT_NE(window, nullptr);
++  auto cleanup = CloseCreatedWindowOnExit(window);
++  AssertBrowserWindow(window, type, profile);
++  // Sync creation returns the real pending window, before Activity attachment.
++  // Its pending-state query must preserve the requested initial mode.
++  EXPECT_TRUE(window->GetWindow()->IsFullscreen());
+ }
+ 
+ IN_PROC_BROWSER_TEST_F(
+@@ -240,16 +283,24 @@
+ 
+ IN_PROC_BROWSER_TEST_F(
+     CreateBrowserWindowAndroidBrowserTest,
+-    CreateBrowserWindowAsync_UnsupportedInitialShowState_TriggersCallbackWithNull) {
+-  auto type = BrowserWindowInterface::Type::TYPE_NORMAL;
+-  Profile* profile = GetProfile();
+-  auto initial_show_state =
+-      ui::mojom::WindowShowState::kFullscreen;  // not supported on Android
+-
+-  BrowserWindowInterface* new_browser_window =
+-      CreateBrowserWindowAsync(type, profile, initial_show_state);
+-
+-  EXPECT_EQ(new_browser_window, nullptr);
++    CreateBrowserWindowAsync_Fullscreen_IsAppliedBeforeNativeCompletion) {
++  auto type = BrowserWindowInterface::Type::TYPE_NORMAL;
++  Profile* profile = GetProfile();
++  BrowserWindowCreateParams params(type, *profile, false);
++  params.initial_show_state = ui::mojom::WindowShowState::kFullscreen;
++  base::test::TestFuture<BrowserWindowInterface*> future;
++  bool callback_saw_fullscreen = false;
++  CreateBrowserWindow(
++      std::move(params), base::BindLambdaForTesting([&](BrowserWindowInterface* window) {
++        callback_saw_fullscreen = window && window->GetWindow()->IsFullscreen();
++        future.SetValue(window);
++      }));
++  BrowserWindowInterface* window = future.Get();
++  ASSERT_NE(window, nullptr);
++  auto cleanup = CloseCreatedWindowOnExit(window);
++  AssertBrowserWindow(window, type, profile, true);
++  EXPECT_TRUE(callback_saw_fullscreen);
++  EXPECT_TRUE(window->GetWindow()->IsFullscreen());
+ }
+ 
+ IN_PROC_BROWSER_TEST_F(CreateBrowserWindowAndroidBrowserTest,
+@@ -430,3 +481,247 @@
+   EXPECT_EQ(new_browser_window, nullptr);
+   EXPECT_EQ(create_params.web_contents, nullptr);
+ }
++
++IN_PROC_BROWSER_TEST_F(
++    CreateBrowserWindowAndroidBrowserTest,
++    CreateBrowserWindowAsync_FullscreenPopup_IsAppliedBeforeNativeCompletion) {
++  auto type = BrowserWindowInterface::Type::TYPE_POPUP;
++  Profile* profile = GetProfile();
++  BrowserWindowCreateParams params(type, *profile, false);
++  params.initial_show_state = ui::mojom::WindowShowState::kFullscreen;
++  base::test::TestFuture<BrowserWindowInterface*> future;
++  bool callback_saw_fullscreen = false;
++  CreateBrowserWindow(
++      std::move(params), base::BindLambdaForTesting([&](BrowserWindowInterface* window) {
++        callback_saw_fullscreen = window && window->GetWindow()->IsFullscreen();
++        future.SetValue(window);
++      }));
++  BrowserWindowInterface* window = future.Get();
++  ASSERT_NE(window, nullptr);
++  auto cleanup = CloseCreatedWindowOnExit(window);
++  AssertBrowserWindow(window, type, profile, true);
++  EXPECT_TRUE(callback_saw_fullscreen);
++}
++
++IN_PROC_BROWSER_TEST_F(
++    CreateBrowserWindowAndroidBrowserTest,
++    CreateBrowserWindowSync_FullscreenPolicyDenial_RetiresOwnedContents) {
++  Profile* profile = GetProfile();
++  const bool old_allowed =
++      profile->GetPrefs()->GetBoolean(prefs::kFullscreenAllowed);
++  base::ScopedClosureRunner restore(base::BindLambdaForTesting([&] {
++    profile->GetPrefs()->SetBoolean(prefs::kFullscreenAllowed, old_allowed);
++  }));
++  profile->GetPrefs()->SetBoolean(prefs::kFullscreenAllowed, false);
++  auto contents =
++      content::WebContents::Create(content::WebContents::CreateParams(profile));
++  bool destroyed = false;
++  ContentsDestroyedObserver observer(contents.get(), destroyed);
++  BrowserWindowCreateParams params(BrowserWindowInterface::TYPE_NORMAL,
++                                   *profile, false);
++  params.initial_show_state = ui::mojom::WindowShowState::kFullscreen;
++  params.web_contents = std::move(contents);
++  EXPECT_EQ(CreateBrowserWindow(std::move(params)), nullptr);
++  EXPECT_TRUE(destroyed);
++}
++
++IN_PROC_BROWSER_TEST_F(
++    CreateBrowserWindowAndroidBrowserTest,
++    CreateBrowserWindowAsync_FullscreenPolicyDenial_CompletesOnceAsynchronously) {
++  Profile* profile = GetProfile();
++  const bool old_allowed =
++      profile->GetPrefs()->GetBoolean(prefs::kFullscreenAllowed);
++  base::ScopedClosureRunner restore(base::BindLambdaForTesting([&] {
++    profile->GetPrefs()->SetBoolean(prefs::kFullscreenAllowed, old_allowed);
++  }));
++  profile->GetPrefs()->SetBoolean(prefs::kFullscreenAllowed, false);
++  auto contents =
++      content::WebContents::Create(content::WebContents::CreateParams(profile));
++  bool destroyed = false;
++  ContentsDestroyedObserver observer(contents.get(), destroyed);
++  BrowserWindowCreateParams params(BrowserWindowInterface::TYPE_POPUP, *profile,
++                                   false);
++  params.initial_show_state = ui::mojom::WindowShowState::kFullscreen;
++  params.web_contents = std::move(contents);
++  base::test::TestFuture<BrowserWindowInterface*> future;
++  int completions = 0;
++  CreateBrowserWindow(std::move(params),
++                      base::BindLambdaForTesting([&](BrowserWindowInterface* window) {
++                        ++completions;
++                        future.SetValue(window);
++                      }));
++  EXPECT_EQ(completions, 0);
++  EXPECT_TRUE(destroyed);
++  EXPECT_EQ(future.Get(), nullptr);
++  EXPECT_EQ(completions, 1);
++  base::RunLoop().RunUntilIdle();
++  EXPECT_EQ(completions, 1);
++}
++
++#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
++class ExtensionWindowFullscreenAndroidBrowserTest
++    : public CreateBrowserWindowAndroidBrowserTest {
++ protected:
++  std::optional<std::string> GetWindowState(BrowserWindowInterface* window) {
++    auto function = base::MakeRefCounted<extensions::WindowsGetFunction>();
++    function->set_extension(extension_);
++    base::ListValue args;
++    args.Append(window->GetSessionID().id());
++    auto result = extensions::api_test_utils::RunFunctionAndReturnSingleResult(
++        function, std::move(args), GetProfile());
++    if (!result || !result->is_dict()) {
++      return std::nullopt;
++    }
++    const std::string* state = result->GetDict().FindString("state");
++    return state ? std::make_optional(*state) : std::nullopt;
++  }
++
++  bool UpdateWindowState(BrowserWindowInterface* window,
++                         const std::string& state) {
++    auto function = base::MakeRefCounted<extensions::WindowsUpdateFunction>();
++    function->set_extension(extension_);
++    base::ListValue args;
++    args.Append(window->GetSessionID().id());
++    args.Append(base::DictValue().Set("state", state));
++    auto result = extensions::api_test_utils::RunFunctionAndReturnSingleResult(
++        function, std::move(args), GetProfile());
++    return result && result->is_dict() &&
++           result->GetDict().FindInt("id") == window->GetSessionID().id();
++  }
++
++  std::optional<base::Value> CreateWindowWithApi(const std::string& type) {
++    auto function = base::MakeRefCounted<extensions::WindowsCreateFunction>();
++    function->set_extension(extension_);
++    base::ListValue args;
++    args.Append(base::DictValue().Set("type", type).Set("state", "fullscreen"));
++    return extensions::api_test_utils::RunFunctionAndReturnSingleResult(
++        function, std::move(args), GetProfile());
++  }
++
++  BrowserWindowInterface* FindWindowById(int id) {
++    for (auto* window : GetAllBrowserWindowInterfaces()) {
++      if (window->GetProfile() == GetProfile() &&
++          window->GetSessionID().id() == id) {
++        return window;
++      }
++    }
++    return nullptr;
++  }
++
++ private:
++  scoped_refptr<const extensions::Extension> extension_ =
++      extensions::ExtensionBuilder("Reaper fullscreen window provider")
++          .SetManifestVersion(3)
++          .Build();
++};
++
++IN_PROC_BROWSER_TEST_F(ExtensionWindowFullscreenAndroidBrowserTest,
++                       FullscreenCreate_GetAndUpdateUseRegisteredRealWindow) {
++  auto* window = CreateBrowserWindowAsync(
++      BrowserWindowInterface::TYPE_NORMAL, GetProfile(),
++      ui::mojom::WindowShowState::kFullscreen);
++  ASSERT_NE(window, nullptr);
++  auto cleanup = CloseCreatedWindowOnExit(window);
++  ASSERT_NE(extensions::BrowserExtensionWindowController::From(window),
++            nullptr);
++  EXPECT_EQ(GetWindowState(window), "fullscreen");
++  ASSERT_TRUE(UpdateWindowState(window, "normal"));
++  EXPECT_FALSE(window->GetWindow()->IsFullscreen());
++  EXPECT_EQ(GetWindowState(window), "normal");
++  ASSERT_TRUE(UpdateWindowState(window, "fullscreen"));
++  EXPECT_TRUE(window->GetWindow()->IsFullscreen());
++  EXPECT_EQ(GetWindowState(window), "fullscreen");
++}
++
++IN_PROC_BROWSER_TEST_F(
++    ExtensionWindowFullscreenAndroidBrowserTest,
++    FullscreenPolicyDeniesEntryButAlwaysAllowsRealWindowExit) {
++  auto* window = CreateBrowserWindowAsync(
++      BrowserWindowInterface::TYPE_NORMAL, GetProfile(),
++      ui::mojom::WindowShowState::kFullscreen);
++  ASSERT_NE(window, nullptr);
++  auto cleanup = CloseCreatedWindowOnExit(window);
++  Profile* profile = GetProfile();
++  const bool old_allowed =
++      profile->GetPrefs()->GetBoolean(prefs::kFullscreenAllowed);
++  base::ScopedClosureRunner restore(base::BindLambdaForTesting([&] {
++    profile->GetPrefs()->SetBoolean(prefs::kFullscreenAllowed, old_allowed);
++  }));
++  profile->GetPrefs()->SetBoolean(prefs::kFullscreenAllowed, false);
++  ASSERT_TRUE(UpdateWindowState(window, "normal"));
++  EXPECT_FALSE(window->GetWindow()->IsFullscreen());
++  EXPECT_EQ(GetWindowState(window), "normal");
++  ASSERT_TRUE(UpdateWindowState(window, "fullscreen"));
++  EXPECT_FALSE(window->GetWindow()->IsFullscreen());
++  EXPECT_EQ(GetWindowState(window), "normal");
++}
++
++IN_PROC_BROWSER_TEST_F(
++    ExtensionWindowFullscreenAndroidBrowserTest,
++    NormalWindowUpdateExitsActualDomFullscreenAndPreservesBrowserQuery) {
++  ASSERT_TRUE(embedded_test_server()->Start());
++  auto* window = CreateBrowserWindowAsync(BrowserWindowInterface::TYPE_NORMAL,
++                                          GetProfile());
++  ASSERT_NE(window, nullptr);
++  auto cleanup = CloseCreatedWindowOnExit(window);
++  auto* tabs = TabListInterface::From(window);
++  ASSERT_NE(tabs, nullptr);
++  ASSERT_NE(tabs->GetActiveTab(), nullptr);
++  content::WebContents* contents = tabs->GetActiveTab()->GetContents();
++  ASSERT_TRUE(content::NavigateToURL(
++      contents, embedded_test_server()->GetURL("/empty.html")));
++  ASSERT_EQ(content::EvalJs(contents, R"(
++    document.documentElement.requestFullscreen().then(
++        () => document.fullscreenElement !== null);
++  )"),
++            true);
++  EXPECT_TRUE(window->GetWindow()->IsFullscreen());
++  EXPECT_EQ(GetWindowState(window), "fullscreen");
++  ASSERT_TRUE(content::ExecJs(contents, R"(
++    window.reaperFullscreenExit = new Promise(resolve => {
++      document.addEventListener('fullscreenchange', () => {
++        if (!document.fullscreenElement) resolve(true);
++      }, {once: true});
++    });
++  )"));
++  ASSERT_TRUE(UpdateWindowState(window, "normal"));
++  EXPECT_EQ(content::EvalJs(contents, "window.reaperFullscreenExit"), true);
++  EXPECT_EQ(content::EvalJs(contents, "document.fullscreenElement === null"),
++            true);
++  EXPECT_FALSE(window->GetWindow()->IsFullscreen());
++  EXPECT_EQ(GetWindowState(window), "normal");
++}
++
++IN_PROC_BROWSER_TEST_F(
++    ExtensionWindowFullscreenAndroidBrowserTest,
++    WindowsCreateFullscreenNormalAndPopup_ReportAppliedStateAtCompletion) {
++  for (const std::string type : {"normal", "popup"}) {
++    std::set<int> existing_ids;
++    for (auto* window : GetAllBrowserWindowInterfaces()) {
++      existing_ids.insert(window->GetSessionID().id());
++    }
++    auto result = CreateWindowWithApi(type);
++    ASSERT_TRUE(result);
++    ASSERT_TRUE(result->is_dict());
++    auto id = result->GetDict().FindInt("id");
++    ASSERT_TRUE(id);
++    ASSERT_FALSE(existing_ids.contains(*id));
++    auto* window = FindWindowById(*id);
++    ASSERT_NE(window, nullptr);
++    auto cleanup = CloseCreatedWindowOnExit(window);
++    EXPECT_EQ(window->GetType(), type == "normal"
++                                     ? BrowserWindowInterface::TYPE_NORMAL
++                                     : BrowserWindowInterface::TYPE_POPUP);
++    ASSERT_NE(extensions::BrowserExtensionWindowController::From(window),
++              nullptr);
++    const std::string* state = result->GetDict().FindString("state");
++    ASSERT_NE(state, nullptr);
++    EXPECT_EQ(*state, "fullscreen");
++    EXPECT_TRUE(window->GetWindow()->IsFullscreen());
++    EXPECT_EQ(GetWindowState(window), "fullscreen");
++    ASSERT_TRUE(UpdateWindowState(window, "normal"));
++    EXPECT_FALSE(window->GetWindow()->IsFullscreen());
++    EXPECT_EQ(GetWindowState(window), "normal");
++  }
++}
++#endif  // BUILDFLAG(ENABLE_EXTENSIONS_CORE)

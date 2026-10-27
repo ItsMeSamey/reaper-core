@@ -1,0 +1,325 @@
+diff --git a/chrome/browser/extensions/extension_disabled_ui_android.cc b/chrome/browser/extensions/extension_disabled_ui_android.cc
+index f3abfa715a98c1541f7ea168d07804537b45984e..870a3e928583e82dc65d068a5424529333477933 100644
+--- a/chrome/browser/extensions/extension_disabled_ui_android.cc
++++ b/chrome/browser/extensions/extension_disabled_ui_android.cc
+@@ -4,17 +4,315 @@
+ 
+ #include "chrome/browser/extensions/extension_disabled_ui.h"
+ 
+-#include "base/logging.h"
+-#include "base/notimplemented.h"
++#include <map>
++#include <memory>
++#include <string>
++#include <utility>
++
++#include "base/android/jni_android.h"
++#include "base/android/scoped_java_ref.h"
++#include "base/callback_list.h"
++#include "base/functional/bind.h"
++#include "base/location.h"
++#include "base/memory/raw_ptr.h"
++#include "base/memory/weak_ptr.h"
++#include "base/scoped_observation.h"
++#include "base/supports_user_data.h"
++#include "base/task/single_thread_task_runner.h"
++#include "chrome/browser/android/android_theme_resources.h"
++#include "chrome/browser/android/resource_mapper.h"
++#include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/ui/browser_window/public/browser_collection_observer.h"
++#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
++#include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
++#include "chrome/browser/ui/browser_window/public/profile_browser_collection.h"
++#include "chrome/common/webui_url_constants.h"
++#include "chrome/grit/generated_resources.h"
++#include "components/messages/android/message_dispatcher_bridge.h"
++#include "components/messages/android/message_wrapper.h"
++#include "content/public/browser/page_navigator.h"
++#include "extensions/browser/disable_reason.h"
++#include "extensions/browser/extension_prefs.h"
++#include "extensions/browser/extension_registry.h"
++#include "extensions/browser/extension_registry_observer.h"
++#include "extensions/browser/ui_util.h"
++#include "extensions/common/extension.h"
++#include "ui/android/window_android.h"
++#include "ui/base/base_window.h"
++#include "ui/base/l10n/l10n_util.h"
++#include "ui/base/page_transition_types.h"
++#include "ui/base/window_open_disposition.h"
++#include "url/gurl.h"
+ 
+ namespace extensions {
++namespace {
++
++const char kDisabledMessageOwnerKey[] = "extensions.disabled_message_android";
++
++// Keep notices while no matching foreground window/provider exists. The existing
++// disabled-extension state remains the source of truth; this owner never grants
++// permissions or enables an extension.
++class DisabledMessageOwner final : public base::SupportsUserData::Data,
++                                   public BrowserCollectionObserver,
++                                   public ExtensionRegistryObserver {
++ public:
++  explicit DisabledMessageOwner(Profile* profile) : profile_(profile) {
++    registry_observation_.Observe(ExtensionRegistry::Get(profile));
++    if (auto* browsers = ProfileBrowserCollection::GetForProfile(profile)) {
++      browser_observation_.Observe(browsers);
++    }
++    dispatcher_subscription_ =
++        messages::MessageDispatcherBridge::Get()->AddDispatcherChangedCallback(
++            base::BindRepeating(&DisabledMessageOwner::Schedule,
++                                weak_factory_.GetWeakPtr()));
++  }
++
++  ~DisabledMessageOwner() override { Stop(); }
++
++  void Add(const Extension& extension, bool remote_install) {
++    pending_[extension.id()] = remote_install;
++    if (displayed_id_ == extension.id()) {
++      Dismiss();
++    }
++    Schedule();
++  }
++
++ private:
++  BrowserWindowInterface* FindHost() {
++    if (!profile_ || profile_->ShutdownStarted()) {
++      return nullptr;
++    }
++    auto* browsers = GlobalBrowserCollection::GetInstance();
++    auto* browser = browsers ? browsers->GetLastActiveBrowser() : nullptr;
++    if (!browser || browser->IsDeleteScheduled() ||
++        browser->GetProfile() != profile_ ||
++        browser->GetType() != BrowserWindowInterface::TYPE_NORMAL ||
++        !browser->GetWindow() || !browser->GetWindow()->IsActive() ||
++        !browser->GetWindow()->GetNativeWindow()) {
++      return nullptr;
++    }
++    return browser;
++  }
++
++  const Extension* GetDisabled(const std::string& id) {
++    if (!profile_ || profile_->ShutdownStarted()) {
++      return nullptr;
++    }
++    const Extension* extension =
++        ExtensionRegistry::Get(profile_)->disabled_extensions().GetByID(id);
++    if (!extension) {
++      return nullptr;
++    }
++    const auto reasons = ExtensionPrefs::Get(profile_)->GetDisableReasons(id);
++    return reasons.contains(disable_reason::DISABLE_PERMISSIONS_INCREASE) ||
++                   reasons.contains(disable_reason::DISABLE_REMOTE_INSTALL)
++               ? extension
++               : nullptr;
++  }
++
++  void Schedule() {
++    if (!profile_ || update_pending_) {
++      return;
++    }
++    update_pending_ = true;
++    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
++        FROM_HERE, base::BindOnce(&DisabledMessageOwner::Update,
++                                  weak_factory_.GetWeakPtr()));
++  }
++
++  void Update() {
++    update_pending_ = false;
++    auto* browser = FindHost();
++    auto* dispatcher = messages::MessageDispatcherBridge::Get();
++    auto java_dispatcher = browser
++        ? dispatcher->GetMessageDispatcher(
++              browser->GetWindow()->GetNativeWindow()->GetJavaObject())
++        : base::android::ScopedJavaLocalRef<jobject>();
++    if (message_ && browser == message_browser_ &&
++        GetDisabled(displayed_id_) == displayed_extension_.get() &&
++        !java_dispatcher.is_null() &&
++        base::android::AttachCurrentThread()->IsSameObject(
++            message_dispatcher_.obj(), java_dispatcher.obj())) {
++      return;
++    }
++    Dismiss();
++    if (!browser || java_dispatcher.is_null()) {
++      return;
++    }
++    while (!pending_.empty()) {
++      const auto& [id, remote_install] = *pending_.begin();
++      const Extension* extension = GetDisabled(id);
++      if (!extension) {
++        pending_.erase(pending_.begin());
++        continue;
++      }
++      displayed_id_ = id;
++      displayed_extension_ = extension;
++      message_browser_ = browser;
++      message_dispatcher_.Reset(java_dispatcher);
++      message_ = std::make_unique<messages::MessageWrapper>(
++          messages::MessageIdentifier::EXTENSION_DISABLED,
++          base::BindOnce(&DisabledMessageOwner::Review,
++                         weak_factory_.GetWeakPtr()),
++          base::BindOnce(&DisabledMessageOwner::OnDismissed,
++                         weak_factory_.GetWeakPtr(), id));
++      message_->SetTitle(l10n_util::GetStringFUTF16(
++          remote_install ? IDS_EXTENSION_DISABLED_REMOTE_INSTALL_ERROR_TITLE
++                         : IDS_EXTENSION_DISABLED_ERROR_TITLE,
++          ui_util::GetFixupExtensionNameForUIDisplay(extension->name())));
++      message_->SetPrimaryButtonText(
++          l10n_util::GetStringUTF16(IDS_EXTENSIONS_ITEM_DETAILS));
++      message_->SetIconResourceId(
++          ResourceMapper::MapToJavaDrawableId(IDR_ANDROID_PERMISSION_WARNING));
++      if (!dispatcher->EnqueueWindowScopedMessage(
++              message_.get(), browser->GetWindow()->GetNativeWindow(),
++              messages::MessagePriority::kNormal)) {
++        Dismiss();
++      }
++      // A genuine browser/provider transition retries a failed enqueue. No
++      // timer, new activity, or permission action is used to manufacture UI.
++      return;
++    }
++  }
++
++  void Review() {
++    auto* browser = FindHost();
++    if (!browser || browser != message_browser_ ||
++        GetDisabled(displayed_id_) != displayed_extension_.get()) {
++      return;
++    }
++    auto java_dispatcher =
++        messages::MessageDispatcherBridge::Get()->GetMessageDispatcher(
++            browser->GetWindow()->GetNativeWindow()->GetJavaObject());
++    if (java_dispatcher.is_null() ||
++        !base::android::AttachCurrentThread()->IsSameObject(
++            message_dispatcher_.obj(), java_dispatcher.obj())) {
++      return;
++    }
++    // A primary click is consumed only when this notice issues a validated
++    // request. OpenURL may return null for ordinary asynchronous navigation;
++    // this flag does not claim that navigation completed.
++    review_requested_ = true;
++    // Open an ordinary new details tab. The existing manager enable action
++    // supplies requesting WebContents and the normal permission-review dialog.
++    browser->OpenURL(
++        content::OpenURLParams(
++            GURL(std::string(chrome::kChromeUIExtensionsURL) + "?id=" +
++                 displayed_id_),
++            content::Referrer(), WindowOpenDisposition::NEW_FOREGROUND_TAB,
++            ui::PAGE_TRANSITION_LINK, false),
++        {});
++  }
++
++  void OnDismissed(const std::string& id, messages::DismissReason reason) {
++    if (reason == messages::DismissReason::DISMISSED_BY_FEATURE) {
++      return;
++    }
++    const bool review_requested = std::exchange(review_requested_, false);
++    message_.reset();
++    message_browser_ = nullptr;
++    message_dispatcher_.Reset();
++    displayed_id_.clear();
++    displayed_extension_.reset();
++    if ((reason == messages::DismissReason::PRIMARY_ACTION && review_requested) ||
++        reason == messages::DismissReason::GESTURE ||
++        reason == messages::DismissReason::CLOSE_BUTTON ||
++        reason == messages::DismissReason::TIMER) {
++      pending_.erase(id);
++    }
++    Schedule();
++  }
++
++  void Dismiss() {
++    auto message = std::move(message_);
++    review_requested_ = false;
++    message_browser_ = nullptr;
++    message_dispatcher_.Reset();
++    displayed_id_.clear();
++    displayed_extension_.reset();
++    if (message && message->is_in_queue()) {
++      messages::MessageDispatcherBridge::Get()->DismissMessage(
++          message.get(), messages::DismissReason::DISMISSED_BY_FEATURE);
++    }
++  }
++
++  void Remove(const Extension& extension) {
++    pending_.erase(extension.id());
++    if (displayed_id_ == extension.id()) {
++      Dismiss();
++    }
++    Schedule();
++  }
++
++  void Stop() {
++    weak_factory_.InvalidateWeakPtrs();
++    browser_observation_.Reset();
++    registry_observation_.Reset();
++    dispatcher_subscription_ = {};
++    profile_ = nullptr;
++    pending_.clear();
++    Dismiss();
++  }
++
++  void OnBrowserCreated(BrowserWindowInterface*) override { Schedule(); }
++  void OnBrowserActivated(BrowserWindowInterface*) override { Schedule(); }
++  void OnBrowserClosed(BrowserWindowInterface* browser) override {
++    if (browser == message_browser_) {
++      Dismiss();
++    }
++    Schedule();
++  }
++  void OnBrowserDeactivated(BrowserWindowInterface* browser) override {
++    if (browser == message_browser_) {
++      Dismiss();
++    }
++    Schedule();
++  }
++  void OnExtensionLoaded(content::BrowserContext*,
++                         const Extension* extension) override {
++    Remove(*extension);
++  }
++  void OnExtensionUninstalled(content::BrowserContext*,
++                              const Extension* extension,
++                              UninstallReason) override {
++    Remove(*extension);
++  }
++  void OnShutdown(ExtensionRegistry*) override { Stop(); }
++
++  raw_ptr<Profile> profile_;
++  std::map<std::string, bool> pending_;
++  bool update_pending_ = false;
++  bool review_requested_ = false;
++  std::unique_ptr<messages::MessageWrapper> message_;
++  raw_ptr<BrowserWindowInterface> message_browser_ = nullptr;
++  std::string displayed_id_;
++  scoped_refptr<const Extension> displayed_extension_;
++  base::android::ScopedJavaGlobalRef<jobject> message_dispatcher_;
++  base::CallbackListSubscription dispatcher_subscription_;
++  base::ScopedObservation<ProfileBrowserCollection, BrowserCollectionObserver>
++      browser_observation_{this};
++  base::ScopedObservation<ExtensionRegistry, ExtensionRegistryObserver>
++      registry_observation_{this};
++  base::WeakPtrFactory<DisabledMessageOwner> weak_factory_{this};
++};
++
++}  // namespace
+ 
+ void AddExtensionDisabledError(Profile* profile,
+                                const Extension* extension,
+                                bool is_remote_install) {
+-  // TODO(crbug.com/399680111): Android will need a special error UI because it
+-  // cannot use the views implementation of the error bubble.
+-  NOTIMPLEMENTED() << "Extension disabled error";
++  if (!profile || !extension || profile->IsOffTheRecord() ||
++      profile->ShutdownStarted()) {
++    return;
++  }
++  auto* owner = static_cast<DisabledMessageOwner*>(
++      profile->GetUserData(kDisabledMessageOwnerKey));
++  if (!owner) {
++    auto new_owner = std::make_unique<DisabledMessageOwner>(profile);
++    owner = new_owner.get();
++    profile->SetUserData(kDisabledMessageOwnerKey, std::move(new_owner));
++  }
++  owner->Add(*extension, is_remote_install);
+ }
+ 
+ }  // namespace extensions

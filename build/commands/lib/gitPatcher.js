@@ -67,7 +67,7 @@ export class GitPatcher {
     }
   }
 
-  async applyPatches() {
+  async applyPatches(throwOnError = false) {
     // STRATEGY:
     // 1. iterate .patch files in dir
     // corresponding .patchinfo file?
@@ -151,6 +151,9 @@ export class GitPatcher {
       console.error(
         'There was an error applying added, modified or removed patches. Please consider running `init` to reset and re-apply all patches.',
       )
+      if (throwOnError) {
+        throw err
+      }
     }
     return pathStatuses
   }
@@ -243,14 +246,8 @@ export class GitPatcher {
         (allPaths, set) => allPaths.concat(set.appliesTo.map((s) => s.path)),
         [],
       )
-    try {
-      await this.resetRepoFiles(allRepoPaths)
-    } catch (error) {
-      console.warn(
-        'There were some failures during git reset of specific repo paths: ',
-        allRepoPaths.join(' '),
-      )
-    }
+    // A failed reset must not continue applying patches to stale source files.
+    await this.resetRepoFiles(allRepoPaths)
     this.logProgressLine('done.')
     this.logProgress('Applying patches:')
     // Apply patches (in series)
@@ -334,8 +331,26 @@ export class GitPatcher {
     })
   }
 
-  resetRepoFiles(filePaths) {
-    return util.runGitAsync(this.repoPath, ['checkout', ...filePaths])
+  async resetRepoFiles(filePaths) {
+    if (!filePaths.length) {
+      return
+    }
+    // New-file patches have no index entry. Including one in checkout makes
+    // the entire batch fail; leave untracked files untouched so git apply can
+    // report any collision instead of deleting a user's file.
+    const requested = new Set(filePaths)
+    const tracked = await util.runGitAsync(this.repoPath, [
+      '--literal-pathspecs', 'ls-files', '--cached', '-z', '--', ...requested,
+    ])
+    const trackedPaths = [...new Set(tracked.split('\0'))].filter((filePath) =>
+      requested.has(filePath),
+    )
+    if (!trackedPaths.length) {
+      return
+    }
+    return util.runGitAsync(this.repoPath, [
+      '--literal-pathspecs', 'checkout', '--', ...trackedPaths,
+    ])
   }
 
   async handleObsoletePatchInfos(patchInfosObsolete) {

@@ -1,0 +1,206 @@
+diff --git a/chrome/browser/resources/extensions/options_dialog.ts b/chrome/browser/resources/extensions/options_dialog.ts
+--- a/chrome/browser/resources/extensions/options_dialog.ts
++++ b/chrome/browser/resources/extensions/options_dialog.ts
+@@ -10,6 +10,9 @@
+ import {CrLitElement} from 'chrome://resources/lit/v3_0/lit.rollup.js';
+ 
+ import {navigation, Page} from './navigation_helper.js';
++// <if expr="is_android">
++import {Dialog} from './navigation_helper.js';
++// </if>
+ import {getCss} from './options_dialog.css.js';
+ import {getHtml} from './options_dialog.html.js';
+ 
+@@ -76,16 +79,59 @@
+   private preferredSize_: {height: number, width: number}|null = null;
+   private eventTracker_: EventTracker = new EventTracker();
+   private updateDialogSizeTimeout_: number|null = null;
++  // <if expr="is_android">
++  private showRequest_: number = 0;
++  private showActive_: boolean = false;
++  private hasOpened_: boolean = false;
++  // </if>
+ 
+   get open() {
++    // <if expr="is_android">
++    return this.$.dialog.getNative().open;
++    // </if>
++    // <if expr="not is_android">
+     return this.$.dialog.open;
+-  }
++    // </if>
++  }
++
++  // <if expr="is_android">
++  /** Retire document-ready and guest callbacks when their route goes away. */
++  cancelPendingShow() {
++    this.retireGuestCallbacks_();
++    this.showActive_ = false;
++  }
++
++  /** Stop guest sizing while retaining ownership of the queued native close. */
++  private retireGuestCallbacks_() {
++    ++this.showRequest_;
++    this.eventTracker_.removeAll();
++    if (this.updateDialogSizeTimeout_ !== null) {
++      clearTimeout(this.updateDialogSizeTimeout_);
++      this.updateDialogSizeTimeout_ = null;
++    }
++    this.preferredSize_ = null;
++    if (this.extensionOptions_) {
++      this.extensionOptions_.onpreferredsizechanged = null;
++    }
++  }
++
++  override disconnectedCallback() {
++    this.cancelPendingShow();
++    super.disconnectedCallback();
++  }
++  // </if>
+ 
+   /**
+    * Resizes the dialog to the width/height stored in |preferredSize_|, taking
+    * into account the window width/height.
+    */
+   private updateDialogSize_() {
++    // <if expr="is_android">
++    // The viewport can resize before the guest has reported its first size.
++    if (!this.preferredSize_ || !this.$.dialog.getNative().open) {
++      return;
++    }
++    // </if>
+     let headerHeight = this.$.body.offsetTop;
+     if (this.$.body.assignedSlot && this.$.body.assignedSlot.parentElement) {
+       headerHeight = this.$.body.assignedSlot.parentElement.offsetTop;
+@@ -93,9 +139,19 @@
+     const maxHeight =
+         Math.min(0.9 * window.innerHeight, OptionsDialogMaxHeight);
+     const effectiveHeight =
++        // <if expr="is_android">
++        Math.min(maxHeight, headerHeight + this.preferredSize_.height);
++        // </if>
++        // <if expr="not is_android">
+         Math.min(maxHeight, headerHeight + this.preferredSize_!.height);
++        // </if>
+     const effectiveWidth =
++        // <if expr="is_android">
++        Math.max(OptionsDialogMinWidth, this.preferredSize_.width);
++        // </if>
++        // <if expr="not is_android">
+         Math.max(OptionsDialogMinWidth, this.preferredSize_!.width);
++        // </if>
+ 
+     this.$.dialog.style.setProperty('--dialog-height', `${effectiveHeight}px`);
+     this.$.dialog.style.setProperty('--dialog-width', `${effectiveWidth}px`);
+@@ -103,25 +159,81 @@
+   }
+ 
+   show(data: chrome.developerPrivate.ExtensionInfo) {
++    // <if expr="is_android">
++    this.cancelPendingShow();
++    const request = this.showRequest_;
++    this.showActive_ = true;
++    const nativeDialog = this.shadowRoot
++        ?.querySelector<CrDialogElement>('#dialog')
++        ?.shadowRoot?.querySelector<HTMLDialogElement>('dialog');
++    this.hasOpened_ = nativeDialog?.open ?? false;
++    // </if>
+     this.data_ = data;
+     whenDocumentReady().then(() => {
++      // <if expr="is_android">
++      if (request !== this.showRequest_ || !this.isConnected) {
++        return;
++      }
++      // </if>
+       if (!this.extensionOptions_) {
+         this.extensionOptions_ = document.createElement('ExtensionOptions') as
+             ExtensionOptionsElement;
+       }
+       this.extensionOptions_.extension = this.data_!.id;
++      // <if expr="is_android">
++      this.extensionOptions_.onclose = () => {
++        if (request === this.showRequest_ && this.isConnected) {
++          this.retireGuestCallbacks_();
++          if (this.$.dialog.getNative().open) {
++            this.$.dialog.close();
++          } else {
++            // Closing an unopened native dialog queues no close event. Use the
++            // same boundary so the active route and manager finish once.
++            this.$.dialog.dispatchEvent(new CustomEvent('close', {
++              bubbles: true,
++              composed: true,
++            }));
++          }
++        }
++      };
++      // </if>
++      // <if expr="not is_android">
+       this.extensionOptions_.onclose = () => this.$.dialog.close();
++      // </if>
+ 
+       this.extensionOptions_.onpreferredsizechanged =
+           (e: {height: number, width: number}) => {
++            // <if expr="is_android">
++            if (request !== this.showRequest_ || !this.isConnected) {
++              return;
++            }
++            // </if>
++            // <if expr="is_android">
++            if (!this.$.dialog.getNative().open) {
++              // A normal close can precede its queued close event. Only the
++              // first preferred size may open this show's native dialog.
++              if (this.hasOpened_) {
++                return;
++              }
++              this.$.dialog.showModal();
++            }
++            this.hasOpened_ = true;
++            // </if>
++            // <if expr="not is_android">
+             if (!this.$.dialog.open) {
+               this.$.dialog.showModal();
+             }
++            // </if>
+             this.preferredSize_ = e;
+             if (this.updateDialogSizeTimeout_) {
+               clearTimeout(this.updateDialogSizeTimeout_);
+             }
+             this.updateDialogSizeTimeout_ = setTimeout(() => {
++              // <if expr="is_android">
++              if (request !== this.showRequest_ || !this.isConnected) {
++                return;
++              }
++              // </if>
+               this.updateDialogSizeTimeout_ = null;
+               this.updateDialogSize_();
+             }, 50);
+@@ -135,10 +247,29 @@
+     });
+   }
+ 
++  // <if expr="is_android">
++  protected onClose_(event: Event) {
++    const route = navigation.getCurrentPage();
++    if (!this.isConnected || !this.showActive_ ||
++        route.page !== Page.DETAILS || route.subpage !== Dialog.OPTIONS ||
++        route.extensionId !== this.data_?.id) {
++      // Native close dispatch is queued until an animation frame. A retired
++      // dialog must neither change the new route nor close the manager's owner.
++      event.stopPropagation();
++      return;
++    }
++  // </if>
++  // <if expr="not is_android">
+   protected onClose_() {
++  // </if>
+     assert(this.extensionOptions_);
++    // <if expr="is_android">
++    this.cancelPendingShow();
++    // </if>
++    // <if expr="not is_android">
+     this.extensionOptions_.onpreferredsizechanged = null;
+     this.eventTracker_.removeAll();
++    // </if>
+ 
+     const currentPage = navigation.getCurrentPage();
+     // We update the page when the options dialog closes, but only if we're

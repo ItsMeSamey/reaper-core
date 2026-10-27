@@ -6,6 +6,8 @@
 #ifndef BRAVE_BROWSER_POLICY_BRAVE_SIMPLE_POLICY_MAP_H_
 #define BRAVE_BROWSER_POLICY_BRAVE_SIMPLE_POLICY_MAP_H_
 
+#include "build/build_config.h"
+
 #include "brave/components/ai_chat/core/common/buildflags/buildflags.h"
 #include "brave/components/brave_news/common/buildflags/buildflags.h"
 #include "brave/components/brave_rewards/core/buildflags/buildflags.h"
@@ -22,13 +24,14 @@
 #include "brave/components/global_privacy_control/pref_names.h"
 #include "brave/components/ipfs/buildflags/buildflags.h"
 #include "brave/components/local_ai/buildflags/buildflags.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/p3a/pref_names.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/playlist/core/common/buildflags/buildflags.h"
 #include "brave/components/psst/buildflags/buildflags.h"
 #include "brave/components/query_filter/common/pref_names.h"
 #include "brave/components/speedreader/common/buildflags/buildflags.h"
 #include "brave/components/tor/buildflags/buildflags.h"
-#include "build/build_config.h"
 #include "components/policy/core/browser/configuration_policy_handler.h"
 #include "components/policy/policy_constants.h"
 
@@ -121,10 +124,12 @@ inline constexpr PolicyToPreferenceMapEntry kBraveSimplePolicyMap[] = {
     {policy::key::kBraveLocalAIEnabled, local_ai::prefs::kBraveLocalAIEnabled,
      base::Value::Type::BOOLEAN},
 #endif
+#if !BUILDFLAG(IS_ANDROID)
     {policy::key::kBraveP3AEnabled, p3a::kP3AEnabled,
      base::Value::Type::BOOLEAN},
     {policy::key::kBraveStatsPingEnabled, kStatsReportingEnabled,
      base::Value::Type::BOOLEAN},
+#endif  // !BUILDFLAG(IS_ANDROID)
 #if BUILDFLAG(ENABLE_PLAYLIST)
     {policy::key::kBravePlaylistEnabled, playlist::kPlaylistEnabledPref,
      base::Value::Type::BOOLEAN},
@@ -141,7 +146,7 @@ inline constexpr PolicyToPreferenceMapEntry kBraveSimplePolicyMap[] = {
     {policy::key::kBraveTalkDisabled, brave_talk::prefs::kDisabledByPolicy,
      base::Value::Type::BOOLEAN},
 #endif
-#if BUILDFLAG(ENABLE_SPEEDREADER)
+#if BUILDFLAG(ENABLE_SPEEDREADER) && !BUILDFLAG(IS_ANDROID)
     {policy::key::kBraveSpeedreaderEnabled, speedreader::kSpeedreaderEnabled,
      base::Value::Type::BOOLEAN},
 #endif

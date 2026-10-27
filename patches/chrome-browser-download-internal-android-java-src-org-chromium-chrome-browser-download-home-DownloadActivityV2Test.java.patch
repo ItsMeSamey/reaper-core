@@ -1,0 +1,635 @@
+diff --git a/chrome/browser/download/internal/android/java/src/org/chromium/chrome/browser/download/home/DownloadActivityV2Test.java b/chrome/browser/download/internal/android/java/src/org/chromium/chrome/browser/download/home/DownloadActivityV2Test.java
+index 436ef9919970ca364b6307829997a9acc9e957a0..00f536fd3239ff71b679df80d1ba4c24be9f758b 100644
+--- a/chrome/browser/download/internal/android/java/src/org/chromium/chrome/browser/download/home/DownloadActivityV2Test.java
++++ b/chrome/browser/download/internal/android/java/src/org/chromium/chrome/browser/download/home/DownloadActivityV2Test.java
+@@ -31,20 +31,25 @@ import static org.mockito.Mockito.when;
+ 
+ import android.content.Context;
+ import android.graphics.Bitmap;
++import android.graphics.Rect;
+ import android.os.Handler;
+ import android.os.Looper;
+ import android.util.Pair;
+ import android.view.View;
+ import android.view.ViewGroup;
++import android.widget.TextView;
+ 
++import androidx.recyclerview.widget.RecyclerView;
+ import androidx.recyclerview.widget.RecyclerView.ViewHolder;
+ import androidx.test.espresso.action.ViewActions;
+ import androidx.test.espresso.contrib.RecyclerViewActions;
+ import androidx.test.espresso.matcher.BoundedMatcher;
+ import androidx.test.filters.MediumTest;
++import androidx.test.platform.app.InstrumentationRegistry;
+ 
+ import org.hamcrest.Description;
+ import org.hamcrest.Matcher;
++import org.junit.After;
+ import org.junit.Assert;
+ import org.junit.Before;
+ import org.junit.BeforeClass;
+@@ -76,12 +81,17 @@ import org.chromium.base.test.util.DisableIf;
+ import org.chromium.base.test.util.DisabledTest;
+ import org.chromium.base.test.util.Features.EnableFeatures;
+ import org.chromium.chrome.browser.back_press.BackPressHelper;
++import org.chromium.chrome.browser.download.home.filter.Filters;
+ import org.chromium.chrome.browser.download.home.list.ListUtils;
+ import org.chromium.chrome.browser.download.home.list.holder.ListItemViewHolder;
+ import org.chromium.chrome.browser.download.home.rename.RenameUtils;
+ import org.chromium.chrome.browser.download.home.toolbar.DownloadHomeToolbar;
++import org.chromium.chrome.browser.download.home.view.SelectionView;
+ import org.chromium.chrome.browser.download.internal.R;
+ import org.chromium.chrome.browser.flags.ChromeFeatureList;
++import org.chromium.chrome.browser.profiles.OtrProfileId;
++import org.chromium.chrome.browser.profiles.Profile;
++import org.chromium.chrome.browser.profiles.ProfileManager;
+ import org.chromium.chrome.browser.ui.edge_to_edge.EdgeToEdgeController;
+ import org.chromium.chrome.browser.ui.edge_to_edge.EdgeToEdgeControllerFactory;
+ import org.chromium.chrome.browser.ui.messages.snackbar.SnackbarManager;
+@@ -151,6 +161,8 @@ public class DownloadActivityV2Test {
+ 
+     private DiscardableReferencePool mDiscardableReferencePool;
+ 
++    private boolean mDestroyRevealCoordinator;
++
+     /**
+      * Returns a Matcher to find a particular {@link ViewHolder} that contains certain text.
+      *
+@@ -226,11 +238,19 @@ public class DownloadActivityV2Test {
+ 
+     private void setUpUi(
+             boolean showDangerousItems, boolean inlineSearchBar, boolean autoFocusSearchBox) {
++        setUpUi(showDangerousItems, inlineSearchBar, autoFocusSearchBox, false);
++    }
++
++    private void setUpUi(
++            boolean showDangerousItems,
++            boolean inlineSearchBar,
++            boolean autoFocusSearchBox,
++            boolean forcePaginationHeaders) {
+         // Initialize this here to avoid "wrong thread" assertion.
+         ThreadUtils.runOnUiThreadBlocking(
+                 () -> mEdgeToEdgeSupplier = ObservableSuppliers.createMonotonic());
+ 
+-        DownloadManagerUiConfig config =
++        DownloadManagerUiConfig.Builder configBuilder =
+                 DownloadManagerUiConfigHelper.fromFlags(sActivity)
+                         .setOtrProfileId(null)
+                         .setIsSeparateActivity(true)
+@@ -240,8 +260,9 @@ public class DownloadActivityV2Test {
+                         .setEdgeToEdgePadAdjusterGenerator(
+                                 view ->
+                                         EdgeToEdgeControllerFactory.createForViewAndObserveSupplier(
+-                                                view, mEdgeToEdgeSupplier))
+-                        .build();
++                                                view, mEdgeToEdgeSupplier));
++        if (forcePaginationHeaders) configBuilder.setShowPaginationHeaders(true);
++        DownloadManagerUiConfig config = configBuilder.build();
+ 
+         mAppModalPresenter = new AppModalPresenter(sActivity);
+ 
+@@ -284,6 +305,544 @@ public class DownloadActivityV2Test {
+         mDownloadCoordinator.updateForUrl(UrlConstants.DOWNLOADS_URL);
+     }
+ 
++    private static void drainInitialUrlTasks() {
++        boolean[] drained = {false};
++        ThreadUtils.runOnUiThreadBlocking(
++                () -> PostTask.postTask(TaskTraits.UI_DEFAULT, () -> drained[0] = true));
++        // Use the same task runner as the production callback, including native-started tests.
++        CriteriaHelper.pollUiThread(() -> drained[0]);
++    }
++
++    @Test
++    @MediumTest
++    public void testInitialUrlObserverNotifiedWhileRegistered() {
++        ArrayList<String> urls = new ArrayList<>();
++        ThreadUtils.runOnUiThreadBlocking(
++                () -> {
++                    mDestroyRevealCoordinator = true;
++                    setUpUi();
++                    mDownloadCoordinator.addObserver(urls::add);
++                });
++        drainInitialUrlTasks();
++        ThreadUtils.runOnUiThreadBlocking(
++                () -> assertEquals(Collections.singletonList(UrlConstants.DOWNLOADS_URL), urls));
++    }
++
++    @Test
++    @MediumTest
++    public void testInitialUrlObserverNotNotifiedAfterRemoval() {
++        ArrayList<String> urls = new ArrayList<>();
++        ThreadUtils.runOnUiThreadBlocking(
++                () -> {
++                    mDestroyRevealCoordinator = true;
++                    setUpUi();
++                    DownloadManagerCoordinator.Observer observer = urls::add;
++                    mDownloadCoordinator.addObserver(observer);
++                    // Removal precedes delivery of the real posted initialization callback.
++                    mDownloadCoordinator.removeObserver(observer);
++                });
++        drainInitialUrlTasks();
++        ThreadUtils.runOnUiThreadBlocking(() -> assertTrue(urls.isEmpty()));
++    }
++
++    @Test
++    @MediumTest
++    public void testInitialUrlObserverNotNotifiedAfterDestroy() {
++        ArrayList<String> urls = new ArrayList<>();
++        ThreadUtils.runOnUiThreadBlocking(
++                () -> {
++                    mDestroyRevealCoordinator = true;
++                    setUpUi();
++                    mDownloadCoordinator.addObserver(urls::add);
++                    // Destruction precedes delivery, even when the observer was not removed first.
++                    destroyRevealCoordinator();
++                });
++        drainInitialUrlTasks();
++        ThreadUtils.runOnUiThreadBlocking(() -> assertTrue(urls.isEmpty()));
++    }
++
++    /** Holds the actual initial source callback instead of faking a populated list model. */
++    private static class DelayedOfflineContentProvider extends StubbedOfflineContentProvider {
++        private Callback<ArrayList<OfflineItem>> mPendingItems;
++
++        @Override
++        public void getAllItems(Callback<ArrayList<OfflineItem>> callback) {
++            Assert.assertNull(mPendingItems);
++            mPendingItems = callback;
++        }
++
++        void releaseItems(List<OfflineItem> items) {
++            Assert.assertNotNull(mPendingItems);
++            Callback<ArrayList<OfflineItem>> callback = mPendingItems;
++            mPendingItems = null;
++            getItems().clear();
++            getItems().addAll(items);
++            callback.onResult(new ArrayList<>(items));
++        }
++    }
++
++    @After
++    public void destroyRevealTestCoordinator() {
++        if (mDestroyRevealCoordinator) {
++            ThreadUtils.runOnUiThreadBlocking(this::destroyRevealCoordinator);
++        }
++    }
++
++    private void destroyRevealCoordinator() {
++        if (mDownloadCoordinator == null) return;
++        mDownloadCoordinator.destroy();
++        mDownloadCoordinator = null;
++    }
++
++    private void setUpRevealUi(boolean inlineSearchBar) {
++        mDestroyRevealCoordinator = true;
++        setUpUi(
++                /* showDangerousItems= */ false,
++                inlineSearchBar,
++                /* autoFocusSearchBox= */ false,
++                /* forcePaginationHeaders= */ true);
++    }
++
++    private static ArrayList<OfflineItem> createRevealItems(int count) {
++        ArrayList<OfflineItem> items = new ArrayList<>();
++        for (int i = 0; i < count; i++) {
++            // Distinct days force DateListPaginator to stop at multiple page boundaries.
++            OfflineItem item =
++                    StubbedProvider.createOfflineItem(
++                            "reveal-guid-" + i,
++                            JUnitTestGURLs.URL_1,
++                            OfflineItemState.COMPLETE,
++                            1024,
++                            "reveal item " + i,
++                            "/data/fake_path/Downloads/reveal-" + i,
++                            1_700_000_000_000L - i * 86_400_000L,
++                            1024,
++                            OfflineItemFilter.OTHER);
++            item.id = new ContentId("download", "reveal-guid-" + i);
++            items.add(item);
++        }
++        return items;
++    }
++
++    private void setRevealItems(List<OfflineItem> items) {
++        mStubbedOfflineContentProvider.getItems().clear();
++        mStubbedOfflineContentProvider.getItems().addAll(items);
++    }
++
++    private View findAttachedRevealRow(OfflineItem item) {
++        RecyclerView list = (RecyclerView) mDownloadCoordinator.getListViewForTesting();
++        for (int i = 0; i < list.getChildCount(); i++) {
++            View row = list.getChildAt(i);
++            ArrayList<View> matches = new ArrayList<>();
++            row.findViewsWithText(matches, item.title, View.FIND_VIEWS_WITH_TEXT);
++            for (View match : matches) {
++                if (match instanceof TextView
++                        && item.title.contentEquals(((TextView) match).getText())
++                        && isDisplayed().matches(match)) {
++                    Rect visible = new Rect();
++                    Rect viewport = new Rect();
++                    if (match.getGlobalVisibleRect(visible)
++                            && list.getGlobalVisibleRect(viewport)
++                            && Rect.intersects(visible, viewport)) {
++                        return row;
++                    }
++                }
++            }
++        }
++        return null;
++    }
++
++    private void assertRevealSelectedAndVisible(OfflineItem item) {
++        // Never scroll from the test: the public reveal operation must bring this row into view.
++        CriteriaHelper.pollUiThread(
++                () -> {
++                    View row = findAttachedRevealRow(item);
++                    if (row == null) return false;
++                    SelectionView selection = row.findViewById(R.id.selection);
++                    return selection != null && selection.isSelected();
++                });
++    }
++
++    private void assertRevealResult(ArrayList<Boolean> results, boolean expected) {
++        CriteriaHelper.pollUiThread(() -> results.size() == 1);
++        InstrumentationRegistry.getInstrumentation().waitForIdleSync();
++        ThreadUtils.runOnUiThreadBlocking(
++                () -> assertEquals(Collections.singletonList(expected), results));
++    }
++
++    private void assertRevealNotSelected(OfflineItem item) {
++        CriteriaHelper.pollUiThread(() -> findAttachedRevealRow(item) != null);
++        ThreadUtils.runOnUiThreadBlocking(
++                () -> {
++                    SelectionView selection =
++                            findAttachedRevealRow(item).findViewById(R.id.selection);
++                    assertFalse(selection.isSelected());
++                });
++    }
++
++    @Test
++    @MediumTest
++    public void testRevealBeyondPaginationSelectsAndScrollsDecoratedRow() {
++        ArrayList<OfflineItem> items = createRevealItems(80);
++        OfflineItem target = items.get(items.size() - 1);
++        ArrayList<Boolean> results = new ArrayList<>();
++        ThreadUtils.runOnUiThreadBlocking(
++                () -> {
++                    setRevealItems(items);
++                    setUpRevealUi(false);
++                });
++        CriteriaHelper.pollUiThread(() -> findAttachedRevealRow(items.get(0)) != null);
++        ThreadUtils.runOnUiThreadBlocking(
++                () -> {
++                    RecyclerView list = (RecyclerView) mDownloadCoordinator.getListViewForTesting();
++                    assertTrue(
++                            "The initial model must actually be paginated",
++                            list.getAdapter().getItemCount() < items.size());
++                    Assert.assertNull(findAttachedRevealRow(target));
++                    mDownloadCoordinator.revealItem(target.id, results::add);
++                });
++        assertRevealResult(results, true);
++        assertRevealSelectedAndVisible(target);
++
++        // Resetting the already-selected All filter must not strand a previously expanded page.
++        ArrayList<Boolean> repeated = new ArrayList<>();
++        ThreadUtils.runOnUiThreadBlocking(
++                () -> mDownloadCoordinator.revealItem(target.id, repeated::add));
++        assertRevealResult(repeated, true);
++        assertRevealSelectedAndVisible(target);
++        assertRevealResult(results, true);
++    }
++
++    @Test
++    @MediumTest
++    public void testRevealUsesNamespaceAsWellAsGuid() {
++        ArrayList<OfflineItem> items = createRevealItems(2);
++        OfflineItem otherNamespace = items.get(0);
++        OfflineItem target = items.get(1);
++        otherNamespace.id = new ContentId("other-provider", target.id.id);
++        // Keep both rows on one day so both selection handles can be inspected without scrolling.
++        otherNamespace.creationTimeMs = target.creationTimeMs;
++        ArrayList<Boolean> results = new ArrayList<>();
++        ThreadUtils.runOnUiThreadBlocking(
++                () -> {
++                    setRevealItems(items);
++                    setUpRevealUi(false);
++                    mDownloadCoordinator.revealItem(target.id, results::add);
++                });
++        assertRevealResult(results, true);
++        assertRevealSelectedAndVisible(target);
++        assertRevealNotSelected(otherNamespace);
++    }
++
++    @Test
++    @MediumTest
++    public void testRevealWrongNamespaceDoesNotSelectSameGuid() {
++        OfflineItem item = createRevealItems(1).get(0);
++        ArrayList<Boolean> results = new ArrayList<>();
++        ThreadUtils.runOnUiThreadBlocking(
++                () -> {
++                    setRevealItems(Collections.singletonList(item));
++                    setUpRevealUi(false);
++                    mDownloadCoordinator.revealItem(
++                            new ContentId("wrong-provider", item.id.id), results::add);
++                });
++        assertRevealResult(results, false);
++        assertRevealNotSelected(item);
++    }
++
++    @Test
++    @MediumTest
++    public void testRevealMissingItemReturnsFalse() {
++        OfflineItem item = createRevealItems(1).get(0);
++        ArrayList<Boolean> results = new ArrayList<>();
++        ThreadUtils.runOnUiThreadBlocking(
++                () -> {
++                    setRevealItems(Collections.singletonList(item));
++                    setUpRevealUi(false);
++                    mDownloadCoordinator.revealItem(
++                            new ContentId(item.id.namespace, "missing-guid"), results::add);
++                });
++        assertRevealResult(results, false);
++        assertRevealNotSelected(item);
++    }
++
++    @Test
++    @MediumTest
++    public void testRevealDangerousFilteredItemReturnsFalse() {
++        OfflineItem target = createRevealItems(1).get(0);
++        target.isDangerous = true;
++        target.dangerType = DownloadDangerType.DANGEROUS_CONTENT;
++        ArrayList<Boolean> results = new ArrayList<>();
++        ThreadUtils.runOnUiThreadBlocking(
++                () -> {
++                    setRevealItems(Collections.singletonList(target));
++                    setUpRevealUi(false);
++                    mDownloadCoordinator.revealItem(target.id, results::add);
++                });
++        assertRevealResult(results, false);
++        onView(withText(target.title)).check(doesNotExist());
++    }
++
++    @Test
++    @MediumTest
++    public void testRevealOffTheRecordFilteredItemReturnsFalse() {
++        OfflineItem target = createRevealItems(1).get(0);
++        target.isOffTheRecord = true;
++        OtrProfileId primaryId = OtrProfileId.getPrimaryOtrProfileId();
++        target.otrProfileId = OtrProfileId.serialize(primaryId);
++        Profile regularProfile = Mockito.mock(Profile.class);
++        ArrayList<Boolean> results = new ArrayList<>();
++        ThreadUtils.runOnUiThreadBlocking(
++                () -> {
++                    when(regularProfile.hasOffTheRecordProfile(eq(primaryId))).thenReturn(true);
++                    ProfileManager.setLastUsedProfileForTesting(regularProfile);
++                    // Prove this is a valid existing OTR profile, not a deserialize failure.
++                    assertEquals(primaryId, OtrProfileId.deserialize(target.otrProfileId));
++                    setRevealItems(Collections.singletonList(target));
++                    setUpRevealUi(false);
++                    mDownloadCoordinator.revealItem(target.id, results::add);
++                });
++        assertRevealResult(results, false);
++        onView(withText(target.title)).check(doesNotExist());
++    }
++
++    @Test
++    @MediumTest
++    public void testRevealWaitsForInitialNonemptyItems() {
++        DelayedOfflineContentProvider provider = new DelayedOfflineContentProvider();
++        OfflineItem target = createRevealItems(1).get(0);
++        ArrayList<Boolean> results = new ArrayList<>();
++        ThreadUtils.runOnUiThreadBlocking(
++                () -> {
++                    mStubbedOfflineContentProvider = provider;
++                    setUpRevealUi(false);
++                    mDownloadCoordinator.revealItem(target.id, results::add);
++                });
++        InstrumentationRegistry.getInstrumentation().waitForIdleSync();
++        ThreadUtils.runOnUiThreadBlocking(
++                () -> {
++                    assertTrue(results.isEmpty());
++                    // OfflineItemSource signals availability before it adds these actual rows.
++                    provider.releaseItems(Collections.singletonList(target));
++                });
++        assertRevealResult(results, true);
++        assertRevealSelectedAndVisible(target);
++    }
++
++    @Test
++    @MediumTest
++    public void testRevealInitialEmptyItemsCompletesFalseOnce() {
++        DelayedOfflineContentProvider provider = new DelayedOfflineContentProvider();
++        OfflineItem target = createRevealItems(1).get(0);
++        ArrayList<Boolean> results = new ArrayList<>();
++        ThreadUtils.runOnUiThreadBlocking(
++                () -> {
++                    mStubbedOfflineContentProvider = provider;
++                    setUpRevealUi(false);
++                    mDownloadCoordinator.revealItem(target.id, results::add);
++                });
++        InstrumentationRegistry.getInstrumentation().waitForIdleSync();
++        ThreadUtils.runOnUiThreadBlocking(
++                () -> {
++                    assertTrue(results.isEmpty());
++                    provider.releaseItems(Collections.emptyList());
++                });
++        assertRevealResult(results, false);
++        ThreadUtils.runOnUiThreadBlocking(() -> provider.addItem(target));
++        assertRevealNotSelected(target);
++        assertRevealResult(results, false);
++    }
++
++    @Test
++    @MediumTest
++    public void testRevealDestroyThenLateInitialCallbackCompletesFalseOnce() {
++        DelayedOfflineContentProvider provider = new DelayedOfflineContentProvider();
++        OfflineItem target = createRevealItems(1).get(0);
++        ArrayList<Boolean> results = new ArrayList<>();
++        ThreadUtils.runOnUiThreadBlocking(
++                () -> {
++                    mStubbedOfflineContentProvider = provider;
++                    setUpRevealUi(false);
++                    mDownloadCoordinator.revealItem(target.id, results::add);
++                    assertTrue(results.isEmpty());
++                    destroyRevealCoordinator();
++                });
++        assertRevealResult(results, false);
++        ThreadUtils.runOnUiThreadBlocking(
++                () -> provider.releaseItems(Collections.singletonList(target)));
++        assertRevealResult(results, false);
++    }
++
++    @Test
++    @MediumTest
++    public void testRevealCancellationCompletesFalseOnce() {
++        DelayedOfflineContentProvider provider = new DelayedOfflineContentProvider();
++        OfflineItem target = createRevealItems(1).get(0);
++        ArrayList<Boolean> results = new ArrayList<>();
++        ThreadUtils.runOnUiThreadBlocking(
++                () -> {
++                    mStubbedOfflineContentProvider = provider;
++                    setUpRevealUi(false);
++                    mDownloadCoordinator.revealItem(target.id, results::add);
++                    assertTrue(results.isEmpty());
++                    mDownloadCoordinator.cancelRevealItem();
++                    mDownloadCoordinator.cancelRevealItem();
++                });
++        assertRevealResult(results, false);
++        ThreadUtils.runOnUiThreadBlocking(
++                () -> provider.releaseItems(Collections.singletonList(target)));
++        assertRevealNotSelected(target);
++        assertRevealResult(results, false);
++    }
++
++    @Test
++    @MediumTest
++    public void testRevealSupersedesPendingRequestOnce() {
++        DelayedOfflineContentProvider provider = new DelayedOfflineContentProvider();
++        ArrayList<OfflineItem> items = createRevealItems(2);
++        ArrayList<Boolean> first = new ArrayList<>();
++        ArrayList<Boolean> second = new ArrayList<>();
++        ThreadUtils.runOnUiThreadBlocking(
++                () -> {
++                    mStubbedOfflineContentProvider = provider;
++                    setUpRevealUi(false);
++                    mDownloadCoordinator.revealItem(items.get(0).id, first::add);
++                    assertTrue(first.isEmpty());
++                    mDownloadCoordinator.revealItem(items.get(1).id, second::add);
++                });
++        assertRevealResult(first, false);
++        ThreadUtils.runOnUiThreadBlocking(
++                () -> {
++                    assertTrue(second.isEmpty());
++                    provider.releaseItems(items);
++                });
++        assertRevealResult(second, true);
++        assertRevealSelectedAndVisible(items.get(1));
++        assertRevealResult(first, false);
++    }
++
++    @Test
++    @MediumTest
++    public void testRevealSupersededCallbackCanCancelReplacementOnce() {
++        DelayedOfflineContentProvider provider = new DelayedOfflineContentProvider();
++        OfflineItem target = createRevealItems(1).get(0);
++        ArrayList<Boolean> first = new ArrayList<>();
++        ArrayList<Boolean> second = new ArrayList<>();
++        ThreadUtils.runOnUiThreadBlocking(
++                () -> {
++                    mStubbedOfflineContentProvider = provider;
++                    setUpRevealUi(false);
++                    mDownloadCoordinator.revealItem(
++                            target.id,
++                            result -> {
++                                first.add(result);
++                                mDownloadCoordinator.cancelRevealItem();
++                            });
++                    assertTrue(first.isEmpty());
++                    mDownloadCoordinator.revealItem(target.id, second::add);
++                });
++        assertRevealResult(first, false);
++        assertRevealResult(second, false);
++        ThreadUtils.runOnUiThreadBlocking(
++                () -> provider.releaseItems(Collections.singletonList(target)));
++        assertRevealNotSelected(target);
++        assertRevealResult(first, false);
++        assertRevealResult(second, false);
++    }
++
++    @Test
++    @MediumTest
++    public void testRepeatedRevealRemainsSelectedAndCanBeDeselected() {
++        OfflineItem target = createRevealItems(1).get(0);
++        ArrayList<Boolean> first = new ArrayList<>();
++        ArrayList<Boolean> second = new ArrayList<>();
++        ThreadUtils.runOnUiThreadBlocking(
++                () -> {
++                    setRevealItems(Collections.singletonList(target));
++                    setUpRevealUi(false);
++                    mDownloadCoordinator.revealItem(target.id, first::add);
++                });
++        assertRevealResult(first, true);
++        assertRevealSelectedAndVisible(target);
++        ThreadUtils.runOnUiThreadBlocking(
++                () -> mDownloadCoordinator.revealItem(target.id, second::add));
++        assertRevealResult(second, true);
++        assertRevealSelectedAndVisible(target);
++        // A normal selection toggle must still work after programmatic selection.
++        onView(withText(target.title)).perform(ViewActions.click());
++        assertRevealNotSelected(target);
++        onView(withId(R.id.selection_mode_number)).check(matches(not(isDisplayed())));
++        assertRevealResult(first, true);
++    }
++
++    @Test
++    @MediumTest
++    public void testRevealClearsInlineSearchAndRestoresFilesTab() {
++        OfflineItem target = createRevealItems(1).get(0);
++        ArrayList<Boolean> results = new ArrayList<>();
++        ThreadUtils.runOnUiThreadBlocking(
++                () -> {
++                    setRevealItems(Collections.singletonList(target));
++                    setUpRevealUi(true);
++                });
++        CriteriaHelper.pollUiThread(() -> findAttachedRevealRow(target) != null);
++        Matcher<View> inlineSearch =
++                allOf(withId(R.id.search_text), isDescendantOfA(withId(R.id.download_search_bar)));
++        onView(inlineSearch)
++                .perform(
++                        ViewActions.replaceText("absent search term"),
++                        ViewActions.closeSoftKeyboard());
++        TextView searchField =
++                ThreadUtils.runOnUiThreadBlocking(
++                        () -> {
++                            View searchBar = sActivity.findViewById(R.id.download_search_bar);
++                            return searchBar.findViewById(R.id.search_text);
++                        });
++        ThreadUtils.runOnUiThreadBlocking(
++                () ->
++                        mDownloadCoordinator.updateForUrl(
++                                Filters.toUrl(Filters.FilterType.PREFETCHED)));
++        onView(withText(target.title)).check(doesNotExist());
++        ThreadUtils.runOnUiThreadBlocking(
++                () -> mDownloadCoordinator.revealItem(target.id, results::add));
++        assertRevealResult(results, true);
++        assertRevealSelectedAndVisible(target);
++        // The reveal may scroll the search header offscreen; inspect the same actual widget.
++        ThreadUtils.runOnUiThreadBlocking(
++                () -> assertEquals("", searchField.getText().toString()));
++    }
++
++    @Test
++    @MediumTest
++    public void testRevealClearsToolbarSearchAndTypeFilter() {
++        OfflineItem target = createRevealItems(1).get(0);
++        ArrayList<Boolean> results = new ArrayList<>();
++        ThreadUtils.runOnUiThreadBlocking(
++                () -> {
++                    setRevealItems(Collections.singletonList(target));
++                    setUpRevealUi(false);
++                });
++        CriteriaHelper.pollUiThread(() -> findAttachedRevealRow(target) != null);
++        ThreadUtils.runOnUiThreadBlocking(
++                () -> {
++                    DownloadHomeToolbar toolbar = sActivity.findViewById(R.id.download_toolbar);
++                    toolbar.getMenu().performIdentifierAction(R.id.search_menu_id, 0);
++                });
++        onView(withId(R.id.search_text))
++                .perform(
++                        ViewActions.replaceText("absent search term"),
++                        ViewActions.closeSoftKeyboard());
++        ThreadUtils.runOnUiThreadBlocking(
++                () ->
++                        mDownloadCoordinator.updateForUrl(
++                                Filters.toUrl(Filters.FilterType.SITES)));
++        onView(withText(target.title)).check(doesNotExist());
++        ThreadUtils.runOnUiThreadBlocking(
++                () -> mDownloadCoordinator.revealItem(target.id, results::add));
++        assertRevealResult(results, true);
++        assertRevealSelectedAndVisible(target);
++    }
++
+     // Adds a dangerous item in Download Home. Returns ID of the item.
+     private ContentId setUpDangerousItem() {
+         OfflineItem dangerousItem =

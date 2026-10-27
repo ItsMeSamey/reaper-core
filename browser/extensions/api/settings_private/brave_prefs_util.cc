@@ -5,9 +5,13 @@
 
 #include "brave/browser/extensions/api/settings_private/brave_prefs_util.h"
 
+#include "build/build_config.h"
+
 #include "brave/browser/ui/tabs/brave_tab_prefs.h"
 #include "brave/common/pref_names.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/ai_chat/core/common/pref_names.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_ads/buildflags/buildflags.h"
 #include "brave/components/brave_news/common/buildflags/buildflags.h"
 #include "brave/components/brave_rewards/core/pref_names.h"
@@ -32,7 +36,9 @@
 #include "brave/components/tor/buildflags/buildflags.h"
 #include "brave/components/traffic_control/buildflags/buildflags.h"
 #include "brave/components/web_discovery/buildflags/buildflags.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/webcompat_reporter/common/pref_names.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "chrome/browser/extensions/api/settings_private/prefs_util.h"
 #include "chrome/common/extensions/api/settings_private.h"
 #include "chrome/common/pref_names.h"
@@ -150,9 +156,11 @@ const PrefsUtil::TypedPrefMap& BravePrefsUtil::GetAllowlistedKeys() {
   (*s_brave_allowlist)[brave_shields::prefs::kAdBlockOnlyModeEnabled] =
       settings_api::PrefType::kBoolean;
 
+#if !BUILDFLAG(IS_ANDROID)
   // Webcompat Reporter
   (*s_brave_allowlist)[webcompat_reporter::prefs::kContactInfoSaveFlagPrefs] =
       settings_api::PrefType::kBoolean;
+#endif  // !BUILDFLAG(IS_ANDROID)
 
   // Rewards/Ads prefs
   (*s_brave_allowlist)[brave_rewards::prefs::kEnabled] =
@@ -306,6 +314,7 @@ const PrefsUtil::TypedPrefMap& BravePrefsUtil::GetAllowlistedKeys() {
       settings_api::PrefType::kBoolean;
 #endif  // BUILDFLAG(ENABLE_BRAVE_WALLET)
 
+#if !BUILDFLAG(IS_ANDROID)
   // Leo Assistant pref
   (*s_brave_allowlist)[ai_chat::prefs::kBraveChatStorageEnabled] =
       settings_api::PrefType::kBoolean;
@@ -335,6 +344,7 @@ const PrefsUtil::TypedPrefMap& BravePrefsUtil::GetAllowlistedKeys() {
   (*s_brave_allowlist)[ai_chat::prefs::kBraveAIChatOllamaFetchEnabled] =
       settings_api::PrefType::kBoolean;
 
+#endif  // !BUILDFLAG(IS_ANDROID)
 #if BUILDFLAG(ENABLE_LOCAL_AI)
   // On-device AI pref
   (*s_brave_allowlist)[local_ai::prefs::kBraveHistoryEmbeddingsEnabled] =

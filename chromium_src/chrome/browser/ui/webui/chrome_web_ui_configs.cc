@@ -3,10 +3,16 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+#include "build/build_config.h"
+
 #include "chrome/browser/ui/webui/chrome_web_ui_configs.h"
 
+#include "brave/components/ntp_background_images/buildflags/buildflags.h"
+
 #include "brave/components/ai_chat/core/common/buildflags/buildflags.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_account/features.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_ads/buildflags/buildflags.h"
 #include "brave/components/brave_education/buildflags.h"
 #include "brave/components/brave_origin/buildflags/buildflags.h"
@@ -50,8 +56,9 @@
 #endif
 
 #else  // !BUILDFLAG(IS_ANDROID)
-#include "brave/browser/ui/webui/brave_account/brave_account_ui_android.h"
+#if BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
 #include "brave/browser/ui/webui/new_tab_takeover/android/new_tab_takeover_ui_config.h"
+#endif  // BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
 #endif  // !BUILDFLAG(IS_ANDROID)
 
 #include "brave/browser/ui/webui/brave_adblock_internals_ui.h"
@@ -140,10 +147,9 @@ void RegisterChromeWebUIConfigs() {
     map.AddWebUIConfig(std::make_unique<BraveAccountUIDesktopConfig>());
   }
 #else   // !BUILDFLAG(IS_ANDROID)
+#if BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
   map.AddWebUIConfig(std::make_unique<NewTabTakeoverUIConfig>());
-  if (brave_account::features::IsBraveAccountEnabled()) {
-    map.AddWebUIConfig(std::make_unique<BraveAccountUIAndroidConfig>());
-  }
+#endif  // BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
 #endif  // !BUILDFLAG(IS_ANDROID)
   map.AddWebUIConfig(std::make_unique<BraveAdblockUIConfig>());
   map.AddWebUIConfig(std::make_unique<BraveAdblockInternalsUIConfig>());

@@ -6,6 +6,8 @@
 #ifndef BRAVE_COMPONENTS_REQUEST_OTR_BROWSER_REQUEST_OTR_SERVICE_H_
 #define BRAVE_COMPONENTS_REQUEST_OTR_BROWSER_REQUEST_OTR_SERVICE_H_
 
+#include "build/build_config.h"
+
 #include <memory>
 #include <string>
 #include <vector>
@@ -48,13 +50,19 @@ class RequestOTRService : public KeyedService,
   bool ShouldBlock(const GURL& url) const;
 
  private:
+#if !BUILDFLAG(IS_ANDROID)
   void UpdateP3AMetrics();
+#endif  // !BUILDFLAG(IS_ANDROID)
 
   std::vector<std::unique_ptr<RequestOTRRule>> rules_;
   base::flat_set<std::string> host_cache_;
 
+#if !BUILDFLAG(IS_ANDROID)
   raw_ptr<PrefService> profile_prefs_;
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
   base::WallClockTimer p3a_timer_;
+#endif  // !BUILDFLAG(IS_ANDROID)
 
   base::WeakPtrFactory<RequestOTRService> weak_factory_{this};
 };

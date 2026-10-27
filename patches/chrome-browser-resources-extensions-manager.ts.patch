@@ -1,0 +1,564 @@
+diff --git a/chrome/browser/resources/extensions/manager.ts b/chrome/browser/resources/extensions/manager.ts
+--- a/chrome/browser/resources/extensions/manager.ts
++++ b/chrome/browser/resources/extensions/manager.ts
+@@ -2,6 +2,9 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
++// <if expr="is_android">
++import 'chrome://resources/cr_elements/cr_button/cr_button.js';
++// </if>
+ import 'chrome://resources/cr_elements/cr_drawer/cr_drawer.js';
+ import 'chrome://resources/cr_elements/cr_lazy_render/cr_lazy_render_lit.js';
+ import 'chrome://resources/cr_elements/cr_toast/cr_toast_manager.js';
+@@ -29,13 +32,21 @@
+ import {assert, assertNotReached, assertNotReachedCase} from 'chrome://resources/js/assert.js';
+ import {loadTimeData} from 'chrome://resources/js/load_time_data.js';
+ import {PromiseResolver} from 'chrome://resources/js/promise_resolver.js';
++// <if expr="is_android">
++import {getDeepActiveElement} from 'chrome://resources/js/util.js';
++// </if>
+ import {CrLitElement} from 'chrome://resources/lit/v3_0/lit.rollup.js';
+ import type {PropertyValues} from 'chrome://resources/lit/v3_0/lit.rollup.js';
+ 
+ import type {ActivityLogExtensionPlaceholder} from './activity_log/activity_log.js';
++// <if expr="not is_android">
+ import type {ExtensionsDetailViewElement} from './detail_view.js';
++// </if>
+ import type {ExtensionsItemListElement} from './item_list.js';
+ import {TOAST_DURATION_MS} from './item_util.js';
++// <if expr="is_android">
++import type {LoadErrorElement} from './load_error.js';
++// </if>
+ import {getCss} from './manager.css.js';
+ import {getHtml} from './manager.html.js';
+ import type {PageState} from './navigation_helper.js';
+@@ -43,6 +54,11 @@
+ import {Service} from './service.js';
+ import type {ServiceInterface} from './service.js';
+ import type {ExtensionsToolbarElement} from './toolbar.js';
++// <if expr="is_android">
++interface ItemRemovalFocusRequest {
++  focusedElement: Element|null;
++}
++// </if>
+ 
+ /**
+  * Compares two extensions to determine which should come first in the list.
+@@ -144,6 +160,10 @@
+        * Prevents page content from showing before data is first loaded.
+        */
+       didInitPage_: {type: Boolean},
++      // <if expr="is_android">
++      isInitializing_: {type: Boolean},
++      initializationError_: {type: Boolean},
++      // </if>
+ 
+       narrow_: {type: Boolean},
+ 
+@@ -184,6 +204,11 @@
+   protected accessor extensions_: chrome.developerPrivate.ExtensionInfo[] = [];
+   protected accessor apps_: chrome.developerPrivate.ExtensionInfo[] = [];
+   protected accessor didInitPage_: boolean = false;
++  // <if expr="is_android">
++  protected accessor isInitializing_: boolean = false;
++  protected accessor initializationError_: boolean = false;
++  private initializeAndroid_: (() => Promise<void>)|null = null;
++  // </if>
+   protected accessor narrow_: boolean = false;
+   protected accessor showDrawer_: boolean = false;
+   protected accessor showLoadErrorDialog_: boolean = false;
+@@ -210,6 +235,12 @@
+    * listener can be removed when this element is detached (happens in tests).
+    */
+   private navigationListener_: number|null = null;
++  // <if expr="is_android">
++  private optionsDialogRequest_: number = 0;
++  private loadErrorPresentation_: {dialog: LoadErrorElement|null}|null = null;
++  private narrowFocusRequest_: number = 0;
++  private itemRemovalFocusRequest_: ItemRemovalFocusRequest|null = null;
++  // </if>
+ 
+   override connectedCallback() {
+     super.connectedCallback();
+@@ -231,6 +262,14 @@
+ 
+   override disconnectedCallback() {
+     super.disconnectedCallback();
++    // <if expr="is_android">
++    ++this.optionsDialogRequest_;
++    this.loadErrorPresentation_ = null;
++    ++this.narrowFocusRequest_;
++    this.itemRemovalFocusRequest_ = null;
++    this.shadowRoot.querySelector('extensions-options-dialog')
++        ?.cancelPendingShow();
++    // </if>
+     assert(this.navigationListener_);
+     assert(navigation.removeListener(this.navigationListener_));
+     this.navigationListener_ = null;
+@@ -242,7 +281,9 @@
+     this.addEventListener('load-error', this.onLoadError_);
+     this.addEventListener('view-enter-start', this.onViewEnterStart_);
+     this.addEventListener('view-exit-start', this.onViewExitStart_);
++    // <if expr="not is_android">
+     this.addEventListener('view-exit-finish', this.onViewExitFinish_);
++    // </if>
+ 
+     const service = Service.getInstance();
+ 
+@@ -260,6 +301,43 @@
+               profileInfo.extensionsPinnedByDefault;
+         };
+     service.getProfileStateChangedTarget().addListener(onProfileStateChanged);
++    // <if expr="is_android">
++    let profileLoaded = false;
++    this.initializeAndroid_ = async () => {
++      if (this.isInitializing_) {
++        return;
++      }
++      this.isInitializing_ = true;
++      let failed = false;
++      const queries: Array<Promise<void>> = [];
++      if (!profileLoaded) {
++        queries.push(Promise.resolve().then(() => service.getProfileConfiguration())
++            .then(info => {
++              onProfileStateChanged(info);
++              if (info.interruptedLocalImport) {
++                this.$.toolbar.showInterruptedLocalImport();
++              }
++              profileLoaded = true;
++            }));
++      }
++      if (!this.didInitPage_) {
++        queries.push(Promise.resolve().then(() => service.getExtensionsInfo())
++            .then(extensionsAndApps => {
++              this.initExtensionsAndApps_(extensionsAndApps);
++              this.initPage_();
++              service.getItemStateChangedTarget().addListener(
++                  this.onItemStateChanged_.bind(this));
++            }));
++      }
++      // Wait for both ordinary API calls to settle before enabling Retry.
++      // Successful data stays visible; retry only the failed initialization.
++      await Promise.all(queries.map(query => query.catch(() => { failed = true; })));
++      this.initializationError_ = failed;
++      this.isInitializing_ = false;
++    };
++    void this.initializeAndroid_();
++    // </if>
++    // <if expr="not is_android">
+     service.getProfileConfiguration().then(onProfileStateChanged);
+ 
+     service.getExtensionsInfo().then(extensionsAndApps => {
+@@ -269,7 +347,29 @@
+       service.getItemStateChangedTarget().addListener(
+           this.onItemStateChanged_.bind(this));
+     });
+-  }
++    // </if>
++  }
++
++  // <if expr="is_android">
++  protected async onInitializationRetryClick_() {
++    const button = this.shadowRoot.querySelector<CrLitElement>('#initializationRetry')!;
++    const hadFocus = button.matches(':focus-within');
++    await this.initializeAndroid_?.();
++    await this.updateComplete;
++    // Wait for the wrapped button to forward its enabled state before focus.
++    await button.updateComplete;
++    const active = getDeepActiveElement();
++    if (hadFocus && this.isConnected &&
++        (!active || active === document.body ||
++         button.matches(':focus-within'))) {
++      if (this.initializationError_) {
++        button.focus();
++      } else {
++        this.$.toolbar.focusSearchInput();
++      }
++    }
++  }
++  // </if>
+ 
+   override updated(changedProperties: PropertyValues<this>) {
+     super.updated(changedProperties);
+@@ -307,8 +407,58 @@
+   }
+ 
+   protected onNarrowChanged_(e: CustomEvent<{value: boolean}>) {
++    // <if expr="is_android">
++    const request = ++this.narrowFocusRequest_;
++    const previousFocus = this.shadowRoot.activeElement;
++    const drawer = this.shadowRoot.querySelector('cr-drawer');
++    const restoreFocus = e.detail.value ?
++        this.shadowRoot.querySelector('#left')?.matches(':focus-within') :
++        this.$.toolbar.$.toolbar.isMenuFocused() ||
++            drawer?.matches(':focus-within');
++    // </if>
+     this.narrow_ = e.detail.value;
+-  }
++    // <if expr="is_android">
++    if (restoreFocus) {
++      if (!e.detail.value && drawer?.open) {
++        // The native modal keeps the search inert until the drawer closes.
++        drawer.addEventListener('close', () => {
++          void this.focusAfterLayoutChanged_(request, previousFocus, false);
++        }, {once: true});
++      } else {
++        void this.focusAfterLayoutChanged_(
++            request, previousFocus, e.detail.value);
++      }
++    }
++    // </if>
++  }
++
++  // <if expr="is_android">
++  private async focusAfterLayoutChanged_(
++      request: number, previousFocus: Element|null, narrow: boolean) {
++    const canFocus = () => {
++      const active = this.shadowRoot.activeElement;
++      return request === this.narrowFocusRequest_ && this.isConnected &&
++          this.narrow_ === narrow &&
++          (document.activeElement === document.body ||
++           (document.activeElement === this &&
++            (!active ||
++             (active === previousFocus &&
++              (active !== this.$.toolbar ||
++               this.$.toolbar.$.toolbar.isMenuFocused())))));
++    };
++    await this.updateComplete;
++    if (!canFocus()) {
++      return;
++    }
++    // The search control survives both layouts. Its reveal has a separate render.
++    const search = this.$.toolbar.$.toolbar.getSearchField();
++    search.showingSearch = true;
++    await search.updateComplete;
++    if (canFocus()) {
++      search.getSearchInput().focus();
++    }
++  }
++  // </if>
+ 
+   private onItemStateChanged_(eventData: chrome.developerPrivate.EventData) {
+     const EventType = chrome.developerPrivate.EventType;
+@@ -379,7 +529,7 @@
+   }
+ 
+   protected onSearchChanged_(event: CustomEvent<string>) {
+-    if (this.currentPage_!.page !== Page.LIST) {
++    if (this.currentPage_?.page !== Page.LIST) {
+       navigation.navigateTo({page: Page.LIST});
+     }
+     this.filter = event.detail;
+@@ -523,9 +673,53 @@
+   // list, focus to the search bar as a fallback.
+   // This is a fix for crbug.com/40063067 which causes focus to linger on a
+   // deleted element, which is then read by the screen reader.
++  // <if expr="is_android">
++  private canRestoreItemFocus_(request: ItemRemovalFocusRequest): boolean {
++    const active = getDeepActiveElement();
++    const canFocus = this.itemRemovalFocusRequest_ === request &&
++        this.isConnected && this.currentPage_?.page === Page.LIST &&
++        (!active || active === document.body ||
++         active === request.focusedElement);
++    if (!canFocus && this.itemRemovalFocusRequest_ === request) {
++      this.itemRemovalFocusRequest_ = null;
++    }
++    return canFocus;
++  }
++
++  private async focusSearchAfterItemRemoved_(request: ItemRemovalFocusRequest) {
++    if (!this.canRestoreItemFocus_(request)) {
++      return;
++    }
++    const search = this.$.toolbar.$.toolbar.getSearchField();
++    search.showingSearch = true;
++    await search.updateComplete;
++    if (this.canRestoreItemFocus_(request)) {
++      this.itemRemovalFocusRequest_ = null;
++      search.getSearchInput().focus();
++    }
++  }
++  // </if>
+   private focusAfterItemRemoved_(listId: string, index: number) {
++    // <if expr="is_android">
++    const request = this.itemRemovalFocusRequest_;
++    // </if>
+     // A timeout is used so elements are focused after the DOM is updated.
+     setTimeout(() => {
++      // <if expr="is_android">
++      if (!request || !this.canRestoreItemFocus_(request)) {
++        return;
++      }
++      const list = this.getListFromId_(listId);
++      if (list.length) {
++        const focusIndex = Math.min(list.length - 1, index);
++        if (this.$.itemsList.focusItemButton(list[focusIndex]!.id)) {
++          this.itemRemovalFocusRequest_ = null;
++          return;
++        }
++      }
++      void this.focusSearchAfterItemRemoved_(request);
++      // </if>
++      // <if expr="not is_android">
+       const list = this.getListFromId_(listId);
+       if (list.length) {
+         const focusIndex = Math.min(list.length - 1, index);
+@@ -539,6 +733,7 @@
+       } else {
+         this.$.toolbar.focusSearchInput();
+       }
++      // </if>
+     }, 0);
+   }
+ 
+@@ -557,11 +752,28 @@
+ 
+     // We should never try and remove a non-existent item.
+     assert(index >= 0);
++    // <if expr="is_android">
++    const focusedElement = getDeepActiveElement();
++    const removedItem =
++        this.$.itemsList.shadowRoot.querySelector(`#${itemId}`);
++    // An unrelated removal must not take focus from a surviving control.
++    const request: ItemRemovalFocusRequest|null =
++        this.currentPage_!.page === Page.LIST &&
++            (!focusedElement || focusedElement === document.body ||
++             removedItem?.matches(':focus-within')) ?
++        {focusedElement} : null;
++    this.itemRemovalFocusRequest_ = request;
++    // </if>
+     this.updateList_(listId, index, 1);
+     if (this.currentPage_!.page === Page.LIST) {
+       // Wait for the items list to be updated with the new value before trying
+       // to focus an item.
+       this.$.itemsList.updateComplete.then(() => {
++        // <if expr="is_android">
++        if (this.itemRemovalFocusRequest_ !== request) {
++          return;
++        }
++        // </if>
+         this.focusAfterItemRemoved_(listId, index);
+       });
+     } else if (
+@@ -576,25 +788,73 @@
+ 
+   private onLoadError_(
+       e: CustomEvent<Error|chrome.developerPrivate.LoadError>) {
++    // <if expr="is_android">
++    // Detached child reloads can still bubble their asynchronous failure here.
++    if (!this.isConnected) {
++      return;
++    }
++    // </if>
+     this.showLoadErrorDialog_ = true;
++    // <if expr="is_android">
++    // Keep queued presentation ownership separate from an already shown dialog:
++    // its older native close event must not cancel a newer pending error.
++    const request: {dialog: LoadErrorElement|null} = {dialog: null};
++    this.loadErrorPresentation_ = request;
++    setTimeout(async () => {
++      if (!this.isConnected || this.loadErrorPresentation_ !== request) {
++        return;
++      }
++      await this.updateComplete;
++      if (!this.isConnected || this.loadErrorPresentation_ !== request ||
++          !this.showLoadErrorDialog_) {
++        return;
++      }
++      const dialog = this.shadowRoot.querySelector('extensions-load-error');
++      if (!dialog?.isConnected) {
++        return;
++      }
++      await dialog.updateComplete;
++      if (!this.isConnected || this.loadErrorPresentation_ !== request ||
++          !this.showLoadErrorDialog_ || !dialog.isConnected ||
++          dialog !== this.shadowRoot.querySelector('extensions-load-error')) {
++        return;
++      }
++      // Retire the old Retry generation atomically with new error delivery.
++      dialog.loadError = e.detail;
++      request.dialog = dialog;
++      dialog.show();
++    }, 0);
++    // </if>
++    // <if expr="not is_android">
+     setTimeout(() => {
+       const dialog = this.shadowRoot.querySelector('extensions-load-error')!;
+       dialog.loadError = e.detail;
+       dialog.show();
+     }, 0);
++    // </if>
+   }
+ 
+   /**
+    * Changes the active page selection.
+    */
+   private changePage_(newPage: PageState) {
++    // <if expr="is_android">
++    this.itemRemovalFocusRequest_ = null;
++    // </if>
+     this.onCloseDrawer_();
+ 
+     const optionsDialog =
+         this.shadowRoot.querySelector('extensions-options-dialog');
++    // <if expr="is_android">
++    const optionsDialogRequest = ++this.optionsDialogRequest_;
++    optionsDialog?.cancelPendingShow();
++    this.showOptionsDialog_ = false;
++    // </if>
++    // <if expr="not is_android">
+     if (optionsDialog && optionsDialog.open) {
+       this.showOptionsDialog_ = false;
+     }
++    // </if>
+ 
+     const fromPage = this.currentPage_ ? this.currentPage_.page : null;
+     const toPage = newPage.page;
+@@ -607,6 +867,13 @@
+     if (newPage.extensionId) {
+       data = this.getData_(newPage.extensionId);
+       if (!data) {
++        // <if expr="is_android">
++        // The initial list must arrive before an ID can be treated as removed.
++        // initPage_ will replay the current URL after that list is installed.
++        if (!this.didInitPage_) {
++          return;
++        }
++        // </if>
+         // Allow the user to navigate to the activity log page even if the
+         // extension ID is not valid. This enables the use case of seeing an
+         // extension's install-time activities by navigating to an extension's
+@@ -649,18 +916,66 @@
+     }
+ 
+     if (fromPage !== toPage) {
++      // <if expr="is_android">
++      const fromExtensionId = this.currentPage_?.extensionId;
++      const fromPageFocus = getDeepActiveElement();
++      // </if>
+       this.$.viewManager.switchView(toPage, 'no-animation', 'no-animation');
++      // <if expr="is_android">
++      // No-animation exit finishes before the destination is shown. Restore
++      // card focus only after the item list has become the active view.
++      // Searching from a subpage must keep the toolbar's current focus.
++      if (toPage === Page.LIST && fromExtensionId &&
++          !this.$.toolbar.matches(':focus-within')) {
++        const list = this.$.itemsList;
++        const button = fromPage === Page.DETAILS ?
++            list.getDetailsButton(fromExtensionId) :
++            fromPage === Page.ERRORS ? list.getErrorsButton(fromExtensionId) :
++                                       null;
++        if (!this.getData_(fromExtensionId) &&
++            (fromPage === Page.DETAILS || fromPage === Page.ERRORS)) {
++          const request = {focusedElement: fromPageFocus};
++          this.itemRemovalFocusRequest_ = request;
++          // A removed item's card can still be stamped during navigation.
++          // Wait until the route is current before restoring visible focus.
++          void this.updateComplete.then(
++              () => this.focusSearchAfterItemRemoved_(request));
++        } else {
++          button?.focus();
++        }
++      }
++      // </if>
+     }
+ 
+     if (newPage.subpage) {
+       assert(newPage.subpage === Dialog.OPTIONS);
+       assert(newPage.extensionId);
++      // <if expr="is_android">
++      setTimeout(async () => {
++        // Complete the false render before mounting another native dialog.
++        // A close event queued by the old dialog must keep its old owner.
++        await this.updateComplete;
++        if (optionsDialogRequest !== this.optionsDialogRequest_ ||
++            !this.isConnected) {
++          return;
++        }
++        this.showOptionsDialog_ = true;
++        await this.updateComplete;
++        if (optionsDialogRequest !== this.optionsDialogRequest_ ||
++            !this.isConnected) {
++          return;
++        }
++        this.shadowRoot.querySelector('extensions-options-dialog')?.show(data!);
++      }, 0);
++      // </if>
++      // <if expr="not is_android">
+       this.showOptionsDialog_ = true;
+       setTimeout(() => {
+         this.shadowRoot.querySelector('extensions-options-dialog')!.show(
+             data!,
+         );
+       }, 0);
++      // </if>
+     }
+ 
+     document.title = toPage === Page.DETAILS ?
+@@ -692,15 +1007,48 @@
+     }
+   }
+ 
+-  protected onLoadErrorDialogClose_() {
++  protected onLoadErrorDialogClose_(
++      // <if expr="is_android">
++      e: Event,
++      // </if>
++      ) {
++    // <if expr="is_android">
++    const dialog = this.loadErrorPresentation_?.dialog;
++    if (!dialog || e.currentTarget !== dialog ||
++        dialog !== this.shadowRoot.querySelector('extensions-load-error') ||
++        dialog.$.dialog.getNative().open) {
++      return;
++    }
++    this.loadErrorPresentation_ = null;
++    // </if>
+     this.showLoadErrorDialog_ = false;
+   }
+ 
++  // <if expr="is_android">
++  protected onOptionsDialogClose_(event: Event) {
++    this.showOptionsDialog_ = false;
++    const details = this.shadowRoot.querySelector('extensions-detail-view')!;
++    const active = getDeepActiveElement();
++    const closingDialog = event.currentTarget;
++    // Native close restores focus before its queued close event. Keep a newer
++    // connected control's focus while retaining the normal Options fallback.
++    if (active && active.isConnected && active !== document.body &&
++        active !== document.documentElement &&
++        !(closingDialog instanceof HTMLElement &&
++          closingDialog.matches(':focus-within')) &&
++        !details.$.extensionsOptions.matches(':focus-within')) {
++      return;
++    }
++    details.focusOptionsButton();
++  }
++  // </if>
++  // <if expr="not is_android">
+   protected onOptionsDialogClose_() {
+     this.showOptionsDialog_ = false;
+     this.shadowRoot.querySelector(
+                        'extensions-detail-view')!.focusOptionsButton();
+   }
++  // </if>
+ 
+   private onViewEnterStart_() {
+     this.fromActivityLog_ = false;
+@@ -711,6 +1059,7 @@
+     this.fromActivityLog_ = viewType === 'EXTENSIONS-ACTIVITY-LOG';
+   }
+ 
++  // <if expr="not is_android">
+   private onViewExitFinish_(e: Event) {
+     const viewType = (e.composedPath()[0] as HTMLElement).tagName;
+     if (viewType === 'EXTENSIONS-ITEM-LIST' ||
+@@ -734,6 +1083,7 @@
+       button.focus();
+     }
+   }
++  // </if>
+ 
+   protected onShowInstallWarnings_(e: CustomEvent<string[]>) {
+     // Leverage Polymer data bindings instead of just assigning the

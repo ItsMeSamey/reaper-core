@@ -1,0 +1,217 @@
+# Preserve Android split layout behavior with explicit nullability and boolean grouping.
+substitutions:
+- description: Support Android live split panes (CompositorViewHolder.java, 1).
+  regex:
+    pattern: 'import org.chromium.base.Callback;
+
+      import org.chromium.base.DeviceInfo;
+
+      import org.chromium.base.InputHintChecker;
+
+      import org.chromium.base.ObserverList;
+
+      import org.chromium.base.TraceEvent;
+
+      import org.chromium.base.metrics.RecordHistogram;
+
+      import org.chromium.base.supplier.NonNullObservableSupplier;
+
+      import org.chromium.base.supplier.ObservableSuppliers;
+
+      '
+    replace: 'import org.chromium.base.Callback;
+
+      import org.chromium.base.DeviceInfo;
+
+      import org.chromium.base.InputHintChecker;
+
+      import org.chromium.base.ObserverList;
+
+      import org.chromium.base.TokenHolder;
+
+      import org.chromium.base.TraceEvent;
+
+      import org.chromium.base.metrics.RecordHistogram;
+
+      import org.chromium.base.supplier.NonNullObservableSupplier;
+
+      import org.chromium.base.supplier.ObservableSuppliers;
+
+      '
+- description: Support Android live split panes (CompositorViewHolder.java, 2).
+  regex:
+    pattern: "     * current Tab.\n     */\n    private @Nullable ContentView mContentView;\n\n    // Cache objects that should not be created frequently.\n    private final Rect mCacheRect = new Rect();\n    private final Point mCachePoint = new Point();\n\n"
+    replace: "     * current Tab.\n     */\n    private @Nullable ContentView mContentView;\n\n    private @Nullable SplitTabCoordinator mSplitTabCoordinator;\n    private int mSplitControlsToken = TokenHolder.INVALID_TOKEN;\n    private boolean mSplitTouchObserverRegistered;\n    private boolean mUpdatingTab;\n    private boolean mSplitDestroyed;\n    private final Runnable mSplitRefresh =\n            () -> {\n                if (!mSplitDestroyed) onContentChanged();\n            };\n    // Pane selection must happen in Java before the initiating touch reaches a\n    // renderer. Keep split gestures on the existing Android dispatch path.\n    private final TouchEventObserver mSplitTouchObserver =\n            new TouchEventObserver() {\n                @Override\n                public boolean onInterceptTouchEvent(MotionEvent event) {\n                    return false;\n                }\n\n                @Override\n                public boolean mayInterceptTouchSequenceInWebContents() {\n                    return true;\n                }\n            };\n\n    // Cache objects that should not be created frequently.\n    private final Rect mCacheRect = new Rect();\n    private final Point mCachePoint = new Point();\n\n"
+- description: Support Android live split panes (CompositorViewHolder.java, 3).
+  regex:
+    pattern: "     */\n    private boolean mHasKeyboardGeometryChangeFired;\n\n    /**\n     * By default, the virtual keyboard overlays content, only resizing the visual viewport.\n     * Web content can use APIs that can change this to cause the WebContents to be resized.\n     */\n    @VirtualKeyboardMode.EnumType\n    private int mVirtualKeyboardMode = VirtualKeyboardMode.RESIZES_VISUAL;\n\n"
+    replace: "     */\n    private boolean mHasKeyboardGeometryChangeFired;\n\n    /**\n     * By default, the virtual keyboard overlays content, only resizing the visual viewport. Web\n     * content can use APIs that can change this to cause the WebContents to be resized.\n     */\n    @VirtualKeyboardMode.EnumType\n    private int mVirtualKeyboardMode = VirtualKeyboardMode.RESIZES_VISUAL;\n\n"
+- description: Support Android live split panes (CompositorViewHolder.java, 4).
+  regex:
+    pattern: "        }\n    }\n\n    /**\n     * @param layoutManager The {@link LayoutManagerImpl} instance that will be driving what\n     *                      shows in this {@link CompositorViewHolder}.\n     */\n    public void setLayoutManager(LayoutManagerImpl layoutManager) {\n        mLayoutManager = layoutManager;\n        onViewportChanged();\n"
+    replace: "        }\n    }\n\n    /**\n     * @param layoutManager The {@link LayoutManagerImpl} instance that will be driving what shows\n     *     in this {@link CompositorViewHolder}.\n     */\n    public void setLayoutManager(LayoutManagerImpl layoutManager) {\n        mLayoutManager = layoutManager;\n        onViewportChanged();\n"
+- description: Support Android live split panes (CompositorViewHolder.java, 5).
+  regex:
+    pattern: "        if (mBrowserControlsManager != null) {\n            mBrowserControlsManager.removeObserver(this);\n        }\n\n        setTab(null);\n        if (mApplicationBottomInsetSupplier != null) {\n            assert mOnViewportInsetsChanged != null;\n            mApplicationBottomInsetSupplier.getSupplier().removeObserver(mOnViewportInsetsChanged);\n"
+    replace: "        if (mBrowserControlsManager != null) {\n            mBrowserControlsManager.removeObserver(this);\n        }\n\n        mSplitDestroyed = true;\n        removeCallbacks(mSplitRefresh);\n        if (mSplitTabCoordinator != null) mSplitTabCoordinator.destroy();\n        releaseSplitControls();\n        setTab(null);\n        if (mApplicationBottomInsetSupplier != null) {\n            assert mOnViewportInsetsChanged != null;\n            mApplicationBottomInsetSupplier.getSupplier().removeObserver(mOnViewportInsetsChanged);\n"
+- description: Support Android live split panes (CompositorViewHolder.java, 6).
+  regex:
+    pattern: "\n        WebContents webContents = tab.getWebContents();\n        View view = tab.getContentView();\n        if (webContents == null || view == null) return;\n\n        Point viewportSize = getViewportSize();\n        int width = viewportSize.x;\n        int height = viewportSize.y;\n"
+    replace: "\n        WebContents webContents = tab.getWebContents();\n        View view = tab.getContentView();\n        if (webContents == null || view == null) return;\n        Rect splitBounds =\n                mSplitTabCoordinator == null ? null : mSplitTabCoordinator.getContentBounds(tab);\n        if (splitBounds != null) {\n            if (splitBounds.isEmpty() || webContents.isDestroyed()) return;\n            RectF visible = new RectF();\n            getVisibleViewport(visible);\n            int visibleHeight =\n                    Math.max(\n                            0,\n                            Math.min(splitBounds.bottom, (int) visible.bottom)\n                                    - Math.max(splitBounds.top, (int) visible.top));\n            int mode = webContents.getVirtualKeyboardMode();\n            if (mode == VirtualKeyboardMode.UNSET) mode = defaultVirtualKeyboardMode();\n            int layoutHeight =\n                    mode == VirtualKeyboardMode.RESIZES_CONTENT\n                            ? visibleHeight\n                            : splitBounds.height();\n            webContents.setSize(splitBounds.width(), Math.max(1, layoutHeight));\n            ((ContentView) view).setContentOffsetXPix(0);\n            int controlsOffset = mSplitTabCoordinator.getContentOffset(tab);\n            int bottomControls =\n                    mBrowserControlsManager == null\n                            ? 0\n                            : getBottomControlsHeightPixels()\n                                    - mBrowserControlsManager.getBottomControlOffset();\n            onPhysicalBackingSizeChanged(\n                    webContents,\n                    splitBounds.width(),\n                    Math.max(1, visibleHeight) + controlsOffset + Math.max(0, bottomControls));\n            onControlsResizeViewChanged(webContents, mControlsResizeView);\n            if (mode == VirtualKeyboardMode.OVERLAYS_CONTENT) {\n                notifySplitKeyboardGeometry(webContents, splitBounds, visible);\n            }\n            return;\n        }\n\n        Point viewportSize = getViewportSize();\n        int width = viewportSize.x;\n        int height = viewportSize.y;\n"
+- description: Support Android live split panes (CompositorViewHolder.java, 7).
+  regex:
+    pattern: "     * @param webContents Active WebContent for which this event needs to be fired.\n     */\n    private void notifyVirtualKeyboardOverlayGeometryChangeEvent(\n            int viewportWidth, int viewportHeight, WebContents webContents) {\n        assert mVirtualKeyboardMode == VirtualKeyboardMode.OVERLAYS_CONTENT;\n\n        int keyboardHeight =\n                KeyboardVisibilityDelegate.getInstance()\n"
+    replace: "     * @param webContents Active WebContent for which this event needs to be fired.\n     */\n    private void notifyVirtualKeyboardOverlayGeometryChangeEvent(\n            int viewportWidth, int viewportHeight, WebContents webContents) {\n        if (mSplitTabCoordinator != null) {\n            Rect pane = mSplitTabCoordinator.getContentBounds(webContents);\n            if (pane != null) {\n                RectF visible = new RectF();\n                getVisibleViewport(visible);\n                notifySplitKeyboardGeometry(webContents, pane, visible);\n                return;\n            }\n        }\n        assert mVirtualKeyboardMode == VirtualKeyboardMode.OVERLAYS_CONTENT;\n\n        int keyboardHeight =\n                KeyboardVisibilityDelegate.getInstance()\n"
+- description: Support Android live split panes (CompositorViewHolder.java, 8).
+  regex:
+    pattern: "    }\n\n    @Override\n    public void onSurfaceResized(int width, int height) {\n        View view = getContentView();\n        WebContents activeWebContents = getWebContents();\n        if (view == null || activeWebContents == null) return;\n        onPhysicalBackingSizeChanged(activeWebContents, width, height);\n"
+    replace: "    }\n\n    @Override\n    public void onSurfaceResized(int width, int height) {\n        if (mSplitTabCoordinator != null && mSplitTabCoordinator.hasSplit()) {\n            updateSplitViewport();\n            resizeSplitContents();\n            WebContents active = getWebContents();\n            if (active != null) syncBackgroundCapturedTabsPhysicalSize(active, width, height);\n            return;\n        }\n        View view = getContentView();\n        WebContents activeWebContents = getWebContents();\n        if (view == null || activeWebContents == null) return;\n        onPhysicalBackingSizeChanged(activeWebContents, width, height);\n"
+- description: Support Android live split panes (CompositorViewHolder.java, 9).
+  regex:
+    pattern: "                WebContents tabWebContents = tab.getWebContents();\n                if (tabWebContents != null\n                        && tabWebContents != activeWebContents\n                        && tabWebContents.isBeingCaptured()) {\n                    onPhysicalBackingSizeChanged(tabWebContents, width, height);\n                }\n            }\n        }\n"
+    replace: "                WebContents tabWebContents = tab.getWebContents();\n                if (tabWebContents != null\n                        && tabWebContents != activeWebContents\n                        && tabWebContents.isBeingCaptured()) {\n                    if (mSplitTabCoordinator != null\n                            && mSplitTabCoordinator.getContentBounds(tab) != null) continue;\n                    onPhysicalBackingSizeChanged(tabWebContents, width, height);\n                }\n            }\n        }\n"
+- description: Support Android live split panes (CompositorViewHolder.java, 10).
+  regex:
+    pattern: "        repositionTabViewForSideUi(mSideUiStateProvider.getExpectedSideUiSpecsForTab(currentTab));\n    }\n\n    private void repositionTabViewForSideUi(SideUiSpecs sideUiSpecs) {\n        Tab currentTab = getCurrentTab();\n        if (mSideUiStateProvider == null || mView == null || currentTab == null) return;\n\n        // Only reposition custom views and native pages. Do not reposition ContentView.\n"
+    replace: "        repositionTabViewForSideUi(mSideUiStateProvider.getExpectedSideUiSpecsForTab(currentTab));\n    }\n\n    private void repositionTabViewForSideUi(SideUiSpecs sideUiSpecs) {\n        if (mSplitTabCoordinator != null && mSplitTabCoordinator.hasSplit()) return;\n        Tab currentTab = getCurrentTab();\n        if (mSideUiStateProvider == null || mView == null || currentTab == null) return;\n\n        // Only reposition custom views and native pages. Do not reposition ContentView.\n"
+- description: Support Android live split panes (CompositorViewHolder.java, 11).
+  regex:
+    pattern: "        }\n    }\n\n    private void onViewportChanged() {\n        if (mLayoutManager != null) mLayoutManager.onViewportChanged();\n    }\n\n    /** To be called once a frame before commit. */\n"
+    replace: "        }\n    }\n\n    private void onViewportChanged() {\n        updateSplitViewport();\n        if (mLayoutManager != null) mLayoutManager.onViewportChanged();\n    }\n\n    /** To be called once a frame before commit. */\n"
+- description: Support Android live split panes (CompositorViewHolder.java, 12).
+  regex:
+    pattern: "        return mControlsResizeView;\n    }\n\n    /**\n     * Sets the URL bar. This is needed so that the ContentViewHolder can find out\n     * whether it can claim focus.\n     */\n    public void setUrlBar(View urlBar) {\n        mUrlBar = urlBar;\n    }\n\n    @Override\n    public void onDetachedFromWindow() {\n        super.onDetachedFromWindow();\n\n        // Removes the accessibility node provider from this view.\n        if (mNodeProvider != null) {\n"
+    replace: "        return mControlsResizeView;\n    }\n\n    /**\n     * Sets the URL bar. This is needed so that the ContentViewHolder can find out whether it can\n     * claim focus.\n     */\n    public void setUrlBar(View urlBar) {\n        mUrlBar = urlBar;\n    }\n\n    @Override\n    protected void onAttachedToWindow() {\n        super.onAttachedToWindow();\n        if (mSplitTabCoordinator != null && !mSplitDestroyed) post(mSplitRefresh);\n    }\n\n    @Override\n    public void onDetachedFromWindow() {\n        if (mSplitTabCoordinator != null) mSplitTabCoordinator.setShown(false);\n        releaseSplitControls();\n        super.onDetachedFromWindow();\n\n        // Removes the accessibility node provider from this view.\n        if (mNodeProvider != null) {\n"
+- description: Support Android live split panes (CompositorViewHolder.java, 13).
+  regex:
+    pattern: "                mToolbarThemeColorProvider,\n                bottomControlsOffsetSupplier);\n\n        mTabModelSelector = tabModelSelector;\n        mTabModelSelector.getCurrentTabSupplier().addSyncObserver((tab) -> onContentChanged());\n        tabModelSelector.addObserver(\n                new TabModelSelectorObserver() {\n                    @Override\n"
+    replace: "                mToolbarThemeColorProvider,\n                bottomControlsOffsetSupplier);\n\n        mTabModelSelector = tabModelSelector;\n        mSplitTabCoordinator =\n                new SplitTabCoordinator(\n                        getContext(),\n                        tabModelSelector,\n                        new SplitTabCoordinator.Host() {\n                            @Override\n                            public void onSplitStateChanged() {\n                                onContentChanged();\n                            }\n\n                            @Override\n                            public void onSplitGeometryChanged() {\n                                resizeSplitContents();\n                            }\n                        });\n        mLayoutManager.setSplitTabCoordinator(mSplitTabCoordinator);\n        mTabModelSelector.getCurrentTabSupplier().addSyncObserver((tab) -> onContentChanged());\n        tabModelSelector.addObserver(\n                new TabModelSelectorObserver() {\n                    @Override\n"
+- description: Support Android live split panes (CompositorViewHolder.java, 14).
+  regex:
+    pattern: "        mNativeInitialized = true;\n    }\n\n    private void updateContentOverlayVisibility(boolean show) {\n        if (mView == null) return;\n        WebContents webContents = getWebContents();\n        if (show) {\n            if (mView != assumeNonNull(getCurrentTab()).getView() || mView.getParent() == this) {\n"
+    replace: "        mNativeInitialized = true;\n    }\n\n    private void updateContentOverlayVisibility(boolean show) {\n        if (mSplitTabCoordinator != null && mSplitTabCoordinator.hasSplit()) {\n            if (show) {\n                if (!mSplitTouchObserverRegistered) {\n                    addTouchEventObserver(mSplitTouchObserver);\n                    mSplitTouchObserverRegistered = true;\n                }\n                if (mSplitControlsToken == TokenHolder.INVALID_TOKEN\n                        && mBrowserControlsManager != null) {\n                    mSplitControlsToken =\n                            mBrowserControlsManager\n                                    .getBrowserVisibilityDelegate()\n                                    .showControlsPersistent();\n                }\n                updateSplitViewport();\n                mSplitTabCoordinator.showIn(this);\n                updateFocusability(false, false);\n                if (mView != null && (mUrlBar == null || !mUrlBar.hasFocus())) mView.requestFocus();\n            } else {\n                mSplitTabCoordinator.setShown(false);\n                releaseSplitControls();\n                if (mView != null && mView.getParent() == this) removeView(mView);\n            }\n            return;\n        }\n        releaseSplitControls();\n        if (mView == null) return;\n        WebContents webContents = getWebContents();\n        if (show) {\n            if (mView != assumeNonNull(getCurrentTab()).getView() || mView.getParent() == this) {\n"
+- description: Support Android live split panes (CompositorViewHolder.java, 15).
+  regex:
+    pattern: "    }\n\n    @Override\n    public void onContentChanged() {\n        if (mTabModelSelector == null) {\n            // Not yet initialized, onContentChanged() will eventually get called by\n            // setTabModelSelector.\n            return;\n"
+    replace: "    }\n\n    @Override\n    public void onContentChanged() {\n        if (mSplitDestroyed) return;\n        if (mTabModelSelector == null) {\n            // Not yet initialized, onContentChanged() will eventually get called by\n            // setTabModelSelector.\n            return;\n"
+- description: Support Android live split panes (CompositorViewHolder.java, 16).
+  regex:
+    pattern: "        setTab(tab);\n    }\n\n    private void setTab(@Nullable Tab tab) {\n        if (tab != null && !tab.isDetachedFromActivity()) {\n            tab.loadIfNeeded(/* forceBackingSize= */ false);\n        }\n\n        View newView = tab != null ? tab.getView() : null;\n        if (mView == newView && mTabVisible == tab) return;\n\n        // TODO(dtrainor): Look into changing this only if the views differ, but still parse the\n        // WebContents list even if they're the same.\n        updateContentOverlayVisibility(false);\n\n        if (mTabVisible != tab) {\n            // Reset the geometrychange event flag so it can fire on the current active tab.\n            mHasKeyboardGeometryChangeFired = false;\n            mContentViewScrolling = false;\n            mInTouch = false;\n            mInGesture = false;\n            updateInMotion();\n            if (mTabVisible != null) mTabVisible.removeObserver(mTabObserver);\n            if (tab != null) {\n                tab.addObserver(mTabObserver);\n                mCompositorView.onTabChanged();\n            }\n            updateViewStateListener(tab != null ? tab.getContentView() : null);\n        }\n\n        mTabVisible = tab;\n        mView = newView;\n\n        updateContentOverlayVisibility(mContentOverlayVisiblity);\n\n        if (mTabVisible != null) initializeTab(mTabVisible);\n\n        if (mOnscreenContentProvider == null) {\n            mOnscreenContentProvider =\n                    new OnscreenContentProvider(\n                            getContext(), this, assumeNonNull(getWebContents()));\n        } else {\n            mOnscreenContentProvider.onWebContentsChanged(assumeNonNull(getWebContents()));\n        }\n\n        // Clear drop permissions when tab changes unless this is a new tab loading from the drop.\n        if (mDropUri == null\n                || tab == null\n                || !tab.getUrl().getSpec().equals(mDropUri.toString())) {\n            releaseDragAndDropPermissions();\n        }\n    }\n\n    private void updateViewStateListener(@Nullable ContentView newContentView) {\n"
+    replace: "        setTab(tab);\n    }\n\n    private void setTab(@Nullable Tab tab) {\n        if (mUpdatingTab) {\n            removeCallbacks(mSplitRefresh);\n            if (!mSplitDestroyed) postOnAnimation(mSplitRefresh);\n            return;\n        }\n        mUpdatingTab = true;\n        try {\n\n            if (tab != null && !tab.isDetachedFromActivity()) {\n                tab.loadIfNeeded(/* forceBackingSize= */ false);\n            }\n\n            boolean splitChanged = mSplitTabCoordinator != null && mSplitTabCoordinator.update(tab);\n            View newView = tab != null ? tab.getView() : null;\n            if (mView == newView\n                    && mTabVisible == tab\n                    && !splitChanged\n                    && !(mSplitTabCoordinator != null\n                            && mSplitTabCoordinator.hasSplit()\n                            && !mSplitTabCoordinator.isShown())) return;\n\n            // TODO(dtrainor): Look into changing this only if the views differ, but still parse the\n            // WebContents list even if they're the same.\n            // Changing focus between panes must not detach either live view or its\n            // owner-bound dialog. Visibility changes only when membership changes.\n            if (mSplitTabCoordinator == null || !mSplitTabCoordinator.isShown() || splitChanged) {\n                updateContentOverlayVisibility(false);\n            }\n\n            if (mTabVisible != tab) {\n                // Reset the geometrychange event flag so it can fire on the current active tab.\n                mHasKeyboardGeometryChangeFired = false;\n                mContentViewScrolling = false;\n                mInTouch = false;\n                mInGesture = false;\n                updateInMotion();\n                if (mTabVisible != null) mTabVisible.removeObserver(mTabObserver);\n                if (tab != null) {\n                    tab.addObserver(mTabObserver);\n                    mCompositorView.onTabChanged();\n                }\n                updateViewStateListener(tab != null ? tab.getContentView() : null);\n            }\n\n            mTabVisible = tab;\n            mView = newView;\n\n            updateContentOverlayVisibility(mContentOverlayVisiblity);\n\n            if (mTabVisible != null) initializeTab(mTabVisible);\n            if (mSplitTabCoordinator != null && mSplitTabCoordinator.hasSplit())\n                resizeSplitContents();\n\n            if (mOnscreenContentProvider == null) {\n                mOnscreenContentProvider =\n                        new OnscreenContentProvider(\n                                getContext(), this, assumeNonNull(getWebContents()));\n            } else {\n                mOnscreenContentProvider.onWebContentsChanged(assumeNonNull(getWebContents()));\n            }\n\n            // Clear drop permissions when tab changes unless this is a new tab loading from the\n            // drop.\n            if (mDropUri == null\n                    || tab == null\n                    || !tab.getUrl().getSpec().equals(mDropUri.toString())) {\n                releaseDragAndDropPermissions();\n            }\n\n        } finally {\n            mUpdatingTab = false;\n        }\n    }\n\n    private void updateViewStateListener(@Nullable ContentView newContentView) {\n"
+- description: Support Android live split panes (CompositorViewHolder.java, 17).
+  regex:
+    pattern: "            mContentView.setEventOffsetHandlerForDragDrop(null);\n        }\n        if (newContentView != null) {\n            newContentView.addOnHierarchyChangeListener(this);\n            newContentView.setEventOffsetHandlerForDragDrop(mEventOffsetHandler);\n        }\n        mContentView = newContentView;\n    }\n\n"
+    replace: "            mContentView.setEventOffsetHandlerForDragDrop(null);\n        }\n        if (newContentView != null) {\n            newContentView.addOnHierarchyChangeListener(this);\n            if (mSplitTabCoordinator == null || !mSplitTabCoordinator.hasSplit()) {\n                newContentView.setEventOffsetHandlerForDragDrop(mEventOffsetHandler);\n            }\n        }\n        mContentView = newContentView;\n    }\n\n"
+- description: Support Android live split panes (CompositorViewHolder.java, 18).
+  regex:
+    pattern: "\n    /**\n     * Sets the correct size for {@link View} on {@code tab} and sets the correct rendering\n     * parameters on {@link WebContents} on {@code tab}.\n     * @param tab The {@link Tab} to initialize.\n     */\n    private void initializeTab(Tab tab) {\n        WebContents webContents = tab.getWebContents();\n        if (webContents != null) {\n            onPhysicalBackingSizeChanged(\n                    webContents, mCompositorView.getWidth(), mCompositorView.getHeight());\n"
+    replace: "\n    /**\n     * Sets the correct size for {@link View} on {@code tab} and sets the correct rendering\n     * parameters on {@link WebContents} on {@code tab}.\n     *\n     * @param tab The {@link Tab} to initialize.\n     */\n    private void initializeTab(Tab tab) {\n        if (mSplitTabCoordinator != null && mSplitTabCoordinator.getContentBounds(tab) != null) {\n            WebContents contents = tab.getWebContents();\n            if (contents != null && tab == getCurrentTab()) {\n                updateVirtualKeyboardMode(contents.getVirtualKeyboardMode());\n            }\n            updateWebContentsSize(tab);\n            return;\n        }\n        WebContents webContents = tab.getWebContents();\n        if (webContents != null) {\n            onPhysicalBackingSizeChanged(\n                    webContents, mCompositorView.getWidth(), mCompositorView.getHeight());\n"
+- description: Support Android live split panes (CompositorViewHolder.java, 19).
+  regex:
+    pattern: "        // WebContents but other types of Views can just wait for layout as usual.\n        if (tab.getView() != tab.getContentView()) return;\n\n        updateWebContentsSize(tab);\n    }\n\n    @Override\n    public void invalidateAccessibilityProvider() {\n"
+    replace: "        // WebContents but other types of Views can just wait for layout as usual.\n        if (tab.getView() != tab.getContentView()) return;\n\n        updateWebContentsSize(tab);\n    }\n\n    private void updateSplitViewport() {\n        if (mSplitTabCoordinator == null || !mSplitTabCoordinator.hasSplit()) return;\n        RectF viewport = new RectF();\n        getVisibleViewport(viewport);\n        // Match the existing single-content keyboard policy: an Android resize is\n        // compensated in visual/overlay modes, while RESIZES_CONTENT uses the\n        // smaller layout viewport. Physical backing still uses the visible area.\n        if (mApplicationBottomInsetSupplier != null) {\n            viewport.bottom +=\n                    mApplicationBottomInsetSupplier.getInsets().viewVisibleHeightInset\n                            - getEffectiveWebContentsHeightInset();\n        }\n        Rect pixels = new Rect();\n        viewport.round(pixels);\n        mSplitTabCoordinator.setViewport(pixels);\n    }\n\n    private void notifySplitKeyboardGeometry(WebContents contents, Rect pane, RectF visible) {\n        int keyboardHeight =\n                KeyboardVisibilityDelegate.getInstance()\n                        .calculateTotalKeyboardHeight(getRootView());\n        if (keyboardHeight <= 0) {\n            notifyVirtualKeyboardOverlayRect(contents, 0, 0, 0, 0);\n            return;\n        }\n        int bottomControls =\n                mBrowserControlsManager == null\n                        ? 0\n                        : getBottomControlsHeightPixels()\n                                - mBrowserControlsManager.getBottomControlOffset();\n        int keyboardTop = (int) visible.bottom + Math.max(0, bottomControls);\n        Rect overlap = new Rect(0, keyboardTop, getWidth(), keyboardTop + keyboardHeight);\n        if (!overlap.intersect(pane)) overlap.setEmpty();\n        if (overlap.isEmpty()) {\n            notifyVirtualKeyboardOverlayRect(contents, 0, 0, 0, 0);\n        } else {\n            notifyVirtualKeyboardOverlayRect(\n                    contents,\n                    overlap.left - pane.left,\n                    overlap.top - pane.top,\n                    overlap.width(),\n                    overlap.height());\n        }\n    }\n\n    private void resizeSplitContents() {\n        if (mSplitTabCoordinator == null || !mSplitTabCoordinator.hasSplit()) return;\n        updateWebContentsSize(mSplitTabCoordinator.getFirstTab());\n        updateWebContentsSize(mSplitTabCoordinator.getSecondTab());\n        requestRender();\n    }\n\n    private void releaseSplitControls() {\n        if (mSplitTouchObserverRegistered) {\n            removeTouchEventObserver(mSplitTouchObserver);\n            mSplitTouchObserverRegistered = false;\n        }\n        if (mSplitControlsToken != TokenHolder.INVALID_TOKEN && mBrowserControlsManager != null) {\n            int token = mSplitControlsToken;\n            mSplitControlsToken = TokenHolder.INVALID_TOKEN;\n            mBrowserControlsManager\n                    .getBrowserVisibilityDelegate()\n                    .releasePersistentShowingToken(token);\n        }\n    }\n\n    @Override\n    public void invalidateAccessibilityProvider() {\n"
+- description: Support Android live split panes (CompositorViewHolder.java, 20).
+  regex:
+    pattern: "            setDescendantFocusability(FOCUS_BLOCK_DESCENDANTS);\n        } else {\n            setDescendantFocusability(FOCUS_BEFORE_DESCENDANTS);\n        }\n\n    }\n\n    // TabObscuringHandler.Observer\n\n"
+    replace: "            setDescendantFocusability(FOCUS_BLOCK_DESCENDANTS);\n        } else {\n            setDescendantFocusability(FOCUS_BEFORE_DESCENDANTS);\n        }\n    }\n\n    // TabObscuringHandler.Observer\n\n"
+- description: Use the existing UI TokenHolder used by browser-controls token ownership
+  regex:
+    re_pattern: 'import\ org\.chromium\.base\.TokenHolder;\
+
+      '
+    replace: 'import org.chromium.ui.util.TokenHolder;
+
+      '
+- description: Format changed Java with the pinned Chromium formatter
+  regex:
+    re_pattern: 'import\ org\.chromium\.base\.Callback;\
+
+      import\ org\.chromium\.base\.DeviceInfo;\
+
+      import\ org\.chromium\.base\.InputHintChecker;\
+
+      import\ org\.chromium\.base\.ObserverList;\
+
+      import\ org\.chromium\.ui\.util\.TokenHolder;\
+
+      import\ org\.chromium\.base\.TraceEvent;\
+
+      import\ org\.chromium\.base\.metrics\.RecordHistogram;\
+
+      import\ org\.chromium\.base\.supplier\.NonNullObservableSupplier;\
+
+      import\ org\.chromium\.base\.supplier\.ObservableSuppliers;\
+
+      '
+    replace: 'import org.chromium.base.Callback;
+
+      import org.chromium.base.DeviceInfo;
+
+      import org.chromium.base.InputHintChecker;
+
+      import org.chromium.base.ObserverList;
+
+      import org.chromium.base.TraceEvent;
+
+      import org.chromium.base.metrics.RecordHistogram;
+
+      import org.chromium.base.supplier.NonNullObservableSupplier;
+
+      import org.chromium.base.supplier.ObservableSuppliers;
+
+      '
+- description: Format changed Java with the pinned Chromium formatter
+  regex:
+    re_pattern: 'import\ org\.chromium\.ui\.resources\.ResourceManager;\
+
+      import\ org\.chromium\.ui\.resources\.dynamics\.DynamicResourceLoader;\
+
+      import\ org\.chromium\.ui\.util\.AccessibilityUtil;\
+
+      import\ org\.chromium\.ui\.util\.MotionEventUtils;\
+
+      import\ org\.chromium\.url\.GURL;\
+
+      \
+
+      import\ java\.util\.ArrayList;\
+
+      import\ java\.util\.Collection;\
+
+      '
+    replace: 'import org.chromium.ui.resources.ResourceManager;
+
+      import org.chromium.ui.resources.dynamics.DynamicResourceLoader;
+
+      import org.chromium.ui.util.AccessibilityUtil;
+
+      import org.chromium.ui.util.MotionEventUtils;
+
+      import org.chromium.ui.util.TokenHolder;
+
+      import org.chromium.url.GURL;
+
+
+      import java.util.ArrayList;
+
+      import java.util.Collection;
+
+      '
+- description: Keep a checked coordinator reference across split content resize callbacks
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ Rect\ splitBounds\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mSplitTabCoordinator\ ==\ null\ \?\ null\ :\ mSplitTabCoordinator\.getContentBounds\(tab\);\
+
+      \ \ \ \ \ \ \ \ if\ \(splitBounds\ !=\ null\)\ \{\
+
+      '
+    replace: "        SplitTabCoordinator splitCoordinator = mSplitTabCoordinator;\n        Rect splitBounds =\n                splitCoordinator == null ? null : splitCoordinator.getContentBounds(tab);\n        if (splitCoordinator != null && splitBounds != null) {\n"
+- description: Read content offset through the same checked coordinator
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ int\ controlsOffset\ =\ mSplitTabCoordinator\.getContentOffset\(tab\);\
+
+      '
+    replace: '            int controlsOffset = splitCoordinator.getContentOffset(tab);
+
+      '

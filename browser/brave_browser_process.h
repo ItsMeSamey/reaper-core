@@ -11,6 +11,7 @@
 #ifndef BRAVE_BROWSER_BRAVE_BROWSER_PROCESS_H_
 #define BRAVE_BROWSER_BRAVE_BROWSER_PROCESS_H_
 
+#include "brave/components/ntp_background_images/buildflags/buildflags.h"
 #include "brave/browser/brave_stats/buildflags.h"
 #include "brave/components/brave_ads/buildflags/buildflags.h"
 #include "brave/components/brave_vpn/common/buildflags/buildflags.h"
@@ -53,9 +54,11 @@ namespace https_upgrade_exceptions {
 class HttpsUpgradeExceptionsService;
 }  // namespace https_upgrade_exceptions
 
+#if !BUILDFLAG(IS_ANDROID)
 namespace misc_metrics {
 class ProcessMiscMetrics;
 }  // namespace misc_metrics
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 namespace request_otr {
 #if BUILDFLAG(ENABLE_REQUEST_OTR)
@@ -67,9 +70,11 @@ namespace ntp_background_images {
 class NTPBackgroundImagesService;
 }  // namespace ntp_background_images
 
+#if !BUILDFLAG(IS_ANDROID)
 namespace p3a {
 class P3AService;
 }  // namespace p3a
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 namespace tor {
 class BraveTorClientUpdater;
@@ -110,8 +115,12 @@ class BraveBrowserProcess {
   virtual tor::BraveTorPluggableTransportUpdater*
   tor_pluggable_transport_updater() = 0;
 #endif
+#if !BUILDFLAG(IS_ANDROID)
   virtual p3a::P3AService* p3a_service() = 0;
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
   virtual brave::BraveReferralsService* brave_referrals_service() = 0;
+#endif  // !BUILDFLAG(IS_ANDROID)
 #if BUILDFLAG(ENABLE_BRAVE_STATS_UPDATER)
   virtual brave_stats::BraveStatsUpdater* brave_stats_updater() = 0;
 #endif
@@ -119,8 +128,10 @@ class BraveBrowserProcess {
   virtual brave_ads::BraveStatsHelper* ads_brave_stats_helper() = 0;
   virtual brave_ads::ResourceComponent* resource_component() = 0;
 #endif  // BUILDFLAG(ENABLE_BRAVE_ADS)
+#if BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
   virtual ntp_background_images::NTPBackgroundImagesService*
   ntp_background_images_service() = 0;
+#endif  // BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
 #if BUILDFLAG(ENABLE_SPEEDREADER)
   virtual speedreader::SpeedreaderRewriterService*
   speedreader_rewriter_service() = 0;
@@ -129,7 +140,9 @@ class BraveBrowserProcess {
   virtual brave_vpn::BraveVPNConnectionManager*
   brave_vpn_connection_manager() = 0;
 #endif
+#if !BUILDFLAG(IS_ANDROID)
   virtual misc_metrics::ProcessMiscMetrics* process_misc_metrics() = 0;
+#endif  // !BUILDFLAG(IS_ANDROID)
 };
 
 extern BraveBrowserProcess* g_brave_browser_process;

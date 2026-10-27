@@ -12,6 +12,7 @@
 #include "base/memory/weak_ptr.h"
 #include "base/scoped_observation.h"
 #include "brave/components/sync/service/sync_service_impl_delegate.h"
+#include "build/build_config.h"
 #include "components/sync_device_info/device_info_tracker.h"
 
 namespace history {
@@ -51,7 +52,9 @@ class BraveSyncServiceImplDelegate
 
   void OnSelfDeviceInfoDeleted(void);
 
+#if !BUILDFLAG(IS_ANDROID)
   void RecordP3ASyncStatus();
+#endif
 
   raw_ptr<syncer::DeviceInfoTracker> device_info_tracker_ = nullptr;
   raw_ptr<syncer::LocalDeviceInfoProvider> local_device_info_provider_ =

@@ -1,0 +1,570 @@
+# Android mixed native-tab and Java-window session restoration.
+substitutions:
+- description: Read typed historical snapshots and reject invalid persisted split ratios
+  count: 1
+  regex:
+    re_pattern: \#include\ <utility>
+    replace: '#include <cmath>
+
+      #include <set>
+
+      #include <utility>
+
+
+      #include "base/android/jni_android.h"
+
+      #include "base/android/jni_string.h"
+
+      #include "base/android/token_android.h"
+
+      #include "url/android/gurl_android.h"'
+- description: Use the closed tab for metadata and match the session service navigation eligibility
+  count: 1
+  regex:
+    re_pattern: \#include\ "chrome/browser/android/tab_android\.h"
+    replace: '#include "chrome/browser/android/tab_android.h"
+
+      #include "chrome/browser/glic/glic_tab_restore_helper.h"
+
+      #include "components/dom_distiller/core/url_constants.h"
+
+      #include "components/sessions/core/serialized_navigation_entry.h"'
+- description: Use private TabImpl snapshot getters without changing historical saver JNI call signatures
+  count: 1
+  regex:
+    re_pattern: AndroidLiveTabContextCloseWrapper::AndroidLiveTabContextCloseWrapper\(
+    replace: '// Must follow headers declaring JNI type conversions.
+
+      #include "chrome/android/chrome_jni_headers/TabImpl_jni.h"
+
+
+      AndroidLiveTabContextCloseWrapper::AndroidLiveTabContextCloseWrapper('
+- description: Never persist an orphan split when session navigation filtering drops one member
+  count: 1
+  regex:
+    re_pattern: AndroidLiveTabContextCloseWrapper::AndroidLiveTabContextCloseWrapper\(
+    replace: "namespace {\n\n// Match PopulateTab's navigation filtering before advertising a complete pair.\nbool CanSaveSplitMember(sessions::LiveTab* tab) {\n  if (tab->IsInitialBlankNavigation()) return false;\n  for (int i = 0; i < tab->GetEntryCount(); ++i) {\n    const auto entry = tab->GetEntryAtIndex(i);\n    if (!entry.virtual_url().is_empty()\n        && !entry.virtual_url().SchemeIs(dom_distiller::kDomDistillerScheme)) return true;\n  }\n  return false;\n}\n\n}  // namespace\n\nAndroidLiveTabContextCloseWrapper::AndroidLiveTabContextCloseWrapper("
+- description: Snapshot valid complete historical split pairs and preserve their leading member order
+  count: 1
+  regex:
+    re_pattern: \ \ CHECK_EQ\(closed_tabs_\.size\(\),\ web_contents_state_\.size\(\)\);
+    replace: "  CHECK_EQ(closed_tabs_.size(), web_contents_state_.size());\n  scoped_web_contents_.resize(closed_tabs_.size());\n  // Java retains these value snapshots before native normalization removes the split.\n  // Only complete pairs are exposed: TabRestoreService requires exactly two members.\n  struct Member {\n    size_t index;\n    int position;\n    split_tabs::SplitTabVisualData visual_data;\n  };\n  std::map<split_tabs::SplitTabId, std::vector<Member>> candidates;\n  JNIEnv* env = base::android::AttachCurrentThread();\n  for (size_t i = 0; i < closed_tabs_.size(); ++i) {\n    auto jtab = closed_tabs_[i]->GetJavaObject();\n    if (!jtab) continue;\n    auto token = Java_TabImpl_getHistoricalSplitTabId(env, jtab);\n    if (!token || token->is_zero()) continue;\n    int layout = Java_TabImpl_getHistoricalSplitLayout(env, jtab);\n    double ratio = Java_TabImpl_getHistoricalSplitRatio(env, jtab);\n    int position = Java_TabImpl_getHistoricalSplitPosition(env, jtab);\n    if (layout < 0 || layout > 1 || !std::isfinite(ratio) || ratio <= 0 || ratio >= 1\n        || position < 0 || position > 1) continue;\n    candidates[split_tabs::SplitTabId::FromRawToken(*token)].push_back(\n        {i, position, split_tabs::SplitTabVisualData(\n            static_cast<split_tabs::SplitTabLayout>(layout), ratio)});\n  }\n  for (const auto& [id, members] : candidates) {\n    if (members.size() != 2 || members[0].position == members[1].position\n        || members[0].visual_data != members[1].visual_data) continue;\n    size_t a = members[0].index;\n    size_t b = members[1].index;\n    // A historical group must never advertise half a split spanning another group.\n    if (GetTabGroupForTab(a) != GetTabGroupForTab(b)\n        || !CanSaveSplitMember(GetLiveTabAt(a))\n        || !CanSaveSplitMember(GetLiveTabAt(b))) continue;\n    tab_id_to_split_.emplace(closed_tabs_[a]->GetAndroidId(), id);\n    tab_id_to_split_.emplace(closed_tabs_[b]->GetAndroidId(), id);\n    split_visual_data_.emplace(id, members[0].visual_data);\n  }\n  // Closure lists need not be in model order. Keep complete pairs adjacent and\n  // leading-first so native reconstruction sees the same ordered collection.\n  std::vector<size_t> order;\n  std::set<int> emitted;\n  for (size_t i = 0; i < closed_tabs_.size(); ++i) {\n    const int tab_id = closed_tabs_[i]->GetAndroidId();\n    if (emitted.contains(tab_id)) continue;\n    auto split = tab_id_to_split_.find(tab_id);\n    if (split == tab_id_to_split_.end()) {\n      order.push_back(i);\n      emitted.insert(tab_id);\n      continue;\n    }\n    const auto& members = candidates.at(split->second);\n    const size_t first = members[0].position == 0 ? members[0].index : members[1].index;\n    const size_t second = members[0].position == 0 ? members[1].index : members[0].index;\n    order.push_back(first);\n    order.push_back(second);\n    emitted.insert(closed_tabs_[first]->GetAndroidId());\n    emitted.insert(closed_tabs_[second]->GetAndroidId());\n  }\n  auto tabs = std::move(closed_tabs_);\n  auto states = std::move(web_contents_state_);\n  auto contents = std::move(scoped_web_contents_);\n  closed_tabs_.clear();\n  web_contents_state_.clear();\n  scoped_web_contents_.clear();\n  for (size_t index : order) {\n    closed_tabs_.push_back(tabs[index]);\n    web_contents_state_.push_back(std::move(states[index]));\n    scoped_web_contents_.push_back(std::move(contents[index]));\n  }"
+- description: Keep frozen live tabs alive across subsequent member lookups
+  count: 1
+  regex:
+    re_pattern: '\ \ scoped_web_contents_\ =\ historical_tab_saver::ScopedWebContents::CreateForTab\(\
+
+      \ \ \ \ \ \ GetTabAt\(relative_index\),\ \&web_contents_state_\[relative_index\]\);\
+
+      \ \ DCHECK\(scoped_web_contents_\->web_contents\(\)\);\
+
+      \ \ return\ sessions::ContentLiveTab::GetOrCreateForWebContents\(\
+
+      \ \ \ \ \ \ scoped_web_contents_\->web_contents\(\)\);'
+    replace: "  auto& scoped = scoped_web_contents_[relative_index];\n  if (!scoped) {\n    scoped = historical_tab_saver::ScopedWebContents::CreateForTab(\n        GetTabAt(relative_index), &web_contents_state_[relative_index]);\n  }\n  DCHECK(scoped->web_contents());\n  return sessions::ContentLiveTab::GetOrCreateForWebContents(scoped->web_contents());"
+- description: Serve historical membership and visual state even after active native unsplit
+  count: 1
+  regex:
+    re_pattern: TabAndroid\*\ AndroidLiveTabContextCloseWrapper::GetTabAt\(
+    replace: "bool AndroidLiveTabContextCloseWrapper::IsTabPinned(int relative_index) const {\n  return GetTabAt(relative_index)->IsPinned();\n}\n\nstd::map<std::string, std::string>\nAndroidLiveTabContextCloseWrapper::GetExtraDataForTab(int relative_index) const {\n  std::map<std::string, std::string> result;\n  glic::PopulateGlicExtraData(GetTabAt(relative_index), &result);\n  return result;\n}\n\nstd::optional<split_tabs::SplitTabId>\nAndroidLiveTabContextCloseWrapper::GetSplitForTab(int relative_index) const {\n  auto it = tab_id_to_split_.find(GetTabAt(relative_index)->GetAndroidId());\n  return it == tab_id_to_split_.end() ? std::nullopt : std::make_optional(it->second);\n}\n\nconst split_tabs::SplitTabVisualData*\nAndroidLiveTabContextCloseWrapper::GetVisualDataForSplit(\n    const split_tabs::SplitTabId& split_id) const {\n  auto it = split_visual_data_.find(split_id);\n  return it == split_visual_data_.end() ? nullptr : &it->second;\n}\n\nTabAndroid* AndroidLiveTabContextCloseWrapper::GetTabAt("
+- description: Reconstruct queued native pairs only after all restored groups are attached
+  count: 1
+  regex:
+    re_pattern: 'const\ std::map<tab_groups::TabGroupId,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ AndroidLiveTabContextRestoreWrapper::TabGroup>\&'
+    replace: "void AndroidLiveTabContextRestoreWrapper::ReconstructSplit(\n    sessions::LiveTab* leading_tab,\n    sessions::LiveTab* trailing_tab,\n    split_tabs::SplitTabId split_id,\n    const split_tabs::SplitTabVisualData& visual_data) {\n  if (!leading_tab || !trailing_tab) return;\n  auto* leading = TabAndroid::FromWebContents(\n      &static_cast<sessions::ContentLiveTab*>(leading_tab)->GetWebContents());\n  auto* trailing = TabAndroid::FromWebContents(\n      &static_cast<sessions::ContentLiveTab*>(trailing_tab)->GetWebContents());\n  if (leading && trailing) {\n    pending_splits_.push_back({{leading->GetAndroidId(), trailing->GetAndroidId()},\n                              split_id, visual_data});\n  }\n}\n\nvoid AndroidLiveTabContextRestoreWrapper::RestoreSplits() {\n  auto pending = std::move(pending_splits_);\n  pending_splits_.clear();\n  for (const auto& split : pending) {\n    RestoreSplitByTabIds(split.tab_ids, split.id, split.visual_data);\n  }\n}\n\nconst std::map<tab_groups::TabGroupId,\n               AndroidLiveTabContextRestoreWrapper::TabGroup>&"
+- description: Format modified Android split persistence implementation
+  count: 1
+  regex:
+    re_pattern: '\#include\ "base/memory/raw_ptr\.h"\
+
+      \#include\ "base/numerics/safe_conversions\.h"\
+
+      \#include\ "chrome/browser/android/tab_android\.h"\
+
+      \#include\ "chrome/browser/glic/glic_tab_restore_helper\.h"\
+
+      \#include\ "components/dom_distiller/core/url_constants\.h"\
+
+      \#include\ "components/sessions/core/serialized_navigation_entry\.h"\
+
+      \#include\ "chrome/browser/ui/android/tab_model/tab_model\.h"\
+
+      \#include\ "components/sessions/content/content_live_tab\.h"\
+
+      \#include\ "components/sessions/core/tab_restore_types\.h"\
+
+      \#include\ "components/tab_groups/tab_group_id\.h"\
+
+      \
+
+      //\ Must\ follow\ headers\ declaring\ JNI\ type\ conversions\.\
+
+      '
+    replace: '#include "base/memory/raw_ptr.h"
+
+      #include "base/numerics/safe_conversions.h"
+
+      #include "chrome/browser/android/tab_android.h"
+
+      #include "chrome/browser/glic/glic_tab_restore_helper.h"
+
+      #include "chrome/browser/ui/android/tab_model/tab_model.h"
+
+      #include "components/dom_distiller/core/url_constants.h"
+
+      #include "components/sessions/content/content_live_tab.h"
+
+      #include "components/sessions/core/serialized_navigation_entry.h"
+
+      #include "components/sessions/core/tab_restore_types.h"
+
+      #include "components/tab_groups/tab_group_id.h"
+
+
+      // Must follow headers declaring JNI type conversions.
+
+      '
+- description: Format modified Android split persistence implementation
+  count: 1
+  regex:
+    re_pattern: 'namespace\ \{\
+
+      \
+
+      //\ Match\ PopulateTab''s\ navigation\ filtering\ before\ advertising\ a\ complete\ pair\.\
+
+      bool\ CanSaveSplitMember\(sessions::LiveTab\*\ tab\)\ \{\
+
+      \ \ if\ \(tab\->IsInitialBlankNavigation\(\)\)\ return\ false;\
+
+      \ \ for\ \(int\ i\ =\ 0;\ i\ <\ tab\->GetEntryCount\(\);\ \+\+i\)\ \{\
+
+      \ \ \ \ const\ auto\ entry\ =\ tab\->GetEntryAtIndex\(i\);\
+
+      \ \ \ \ if\ \(!entry\.virtual_url\(\)\.is_empty\(\)\
+
+      \ \ \ \ \ \ \ \ \&\&\ !entry\.virtual_url\(\)\.SchemeIs\(dom_distiller::kDomDistillerScheme\)\)\ return\ true;\
+
+      \ \ \}\
+
+      \ \ return\ false;\
+
+      \}\
+
+      \
+
+      '
+    replace: "namespace {\n\n// Match PopulateTab's navigation filtering before advertising a complete pair.\nbool CanSaveSplitMember(sessions::LiveTab* tab) {\n  if (tab->IsInitialBlankNavigation())\n    return false;\n  for (int i = 0; i < tab->GetEntryCount(); ++i) {\n    const auto entry = tab->GetEntryAtIndex(i);\n    if (!entry.virtual_url().is_empty() &&\n        !entry.virtual_url().SchemeIs(dom_distiller::kDomDistillerScheme))\n      return true;\n  }\n  return false;\n}\n\n"
+- description: Format modified Android split persistence implementation
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ \ \ saved_tab_group_ids_\(std::move\(saved_tab_group_ids\)\),\
+
+      \ \ \ \ \ \ web_contents_state_\(std::move\(web_contents_state\)\)\ \{\
+
+      \ \ CHECK_EQ\(closed_tabs_\.size\(\),\ web_contents_state_\.size\(\)\);\
+
+      \ \ scoped_web_contents_\.resize\(closed_tabs_\.size\(\)\);\
+
+      \ \ //\ Java\ retains\ these\ value\ snapshots\ before\ native\ normalization\ removes\ the\ split\.\
+
+      \ \ //\ Only\ complete\ pairs\ are\ exposed:\ TabRestoreService\ requires\ exactly\ two\ members\.\
+
+      \ \ struct\ Member\ \{\
+
+      \ \ \ \ size_t\ index;\
+
+      \ \ \ \ int\ position;\
+
+      \ \ \ \ split_tabs::SplitTabVisualData\ visual_data;\
+
+      '
+    replace: "      saved_tab_group_ids_(std::move(saved_tab_group_ids)),\n      web_contents_state_(std::move(web_contents_state)) {\n  CHECK_EQ(closed_tabs_.size(), web_contents_state_.size());\n  scoped_web_contents_.resize(closed_tabs_.size());\n  // Java retains these value snapshots before native normalization removes the\n  // split. Only complete pairs are exposed: TabRestoreService requires exactly\n  // two members.\n  struct Member {\n    size_t index;\n    int position;\n    split_tabs::SplitTabVisualData visual_data;\n"
+- description: Format modified Android split persistence implementation
+  count: 1
+  regex:
+    re_pattern: '\ \ std::map<split_tabs::SplitTabId,\ std::vector<Member>>\ candidates;\
+
+      \ \ JNIEnv\*\ env\ =\ base::android::AttachCurrentThread\(\);\
+
+      \ \ for\ \(size_t\ i\ =\ 0;\ i\ <\ closed_tabs_\.size\(\);\ \+\+i\)\ \{\
+
+      \ \ \ \ auto\ jtab\ =\ closed_tabs_\[i\]\->GetJavaObject\(\);\
+
+      \ \ \ \ if\ \(!jtab\)\ continue;\
+
+      \ \ \ \ auto\ token\ =\ Java_TabImpl_getHistoricalSplitTabId\(env,\ jtab\);\
+
+      \ \ \ \ if\ \(!token\ \|\|\ token\->is_zero\(\)\)\ continue;\
+
+      \ \ \ \ int\ layout\ =\ Java_TabImpl_getHistoricalSplitLayout\(env,\ jtab\);\
+
+      \ \ \ \ double\ ratio\ =\ Java_TabImpl_getHistoricalSplitRatio\(env,\ jtab\);\
+
+      \ \ \ \ int\ position\ =\ Java_TabImpl_getHistoricalSplitPosition\(env,\ jtab\);\
+
+      \ \ \ \ if\ \(layout\ <\ 0\ \|\|\ layout\ >\ 1\ \|\|\ !std::isfinite\(ratio\)\ \|\|\ ratio\ <=\ 0\ \|\|\ ratio\ >=\ 1\
+
+      \ \ \ \ \ \ \ \ \|\|\ position\ <\ 0\ \|\|\ position\ >\ 1\)\ continue;\
+
+      \ \ \ \ candidates\[split_tabs::SplitTabId::FromRawToken\(\*token\)\]\.push_back\(\
+
+      \ \ \ \ \ \ \ \ \{i,\ position,\ split_tabs::SplitTabVisualData\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ static_cast<split_tabs::SplitTabLayout>\(layout\),\ ratio\)\}\);\
+
+      \ \ \}\
+
+      \ \ for\ \(const\ auto\&\ \[id,\ members\]\ :\ candidates\)\ \{\
+
+      \ \ \ \ if\ \(members\.size\(\)\ !=\ 2\ \|\|\ members\[0\]\.position\ ==\ members\[1\]\.position\
+
+      \ \ \ \ \ \ \ \ \|\|\ members\[0\]\.visual_data\ !=\ members\[1\]\.visual_data\)\ continue;\
+
+      \ \ \ \ size_t\ a\ =\ members\[0\]\.index;\
+
+      \ \ \ \ size_t\ b\ =\ members\[1\]\.index;\
+
+      \ \ \ \ //\ A\ historical\ group\ must\ never\ advertise\ half\ a\ split\ spanning\ another\ group\.\
+
+      \ \ \ \ if\ \(GetTabGroupForTab\(a\)\ !=\ GetTabGroupForTab\(b\)\
+
+      \ \ \ \ \ \ \ \ \|\|\ !CanSaveSplitMember\(GetLiveTabAt\(a\)\)\
+
+      \ \ \ \ \ \ \ \ \|\|\ !CanSaveSplitMember\(GetLiveTabAt\(b\)\)\)\ continue;\
+
+      \ \ \ \ tab_id_to_split_\.emplace\(closed_tabs_\[a\]\->GetAndroidId\(\),\ id\);\
+
+      \ \ \ \ tab_id_to_split_\.emplace\(closed_tabs_\[b\]\->GetAndroidId\(\),\ id\);\
+
+      \ \ \ \ split_visual_data_\.emplace\(id,\ members\[0\]\.visual_data\);\
+
+      \ \ \}\
+
+      '
+    replace: "  std::map<split_tabs::SplitTabId, std::vector<Member>> candidates;\n  JNIEnv* env = base::android::AttachCurrentThread();\n  for (size_t i = 0; i < closed_tabs_.size(); ++i) {\n    auto jtab = closed_tabs_[i]->GetJavaObject();\n    if (!jtab)\n      continue;\n    auto token = Java_TabImpl_getHistoricalSplitTabId(env, jtab);\n    if (!token || token->is_zero())\n      continue;\n    int layout = Java_TabImpl_getHistoricalSplitLayout(env, jtab);\n    double ratio = Java_TabImpl_getHistoricalSplitRatio(env, jtab);\n    int position = Java_TabImpl_getHistoricalSplitPosition(env, jtab);\n    if (layout < 0 || layout > 1 || !std::isfinite(ratio) || ratio <= 0 ||\n        ratio >= 1 || position < 0 || position > 1)\n      continue;\n    candidates[split_tabs::SplitTabId::FromRawToken(*token)].push_back(\n        {i, position,\n         split_tabs::SplitTabVisualData(\n             static_cast<split_tabs::SplitTabLayout>(layout), ratio)});\n  }\n  for (const auto& [id, members] : candidates) {\n    if (members.size() != 2 || members[0].position == members[1].position ||\n        members[0].visual_data != members[1].visual_data)\n      continue;\n    size_t a = members[0].index;\n    size_t b = members[1].index;\n    // A historical group must never advertise half a split spanning another\n    // group.\n    if (GetTabGroupForTab(a) != GetTabGroupForTab(b) ||\n        !CanSaveSplitMember(GetLiveTabAt(a)) ||\n        !CanSaveSplitMember(GetLiveTabAt(b)))\n      continue;\n    tab_id_to_split_.emplace(closed_tabs_[a]->GetAndroidId(), id);\n    tab_id_to_split_.emplace(closed_tabs_[b]->GetAndroidId(), id);\n    split_visual_data_.emplace(id, members[0].visual_data);\n  }\n"
+- description: Format modified Android split persistence implementation
+  count: 1
+  regex:
+    re_pattern: '\ \ std::vector<size_t>\ order;\
+
+      \ \ std::set<int>\ emitted;\
+
+      \ \ for\ \(size_t\ i\ =\ 0;\ i\ <\ closed_tabs_\.size\(\);\ \+\+i\)\ \{\
+
+      \ \ \ \ const\ int\ tab_id\ =\ closed_tabs_\[i\]\->GetAndroidId\(\);\
+
+      \ \ \ \ if\ \(emitted\.contains\(tab_id\)\)\ continue;\
+
+      \ \ \ \ auto\ split\ =\ tab_id_to_split_\.find\(tab_id\);\
+
+      \ \ \ \ if\ \(split\ ==\ tab_id_to_split_\.end\(\)\)\ \{\
+
+      \ \ \ \ \ \ order\.push_back\(i\);\
+
+      \ \ \ \ \ \ emitted\.insert\(tab_id\);\
+
+      \ \ \ \ \ \ continue;\
+
+      \ \ \ \ \}\
+
+      \ \ \ \ const\ auto\&\ members\ =\ candidates\.at\(split\->second\);\
+
+      \ \ \ \ const\ size_t\ first\ =\ members\[0\]\.position\ ==\ 0\ \?\ members\[0\]\.index\ :\ members\[1\]\.index;\
+
+      \ \ \ \ const\ size_t\ second\ =\ members\[0\]\.position\ ==\ 0\ \?\ members\[1\]\.index\ :\ members\[0\]\.index;\
+
+      \ \ \ \ order\.push_back\(first\);\
+
+      \ \ \ \ order\.push_back\(second\);\
+
+      \ \ \ \ emitted\.insert\(closed_tabs_\[first\]\->GetAndroidId\(\)\);\
+
+      \ \ \ \ emitted\.insert\(closed_tabs_\[second\]\->GetAndroidId\(\)\);\
+
+      '
+    replace: "  std::vector<size_t> order;\n  std::set<int> emitted;\n  for (size_t i = 0; i < closed_tabs_.size(); ++i) {\n    const int tab_id = closed_tabs_[i]->GetAndroidId();\n    if (emitted.contains(tab_id))\n      continue;\n    auto split = tab_id_to_split_.find(tab_id);\n    if (split == tab_id_to_split_.end()) {\n      order.push_back(i);\n      emitted.insert(tab_id);\n      continue;\n    }\n    const auto& members = candidates.at(split->second);\n    const size_t first =\n        members[0].position == 0 ? members[0].index : members[1].index;\n    const size_t second =\n        members[0].position == 0 ? members[1].index : members[0].index;\n    order.push_back(first);\n    order.push_back(second);\n    emitted.insert(closed_tabs_[first]->GetAndroidId());\n    emitted.insert(closed_tabs_[second]->GetAndroidId());\n"
+- description: Format modified Android split persistence implementation
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ scoped\ =\ historical_tab_saver::ScopedWebContents::CreateForTab\(\
+
+      \ \ \ \ \ \ \ \ GetTabAt\(relative_index\),\ \&web_contents_state_\[relative_index\]\);\
+
+      \ \ \}\
+
+      \ \ DCHECK\(scoped\->web_contents\(\)\);\
+
+      \ \ return\ sessions::ContentLiveTab::GetOrCreateForWebContents\(scoped\->web_contents\(\)\);\
+
+      \}\
+
+      \
+
+      std::optional<tab_groups::TabGroupId>\
+
+      AndroidLiveTabContextCloseWrapper::GetTabGroupForTab\(int\ relative_index\)\ const\ \{\
+
+      '
+    replace: "    scoped = historical_tab_saver::ScopedWebContents::CreateForTab(\n        GetTabAt(relative_index), &web_contents_state_[relative_index]);\n  }\n  DCHECK(scoped->web_contents());\n  return sessions::ContentLiveTab::GetOrCreateForWebContents(\n      scoped->web_contents());\n}\n\nstd::optional<tab_groups::TabGroupId>\nAndroidLiveTabContextCloseWrapper::GetTabGroupForTab(int relative_index) const {\n"
+- description: Format modified Android split persistence implementation
+  count: 1
+  regex:
+    re_pattern: '\ \ return\ GetTabAt\(relative_index\)\->IsPinned\(\);\
+
+      \}\
+
+      \
+
+      std::map<std::string,\ std::string>\
+
+      AndroidLiveTabContextCloseWrapper::GetExtraDataForTab\(int\ relative_index\)\ const\ \{\
+
+      \ \ std::map<std::string,\ std::string>\ result;\
+
+      \ \ glic::PopulateGlicExtraData\(GetTabAt\(relative_index\),\ \&result\);\
+
+      \ \ return\ result;\
+
+      \}\
+
+      \
+
+      std::optional<split_tabs::SplitTabId>\
+
+      AndroidLiveTabContextCloseWrapper::GetSplitForTab\(int\ relative_index\)\ const\ \{\
+
+      \ \ auto\ it\ =\ tab_id_to_split_\.find\(GetTabAt\(relative_index\)\->GetAndroidId\(\)\);\
+
+      \ \ return\ it\ ==\ tab_id_to_split_\.end\(\)\ \?\ std::nullopt\ :\ std::make_optional\(it\->second\);\
+
+      \}\
+
+      \
+
+      const\ split_tabs::SplitTabVisualData\*\
+
+      AndroidLiveTabContextCloseWrapper::GetVisualDataForSplit\(\
+
+      '
+    replace: "  return GetTabAt(relative_index)->IsPinned();\n}\n\nstd::map<std::string, std::string>\nAndroidLiveTabContextCloseWrapper::GetExtraDataForTab(\n    int relative_index) const {\n  std::map<std::string, std::string> result;\n  glic::PopulateGlicExtraData(GetTabAt(relative_index), &result);\n  return result;\n}\n\nstd::optional<split_tabs::SplitTabId>\nAndroidLiveTabContextCloseWrapper::GetSplitForTab(int relative_index) const {\n  auto it = tab_id_to_split_.find(GetTabAt(relative_index)->GetAndroidId());\n  return it == tab_id_to_split_.end() ? std::nullopt\n                                      : std::make_optional(it->second);\n}\n\nconst split_tabs::SplitTabVisualData*\nAndroidLiveTabContextCloseWrapper::GetVisualDataForSplit(\n"
+- description: Format modified Android split persistence implementation
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ sessions::LiveTab\*\ leading_tab,\
+
+      \ \ \ \ sessions::LiveTab\*\ trailing_tab,\
+
+      \ \ \ \ split_tabs::SplitTabId\ split_id,\
+
+      \ \ \ \ const\ split_tabs::SplitTabVisualData\&\ visual_data\)\ \{\
+
+      \ \ if\ \(!leading_tab\ \|\|\ !trailing_tab\)\ return;\
+
+      \ \ auto\*\ leading\ =\ TabAndroid::FromWebContents\(\
+
+      \ \ \ \ \ \ \&static_cast<sessions::ContentLiveTab\*>\(leading_tab\)\->GetWebContents\(\)\);\
+
+      \ \ auto\*\ trailing\ =\ TabAndroid::FromWebContents\(\
+
+      \ \ \ \ \ \ \&static_cast<sessions::ContentLiveTab\*>\(trailing_tab\)\->GetWebContents\(\)\);\
+
+      \ \ if\ \(leading\ \&\&\ trailing\)\ \{\
+
+      \ \ \ \ pending_splits_\.push_back\(\{\{leading\->GetAndroidId\(\),\ trailing\->GetAndroidId\(\)\},\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ split_id,\ visual_data\}\);\
+
+      \ \ \}\
+
+      \}\
+
+      \
+
+      void\ AndroidLiveTabContextRestoreWrapper::RestoreSplits\(\)\ \{\
+
+      '
+    replace: "    sessions::LiveTab* leading_tab,\n    sessions::LiveTab* trailing_tab,\n    split_tabs::SplitTabId split_id,\n    const split_tabs::SplitTabVisualData& visual_data) {\n  if (!leading_tab || !trailing_tab)\n    return;\n  auto* leading = TabAndroid::FromWebContents(\n      &static_cast<sessions::ContentLiveTab*>(leading_tab)->GetWebContents());\n  auto* trailing = TabAndroid::FromWebContents(\n      &static_cast<sessions::ContentLiveTab*>(trailing_tab)->GetWebContents());\n  if (leading && trailing) {\n    pending_splits_.push_back(\n        {{leading->GetAndroidId(), trailing->GetAndroidId()},\n         split_id,\n         visual_data});\n  }\n}\n\nvoid AndroidLiveTabContextRestoreWrapper::RestoreSplits() {\n"
+- description: Check model liveness after Java group mutation callbacks
+  regex:
+    re_pattern: \#include\ <cmath>
+    replace: '#include <algorithm>
+
+      #include <cmath>'
+- description: Use the existing registered Android models as the lifecycle authority
+  regex:
+    re_pattern: \#include\ "chrome/browser/ui/android/tab_model/tab_model\.h"
+    replace: '#include "chrome/browser/ui/android/tab_model/tab_model.h"
+
+      #include "chrome/browser/ui/android/tab_model/tab_model_list.h"'
+- description: Call the unchanged Android Recent Tabs group restoration body
+  regex:
+    re_pattern: \#include\ "chrome/android/chrome_jni_headers/TabImpl_jni\.h"
+    replace: '#include "chrome/android/chrome_jni_headers/TabImpl_jni.h"
+
+      #include "chrome/android/chrome_jni_headers/RecentlyClosedBridge_jni.h"'
+- description: Move the shared group loop to the same wrapper that owns restored group/split metadata
+  regex:
+    re_pattern: void\ AndroidLiveTabContextRestoreWrapper::RestoreSplits\(\)\ \{
+    replace: "bool AndroidLiveTabContextRestoreWrapper::RestoreTabGroups(TabModel* model) {\n  const auto is_live = [model] {\n    const auto& models = TabModelList::models();\n    return std::ranges::find(models, model) != models.end();\n  };\n  JNIEnv* env = base::android::AttachCurrentThread();\n  for (const auto& [id, group] : tab_groups_) {\n    if (!is_live()) {\n      return false;\n    }\n    Java_RecentlyClosedBridge_restoreTabGroup(\n        env, model, group.visual_data.title(),\n        static_cast<int>(group.visual_data.color()), group.tab_ids);\n  }\n  return is_live();\n}\n\nvoid AndroidLiveTabContextRestoreWrapper::RestoreSplits() {"
+- description: Format modified Android mixed-session restoration
+  regex:
+    re_pattern: '\#include\ "components/sessions/core/tab_restore_types\.h"\
+
+      \#include\ "components/tab_groups/tab_group_id\.h"\
+
+      \
+
+      //\ Must\ follow\ headers\ declaring\ JNI\ type\ conversions\.\
+
+      \#include\ "chrome/android/chrome_jni_headers/TabImpl_jni\.h"\
+
+      \#include\ "chrome/android/chrome_jni_headers/RecentlyClosedBridge_jni\.h"\
+
+      \
+
+      namespace\ \{\
+
+      \
+
+      //\ Match\ PopulateTab''s\ navigation\ filtering\ before\ advertising\ a\ complete\ pair\.\
+
+      '
+    replace: '#include "components/sessions/core/tab_restore_types.h"
+
+      #include "components/tab_groups/tab_group_id.h"
+
+
+      // Must follow headers declaring JNI type conversions.
+
+      #include "chrome/android/chrome_jni_headers/RecentlyClosedBridge_jni.h"
+
+      #include "chrome/android/chrome_jni_headers/TabImpl_jni.h"
+
+
+      namespace {
+
+
+      // Match PopulateTab''s navigation filtering before advertising a complete pair.
+
+      '
+- description: Declare the TabModel JNI conversion before generated Recent Tabs calls
+  regex:
+    re_pattern: '\#include\ "chrome/browser/ui/android/tab_model/tab_model\.h"\
+
+      '
+    replace: '#include "chrome/browser/ui/android/tab_model/tab_model.h"
+
+      #include "chrome/browser/ui/android/tab_model/tab_model_jni_bridge.h"
+
+      '
+- description: Move group restoration unchanged into the existing RecentlyClosedBridge JNI owner.
+  regex:
+    re_pattern: 'bool\ AndroidLiveTabContextRestoreWrapper::RestoreTabGroups\(TabModel\*\ model\)\ \{\
+
+      \ \ const\ auto\ is_live\ =\ \[model\]\ \{\
+
+      \ \ \ \ const\ auto\&\ models\ =\ TabModelList::models\(\);\
+
+      \ \ \ \ return\ std::ranges::find\(models,\ model\)\ !=\ models\.end\(\);\
+
+      \ \ \};\
+
+      \ \ JNIEnv\*\ env\ =\ base::android::AttachCurrentThread\(\);\
+
+      \ \ for\ \(const\ auto\&\ \[id,\ group\]\ :\ tab_groups_\)\ \{\
+
+      \ \ \ \ if\ \(!is_live\(\)\)\ \{\
+
+      \ \ \ \ \ \ return\ false;\
+
+      \ \ \ \ \}\
+
+      \ \ \ \ Java_RecentlyClosedBridge_restoreTabGroup\(\
+
+      \ \ \ \ \ \ \ \ env,\ model,\ group\.visual_data\.title\(\),\
+
+      \ \ \ \ \ \ \ \ static_cast<int>\(group\.visual_data\.color\(\)\),\ group\.tab_ids\);\
+
+      \ \ \}\
+
+      \ \ return\ is_live\(\);\
+
+      \}\
+
+      \
+
+      '
+    replace: ''
+- description: Remove the wrapper conversion include after transferring its JNI calls to their owners.
+  regex:
+    re_pattern: '\#include\ "base/android/jni_string\.h"\
+
+      '
+    replace: ''
+- description: Remove the wrapper conversion include after transferring its JNI calls to their owners.
+  regex:
+    re_pattern: '\#include\ "base/android/token_android\.h"\
+
+      '
+    replace: ''
+- description: Remove the wrapper conversion include after transferring its JNI calls to their owners.
+  regex:
+    re_pattern: '\#include\ "url/android/gurl_android\.h"\
+
+      '
+    replace: ''
+- description: Remove the wrapper conversion include after transferring its JNI calls to their owners.
+  regex:
+    re_pattern: '\#include\ "chrome/browser/ui/android/tab_model/tab_model_jni_bridge\.h"\
+
+      '
+    replace: ''
+- description: Remove foreign generated JNI headers from the live tab context wrapper.
+  regex:
+    re_pattern: '//\ Must\ follow\ headers\ declaring\ JNI\ type\ conversions\.\
+
+      \#include\ "chrome/android/chrome_jni_headers/RecentlyClosedBridge_jni\.h"\
+
+      \#include\ "chrome/android/chrome_jni_headers/TabImpl_jni\.h"\
+
+      \
+
+      '
+    replace: ''
+- description: Read the same closing-split field through its existing JNI owner.
+  regex:
+    re_pattern: Java_TabImpl_getHistoricalSplitTabId\(env,\ jtab\)
+    replace: TabAndroid::GetHistoricalSplitTabId(env, jtab)
+- description: Read the same closing-split field through its existing JNI owner.
+  regex:
+    re_pattern: Java_TabImpl_getHistoricalSplitLayout\(env,\ jtab\)
+    replace: TabAndroid::GetHistoricalSplitLayout(env, jtab)
+- description: Read the same closing-split field through its existing JNI owner.
+  regex:
+    re_pattern: Java_TabImpl_getHistoricalSplitRatio\(env,\ jtab\)
+    replace: TabAndroid::GetHistoricalSplitRatio(env, jtab)
+- description: Read the same closing-split field through its existing JNI owner.
+  regex:
+    re_pattern: Java_TabImpl_getHistoricalSplitPosition\(env,\ jtab\)
+    replace: TabAndroid::GetHistoricalSplitPosition(env, jtab)
+- description: Propagate a declined base restore before accumulating restored group membership
+  regex:
+    pattern: "      original_session_type);\n  if (tab.group) {\n"
+    replace: "      original_session_type);\n  if (!live_tab) {\n    return nullptr;\n  }\n  if (tab.group) {\n"
+  count: 1
+- description: remove-glic-restore-include
+  regex:
+    pattern: '#include "chrome/browser/glic/glic_tab_restore_helper.h"
+
+      '
+    replace: ''
+  count: 1
+- description: remove-glic-only-android-tab-metadata
+  regex:
+    pattern: "  std::map<std::string, std::string> result;\n  glic::PopulateGlicExtraData(GetTabAt(relative_index), &result);\n\
+      \  return result;"
+    replace: '  return {};'
+  count: 1

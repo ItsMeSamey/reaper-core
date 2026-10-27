@@ -1,0 +1,537 @@
+diff --git a/content/browser/media/capture/desktop_capturer_android_unittest.cc b/content/browser/media/capture/desktop_capturer_android_unittest.cc
+--- a/content/browser/media/capture/desktop_capturer_android_unittest.cc
++++ b/content/browser/media/capture/desktop_capturer_android_unittest.cc
+@@ -4,7 +4,10 @@
+ 
+ #include "content/browser/media/capture/desktop_capturer_android.h"
+ 
++#include <array>
++#include <limits>
+ #include <memory>
++#include <tuple>
+ #include <utility>
+ #include <vector>
+ 
+@@ -18,17 +21,23 @@
+ #include "base/functional/callback.h"
+ #include "base/memory/raw_ptr.h"
+ #include "base/time/time.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/test/navigation_simulator.h"
++#include "content/public/test/test_renderer_host.h"
+ #include "testing/gmock/include/gmock/gmock.h"
+ #include "testing/gtest/include/gtest/gtest.h"
+ #include "third_party/webrtc/modules/desktop_capture/desktop_capture_options.h"
+ #include "third_party/webrtc/modules/desktop_capture/desktop_capturer.h"
+ #include "third_party/webrtc/modules/desktop_capture/desktop_frame.h"
+ #include "ui/gfx/geometry/rect.h"
+-
++#include "url/gurl.h"
++
++using testing::_;
+ using testing::Return;
+ 
+ namespace {
+ 
++constexpr int32_t kSourceId = 42;
+ constexpr int kWidth = 8;
+ constexpr int kHeight = 4;
+ constexpr int kBytesPerPixel = 4;
+@@ -63,6 +72,93 @@
+ }  // namespace
+ 
+ namespace content {
++
++class ScreenCaptureDocumentRegistryTest : public RenderViewHostTestHarness {
++ public:
++  void SetUp() override {
++    RenderViewHostTestHarness::SetUp();
++    NavigateAndCommit(GURL("https://capture.test/"));
++  }
++
++  void TearDown() override {
++    ReleaseScreenCaptureDocument(kSourceId);
++    ReleaseScreenCaptureDocument(kSourceId + 1);
++    RenderViewHostTestHarness::TearDown();
++  }
++
++  bool Register(RenderFrameHost* frame, int32_t id = kSourceId) {
++    return RegisterScreenCaptureDocument(
++        web_contents(), frame, id,
++        base::BindOnce([](int* revoked) { ++*revoked; }, &revocations_));
++  }
++
++ protected:
++  int revocations_ = 0;
++};
++
++TEST_F(ScreenCaptureDocumentRegistryTest,
++       RejectsMissingInvalidAndDuplicateSource) {
++  EXPECT_FALSE(Register(nullptr));
++  EXPECT_FALSE(Register(main_rfh(), 0));
++  ASSERT_TRUE(Register(main_rfh()));
++  EXPECT_FALSE(Register(main_rfh()));
++  ReleaseScreenCaptureDocument(kSourceId);
++  EXPECT_EQ(0, revocations_);
++}
++
++TEST_F(ScreenCaptureDocumentRegistryTest,
++       SubframeNavigationRevokesOnlyItsGrant) {
++  auto* child =
++      RenderFrameHostTester::For(main_rfh())->AppendChild("requester");
++  ASSERT_TRUE(Register(child));
++  ASSERT_TRUE(Register(main_rfh(), kSourceId + 1));
++  auto navigation = NavigationSimulator::CreateRendererInitiated(
++      GURL("https://capture.test/replacement"), child);
++  navigation->Start();
++  EXPECT_EQ(1, revocations_);
++  navigation->Commit();
++  EXPECT_EQ(1, revocations_);
++  // Explicit normal release of the main-frame grant must not revoke it.
++  ReleaseScreenCaptureDocument(kSourceId + 1);
++  EXPECT_EQ(1, revocations_);
++}
++
++TEST_F(ScreenCaptureDocumentRegistryTest,
++       SameDocumentAndOtherFrameNavigationPreserveGrant) {
++  ASSERT_TRUE(Register(main_rfh()));
++  auto navigation = NavigationSimulator::CreateRendererInitiated(
++      GURL("https://capture.test/#same"), main_rfh());
++  navigation->CommitSameDocument();
++  auto* child =
++      RenderFrameHostTester::For(main_rfh())->AppendChild("unrelated");
++  NavigationSimulator::NavigateAndCommitFromDocument(
++      GURL("https://capture.test/child"), child);
++  EXPECT_EQ(0, revocations_);
++}
++
++TEST_F(ScreenCaptureDocumentRegistryTest, DeletedSubframeRevokesExactlyOnce) {
++  auto* child =
++      RenderFrameHostTester::For(main_rfh())->AppendChild("requester");
++  ASSERT_TRUE(Register(child));
++  RenderFrameHostTester::For(child)->Detach();
++  EXPECT_EQ(1, revocations_);
++  ReleaseScreenCaptureDocument(kSourceId);
++  EXPECT_EQ(1, revocations_);
++}
++
++TEST_F(ScreenCaptureDocumentRegistryTest,
++       CallbackMayReleaseItsOwnRegistryEntry) {
++  ASSERT_TRUE(RegisterScreenCaptureDocument(
++      web_contents(), main_rfh(), kSourceId,
++      base::BindOnce(
++          [](int* revoked) {
++            ReleaseScreenCaptureDocument(kSourceId);
++            ++*revoked;
++          },
++          &revocations_)));
++  NavigateAndCommit(GURL("https://capture.test/replacement"));
++  EXPECT_EQ(1, revocations_);
++}
+ 
+ class MockDesktopCapturerAndroidJni
+     : public DesktopCapturerAndroidJniInterface {
+@@ -74,11 +170,20 @@
+               (override));
+   MOCK_METHOD(bool,
+               StartCapture,
+-              (JNIEnv*, const base::android::JavaRef<jobject>&),
++              (JNIEnv*, const base::android::JavaRef<jobject>&, int32_t),
+               (override));
+   MOCK_METHOD(void,
+               Destroy,
+               (JNIEnv*, const base::android::JavaRef<jobject>&),
++              (override));
++};
++
++class MockDesktopCaptureCallback : public webrtc::DesktopCapturer::Callback {
++ public:
++  MOCK_METHOD(void,
++              OnCaptureResult,
++              (webrtc::DesktopCapturer::Result,
++               std::unique_ptr<webrtc::DesktopFrame>),
+               (override));
+ };
+ 
+@@ -100,7 +205,8 @@
+     last_frame_ = std::move(frame);
+   }
+ 
+-  void StartCapturer(bool start_success) {
++  void StartCapturer(bool start_success, int32_t source_id = kSourceId) {
++    ASSERT_TRUE(capturer_->SelectSource(source_id));
+     base::android::ScopedJavaLocalRef<jclass> object_class =
+         base::android::GetClass(env_, "java/lang/Object");
+     jmethodID constructor =
+@@ -110,7 +216,7 @@
+             env_, env_->NewObject(object_class.obj(), constructor))));
+     ON_CALL(*jni_interface_, StartCapture).WillByDefault(Return(start_success));
+     EXPECT_CALL(*jni_interface_, Create).Times(1);
+-    EXPECT_CALL(*jni_interface_, StartCapture).Times(1);
++    EXPECT_CALL(*jni_interface_, StartCapture(_, _, source_id)).Times(1);
+     EXPECT_CALL(*jni_interface_, Destroy).Times(1);
+ 
+     capturer_->Start(this);
+@@ -130,6 +236,7 @@
+  protected:
+   raw_ptr<JNIEnv> env_ = nullptr;
+   std::unique_ptr<DesktopCapturerAndroid> capturer_;
++  raw_ptr<MockDesktopCapturerAndroidJni> jni_interface_ = nullptr;
+ 
+   void PushRgbaFrame(base::span<uint8_t> buffer, int64_t timestamp_ns) {
+     auto j_buf = CreateJavaByteBuffer(buffer);
+@@ -151,6 +258,24 @@
+     PushRgbaFrame(buffer, timestamp_ns);
+   }
+ 
++  void PushI420Frame(base::span<uint8_t> y,
++                     base::span<uint8_t> u,
++                     base::span<uint8_t> v,
++                     int y_stride,
++                     int u_stride,
++                     int v_stride,
++                     int uv_pixel_stride,
++                     const gfx::Rect& crop,
++                     int64_t timestamp_ns = kTimestampNs) {
++    RunnableFlag release_cb;
++    capturer_->OnI420FrameAvailable(
++        env_, release_cb.GetJavaObject(), timestamp_ns, CreateJavaByteBuffer(y),
++        1, y_stride, CreateJavaByteBuffer(u), uv_pixel_stride, u_stride,
++        CreateJavaByteBuffer(v), uv_pixel_stride, v_stride, crop.x(), crop.y(),
++        crop.right(), crop.bottom());
++    EXPECT_TRUE(release_cb.WasRun());
++  }
++
+   void ExpectFrameWithCaptureTime(base::TimeDelta capture_time) {
+     const auto& [result, frame] = CaptureFrame();
+     EXPECT_EQ(result, webrtc::DesktopCapturer::Result::SUCCESS);
+@@ -159,7 +284,6 @@
+   }
+ 
+  private:
+-  raw_ptr<MockDesktopCapturerAndroidJni> jni_interface_ = nullptr;
+   std::optional<webrtc::DesktopCapturer::Result> last_result_ = std::nullopt;
+   std::unique_ptr<webrtc::DesktopFrame> last_frame_;
+ };
+@@ -175,6 +299,305 @@
+ 
+ TEST_F(DesktopCapturerAndroidTest, StartFailurePermanentError) {
+   StartCapturer(/*start_success=*/false);
++  const auto& [result, frame] = CaptureFrame();
++  EXPECT_EQ(result, webrtc::DesktopCapturer::Result::ERROR_PERMANENT);
++  EXPECT_EQ(frame, nullptr);
++}
++
++TEST_F(DesktopCapturerAndroidTest, MinimumSourceIdPassedToJava) {
++  StartCapturer(/*start_success=*/true, 1);
++}
++
++TEST_F(DesktopCapturerAndroidTest, MaximumSourceIdPassedToJava) {
++  StartCapturer(/*start_success=*/true, std::numeric_limits<int32_t>::max());
++}
++
++TEST_F(DesktopCapturerAndroidTest, RepeatedSelectionBeforeStart) {
++  ASSERT_TRUE(capturer_->SelectSource(kSourceId));
++  StartCapturer(/*start_success=*/true);
++}
++
++TEST_F(DesktopCapturerAndroidTest, DestroyWithoutStartDoesNotCallJava) {
++  EXPECT_CALL(*jni_interface_, Create).Times(0);
++  EXPECT_CALL(*jni_interface_, StartCapture).Times(0);
++  EXPECT_CALL(*jni_interface_, Destroy).Times(0);
++  jni_interface_ = nullptr;
++  capturer_.reset();
++}
++
++TEST_F(DesktopCapturerAndroidTest, MissingSourceDoesNotCallJava) {
++  EXPECT_CALL(*jni_interface_, Create).Times(0);
++  EXPECT_CALL(*jni_interface_, StartCapture).Times(0);
++  EXPECT_CALL(*jni_interface_, Destroy).Times(0);
++  capturer_->Start(this);
++  EXPECT_FALSE(capturer_->SelectSource(kSourceId));
++  const auto& [result, frame] = CaptureFrame();
++  EXPECT_EQ(result, webrtc::DesktopCapturer::Result::ERROR_PERMANENT);
++  EXPECT_EQ(frame, nullptr);
++}
++
++class DesktopCapturerAndroidInvalidSourceTest
++    : public DesktopCapturerAndroidTest,
++      public testing::WithParamInterface<webrtc::DesktopCapturer::SourceId> {};
++
++TEST_P(DesktopCapturerAndroidInvalidSourceTest, RejectsWithoutCallingJava) {
++  EXPECT_CALL(*jni_interface_, Create).Times(0);
++  EXPECT_CALL(*jni_interface_, StartCapture).Times(0);
++  EXPECT_CALL(*jni_interface_, Destroy).Times(0);
++  EXPECT_FALSE(capturer_->SelectSource(GetParam()));
++  EXPECT_FALSE(capturer_->SelectSource(kSourceId));
++  capturer_->Start(this);
++  const auto& [result, frame] = CaptureFrame();
++  EXPECT_EQ(result, webrtc::DesktopCapturer::Result::ERROR_PERMANENT);
++  EXPECT_EQ(frame, nullptr);
++}
++
++INSTANTIATE_TEST_SUITE_P(
++    InvalidSourceIds,
++    DesktopCapturerAndroidInvalidSourceTest,
++    testing::Values(
++        0,
++        -1,
++        std::numeric_limits<webrtc::DesktopCapturer::SourceId>::min()));
++
++TEST_F(DesktopCapturerAndroidTest, OversizedSourceDoesNotCallJava) {
++  if constexpr (sizeof(webrtc::DesktopCapturer::SourceId) <= sizeof(int32_t)) {
++    GTEST_SKIP() << "SourceId cannot represent an oversized Java int";
++  }
++  EXPECT_CALL(*jni_interface_, Create).Times(0);
++  EXPECT_CALL(*jni_interface_, StartCapture).Times(0);
++  EXPECT_CALL(*jni_interface_, Destroy).Times(0);
++  const int64_t oversized_id =
++      static_cast<int64_t>(std::numeric_limits<int32_t>::max()) + 1;
++  EXPECT_FALSE(capturer_->SelectSource(
++      static_cast<webrtc::DesktopCapturer::SourceId>(oversized_id)));
++  capturer_->Start(this);
++  const auto& [result, frame] = CaptureFrame();
++  EXPECT_EQ(result, webrtc::DesktopCapturer::Result::ERROR_PERMANENT);
++  EXPECT_EQ(frame, nullptr);
++}
++
++TEST_F(DesktopCapturerAndroidTest, ChangedSourceBeforeStartDoesNotCallJava) {
++  EXPECT_CALL(*jni_interface_, Create).Times(0);
++  EXPECT_CALL(*jni_interface_, StartCapture).Times(0);
++  EXPECT_CALL(*jni_interface_, Destroy).Times(0);
++  ASSERT_TRUE(capturer_->SelectSource(kSourceId));
++  EXPECT_FALSE(capturer_->SelectSource(kSourceId + 1));
++  capturer_->Start(this);
++  const auto& [result, frame] = CaptureFrame();
++  EXPECT_EQ(result, webrtc::DesktopCapturer::Result::ERROR_PERMANENT);
++  EXPECT_EQ(frame, nullptr);
++}
++
++TEST_F(DesktopCapturerAndroidTest, SelectionAfterStartFailsPermanently) {
++  StartCapturer(/*start_success=*/true);
++  EXPECT_FALSE(capturer_->SelectSource(kSourceId));
++  const auto& [result, frame] = CaptureFrame();
++  EXPECT_EQ(result, webrtc::DesktopCapturer::Result::ERROR_PERMANENT);
++  EXPECT_EQ(frame, nullptr);
++}
++
++TEST_F(DesktopCapturerAndroidTest, RepeatedStartDoesNotCallJavaAgain) {
++  StartCapturer(/*start_success=*/true);
++  PushRgbaFrame();
++  testing::StrictMock<MockDesktopCaptureCallback> replacement_callback;
++  capturer_->Start(&replacement_callback);
++  const auto& [result, frame] = CaptureFrame();
++  EXPECT_EQ(result, webrtc::DesktopCapturer::Result::ERROR_PERMANENT);
++  EXPECT_EQ(frame, nullptr);
++}
++
++TEST_F(DesktopCapturerAndroidTest, FailedStartCannotBeRetried) {
++  StartCapturer(/*start_success=*/false);
++  capturer_->OnStop(env_);
++  capturer_->OnStop(env_);
++  capturer_->Start(this);
++  const auto& [result, frame] = CaptureFrame();
++  EXPECT_EQ(result, webrtc::DesktopCapturer::Result::ERROR_PERMANENT);
++  EXPECT_EQ(frame, nullptr);
++}
++
++TEST_F(DesktopCapturerAndroidTest, CreateFailureDoesNotStartOrDestroyJava) {
++  ASSERT_TRUE(capturer_->SelectSource(kSourceId));
++  EXPECT_CALL(*jni_interface_, Create)
++      .WillOnce(Return(base::android::ScopedJavaLocalRef<jobject>()));
++  EXPECT_CALL(*jni_interface_, StartCapture).Times(0);
++  EXPECT_CALL(*jni_interface_, Destroy).Times(0);
++  capturer_->Start(this);
++  capturer_->OnStop(env_);
++  capturer_->Start(this);
++  const auto& [result, frame] = CaptureFrame();
++  EXPECT_EQ(result, webrtc::DesktopCapturer::Result::ERROR_PERMANENT);
++  EXPECT_EQ(frame, nullptr);
++}
++
++// Layouts: planar, separate stride-two planes, NV12, NV21.
++class DesktopCapturerAndroidYuvTest
++    : public DesktopCapturerAndroidTest,
++      public testing::WithParamInterface<std::tuple<int, bool>> {};
++
++TEST_P(DesktopCapturerAndroidYuvTest, PaddedCroppedKnownColors) {
++  StartCapturer(/*start_success=*/true);
++  const auto [layout, odd_crop] = GetParam();
++  const int uv_pixel_stride = layout == 0 ? 1 : 2;
++  const int y_stride = 8;
++  const int u_stride = layout >= 2 ? 8 : 3 * uv_pixel_stride + 2;
++  const int v_stride = layout >= 2 ? 8 : 3 * uv_pixel_stride + 4;
++  // Only the bytes through the final sample are mapped, not final-row padding.
++  std::vector<uint8_t> y(y_stride * 3 + 6, 0xcd);
++  std::vector<uint8_t> u_storage(u_stride + 2 * uv_pixel_stride + 1, 0xcd);
++  std::vector<uint8_t> v_storage(v_stride + 2 * uv_pixel_stride + 1, 0xcd);
++  std::vector<uint8_t> interleaved(8 + 6, 0xcd);
++  base::span<uint8_t> u(u_storage);
++  base::span<uint8_t> v(v_storage);
++  if (layout >= 2) {
++    u = base::span(interleaved).subspan(layout == 2 ? 0u : 1u);
++    v = base::span(interleaved).subspan(layout == 2 ? 1u : 0u);
++  }
++
++  // BT.601 limited-range red, green and blue in two-by-two chroma blocks.
++  constexpr std::array<std::array<uint8_t, 3>, 3> kYuv = {
++      {{81, 90, 240}, {145, 54, 34}, {41, 240, 110}}};
++  constexpr std::array<std::array<uint8_t, 3>, 3> kRgb = {
++      {{255, 0, 0}, {0, 255, 0}, {0, 0, 255}}};
++  for (int row = 0; row < 4; ++row) {
++    for (int column = 0; column < 6; ++column) {
++      base::span(y)[row * y_stride + column] =
++          kYuv[(row / 2 + column / 2) % 3][0];
++    }
++  }
++  for (int row = 0; row < 2; ++row) {
++    for (int column = 0; column < 3; ++column) {
++      u[row * u_stride + column * uv_pixel_stride] =
++          kYuv[(row + column) % 3][1];
++      v[row * v_stride + column * uv_pixel_stride] =
++          kYuv[(row + column) % 3][2];
++    }
++  }
++  const gfx::Rect crop =
++      odd_crop ? gfx::Rect(1, 1, 3, 3) : gfx::Rect(2, 0, 3, 3);
++  PushI420Frame(y, u, v, y_stride, u_stride, v_stride, uv_pixel_stride, crop);
++  const auto& [result, frame] = CaptureFrame();
++  ASSERT_EQ(result, webrtc::DesktopCapturer::Result::SUCCESS);
++  ASSERT_TRUE(frame);
++  ASSERT_EQ(frame->size().width(), crop.width());
++  ASSERT_EQ(frame->size().height(), crop.height());
++  EXPECT_EQ(frame->pixel_format(), webrtc::FOURCC_ABGR);
++  EXPECT_EQ(frame->capture_time_ms(), 0);
++  const webrtc::DesktopRegion region(
++      webrtc::DesktopRect::MakeSize(frame->size()));
++  EXPECT_TRUE(frame->updated_region().Equals(region));
++  // SAFETY: BasicDesktopFrame owns stride * height bytes.
++  const auto pixels = UNSAFE_BUFFERS(
++      base::span(frame->data(),
++                 base::checked_cast<size_t>(frame->stride() * crop.height())));
++  for (int row = 0; row < crop.height(); ++row) {
++    for (int column = 0; column < crop.width(); ++column) {
++      const auto& expected =
++          kRgb[((row + crop.y()) / 2 + (column + crop.x()) / 2) % 3];
++      const auto pixel = pixels.subspan(row * frame->stride() + column * 4, 4u);
++      for (int channel = 0; channel < 3; ++channel) {
++        EXPECT_NEAR(pixel[channel], expected[channel], 2);
++      }
++      EXPECT_EQ(pixel[3], 255);
++    }
++  }
++}
++
++INSTANTIATE_TEST_SUITE_P(Android420Layouts,
++                         DesktopCapturerAndroidYuvTest,
++                         testing::Combine(testing::Values(0, 1, 2, 3),
++                                          testing::Bool()));
++
++class DesktopCapturerAndroidTruncatedYuvTest
++    : public DesktopCapturerAndroidTest,
++      public testing::WithParamInterface<int> {};
++
++TEST_P(DesktopCapturerAndroidTruncatedYuvTest, ReleasesAndFailsPermanently) {
++  StartCapturer(/*start_success=*/true);
++  PushRgbaFrame();
++  std::vector<uint8_t> y(8, 81);
++  std::vector<uint8_t> u(2, 90);
++  std::vector<uint8_t> v(2, 240);
++  if (GetParam() == 0)
++    y.pop_back();
++  if (GetParam() == 1)
++    u.pop_back();
++  if (GetParam() == 2)
++    v.pop_back();
++  PushI420Frame(y, u, v, 4, 2, 2, 1, gfx::Rect(0, 0, 4, 2));
++  const auto& [result, frame] = CaptureFrame();
++  EXPECT_EQ(result, webrtc::DesktopCapturer::Result::ERROR_PERMANENT);
++  EXPECT_EQ(frame, nullptr);
++}
++
++INSTANTIATE_TEST_SUITE_P(TruncatedPlane,
++                         DesktopCapturerAndroidTruncatedYuvTest,
++                         testing::Values(0, 1, 2));
++
++TEST_F(DesktopCapturerAndroidTest, YuvInvalidGeometryReleasesBuffer) {
++  StartCapturer(/*start_success=*/true);
++  std::vector<uint8_t> y(8, 81);
++  std::vector<uint8_t> u(2, 90);
++  std::vector<uint8_t> v(2, 240);
++  PushI420Frame(y, u, v, 4, 2, 2, 1,
++                gfx::Rect(0, 0, std::numeric_limits<int>::max(), 2));
++  const auto& [result, frame] = CaptureFrame();
++  EXPECT_EQ(result, webrtc::DesktopCapturer::Result::ERROR_PERMANENT);
++  EXPECT_EQ(frame, nullptr);
++}
++
++TEST_F(DesktopCapturerAndroidTest, YuvUnsupportedStrideReleasesBuffer) {
++  StartCapturer(/*start_success=*/true);
++  std::vector<uint8_t> y(8, 81);
++  std::vector<uint8_t> u(2, 90);
++  std::vector<uint8_t> v(2, 240);
++  PushI420Frame(y, u, v, 4, 2, 2, 3, gfx::Rect(0, 0, 4, 2));
++  const auto& [result, frame] = CaptureFrame();
++  EXPECT_EQ(result, webrtc::DesktopCapturer::Result::ERROR_PERMANENT);
++  EXPECT_EQ(frame, nullptr);
++}
++
++class DesktopCapturerAndroidInvalidYuvStrideTest
++    : public DesktopCapturerAndroidTest,
++      public testing::WithParamInterface<int> {};
++
++TEST_P(DesktopCapturerAndroidInvalidYuvStrideTest,
++       ReleasesAndFailsPermanently) {
++  StartCapturer(/*start_success=*/true);
++  std::vector<uint8_t> y(8, 81);
++  std::vector<uint8_t> u(2, 90);
++  std::vector<uint8_t> v(2, 240);
++  PushI420Frame(y, u, v, GetParam(), 2, 2, 1, gfx::Rect(0, 0, 4, 2));
++  const auto& [result, frame] = CaptureFrame();
++  EXPECT_EQ(result, webrtc::DesktopCapturer::Result::ERROR_PERMANENT);
++  EXPECT_EQ(frame, nullptr);
++}
++
++INSTANTIATE_TEST_SUITE_P(InvalidYRowStride,
++                         DesktopCapturerAndroidInvalidYuvStrideTest,
++                         testing::Values(0, -1, 3));
++
++TEST_F(DesktopCapturerAndroidTest, YuvNullPlanesReleaseBuffer) {
++  StartCapturer(/*start_success=*/true);
++  RunnableFlag release_cb;
++  const base::android::ScopedJavaLocalRef<jobject> no_buffer;
++  capturer_->OnI420FrameAvailable(env_, release_cb.GetJavaObject(),
++                                  kTimestampNs, no_buffer, 1, 2, no_buffer, 1,
++                                  1, no_buffer, 1, 1, 0, 0, 2, 2);
++  EXPECT_TRUE(release_cb.WasRun());
++  const auto& [result, frame] = CaptureFrame();
++  EXPECT_EQ(result, webrtc::DesktopCapturer::Result::ERROR_PERMANENT);
++  EXPECT_EQ(frame, nullptr);
++}
++
++TEST_F(DesktopCapturerAndroidTest, YuvAfterStopReleasesBuffer) {
++  StartCapturer(/*start_success=*/true);
++  capturer_->OnStop(env_);
++  std::vector<uint8_t> y(8, 81);
++  std::vector<uint8_t> u(2, 90);
++  std::vector<uint8_t> v(2, 240);
++  PushI420Frame(y, u, v, 4, 2, 2, 1, gfx::Rect(0, 0, 4, 2));
+   const auto& [result, frame] = CaptureFrame();
+   EXPECT_EQ(result, webrtc::DesktopCapturer::Result::ERROR_PERMANENT);
+   EXPECT_EQ(frame, nullptr);
+@@ -221,10 +644,13 @@
+   EXPECT_EQ(frame, nullptr);
+ }
+ 
+-TEST_F(DesktopCapturerAndroidTest, OnStopCalledTwiceDeathTest) {
++TEST_F(DesktopCapturerAndroidTest, OnStopIsIdempotent) {
+   StartCapturer(/*start_success=*/true);
+   capturer_->OnStop(env_);
+-  EXPECT_DEATH(capturer_->OnStop(env_), "");
++  capturer_->OnStop(env_);
++  const auto& [result, frame] = CaptureFrame();
++  EXPECT_EQ(result, webrtc::DesktopCapturer::Result::ERROR_PERMANENT);
++  EXPECT_EQ(frame, nullptr);
+ }
+ 
+ TEST_F(DesktopCapturerAndroidTest, CaptureAndTemporaryError) {

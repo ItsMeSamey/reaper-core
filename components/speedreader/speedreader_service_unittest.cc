@@ -3,6 +3,8 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at https://mozilla.org/MPL/2.0/.
 
+#include "build/build_config.h"
+
 #include "brave/components/speedreader/speedreader_service.h"
 
 #include "base/test/scoped_feature_list.h"
@@ -26,7 +28,9 @@ class SpeedreaderServiceTest : public testing::Test {
   void SetUp() override {
     HostContentSettingsMap::RegisterProfilePrefs(prefs_.registry());
     SpeedreaderService::RegisterProfilePrefs(prefs_.registry());
+#if !BUILDFLAG(IS_ANDROID)
     SpeedreaderMetrics::RegisterPrefs(prefs_.registry());
+#endif  // !BUILDFLAG(IS_ANDROID)
     settings_map_ = base::MakeRefCounted<HostContentSettingsMap>(
         &prefs_, /*is_off_the_record=*/false, /*store_last_modified=*/false,
         /*restore_session=*/false, /*should_record_metrics=*/false);

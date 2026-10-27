@@ -1,0 +1,233 @@
+diff --git a/chrome/browser/ui/android/extensions/side_panel/internal/javatests/src/org/chromium/chrome/browser/ui/extensions/side_panel/ExtensionSidePanelContentsTest.java b/chrome/browser/ui/android/extensions/side_panel/internal/javatests/src/org/chromium/chrome/browser/ui/extensions/side_panel/ExtensionSidePanelContentsTest.java
+--- a/chrome/browser/ui/android/extensions/side_panel/internal/javatests/src/org/chromium/chrome/browser/ui/extensions/side_panel/ExtensionSidePanelContentsTest.java
++++ b/chrome/browser/ui/android/extensions/side_panel/internal/javatests/src/org/chromium/chrome/browser/ui/extensions/side_panel/ExtensionSidePanelContentsTest.java
+@@ -5,8 +5,12 @@
+ package org.chromium.chrome.browser.ui.extensions.side_panel;
+ 
+ import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
+ import static org.junit.Assert.assertNotNull;
++import static org.junit.Assert.assertNotSame;
+ import static org.junit.Assert.assertNull;
++import static org.junit.Assert.assertSame;
++import static org.junit.Assert.assertTrue;
+ import static org.mockito.ArgumentMatchers.any;
+ import static org.mockito.ArgumentMatchers.eq;
+ import static org.mockito.Mockito.mock;
+@@ -23,6 +27,7 @@
+ import org.junit.Rule;
+ import org.junit.Test;
+ import org.junit.runner.RunWith;
++import org.mockito.ArgumentCaptor;
+ import org.mockito.Mock;
+ import org.mockito.junit.MockitoJUnit;
+ import org.mockito.junit.MockitoRule;
+@@ -38,6 +43,7 @@
+ import org.chromium.ui.base.IntentRequestTracker;
+ import org.chromium.ui.base.ViewAndroidDelegate;
+ import org.chromium.ui.base.WindowAndroid;
++import org.chromium.ui.modaldialog.ModalDialogManager;
+ 
+ import java.lang.ref.WeakReference;
+ 
+@@ -53,6 +59,8 @@
+     private Activity mActivity;
+     private IntentRequestTracker mIntentRequestTracker;
+     private ActivityWindowAndroid mWindowAndroid;
++    private final ModalDialogManager mModalDialogManager = mock(ModalDialogManager.class);
++    private ExtensionSidePanelContents mContents;
+ 
+     @Before
+     public void setUp() {
+@@ -65,59 +73,77 @@
+                         /* listenToActivityState= */ false,
+                         mIntentRequestTracker,
+                         /* insetObserver= */ null,
+-                        /* occlusionTrackingAllowed= */ false);
++                        /* occlusionTrackingAllowed= */ false) {
++                    @Override
++                    public ModalDialogManager getModalDialogManager() {
++                        return mModalDialogManager;
++                    }
++                };
+         ThinWebViewFactory.setInstanceForTesting(mThinWebView);
+     }
+ 
+     @After
+     public void tearDown() {
+-        if (mWindowAndroid != null) {
++        if (mContents != null) mContents.destroy();
++        if (mWindowAndroid != null && !mWindowAndroid.isDestroyed()) {
+             mWindowAndroid.destroy();
+         }
+     }
+ 
+-    @Test
+-    public void testCreate_nullContext_returnsNull() {
+-        WindowAndroid mockWindow = mock(WindowAndroid.class);
+-        when(mockWindow.getContext()).thenReturn(new WeakReference<Context>(null));
+-
+-        ExtensionSidePanelContents contents =
+-                ExtensionSidePanelContents.create(mWebContents, mockWindow);
+-
+-        assertNull(contents);
+-    }
+-
+-    @Test
+-    public void testCreate_nullIntentRequestTracker_returnsNull() {
+-        WindowAndroid windowWithoutTracker =
+-                new WindowAndroid(mActivity, /* occlusionTrackingAllowed= */ false);
+-
+-        ExtensionSidePanelContents contents =
+-                ExtensionSidePanelContents.create(mWebContents, windowWithoutTracker);
+-
+-        assertNull(contents);
+-        windowWithoutTracker.destroy();
+-    }
+-
+-    @Test
+-    public void testCreate_success_setsDelegatesAndAttachesThinWebView() {
+-        when(mThinWebView.getView()).thenReturn(mThinWebViewUnderlyingView);
+-        when(mWebContents.getViewAndroidDelegate()).thenReturn(null);
+-
+-        ExtensionSidePanelContents contents =
+-                ExtensionSidePanelContents.create(mWebContents, mWindowAndroid);
+-
+-        assertNotNull(contents);
+-        assertEquals(mWebContents, contents.getWebContents());
+-        assertEquals(mThinWebViewUnderlyingView, contents.getView());
+-
++    private ExtensionSidePanelContents createContents(WindowAndroid window) {
++        mContents = ExtensionSidePanelContents.create(mWebContents, window);
++        return mContents;
++    }
++
++    private WindowAndroid capturedNewWindow() {
++        ArgumentCaptor<WindowAndroid> window = ArgumentCaptor.forClass(WindowAndroid.class);
+         verify(mWebContents)
+                 .setDelegates(
+                         any(),
+                         any(ViewAndroidDelegate.class),
+                         any(ContentView.class),
+-                        eq(mWindowAndroid),
++                        window.capture(),
+                         any());
++        return window.getValue();
++    }
++
++    @Test
++    public void testCreate_nullContext_returnsNull() {
++        WindowAndroid mockWindow = mock(WindowAndroid.class);
++        when(mockWindow.getContext()).thenReturn(new WeakReference<Context>(null));
++
++        ExtensionSidePanelContents contents = createContents(mockWindow);
++
++        assertNull(contents);
++    }
++
++    @Test
++    public void testCreate_nullIntentRequestTracker_returnsNull() {
++        WindowAndroid windowWithoutTracker =
++                new WindowAndroid(mActivity, /* occlusionTrackingAllowed= */ false);
++
++        ExtensionSidePanelContents contents = createContents(windowWithoutTracker);
++
++        assertNull(contents);
++        windowWithoutTracker.destroy();
++    }
++
++    @Test
++    public void testCreate_success_setsDelegatesAndAttachesThinWebView() {
++        when(mThinWebView.getView()).thenReturn(mThinWebViewUnderlyingView);
++        when(mWebContents.getViewAndroidDelegate()).thenReturn(null);
++
++        ExtensionSidePanelContents contents = createContents(mWindowAndroid);
++
++        assertNotNull(contents);
++        assertEquals(mWebContents, contents.getWebContents());
++        assertEquals(mThinWebViewUnderlyingView, contents.getView());
++
++        WindowAndroid panelWindow = capturedNewWindow();
++        assertNotSame(mWindowAndroid, panelWindow);
++        assertSame(mModalDialogManager, panelWindow.getModalDialogManager());
++        assertSame(mIntentRequestTracker, panelWindow.getIntentRequestTracker());
++        assertSame(mActivity, panelWindow.getActivity().get());
+         verify(mThinWebView)
+                 .attachWebContents(
+                         eq(mWebContents),
+@@ -130,11 +156,14 @@
+         ViewAndroidDelegate delegate = ViewAndroidDelegate.createBasicDelegate(null);
+         when(mWebContents.getViewAndroidDelegate()).thenReturn(delegate);
+ 
+-        ExtensionSidePanelContents contents =
+-                ExtensionSidePanelContents.create(mWebContents, mWindowAndroid);
+-
+-        assertNotNull(contents);
+-        verify(mWebContents).setTopLevelNativeWindow(mWindowAndroid);
++        ExtensionSidePanelContents contents = createContents(mWindowAndroid);
++
++        assertNotNull(contents);
++        ArgumentCaptor<WindowAndroid> window = ArgumentCaptor.forClass(WindowAndroid.class);
++        verify(mWebContents).setTopLevelNativeWindow(window.capture());
++        assertNotSame(mWindowAndroid, window.getValue());
++        assertSame(mModalDialogManager, window.getValue().getModalDialogManager());
++        assertSame(mIntentRequestTracker, window.getValue().getIntentRequestTracker());
+         assertNotNull(delegate.getContainerView());
+     }
+ 
+@@ -144,8 +173,7 @@
+         when(mWebContents.isDestroyed()).thenReturn(false);
+         when(mWebContents.getViewAndroidDelegate()).thenReturn(delegate);
+ 
+-        ExtensionSidePanelContents contents =
+-                ExtensionSidePanelContents.create(mWebContents, mWindowAndroid);
++        ExtensionSidePanelContents contents = createContents(mWindowAndroid);
+         assertNotNull(contents);
+         assertNotNull(delegate.getContainerView());
+ 
+@@ -157,11 +185,43 @@
+     }
+ 
+     @Test
++    public void testDestroy_isolatedWindowReleasedOnceAndBrowserWindowSurvives() {
++        ExtensionSidePanelContents contents = createContents(mWindowAndroid);
++        assertNotNull(contents);
++        WindowAndroid panelWindow = capturedNewWindow();
++        contents.destroy();
++        contents.destroy();
++        verify(mThinWebView).destroy();
++        assertTrue(panelWindow.isDestroyed());
++        assertNull(panelWindow.getModalDialogManager());
++        assertFalse(mWindowAndroid.isDestroyed());
++        assertSame(mModalDialogManager, mWindowAndroid.getModalDialogManager());
++        verify(mModalDialogManager, never()).destroy();
++    }
++
++    @Test
++    public void testBrowserWindowDestroyed_doesNotForwardDeadDialogManager() {
++        ExtensionSidePanelContents contents = createContents(mWindowAndroid);
++        assertNotNull(contents);
++        WindowAndroid panelWindow = capturedNewWindow();
++        mWindowAndroid.destroy();
++        assertNull(panelWindow.getModalDialogManager());
++        contents.destroy();
++        assertTrue(panelWindow.isDestroyed());
++    }
++
++    @Test
++    public void testCreate_finishingActivity_returnsNull() {
++        mActivity.finish();
++        assertNull(createContents(mWindowAndroid));
++        verify(mThinWebView, never()).attachWebContents(any(), any(), any());
++    }
++
++    @Test
+     public void testDestroy_webContentsAlreadyDestroyed_onlyDestroysThinWebView() {
+         when(mWebContents.isDestroyed()).thenReturn(true);
+ 
+-        ExtensionSidePanelContents contents =
+-                ExtensionSidePanelContents.create(mWebContents, mWindowAndroid);
++        ExtensionSidePanelContents contents = createContents(mWindowAndroid);
+         assertNotNull(contents);
+ 
+         contents.destroy();

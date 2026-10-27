@@ -35,8 +35,10 @@ PerfPredictorTabHelper::PerfPredictorTabHelper(
     return;
   }
 
+#if !BUILDFLAG(IS_ANDROID)
   bandwidth_tracker_ = std::make_unique<P3ABandwidthSavingsTracker>(
       user_prefs::UserPrefs::Get(web_contents->GetBrowserContext()));
+#endif  // !BUILDFLAG(IS_ANDROID)
 }
 
 PerfPredictorTabHelper::~PerfPredictorTabHelper() = default;
@@ -91,9 +93,11 @@ void PerfPredictorTabHelper::RecordSavings() {
             prefs->GetUint64(prefs::kBandwidthSavedBytes) + savings);
       }
 
+#if !BUILDFLAG(IS_ANDROID)
       if (bandwidth_tracker_) {
         bandwidth_tracker_->RecordSavings(savings);
       }
+#endif  // !BUILDFLAG(IS_ANDROID)
 #if BUILDFLAG(IS_ANDROID)
       chrome::android::BraveShieldsContentSettings::DispatchSavedBandwidth(
           savings);

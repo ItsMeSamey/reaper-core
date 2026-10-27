@@ -3,6 +3,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+#include "build/build_config.h"
+
 #include "brave/components/sync/service/brave_sync_service_impl.h"
 
 #include <utility>
@@ -21,14 +23,15 @@
 #include "base/test/task_environment.h"
 #include "base/time/default_clock.h"
 #include "base/time/default_tick_clock.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_sync/brave_sync_p3a.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_sync/features.h"
 #include "brave/components/brave_sync/network_time_helper.h"
 #include "brave/components/history/core/browser/sync/brave_history_data_type_controller.h"
 #include "brave/components/history/core/browser/sync/brave_history_delete_directives_data_type_controller.h"
 #include "brave/components/sync/service/sync_service_impl_delegate.h"
 #include "brave/components/sync/test/brave_mock_sync_engine.h"
-#include "build/build_config.h"
 #include "components/network_time/network_time_tracker.h"
 #include "components/os_crypt/async/browser/test_utils.h"
 #include "components/os_crypt/async/common/test_encryptor.h"
@@ -444,6 +447,13 @@ TEST_F(BraveSyncServiceImplTest, ValidPassphraseKeyringLocked) {
 
   EXPECT_THAT(brave_sync_service_impl()->GetSeed().error(),
               Eq(GetSeedStatusEnum::kDecryptFailed));
+
+#if BUILDFLAG(IS_ANDROID)
+  const std::string encrypted_seed = brave_sync_prefs()->GetEncryptedSeed();
+  EXPECT_FALSE(encrypted_seed.empty());
+  EXPECT_TRUE(brave_sync_service_impl()->GetOrCreateSyncCode().empty());
+  EXPECT_EQ(brave_sync_prefs()->GetEncryptedSeed(), encrypted_seed);
+#endif  // BUILDFLAG(IS_ANDROID)
 }
 
 TEST_F(BraveSyncServiceImplTest, FailedToDecryptBraveSeedValue) {
@@ -497,6 +507,13 @@ TEST_F(BraveSyncServiceImplTest,
 
   ASSERT_THAT(brave_sync_service_impl()->GetSeed().error(),
               Eq(GetSeedStatusEnum::kEncryptorIsNotSet));
+
+#if BUILDFLAG(IS_ANDROID)
+  const std::string encrypted_seed = brave_sync_prefs()->GetEncryptedSeed();
+  EXPECT_FALSE(encrypted_seed.empty());
+  EXPECT_TRUE(brave_sync_service_impl()->GetOrCreateSyncCode().empty());
+  EXPECT_EQ(brave_sync_prefs()->GetEncryptedSeed(), encrypted_seed);
+#endif  // BUILDFLAG(IS_ANDROID)
   EXPECT_EQ(brave_sync_service_impl()->GetPreferredDataTypes(),
             DataTypeSet::All());
 }
@@ -790,6 +807,7 @@ TEST_F(BraveSyncServiceImplTest,
 }
 #endif  // BUILDFLAG(IS_ANDROID)
 
+#if !BUILDFLAG(IS_ANDROID)
 TEST_F(BraveSyncServiceImplTest, P3aForHistoryThroughDelegate) {
   CreateSyncService(DataTypeSet({BOOKMARKS, HISTORY, PASSWORDS}));
   EXPECT_FALSE(engine());
@@ -830,6 +848,7 @@ TEST_F(BraveSyncServiceImplTest, P3aForHistoryThroughDelegate) {
   histogram_tester.ExpectBucketCount(
       brave_sync::p3a::kSyncedObjectsCountHistogramNameV2, 2, 1);
 }
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 TEST_F(BraveSyncServiceImplTest, NoLeaveDetailsWhenInitializeIOS) {
   CreateSyncService();

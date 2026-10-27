@@ -1,0 +1,71 @@
+diff --git a/content/common/font_list_android.cc b/content/common/font_list_android.cc
+--- a/content/common/font_list_android.cc
++++ b/content/common/font_list_android.cc
+@@ -4,14 +4,65 @@
+ 
+ #include "content/common/font_list.h"
+ 
+-#include <memory>
++#include <set>
++#include <string>
++#include <utility>
+ 
++#include "base/strings/string_util.h"
+ #include "base/values.h"
++#include "skia/ext/font_utils.h"
++#include "third_party/skia/include/core/SkFontMgr.h"
++#include "third_party/skia/include/core/SkString.h"
++#include "third_party/skia/include/core/SkTypeface.h"
+ 
+ namespace content {
+ 
+ base::ListValue GetFontList_SlowBlocking() {
+-  return base::ListValue();
++  const auto font_manager = skia::DefaultFontMgr();
++  if (!font_manager) {
++    return {};
++  }
++
++  // Enumerate names selectable by the same Android font manager used to render
++  // them. Its catalog excludes unnamed fallback families; no directory scan or
++  // separate Android font API is needed.
++  std::set<std::string> names;
++  auto add_family = [&font_manager, &names](const char* name) {
++    if (!name || !*name || !base::IsStringUTF8(name)) {
++      return;
++    }
++    const auto styles = font_manager->matchFamily(name);
++    if (!styles) {
++      return;
++    }
++    for (int index = 0; index < styles->count(); ++index) {
++      const auto typeface = styles->createTypeface(index);
++      if (typeface && typeface->countGlyphs() > 0) {
++        names.emplace(name);
++        return;
++      }
++    }
++  };
++  for (int index = 0; index < font_manager->countFamilies(); ++index) {
++    SkString name;
++    font_manager->getFamilyName(index, &name);
++    add_family(name.c_str());
++  }
++  // Keep the previous generic choices when they resolve to an actual family,
++  // even if a platform manager does not enumerate its aliases separately.
++  for (const char* alias : {"sans-serif", "serif", "monospace", "cursive"}) {
++    add_family(alias);
++  }
++
++  base::ListValue result;
++  for (const auto& name : names) {
++    base::ListValue entry;
++    entry.Append(name);
++    // Android's manager has canonical names, not localized family labels.
++    entry.Append(name);
++    result.Append(std::move(entry));
++  }
++  return result;
+ }
+ 
+ }  // namespace content

@@ -1,0 +1,250 @@
+diff --git a/chrome/android/java/src/org/chromium/chrome/browser/ui/ExclusiveAccessManager.java b/chrome/android/java/src/org/chromium/chrome/browser/ui/ExclusiveAccessManager.java
+--- a/chrome/android/java/src/org/chromium/chrome/browser/ui/ExclusiveAccessManager.java
++++ b/chrome/android/java/src/org/chromium/chrome/browser/ui/ExclusiveAccessManager.java
+@@ -6,8 +6,10 @@
+
+ import android.os.Bundle;
+
++import org.jni_zero.JniType;
+ import org.jni_zero.NativeMethods;
+
++import org.chromium.base.Callback;
+ import org.chromium.base.IntentUtils;
+ import org.chromium.base.lifetime.Destroyable;
+ import org.chromium.base.supplier.NonNullObservableSupplier;
+@@ -50,13 +52,30 @@
+     private final TabModelObserver mTabModelObserver;
+     private final SettableNonNullObservableSupplier<Boolean> mExclusiveAccessState =
+             ObservableSuppliers.createNonNull(false);
++    private final NonNullObservableSupplier<FullscreenManager.BrowserFullscreenExtensionInfo>
++            mBrowserFullscreenExtensionInfoSupplier;
++    private final Callback<FullscreenManager.BrowserFullscreenExtensionInfo>
++            mBrowserFullscreenExtensionInfoObserver = unused -> notifyFullscreenExtensionUrl();
++    private final NonNullObservableSupplier<Boolean> mFullscreenUiModeSupplier;
++    private final Callback<Boolean> mFullscreenUiModeObserver =
++            unused -> notifyWindowFullscreenState();
++    private boolean mObservingFullscreenUi = true;
++    private boolean mReportedFullscreenUi;
++    private FullscreenManager.@Nullable BrowserFullscreenExtensionInfo
++            mReportedFullscreenExtensionInfo;
+     private boolean mPendingFullscreen;
+     @Nullable private FullscreenOptions mLatestFullscreenOptions;
++    @Nullable private Tab mLatestFullscreenTab;
++    @Nullable private WebContents mLatestFullscreenWebContents;
++    private long mFullscreenRequestGeneration;
+
+     public ExclusiveAccessManager(
+             FullscreenManager fullscreenManager,
+             @Nullable DesktopWindowStateManager desktopWindowStateManager) {
+         mFullscreenManager = fullscreenManager;
++        mFullscreenUiModeSupplier = fullscreenManager.getFullscreenUiModeSupplier();
++        mBrowserFullscreenExtensionInfoSupplier =
++                fullscreenManager.getBrowserFullscreenExtensionInfoSupplier();
+         if (desktopWindowStateManager != null) {
+             mDesktopWindowStateManager = desktopWindowStateManager;
+             mDesktopWindowStateManager.addObserver(this);
+@@ -65,8 +84,12 @@
+                 new FullscreenManager.FullscreenManagerDelegate() {
+                     @Override
+                     public void onExitFullscreen(@Nullable Tab tab) {
++                        if (tab == null) {
++                            clearFullscreenOptions();
++                        } else {
++                            clearFullscreenOptionsForTab(tab);
++                        }
+                         if (mExclusiveAccessManagerAndroidNativePointer == 0) return;
+-                        mLatestFullscreenOptions = null;
+                         if (tab == null) {
+                             ExclusiveAccessManagerJni.get()
+                                     .exitExclusiveAccess(
+@@ -80,8 +103,8 @@
+                 new TabModelObserver() {
+                     @Override
+                     public void willCloseTab(Tab tab, boolean didCloseAlone) {
++                        clearFullscreenOptionsForTab(tab);
+                         if (mExclusiveAccessManagerAndroidNativePointer == 0) return;
+-                        mLatestFullscreenOptions = null;
+                         ExclusiveAccessManagerJni.get()
+                                 .onTabClosing(
+                                         mExclusiveAccessManagerAndroidNativePointer,
+@@ -91,8 +114,10 @@
+                     @Override
+                     public void willCloseTabs(
+                             List<Tab> tabs, boolean isAllTabs, boolean allowUndo) {
++                        for (Tab tab : tabs) {
++                            clearFullscreenOptionsForTab(tab);
++                        }
+                         if (mExclusiveAccessManagerAndroidNativePointer == 0) return;
+-                        mLatestFullscreenOptions = null;
+                         for (Tab tab : tabs) {
+                             ExclusiveAccessManagerJni.get()
+                                     .onTabClosing(
+@@ -108,6 +133,33 @@
+         mFullscreenManager
+                 .getPersistentFullscreenModeSupplier()
+                 .addSyncObserverAndPostIfNonNull(mExclusiveAccessState::set);
++        // Native window transitions use aggregate UI state; the DOM/lock supplier above stays
++        // independent so browser fullscreen never claims renderer exclusive access.
++        mBrowserFullscreenExtensionInfoSupplier.addSyncObserverAndPostIfNonNull(
++                mBrowserFullscreenExtensionInfoObserver);
++        mFullscreenUiModeSupplier.addSyncObserverAndPostIfNonNull(mFullscreenUiModeObserver);
++    }
++
++    private void notifyFullscreenExtensionUrl() {
++        if (!mObservingFullscreenUi || mExclusiveAccessManagerAndroidNativePointer == 0) return;
++        var info = mBrowserFullscreenExtensionInfoSupplier.get();
++        var previous = mReportedFullscreenExtensionInfo;
++        if (previous != null
++                && previous.getUrl().equals(info.getUrl())
++                && previous.getName().equals(info.getName())) return;
++        mReportedFullscreenExtensionInfo = info;
++        ExclusiveAccessManagerJni.get()
++                .setFullscreenExtensionUrl(
++                        mExclusiveAccessManagerAndroidNativePointer, info.getUrl(), info.getName());
++    }
++
++    private void notifyWindowFullscreenState() {
++        if (!mObservingFullscreenUi || mExclusiveAccessManagerAndroidNativePointer == 0) return;
++        boolean fullscreen = mFullscreenUiModeSupplier.get();
++        if (fullscreen == mReportedFullscreenUi) return;
++        mReportedFullscreenUi = fullscreen;
++        ExclusiveAccessManagerJni.get()
++                .onWindowFullscreenStateChanged(mExclusiveAccessManagerAndroidNativePointer);
+     }
+
+     public void initialize(
+@@ -119,6 +171,10 @@
+         mExclusiveAccessManagerAndroidNativePointer =
+                 ExclusiveAccessManagerJni.get()
+                         .init(this, windowAndroid, mFullscreenManager, activityTabProvider);
++        // Publish the trusted caller before an initial fullscreen notice is generated.
++        notifyFullscreenExtensionUrl();
++        // Synchronize a browser request applied before this native manager existed.
++        notifyWindowFullscreenState();
+
+         for (TabModel model : modelSelector.getModels()) {
+             model.addObserver(mTabModelObserver);
+@@ -167,15 +223,54 @@
+         }
+         mPendingFullscreen = true;
+         mLatestFullscreenOptions = options;
++        mLatestFullscreenTab = null;
++        mLatestFullscreenWebContents = null;
+     }
+
+     public NonNullObservableSupplier<Boolean> getExclusiveAccessStateSupplier() {
+         return mExclusiveAccessState;
+     }
+
++    private void clearFullscreenOptions() {
++        mFullscreenRequestGeneration++;
++        mPendingFullscreen = false;
++        mLatestFullscreenOptions = null;
++        mLatestFullscreenTab = null;
++        mLatestFullscreenWebContents = null;
++    }
++
++    private void clearFullscreenOptionsForTab(Tab tab) {
++        if (mLatestFullscreenTab == tab) clearFullscreenOptions();
++    }
++
++    // Called only by the native context's accepted DOM-entry callback.
++    long onFullscreenRequestAccepted(Tab tab, FullscreenOptions options) {
++        WebContents webContents = tab.getWebContents();
++        if (mLatestFullscreenTab == tab
++                && mLatestFullscreenWebContents == webContents
++                && mLatestFullscreenOptions != null
++                && mLatestFullscreenOptions.equals(options)) {
++            return mFullscreenRequestGeneration;
++        }
++        mFullscreenRequestGeneration++;
++        mPendingFullscreen = false;
++        mLatestFullscreenOptions = options;
++        mLatestFullscreenTab = tab;
++        mLatestFullscreenWebContents = webContents;
++        return mFullscreenRequestGeneration;
++    }
++
++    // Retire the accepted snapshot before fullscreen observers can reenter.
++    void onFullscreenRequestExited(Tab tab, long requestGeneration) {
++        if (mLatestFullscreenTab == tab
++                && mFullscreenRequestGeneration == requestGeneration) {
++            clearFullscreenOptions();
++        }
++    }
++
+     private void deactivateTab(Tab tab) {
+-        if (mExclusiveAccessManagerAndroidNativePointer == 0) return;
+-        mLatestFullscreenOptions = null;
++        clearFullscreenOptionsForTab(tab);
++        if (mExclusiveAccessManagerAndroidNativePointer == 0) return;
+         ExclusiveAccessManagerJni.get()
+                 .onTabDeactivated(
+                         mExclusiveAccessManagerAndroidNativePointer, tab.getWebContents());
+@@ -206,8 +301,6 @@
+     public void enterFullscreenModeForTab(
+             RenderFrameHost renderFrameHost, FullscreenOptions options) {
+         if (mExclusiveAccessManagerAndroidNativePointer == 0) return;
+-        if (mLatestFullscreenOptions != null && mLatestFullscreenOptions.equals(options)) return;
+-        mLatestFullscreenOptions = options;
+         ExclusiveAccessManagerJni.get()
+                 .enterFullscreenModeForTab(
+                         mExclusiveAccessManagerAndroidNativePointer,
+@@ -223,16 +316,18 @@
+      * @param webContents exit requester
+      */
+     public void exitFullscreenModeForTab(@Nullable WebContents webContents) {
+-        if (mExclusiveAccessManagerAndroidNativePointer == 0) return;
+-        mLatestFullscreenOptions = null;
++        if (webContents != null && webContents == mLatestFullscreenWebContents) {
++            clearFullscreenOptions();
++        }
++        if (mExclusiveAccessManagerAndroidNativePointer == 0) return;
+         ExclusiveAccessManagerJni.get()
+                 .exitFullscreenModeForTab(mExclusiveAccessManagerAndroidNativePointer, webContents);
+     }
+
+     /** Force exit of all exclusive access controllers */
+     public void exitExclusiveAccess() {
+-        if (mExclusiveAccessManagerAndroidNativePointer == 0) return;
+-        mLatestFullscreenOptions = null;
++        clearFullscreenOptions();
++        if (mExclusiveAccessManagerAndroidNativePointer == 0) return;
+         ExclusiveAccessManagerJni.get()
+                 .exitExclusiveAccess(mExclusiveAccessManagerAndroidNativePointer);
+         // Marking state in case of enabled locks without fullscreen
+@@ -388,7 +483,7 @@
+         if (mExclusiveAccessManagerAndroidNativePointer == 0) return;
+
+         if (isInDesktopWindow && mFullscreenManager.getPersistentFullscreenMode()) {
+-            mLatestFullscreenOptions = null;
++            clearFullscreenOptions();
+             // Exiting when fullscreen should be lost
+             ExclusiveAccessManagerJni.get()
+                     .exitExclusiveAccess(mExclusiveAccessManagerAndroidNativePointer);
+@@ -398,6 +493,11 @@
+     /** Cleanup function which should be called when owning object is destroyed. */
+     @Override
+     public void destroy() {
++        clearFullscreenOptions();
++        mObservingFullscreenUi = false;
++        mBrowserFullscreenExtensionInfoSupplier.removeObserver(
++                mBrowserFullscreenExtensionInfoObserver);
++        mFullscreenUiModeSupplier.removeObserver(mFullscreenUiModeObserver);
+         if (mExclusiveAccessManagerAndroidNativePointer != 0) {
+             ExclusiveAccessManagerJni.get().destroy(mExclusiveAccessManagerAndroidNativePointer);
+             mExclusiveAccessManagerAndroidNativePointer = 0;
+@@ -457,6 +557,13 @@
+
+         boolean isPointerLocked(long nativeExclusiveAccessManagerAndroid);
+
++        void setFullscreenExtensionUrl(
++                long nativeExclusiveAccessManagerAndroid,
++                @JniType("std::string") String extensionUrl,
++                @JniType("std::string") String extensionName);
++
++        void onWindowFullscreenStateChanged(long nativeExclusiveAccessManagerAndroid);
++
+         void exitExclusiveAccess(long nativeExclusiveAccessManagerAndroid);
+
+         boolean hasExclusiveAccess(long nativeExclusiveAccessManagerAndroid);

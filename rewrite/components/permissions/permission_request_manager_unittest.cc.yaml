@@ -1,0 +1,224 @@
+# Android split pane request ownership and dialog placement.
+substitutions:
+- description: use actual native tab callback contracts in Android permission regressions
+  regex:
+    re_pattern: \#include\ "components/prefs/testing_pref_service\.h"
+    replace: '#include "components/prefs/testing_pref_service.h"
+
+      #if BUILDFLAG(IS_ANDROID)
+
+      #include "components/tabs/public/mock_tab_interface.h"
+
+      #endif'
+- description: cover Android permission native activation and OS visibility transitions
+  regex:
+    re_pattern: '\#if\ BUILDFLAG\(IS_ANDROID\)\
+
+      TEST_F\(PermissionRequestManagerTest,\ TwoRequestsTabSwitch\)\ \{'
+    replace: "#if BUILDFLAG(IS_ANDROID)\n// Keep the native getter stale during WillDeactivate, as the Java model does.\nclass PermissionRequestManagerAndroidTabTest\n    : public PermissionRequestManagerTest {\n protected:\n  void SetUp() override {\n    PermissionRequestManagerTest::SetUp();\n    ON_CALL(tab_, IsActivated()).WillByDefault(testing::ReturnPointee(&active_));\n    ON_CALL(tab_, RegisterDidActivate(testing::_))\n        .WillByDefault([this](tabs::TabInterface::DidActivateCallback callback) {\n          return activated_.Add(std::move(callback));\n        });\n    ON_CALL(tab_, RegisterWillDeactivate(testing::_))\n        .WillByDefault([this](tabs::TabInterface::WillDeactivateCallback callback) {\n          return deactivated_.Add(std::move(callback));\n        });\n  }\n\n  void AdoptTab() { manager_->AdoptTabInterfaceIfNeeded(&tab_); }\n  void SetModelActive(bool active) {\n    manager_->OnAndroidTabModelActiveChanged(active);\n  }\n  void ActivateTab() {\n    active_ = true;\n    activated_.Notify(&tab_);\n  }\n  void DeactivateTab() {\n    deactivated_.Notify(&tab_);\n    active_ = false;\n  }\n\n  bool active_ = true;\n  tabs::MockTabInterface tab_;\n  base::RepeatingCallbackList<void(tabs::TabInterface*)> activated_;\n  base::RepeatingCallbackList<void(tabs::TabInterface*)> deactivated_;\n};\n\nTEST_F(PermissionRequestManagerAndroidTabTest, PassiveVisiblePaneWaitsForActivation) {\n  active_ = false;\n  AdoptTab();\n  auto state = CreateAndAddRequest(request1_.first, false, 0);\n  EXPECT_FALSE(state->finished);\n\n  ActivateTab();\n  WaitForBubbleToBeShown();\n  EXPECT_TRUE(prompt_factory_->is_visible());\n  Accept();\n  EXPECT_TRUE(state->granted);\n}\n\nTEST_F(PermissionRequestManagerAndroidTabTest, HiddenCurrentModelWaitsForVisibility) {\n  web_contents()->WasHidden();\n  AdoptTab();\n  auto state = CreateAndAddRequest(request1_.first, false, 0);\n\n  web_contents()->WasShown();\n  WaitForBubbleToBeShown();\n  EXPECT_TRUE(prompt_factory_->is_visible());\n  EXPECT_FALSE(state->finished);\n}\n\nTEST_F(PermissionRequestManagerAndroidTabTest, DeactivationRetiresPromptButKeepsRequest) {\n  AdoptTab();\n  auto state = CreateAndAddRequest(request1_.first, true, 1);\n\n  DeactivateTab();\n  EXPECT_FALSE(prompt_factory_->is_visible());\n  EXPECT_FALSE(state->finished);\n  // Visibility cannot reactivate a passive split pane with native observers.\n  manager_->OnVisibilityChanged(content::Visibility::VISIBLE);\n  WaitForBubbleToBeShown();\n  EXPECT_FALSE(prompt_factory_->is_visible());\n\n  ActivateTab();\n  WaitForBubbleToBeShown();\n  EXPECT_TRUE(prompt_factory_->is_visible());\n  Accept();\n  EXPECT_TRUE(state->granted);\n}\n\nTEST_F(PermissionRequestManagerAndroidTabTest, ModelDeselectionRetiresPromptWithTabStillCurrent) {\n  AdoptTab();\n  auto state = CreateAndAddRequest(request1_.first, true, 1);\n  SetModelActive(false);\n  EXPECT_TRUE(tab_.IsActivated());\n  EXPECT_FALSE(prompt_factory_->is_visible());\n  EXPECT_FALSE(state->finished);\n\n  // Neither native activation nor visibility can bypass the model latch.\n  ActivateTab();\n  manager_->OnVisibilityChanged(content::Visibility::VISIBLE);\n  WaitForBubbleToBeShown();\n  EXPECT_FALSE(prompt_factory_->is_visible());\n  SetModelActive(true);\n  WaitForBubbleToBeShown();\n  EXPECT_TRUE(prompt_factory_->is_visible());\n  EXPECT_EQ(2, prompt_factory_->show_count());\n}\n\nTEST_F(PermissionRequestManagerAndroidTabTest, ModelReactivationStillWaitsForVisibleContents) {\n  AdoptTab();\n  auto state = CreateAndAddRequest(request1_.first, true, 1);\n  web_contents()->WasHidden();\n  SetModelActive(false);\n  EXPECT_FALSE(prompt_factory_->is_visible());\n  SetModelActive(true);\n  WaitForBubbleToBeShown();\n  EXPECT_FALSE(prompt_factory_->is_visible());\n  web_contents()->WasShown();\n  WaitForBubbleToBeShown();\n  EXPECT_TRUE(prompt_factory_->is_visible());\n  EXPECT_FALSE(state->finished);\n}\n\nTEST_F(PermissionRequestManagerAndroidTabTest, OsPermissionHidePreservesNativeResult) {\n  AdoptTab();\n  auto state = CreateAndAddRequest(request1_.first, true, 1);\n\n  web_contents()->WasHidden();\n  EXPECT_TRUE(prompt_factory_->is_visible());\n  Accept();\n  EXPECT_TRUE(state->granted);\n}\n\nTEST_F(PermissionRequestManagerAndroidTabTest, DeactivationAfterOsHideRetiresPrompt) {\n  AdoptTab();\n  auto state = CreateAndAddRequest(request1_.first, true, 1);\n  web_contents()->WasHidden();\n  EXPECT_TRUE(prompt_factory_->is_visible());\n\n  DeactivateTab();\n  EXPECT_FALSE(prompt_factory_->is_visible());\n  EXPECT_FALSE(state->finished);\n  ActivateTab();\n  WaitForBubbleToBeShown();\n  EXPECT_FALSE(prompt_factory_->is_visible());\n  web_contents()->WasShown();\n  WaitForBubbleToBeShown();\n  EXPECT_TRUE(prompt_factory_->is_visible());\n}\n\nTEST_F(PermissionRequestManagerTest, TwoRequestsTabSwitch) {"
+- description: Format modified Android split dialog code
+  regex:
+    re_pattern: '\ \ \ \ :\ public\ PermissionRequestManagerTest\ \{\
+
+      \ protected:\
+
+      \ \ void\ SetUp\(\)\ override\ \{\
+
+      \ \ \ \ PermissionRequestManagerTest::SetUp\(\);\
+
+      \ \ \ \ ON_CALL\(tab_,\ IsActivated\(\)\)\.WillByDefault\(testing::ReturnPointee\(\&active_\)\);\
+
+      \ \ \ \ ON_CALL\(tab_,\ RegisterDidActivate\(testing::_\)\)\
+
+      \ \ \ \ \ \ \ \ \.WillByDefault\(\[this\]\(tabs::TabInterface::DidActivateCallback\ callback\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ return\ activated_\.Add\(std::move\(callback\)\);\
+
+      \ \ \ \ \ \ \ \ \}\);\
+
+      \ \ \ \ ON_CALL\(tab_,\ RegisterWillDeactivate\(testing::_\)\)\
+
+      \ \ \ \ \ \ \ \ \.WillByDefault\(\[this\]\(tabs::TabInterface::WillDeactivateCallback\ callback\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ return\ deactivated_\.Add\(std::move\(callback\)\);\
+
+      \ \ \ \ \ \ \ \ \}\);\
+
+      \ \ \}\
+
+      \
+
+      \ \ void\ AdoptTab\(\)\ \{\ manager_\->AdoptTabInterfaceIfNeeded\(\&tab_\);\ \}\
+
+      \ \ void\ SetModelActive\(bool\ active\)\ \{\
+
+      '
+    replace: "    : public PermissionRequestManagerTest {\n protected:\n  void SetUp() override {\n    PermissionRequestManagerTest::SetUp();\n    ON_CALL(tab_, IsActivated())\n        .WillByDefault(testing::ReturnPointee(&active_));\n    ON_CALL(tab_, RegisterDidActivate(testing::_))\n        .WillByDefault(\n            [this](tabs::TabInterface::DidActivateCallback callback) {\n              return activated_.Add(std::move(callback));\n            });\n    ON_CALL(tab_, RegisterWillDeactivate(testing::_))\n        .WillByDefault(\n            [this](tabs::TabInterface::WillDeactivateCallback callback) {\n              return deactivated_.Add(std::move(callback));\n            });\n  }\n\n  void AdoptTab() { manager_->AdoptTabInterfaceIfNeeded(&tab_); }\n  void SetModelActive(bool active) {\n"
+- description: Format modified Android split dialog code
+  regex:
+    re_pattern: '\ \ base::RepeatingCallbackList<void\(tabs::TabInterface\*\)>\ activated_;\
+
+      \ \ base::RepeatingCallbackList<void\(tabs::TabInterface\*\)>\ deactivated_;\
+
+      \};\
+
+      \
+
+      TEST_F\(PermissionRequestManagerAndroidTabTest,\ PassiveVisiblePaneWaitsForActivation\)\ \{\
+
+      \ \ active_\ =\ false;\
+
+      \ \ AdoptTab\(\);\
+
+      \ \ auto\ state\ =\ CreateAndAddRequest\(request1_\.first,\ false,\ 0\);\
+
+      \ \ EXPECT_FALSE\(state\->finished\);\
+
+      '
+    replace: "  base::RepeatingCallbackList<void(tabs::TabInterface*)> activated_;\n  base::RepeatingCallbackList<void(tabs::TabInterface*)> deactivated_;\n};\n\nTEST_F(PermissionRequestManagerAndroidTabTest,\n       PassiveVisiblePaneWaitsForActivation) {\n  active_ = false;\n  AdoptTab();\n  auto state = CreateAndAddRequest(request1_.first, false, 0);\n  EXPECT_FALSE(state->finished);\n"
+- description: Format modified Android split dialog code
+  regex:
+    re_pattern: '\ \ Accept\(\);\
+
+      \ \ EXPECT_TRUE\(state\->granted\);\
+
+      \}\
+
+      \
+
+      TEST_F\(PermissionRequestManagerAndroidTabTest,\ HiddenCurrentModelWaitsForVisibility\)\ \{\
+
+      \ \ web_contents\(\)\->WasHidden\(\);\
+
+      \ \ AdoptTab\(\);\
+
+      \ \ auto\ state\ =\ CreateAndAddRequest\(request1_\.first,\ false,\ 0\);\
+
+      \
+
+      '
+    replace: "  Accept();\n  EXPECT_TRUE(state->granted);\n}\n\nTEST_F(PermissionRequestManagerAndroidTabTest,\n       HiddenCurrentModelWaitsForVisibility) {\n  web_contents()->WasHidden();\n  AdoptTab();\n  auto state = CreateAndAddRequest(request1_.first, false, 0);\n\n"
+- description: Format modified Android split dialog code
+  regex:
+    re_pattern: '\ \ EXPECT_TRUE\(prompt_factory_\->is_visible\(\)\);\
+
+      \ \ EXPECT_FALSE\(state\->finished\);\
+
+      \}\
+
+      \
+
+      TEST_F\(PermissionRequestManagerAndroidTabTest,\ DeactivationRetiresPromptButKeepsRequest\)\ \{\
+
+      \ \ AdoptTab\(\);\
+
+      \ \ auto\ state\ =\ CreateAndAddRequest\(request1_\.first,\ true,\ 1\);\
+
+      \
+
+      \ \ DeactivateTab\(\);\
+
+      '
+    replace: "  EXPECT_TRUE(prompt_factory_->is_visible());\n  EXPECT_FALSE(state->finished);\n}\n\nTEST_F(PermissionRequestManagerAndroidTabTest,\n       DeactivationRetiresPromptButKeepsRequest) {\n  AdoptTab();\n  auto state = CreateAndAddRequest(request1_.first, true, 1);\n\n  DeactivateTab();\n"
+- description: Format modified Android split dialog code
+  regex:
+    re_pattern: '\ \ Accept\(\);\
+
+      \ \ EXPECT_TRUE\(state\->granted\);\
+
+      \}\
+
+      \
+
+      TEST_F\(PermissionRequestManagerAndroidTabTest,\ ModelDeselectionRetiresPromptWithTabStillCurrent\)\ \{\
+
+      \ \ AdoptTab\(\);\
+
+      \ \ auto\ state\ =\ CreateAndAddRequest\(request1_\.first,\ true,\ 1\);\
+
+      \ \ SetModelActive\(false\);\
+
+      \ \ EXPECT_TRUE\(tab_\.IsActivated\(\)\);\
+
+      '
+    replace: "  Accept();\n  EXPECT_TRUE(state->granted);\n}\n\nTEST_F(PermissionRequestManagerAndroidTabTest,\n       ModelDeselectionRetiresPromptWithTabStillCurrent) {\n  AdoptTab();\n  auto state = CreateAndAddRequest(request1_.first, true, 1);\n  SetModelActive(false);\n  EXPECT_TRUE(tab_.IsActivated());\n"
+- description: Format modified Android split dialog code
+  regex:
+    re_pattern: '\ \ EXPECT_TRUE\(prompt_factory_\->is_visible\(\)\);\
+
+      \ \ EXPECT_EQ\(2,\ prompt_factory_\->show_count\(\)\);\
+
+      \}\
+
+      \
+
+      TEST_F\(PermissionRequestManagerAndroidTabTest,\ ModelReactivationStillWaitsForVisibleContents\)\ \{\
+
+      \ \ AdoptTab\(\);\
+
+      \ \ auto\ state\ =\ CreateAndAddRequest\(request1_\.first,\ true,\ 1\);\
+
+      \ \ web_contents\(\)\->WasHidden\(\);\
+
+      \ \ SetModelActive\(false\);\
+
+      '
+    replace: "  EXPECT_TRUE(prompt_factory_->is_visible());\n  EXPECT_EQ(2, prompt_factory_->show_count());\n}\n\nTEST_F(PermissionRequestManagerAndroidTabTest,\n       ModelReactivationStillWaitsForVisibleContents) {\n  AdoptTab();\n  auto state = CreateAndAddRequest(request1_.first, true, 1);\n  web_contents()->WasHidden();\n  SetModelActive(false);\n"
+- description: Format modified Android split dialog code
+  regex:
+    re_pattern: '\ \ EXPECT_TRUE\(prompt_factory_\->is_visible\(\)\);\
+
+      \ \ EXPECT_FALSE\(state\->finished\);\
+
+      \}\
+
+      \
+
+      TEST_F\(PermissionRequestManagerAndroidTabTest,\ OsPermissionHidePreservesNativeResult\)\ \{\
+
+      \ \ AdoptTab\(\);\
+
+      \ \ auto\ state\ =\ CreateAndAddRequest\(request1_\.first,\ true,\ 1\);\
+
+      \
+
+      \ \ web_contents\(\)\->WasHidden\(\);\
+
+      '
+    replace: "  EXPECT_TRUE(prompt_factory_->is_visible());\n  EXPECT_FALSE(state->finished);\n}\n\nTEST_F(PermissionRequestManagerAndroidTabTest,\n       OsPermissionHidePreservesNativeResult) {\n  AdoptTab();\n  auto state = CreateAndAddRequest(request1_.first, true, 1);\n\n  web_contents()->WasHidden();\n"
+- description: Format modified Android split dialog code
+  regex:
+    re_pattern: '\ \ Accept\(\);\
+
+      \ \ EXPECT_TRUE\(state\->granted\);\
+
+      \}\
+
+      \
+
+      TEST_F\(PermissionRequestManagerAndroidTabTest,\ DeactivationAfterOsHideRetiresPrompt\)\ \{\
+
+      \ \ AdoptTab\(\);\
+
+      \ \ auto\ state\ =\ CreateAndAddRequest\(request1_\.first,\ true,\ 1\);\
+
+      \ \ web_contents\(\)\->WasHidden\(\);\
+
+      \ \ EXPECT_TRUE\(prompt_factory_\->is_visible\(\)\);\
+
+      '
+    replace: "  Accept();\n  EXPECT_TRUE(state->granted);\n}\n\nTEST_F(PermissionRequestManagerAndroidTabTest,\n       DeactivationAfterOsHideRetiresPrompt) {\n  AdoptTab();\n  auto state = CreateAndAddRequest(request1_.first, true, 1);\n  web_contents()->WasHidden();\n  EXPECT_TRUE(prompt_factory_->is_visible());\n"
+- description: Retain existing Android permission-manager enum fixtures using the native selector contract instead of prediction
+    message generation.
+  regex:
+    pattern: '#include "components/permissions/prediction_service/prediction_service_messages.pb.h"
+
+      '
+    replace: '#if !BUILDFLAG(IS_ANDROID)
+
+      #include "components/permissions/prediction_service/prediction_service_messages.pb.h"
+
+      #endif  // !BUILDFLAG(IS_ANDROID)
+
+      '
+  count: 1

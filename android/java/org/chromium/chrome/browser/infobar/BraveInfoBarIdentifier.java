@@ -14,9 +14,7 @@ import java.lang.annotation.RetentionPolicy;
 
 @IntDef({
     BraveInfoBarIdentifier.INVALID,
-    BraveInfoBarIdentifier.BRAVE_CONFIRM_P3A_INFOBAR_DELEGATE,
     BraveInfoBarIdentifier.SYNC_CANNOT_RUN_INFOBAR,
-    BraveInfoBarIdentifier.WEB_DISCOVERY_INFOBAR_DELEGATE,
     BraveInfoBarIdentifier.BRAVE_SYNC_ACCOUNT_DELETED_INFOBAR,
     BraveInfoBarIdentifier.SEARCH_RESULT_AD_CLICKED_INFOBAR_DELEGATE,
     BraveInfoBarIdentifier.NEW_TAB_TAKEOVER_INFOBAR_DELEGATE
@@ -24,12 +22,10 @@ import java.lang.annotation.RetentionPolicy;
 @Retention(RetentionPolicy.SOURCE)
 public @interface BraveInfoBarIdentifier {
     int INVALID = -1;
-    int BRAVE_CONFIRM_P3A_INFOBAR_DELEGATE = 500;
     // int WAYBACK_MACHINE_INFOBAR_DELEGATE = 502; - deprecated
     //  int SYNC_V2_MIGRATE_INFOBAR_DELEGATE = 503; - deprecated
     //  int ANDROID_SYSTEM_SYNC_DISABLED_INFOBAR = 504; - deprecated
     int SYNC_CANNOT_RUN_INFOBAR = 505;
-    int WEB_DISCOVERY_INFOBAR_DELEGATE = 506;
     int BRAVE_SYNC_ACCOUNT_DELETED_INFOBAR = 507;
     int SEARCH_RESULT_AD_CLICKED_INFOBAR_DELEGATE = 510;
     int NEW_TAB_TAKEOVER_INFOBAR_DELEGATE = 511;

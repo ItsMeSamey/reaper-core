@@ -6,6 +6,7 @@
 #ifndef BRAVE_BROWSER_UI_SPEEDREADER_SPEEDREADER_TAB_HELPER_H_
 #define BRAVE_BROWSER_UI_SPEEDREADER_SPEEDREADER_TAB_HELPER_H_
 
+#include <cstdint>
 #include <memory>
 #include <string>
 
@@ -27,12 +28,6 @@ namespace content {
 class NavigationHandle;
 class WebContents;
 }  // namespace content
-
-#if BUILDFLAG(IS_ANDROID)
-namespace ui {
-class ViewAndroid;
-}
-#endif
 
 namespace speedreader {
 
@@ -85,6 +80,19 @@ class SpeedreaderTabHelper
   // In Speedreader mode shows bubble. In Reader mode toggles state.
   void ProcessIconClick();
 
+#if BUILDFLAG(IS_ANDROID)
+  // Values match SpeedreaderBridge.State, queried whenever Android opens its
+  // menu.
+  enum class AndroidReaderState : int {
+    kUnavailable = 0,
+    kOriginal = 1,
+    kBusy = 2,
+    kReader = 3,
+  };
+  AndroidReaderState GetAndroidReaderState() const;
+  bool ToggleReaderModeForAndroid();
+#endif
+
   DistillState PageDistillState() const { return distill_state_; }
 
   // Sets the distill state directly, bypassing the state machine that
@@ -115,7 +123,9 @@ class SpeedreaderTabHelper
   void OnShowOriginalPage() override;
   void OnTtsPlayPause(int index) override;
 
+#if !BUILDFLAG(IS_ANDROID)
   void OnToolbarStateChanged(mojom::MainButtonType button);
+#endif
 
  private:
   friend class content::WebContentsUserData<SpeedreaderTabHelper>;
@@ -186,12 +196,18 @@ class SpeedreaderTabHelper
                       bool no_reload = false);
 
 #if BUILDFLAG(IS_ANDROID)
-  friend class ui::ViewAndroid;
-  // Non-JNI equivalent of ui::EventForwarder::OnGestureEvent
-  bool SendGestureEvent(ui::ViewAndroid* view,
-                        int type,
-                        int64_t time_ms,
-                        float scale);
+  friend class AndroidSpeedreaderTabHelperTest;
+  void OnAndroidDocumentSource(uint64_t generation,
+                               bool success,
+                               std::string html);
+  void FinishAndroidUINotification();
+  bool android_notifying_observers_ = false;
+  bool android_ui_update_pending_ = false;
+  // Cancel stale extraction without invalidating unrelated weak callbacks.
+  uint64_t android_request_generation_ = 0;
+  // Distinguishes nested observer-driven transitions in the same document.
+  uint64_t android_transition_generation_ = 0;
+  bool android_manual_distill_pending_ = false;
 #endif
   bool is_visible_ = false;
 

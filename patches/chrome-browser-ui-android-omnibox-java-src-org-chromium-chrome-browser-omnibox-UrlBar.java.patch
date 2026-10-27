@@ -1,0 +1,206 @@
+diff --git a/chrome/browser/ui/android/omnibox/java/src/org/chromium/chrome/browser/omnibox/UrlBar.java b/chrome/browser/ui/android/omnibox/java/src/org/chromium/chrome/browser/omnibox/UrlBar.java
+--- a/chrome/browser/ui/android/omnibox/java/src/org/chromium/chrome/browser/omnibox/UrlBar.java
++++ b/chrome/browser/ui/android/omnibox/java/src/org/chromium/chrome/browser/omnibox/UrlBar.java
+@@ -119,8 +119,6 @@
+     private @Nullable Runnable mDetectAndNotifyOnTextWrappingChanges;
+     private boolean mWrapDetectionScheduled;
+     private @Nullable Runnable mManageSearchEnginesCallback;
+-    private boolean mShowAiMode;
+-    private @Nullable Callback<Boolean> mShowAiModeCallback;
+     private @Nullable UrlBarContextMenuHelper mContextMenuHelper;
+ 
+     private final Rect mClipBounds = new Rect();
+@@ -203,7 +201,8 @@
+         /**
+          * @return The view to be focused on a backward focus traversal.
+          */
+-        @Nullable View getViewForUrlBackFocus();
++        @Nullable
++        View getViewForUrlBackFocus();
+ 
+         /**
+          * @return Whether the keyboard should be allowed to learn from the user input.
+@@ -218,11 +217,6 @@
+ 
+         /** Called to notify that UrlBar has been touched after focus. */
+         void onTouchAfterFocus();
+-
+-        /** Returns whether showing the keyboard should be suppressed. */
+-        default boolean isKeyboardSuppressed() {
+-            return false;
+-        }
+ 
+         /**
+          * Called when the 'Paste and go' action is performed.
+@@ -237,6 +231,20 @@
+          * @param text The text to be shared.
+          */
+         default void shareText(String text) {}
++
++        /** Returns the UrlBarData representing the current input session. */
++        default UrlBarData getUrlBarDataForCurrentInput() {
++            return UrlBarData.EMPTY;
++        }
++    }
++
++    /** Delegate that provides the additional functionality to the textual context menus. */
++    interface UrlBarTextContextMenuDelegate {
++        /**
++         * @return The text to be pasted into the UrlBar.
++         */
++        @Nullable
++        String getTextToPaste();
+ 
+         /**
+          * Gets potential replacement text to be used instead of the current selected text for
+@@ -246,33 +254,8 @@
+          * @param selection The current text selection range in the URL bar.
+          * @return The text to be cut/copied instead of the currently selected text.
+          */
+-        default @Nullable String getReplacementCutCopyText(
+-                String currentText, TextSelection selection) {
+-            return null;
+-        }
+-
+-        /** Returns the UrlBarData representing the current input session. */
+-        default UrlBarData getUrlBarDataForCurrentInput() {
+-            return UrlBarData.EMPTY;
+-        }
+-    }
+-
+-    /** Delegate that provides the additional functionality to the textual context menus. */
+-    interface UrlBarTextContextMenuDelegate {
+-        /**
+-         * @return The text to be pasted into the UrlBar.
+-         */
+-        @Nullable String getTextToPaste();
+-
+-        /**
+-         * Gets potential replacement text to be used instead of the current selected text for
+-         * cut/copy actions. If null is returned, the existing text will be cut or copied.
+-         *
+-         * @param currentText The current displayed text.
+-         * @param selection The current text selection range in the URL bar.
+-         * @return The text to be cut/copied instead of the currently selected text.
+-         */
+-        @Nullable String getReplacementCutCopyText(String currentText, TextSelection selection);
++        @Nullable
++        String getReplacementCutCopyText(String currentText, TextSelection selection);
+     }
+ 
+     public UrlBar(Context context, AttributeSet attrs) {
+@@ -372,7 +355,6 @@
+         mTextContextMenuDelegate = null;
+         mTextChangeListener = null;
+         mManageSearchEnginesCallback = null;
+-        mShowAiModeCallback = null;
+     }
+ 
+     /**
+@@ -396,16 +378,6 @@
+     /** Set the callback to trigger "Manage search engines" settings shortcut. */
+     public void setManageSearchEnginesCallback(@Nullable Runnable callback) {
+         mManageSearchEnginesCallback = callback;
+-    }
+-
+-    /** Set the state of "Always Show AI Mode" option. */
+-    public void setShowAiMode(boolean showAiMode) {
+-        mShowAiMode = showAiMode;
+-    }
+-
+-    /** Set the callback when "Always Show AI Mode" is toggled. */
+-    public void setShowAiModeCallback(@Nullable Callback<Boolean> callback) {
+-        mShowAiModeCallback = callback;
+     }
+ 
+     @Override
+@@ -574,7 +546,6 @@
+         if (DEBUG) Log.i(TAG, "onWindowFocusChanged: " + hasWindowFocus);
+         updateCursorVisibility();
+         if (!hasWindowFocus || !isFocused()) return;
+-        if (mUrlBarDelegate != null && mUrlBarDelegate.isKeyboardSuppressed()) return;
+ 
+         // Without the call to post(..), the keyboard was not getting shown when the
+         // window regained focus despite this being the final call in the view system
+@@ -771,8 +742,6 @@
+         return result;
+     }
+ 
+-
+-
+     /**
+      * If the direction of the URL has changed, update mUrlDirection and notify the
+      * UrlDirectionListeners.
+@@ -925,13 +894,6 @@
+             int selEnd = Math.max(getSelectionStart(), getSelectionEnd());
+             if (selStart != selEnd && selStart >= 0) {
+                 getText().delete(selStart, selEnd);
+-            }
+-            return true;
+-        }
+-
+-        if (id == R.id.url_bar_always_show_ai_mode) {
+-            if (mShowAiModeCallback != null) {
+-                mShowAiModeCallback.onResult(!mShowAiMode);
+             }
+             return true;
+         }
+@@ -1034,28 +996,6 @@
+         // Restore backwards selection if necessary.
+         if (start > end) setSelection(start, end);
+ 
+-        if (mShowAiModeCallback != null) {
+-            if (menu.findItem(R.id.url_bar_always_show_ai_mode) == null) {
+-                MenuItem alwaysShowItem =
+-                        menu.add(
+-                                Menu.NONE,
+-                                R.id.url_bar_always_show_ai_mode,
+-                                Menu.CATEGORY_SECONDARY,
+-                                getContext().getString(R.string.always_show_ai_mode));
+-                alwaysShowItem.setCheckable(true);
+-                alwaysShowItem.setChecked(mShowAiMode);
+-                alwaysShowItem.setOnMenuItemClickListener(
+-                        clickedItem -> {
+-                            boolean newCheckedState = !clickedItem.isChecked();
+-                            clickedItem.setChecked(newCheckedState);
+-                            if (mShowAiModeCallback != null) {
+-                                mShowAiModeCallback.onResult(newCheckedState);
+-                            }
+-                            return true;
+-                        });
+-            }
+-        }
+-
+         if (getSelectionStart() != getSelectionEnd()
+                 && menu.findItem(R.id.url_bar_delete) == null) {
+             MenuItem copyItem = menu.findItem(android.R.id.copy);
+@@ -1383,7 +1323,8 @@
+      * @return A prefix of getText(), up to and including the last visible character.
+      */
+     @VisibleForTesting
+-    @Nullable CharSequence calculateVisibleHint() {
++    @Nullable
++    CharSequence calculateVisibleHint() {
+         try (TimingMetric t = TimingMetric.shortUptime("Omnibox.CalculateVisibleHint.Duration")) {
+             Editable url = getText();
+             int measuredWidth = getVisibleMeasuredViewportWidth();
+@@ -1834,7 +1775,8 @@
+         public static final BoundsEllipsisSpan INSTANCE = new BoundsEllipsisSpan();
+     }
+ 
+-    /* package */ @Nullable Runnable getManageSearchEnginesCallback() {
++    /* package */ @Nullable
++    Runnable getManageSearchEnginesCallback() {
+         return mManageSearchEnginesCallback;
+     }
+ 
+@@ -1862,7 +1804,8 @@
+         mVisibleTextPrefixHint = hintForTesting;
+     }
+ 
+-    @Nullable UrlBarContextMenuHelper getContextMenuHelperForTesting() {
++    @Nullable
++    UrlBarContextMenuHelper getContextMenuHelperForTesting() {
+         return mContextMenuHelper;
+     }
+ }

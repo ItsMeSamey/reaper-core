@@ -3,27 +3,41 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+#include "build/build_config.h"
+
 #include "brave/browser/brave_browser_main_extra_parts.h"
 
 #include "base/metrics/histogram_macros.h"
 #include "brave/browser/brave_browser_process_impl.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/misc_metrics/process_misc_metrics.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/misc_metrics/uptime_monitor_impl.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_shields/core/browser/brave_shields_p3a.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/p3a/p3a_service.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "components/metrics/metrics_pref_names.h"
 #include "components/prefs/pref_service.h"
 #include "services/network/public/cpp/shared_url_loader_factory.h"
 
 #if !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/importer/brave_importer_p3a.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/p3a/p3a_core_metrics.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/ui/webui/new_tab_page/brave_new_tab_message_handler.h"
 #include "chrome/browser/first_run/first_run.h"
 #endif  // !BUILDFLAG(IS_ANDROID)
 
 #if BUILDFLAG(ENABLE_BRAVE_ADS)
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/brave_ads/analytics/p3a/brave_stats_helper.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #endif
 
 namespace {
@@ -33,6 +47,7 @@ namespace {
 // to their usage scenarios.
 //
 // For profile specific values, see browser/profiles/profile_util.cc
+#if !BUILDFLAG(IS_ANDROID)
 void RecordInitialP3AValues() {
 #if !BUILDFLAG(IS_ANDROID)
   if (first_run::IsChromeFirstRun()) {
@@ -53,6 +68,7 @@ void RecordInitialP3AValues() {
   UMA_HISTOGRAM_BOOLEAN("Brave.Core.CrashReportsEnabled",
                         crash_reports_enabled);
 }
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 }  // namespace
 
@@ -61,8 +77,10 @@ BraveBrowserMainExtraParts::BraveBrowserMainExtraParts() = default;
 BraveBrowserMainExtraParts::~BraveBrowserMainExtraParts() = default;
 
 void BraveBrowserMainExtraParts::PreProfileInit() {
+#if !BUILDFLAG(IS_ANDROID)
   // Early initialize referrals
   g_brave_browser_process->brave_referrals_service();
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 #if BUILDFLAG(ENABLE_BRAVE_ADS)
   // Initialize ads stats helper
@@ -80,6 +98,7 @@ void BraveBrowserMainExtraParts::PostBrowserStart() {
 }
 
 void BraveBrowserMainExtraParts::PreMainMessageLoopRun() {
+#if !BUILDFLAG(IS_ANDROID)
   // Disabled on mobile platforms, see for instance issues/6176
   if (g_brave_browser_process->p3a_service() != nullptr) {
     // TODO(iefremov): Maybe find a better place for this initialization.
@@ -95,6 +114,7 @@ void BraveBrowserMainExtraParts::PreMainMessageLoopRun() {
   brave::BraveWindowTracker::CreateInstance(g_browser_process->local_state());
 #endif  // !BUILDFLAG(IS_ANDROID)
   g_brave_browser_process->process_misc_metrics()->uptime_monitor()->Init();
+#endif  // !BUILDFLAG(IS_ANDROID)
 }
 
 void BraveBrowserMainExtraParts::PostDestroyThreads() {

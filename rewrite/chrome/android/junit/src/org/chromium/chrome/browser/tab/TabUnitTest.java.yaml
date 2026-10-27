@@ -1,0 +1,186 @@
+# Android real split persistence and recently-closed restoration.
+substitutions:
+- description: Exercise real TabImpl visibility ordering, repeated transitions, reentrant hiding and destruction, and lazy native initialization
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ @Test\
+
+      \ \ \ \ @SmallTest\
+
+      \ \ \ \ public\ void\ testOnAddedToTabModel_SendsDidInsertUpdate\(\)'
+    replace: "    private void prepareVisibilityTestTab() {\n        mTab = spy(mTab);\n        mTab.setNativePtrForTesting(1);\n        // Keep the production show/hide state machine, without creating a renderer.\n        doReturn(false).when(mTab).loadIfNeeded(anyBoolean());\n    }\n\n    @Test\n    @SmallTest\n    public void testVisibilityTransitionsNotifyOnceInOrder() {\n        prepareVisibilityTestTab();\n        doAnswer(invocation -> {\n                    assertFalse(mTab.isHidden());\n                    return null;\n                }).when(mNativeMock).sendDidBecomeVisibleUpdate(1);\n        doAnswer(invocation -> {\n                    assertFalse(mTab.isHidden());\n                    return null;\n                }).when(mNativeMock).sendWillBecomeHiddenUpdate(1);\n\n        mTab.show(TabSelectionType.FROM_USER);\n        mTab.show(TabSelectionType.FROM_USER);\n        mTab.hide(TabHidingType.CHANGED_TABS);\n        mTab.hide(TabHidingType.CHANGED_TABS);\n        mTab.show(TabSelectionType.FROM_USER);\n        mTab.hide(TabHidingType.CHANGED_TABS);\n\n        assertTrue(mTab.isHidden());\n        InOrder order = inOrder(mNativeMock, mObserver);\n        order.verify(mNativeMock).sendDidBecomeVisibleUpdate(1);\n        order.verify(mNativeMock).onShow(1);\n        order.verify(mObserver).onShown(mTab, TabSelectionType.FROM_USER);\n        order.verify(mNativeMock).sendWillBecomeHiddenUpdate(1);\n        order.verify(mObserver).onHidden(mTab, TabHidingType.CHANGED_TABS);\n        order.verify(mNativeMock).sendDidBecomeVisibleUpdate(1);\n        order.verify(mNativeMock).onShow(1);\n        order.verify(mObserver).onShown(mTab, TabSelectionType.FROM_USER);\n        order.verify(mNativeMock).sendWillBecomeHiddenUpdate(1);\n        order.verify(mObserver).onHidden(mTab, TabHidingType.CHANGED_TABS);\n        verify(mNativeMock, times(2)).sendDidBecomeVisibleUpdate(1);\n        verify(mNativeMock, times(2)).sendWillBecomeHiddenUpdate(1);\n        verify(mNativeMock, never()).sendDidActivateUpdate(anyLong());\n        verify(mNativeMock, never()).sendWillDeactivateUpdate(anyLong());\n    }\n\n    @Test\n    @SmallTest\n    public void testDidBecomeVisibleObserverCanHideBeforeShowWork() {\n        prepareVisibilityTestTab();\n        doAnswer(invocation -> {\n                    mTab.hide(TabHidingType.CHANGED_TABS);\n                    return null;\n                }).when(mNativeMock).sendDidBecomeVisibleUpdate(1);\n\n        mTab.show(TabSelectionType.FROM_USER);\n\n        assertTrue(mTab.isHidden());\n        verify(mNativeMock).sendDidBecomeVisibleUpdate(1);\n        verify(mNativeMock).sendWillBecomeHiddenUpdate(1);\n        verify(mTab, never()).loadIfNeeded(anyBoolean());\n        verify(mNativeMock, never()).onShow(anyLong());\n        verify(mObserver, never()).onShown(any(), anyInt());\n        verify(mObserver).onHidden(mTab, TabHidingType.CHANGED_TABS);\n    }\n\n    @Test\n    @SmallTest\n    public void testWillBecomeHiddenObserverCannotDispatchHideTwice() {\n        prepareVisibilityTestTab();\n        mTab.show(TabSelectionType.FROM_USER);\n        doAnswer(invocation -> {\n                    assertFalse(mTab.isHidden());\n                    mTab.hide(TabHidingType.CHANGED_TABS);\n                    assertFalse(mTab.isHidden());\n                    return null;\n                }).when(mNativeMock).sendWillBecomeHiddenUpdate(1);\n\n        mTab.hide(TabHidingType.CHANGED_TABS);\n\n        assertTrue(mTab.isHidden());\n        verify(mNativeMock).sendWillBecomeHiddenUpdate(1);\n        verify(mObserver).onHidden(mTab, TabHidingType.CHANGED_TABS);\n    }\n\n    @Test\n    @SmallTest\n    @EnableFeatures({ChromeFeatureList.ABORT_NAVIGATIONS_FROM_TAB_CLOSURES})\n    public void testDidBecomeVisibleObserverCanDestroyTab() {\n        prepareVisibilityTestTab();\n        doAnswer(invocation -> {\n                    mTab.clearNativePtr();\n                    return null;\n                }).when(mNativeMock).destroy(1);\n        doAnswer(invocation -> {\n                    mTab.destroy();\n                    return null;\n                }).when(mNativeMock).sendDidBecomeVisibleUpdate(1);\n\n        mTab.show(TabSelectionType.FROM_USER);\n        mTab.show(TabSelectionType.FROM_USER);\n        mTab.hide(TabHidingType.CHANGED_TABS);\n\n        assertTrue(mTab.isDestroyed());\n        verify(mNativeMock).sendDidBecomeVisibleUpdate(1);\n        verify(mNativeMock).destroy(1);\n        verify(mNativeMock, never()).onShow(anyLong());\n        verify(mNativeMock, never()).sendWillBecomeHiddenUpdate(anyLong());\n        verify(mTab, never()).loadIfNeeded(anyBoolean());\n        verify(mObserver, never()).onShown(any(), anyInt());\n    }\n\n    @Test\n    @SmallTest\n    public void testShowStillLoadsWhenNativePeerInitiallyAbsent() {\n        prepareVisibilityTestTab();\n        mTab.clearNativePtr();\n        doAnswer(invocation -> {\n                    mTab.setNativePtrForTesting(1);\n                    return false;\n                }).when(mTab).loadIfNeeded(false);\n\n        mTab.show(TabSelectionType.FROM_USER);\n\n        assertFalse(mTab.isHidden());\n        verify(mTab).loadIfNeeded(false);\n        verify(mNativeMock).onShow(1);\n        verify(mNativeMock, never()).sendDidBecomeVisibleUpdate(anyLong());\n        verify(mObserver).onShown(mTab, TabSelectionType.FROM_USER);\n    }\n\n    @Test\n    @SmallTest\n    public void testOnAddedToTabModel_SendsDidInsertUpdate()"
+- description: Activation alone must not manufacture native visibility changes
+  count: 1
+  regex:
+    re_pattern: \ \ \ \ \ \ \ \ verify\(mNativeMock\)\.sendDidActivateUpdate\(anyLong\(\)\);
+    replace: "        verify(mNativeMock).sendDidActivateUpdate(anyLong());\n        verify(mNativeMock, never()).sendDidBecomeVisibleUpdate(anyLong());\n        verify(mNativeMock, never()).sendWillBecomeHiddenUpdate(anyLong());"
+- description: Deactivation alone must leave other visible split panes visible
+  count: 1
+  regex:
+    re_pattern: \ \ \ \ \ \ \ \ verify\(mNativeMock\)\.sendWillDeactivateUpdate\(anyLong\(\)\);
+    replace: "        verify(mNativeMock).sendWillDeactivateUpdate(anyLong());\n        verify(mNativeMock, never()).sendDidBecomeVisibleUpdate(anyLong());\n        verify(mNativeMock, never()).sendWillBecomeHiddenUpdate(anyLong());"
+- description: Format modified Android split persistence Java sources
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ @Test\
+
+      \ \ \ \ @SmallTest\
+
+      \ \ \ \ public\ void\ testVisibilityTransitionsNotifyOnceInOrder\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ prepareVisibilityTestTab\(\);\
+
+      \ \ \ \ \ \ \ \ doAnswer\(invocation\ \->\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ assertFalse\(mTab\.isHidden\(\)\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ return\ null;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\)\.when\(mNativeMock\)\.sendDidBecomeVisibleUpdate\(1\);\
+
+      \ \ \ \ \ \ \ \ doAnswer\(invocation\ \->\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ assertFalse\(mTab\.isHidden\(\)\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ return\ null;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\)\.when\(mNativeMock\)\.sendWillBecomeHiddenUpdate\(1\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ mTab\.show\(TabSelectionType\.FROM_USER\);\
+
+      \ \ \ \ \ \ \ \ mTab\.show\(TabSelectionType\.FROM_USER\);\
+
+      \ \ \ \ \ \ \ \ mTab\.hide\(TabHidingType\.CHANGED_TABS\);\
+
+      '
+    replace: "    @Test\n    @SmallTest\n    public void testVisibilityTransitionsNotifyOnceInOrder() {\n        prepareVisibilityTestTab();\n        doAnswer(\n                        invocation -> {\n                            assertFalse(mTab.isHidden());\n                            return null;\n                        })\n                .when(mNativeMock)\n                .sendDidBecomeVisibleUpdate(1);\n        doAnswer(\n                        invocation -> {\n                            assertFalse(mTab.isHidden());\n                            return null;\n                        })\n                .when(mNativeMock)\n                .sendWillBecomeHiddenUpdate(1);\n\n        mTab.show(TabSelectionType.FROM_USER);\n        mTab.show(TabSelectionType.FROM_USER);\n        mTab.hide(TabHidingType.CHANGED_TABS);\n"
+- description: Format modified Android split persistence Java sources
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ @Test\
+
+      \ \ \ \ @SmallTest\
+
+      \ \ \ \ public\ void\ testDidBecomeVisibleObserverCanHideBeforeShowWork\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ prepareVisibilityTestTab\(\);\
+
+      \ \ \ \ \ \ \ \ doAnswer\(invocation\ \->\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mTab\.hide\(TabHidingType\.CHANGED_TABS\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ return\ null;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\)\.when\(mNativeMock\)\.sendDidBecomeVisibleUpdate\(1\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ mTab\.show\(TabSelectionType\.FROM_USER\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ assertTrue\(mTab\.isHidden\(\)\);\
+
+      '
+    replace: "    @Test\n    @SmallTest\n    public void testDidBecomeVisibleObserverCanHideBeforeShowWork() {\n        prepareVisibilityTestTab();\n        doAnswer(\n                        invocation -> {\n                            mTab.hide(TabHidingType.CHANGED_TABS);\n                            return null;\n                        })\n                .when(mNativeMock)\n                .sendDidBecomeVisibleUpdate(1);\n\n        mTab.show(TabSelectionType.FROM_USER);\n\n        assertTrue(mTab.isHidden());\n"
+- description: Format modified Android split persistence Java sources
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ @SmallTest\
+
+      \ \ \ \ public\ void\ testWillBecomeHiddenObserverCannotDispatchHideTwice\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ prepareVisibilityTestTab\(\);\
+
+      \ \ \ \ \ \ \ \ mTab\.show\(TabSelectionType\.FROM_USER\);\
+
+      \ \ \ \ \ \ \ \ doAnswer\(invocation\ \->\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ assertFalse\(mTab\.isHidden\(\)\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mTab\.hide\(TabHidingType\.CHANGED_TABS\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ assertFalse\(mTab\.isHidden\(\)\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ return\ null;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\)\.when\(mNativeMock\)\.sendWillBecomeHiddenUpdate\(1\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ mTab\.hide\(TabHidingType\.CHANGED_TABS\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ assertTrue\(mTab\.isHidden\(\)\);\
+
+      '
+    replace: "    @SmallTest\n    public void testWillBecomeHiddenObserverCannotDispatchHideTwice() {\n        prepareVisibilityTestTab();\n        mTab.show(TabSelectionType.FROM_USER);\n        doAnswer(\n                        invocation -> {\n                            assertFalse(mTab.isHidden());\n                            mTab.hide(TabHidingType.CHANGED_TABS);\n                            assertFalse(mTab.isHidden());\n                            return null;\n                        })\n                .when(mNativeMock)\n                .sendWillBecomeHiddenUpdate(1);\n\n        mTab.hide(TabHidingType.CHANGED_TABS);\n\n        assertTrue(mTab.isHidden());\n"
+- description: Format modified Android split persistence Java sources
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ @SmallTest\
+
+      \ \ \ \ @EnableFeatures\(\{ChromeFeatureList\.ABORT_NAVIGATIONS_FROM_TAB_CLOSURES\}\)\
+
+      \ \ \ \ public\ void\ testDidBecomeVisibleObserverCanDestroyTab\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ prepareVisibilityTestTab\(\);\
+
+      \ \ \ \ \ \ \ \ doAnswer\(invocation\ \->\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mTab\.clearNativePtr\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ return\ null;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\)\.when\(mNativeMock\)\.destroy\(1\);\
+
+      \ \ \ \ \ \ \ \ doAnswer\(invocation\ \->\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mTab\.destroy\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ return\ null;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\)\.when\(mNativeMock\)\.sendDidBecomeVisibleUpdate\(1\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ mTab\.show\(TabSelectionType\.FROM_USER\);\
+
+      \ \ \ \ \ \ \ \ mTab\.show\(TabSelectionType\.FROM_USER\);\
+
+      \ \ \ \ \ \ \ \ mTab\.hide\(TabHidingType\.CHANGED_TABS\);\
+
+      '
+    replace: "    @SmallTest\n    @EnableFeatures({ChromeFeatureList.ABORT_NAVIGATIONS_FROM_TAB_CLOSURES})\n    public void testDidBecomeVisibleObserverCanDestroyTab() {\n        prepareVisibilityTestTab();\n        doAnswer(\n                        invocation -> {\n                            mTab.clearNativePtr();\n                            return null;\n                        })\n                .when(mNativeMock)\n                .destroy(1);\n        doAnswer(\n                        invocation -> {\n                            mTab.destroy();\n                            return null;\n                        })\n                .when(mNativeMock)\n                .sendDidBecomeVisibleUpdate(1);\n\n        mTab.show(TabSelectionType.FROM_USER);\n        mTab.show(TabSelectionType.FROM_USER);\n        mTab.hide(TabHidingType.CHANGED_TABS);\n"
+- description: Format modified Android split persistence Java sources
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ @SmallTest\
+
+      \ \ \ \ public\ void\ testShowStillLoadsWhenNativePeerInitiallyAbsent\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ prepareVisibilityTestTab\(\);\
+
+      \ \ \ \ \ \ \ \ mTab\.clearNativePtr\(\);\
+
+      \ \ \ \ \ \ \ \ doAnswer\(invocation\ \->\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mTab\.setNativePtrForTesting\(1\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ return\ false;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\)\.when\(mTab\)\.loadIfNeeded\(false\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ mTab\.show\(TabSelectionType\.FROM_USER\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ assertFalse\(mTab\.isHidden\(\)\);\
+
+      '
+    replace: "    @SmallTest\n    public void testShowStillLoadsWhenNativePeerInitiallyAbsent() {\n        prepareVisibilityTestTab();\n        mTab.clearNativePtr();\n        doAnswer(\n                        invocation -> {\n                            mTab.setNativePtrForTesting(1);\n                            return false;\n                        })\n                .when(mTab)\n                .loadIfNeeded(false);\n\n        mTab.show(TabSelectionType.FROM_USER);\n\n        assertFalse(mTab.isHidden());\n"

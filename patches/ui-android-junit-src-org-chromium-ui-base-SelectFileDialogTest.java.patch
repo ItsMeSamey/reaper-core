@@ -1,0 +1,147 @@
+diff --git a/ui/android/junit/src/org/chromium/ui/base/SelectFileDialogTest.java b/ui/android/junit/src/org/chromium/ui/base/SelectFileDialogTest.java
+--- a/ui/android/junit/src/org/chromium/ui/base/SelectFileDialogTest.java
++++ b/ui/android/junit/src/org/chromium/ui/base/SelectFileDialogTest.java
+@@ -34,6 +34,7 @@
+ import org.junit.Rule;
+ import org.junit.Test;
+ import org.junit.runner.RunWith;
++import org.mockito.ArgumentCaptor;
+ import org.mockito.ArgumentMatcher;
+ import org.mockito.ArgumentMatchers;
+ import org.mockito.Mock;
+@@ -43,6 +44,7 @@
+ import org.robolectric.Shadows;
+ import org.robolectric.annotation.Config;
+ import org.robolectric.shadows.ShadowMimeTypeMap;
++import org.robolectric.util.ReflectionHelpers;
+
+ import org.chromium.base.ContextUtils;
+ import org.chromium.base.DeviceInfo;
+@@ -56,7 +58,10 @@
+ import org.chromium.base.test.util.Features.DisableFeatures;
+ import org.chromium.base.test.util.Features.EnableFeatures;
+ import org.chromium.base.test.util.HistogramWatcher;
++import org.chromium.ui.R;
+ import org.chromium.ui.permissions.PermissionCallback;
++import org.chromium.ui.widget.Toast;
++import org.chromium.ui.widget.ToastManager;
+
+ import java.io.File;
+ import java.io.IOException;
+@@ -1041,6 +1046,63 @@
+     }
+
+     @Test
++    public void testIntentCompletedCanceledWithoutCameraOutput() {
++        TestSelectFileDialog selectFileDialog = new TestSelectFileDialog(0);
++        int callCount = mOnActionCallback.getCallCount();
++
++        selectFileDialog.onIntentCompleted(Activity.RESULT_CANCELED, null);
++
++        assertEquals(0, selectFileDialog.mFileSelectionSuccess);
++        assertEquals(1, selectFileDialog.mFileSelectionAborted);
++        assertEquals(callCount + 1, mOnActionCallback.getCallCount());
++    }
++
++    @Test
++    public void testIntentCompletedWithNullResultWithoutCameraOutput() {
++        TestSelectFileDialog selectFileDialog = new TestSelectFileDialog(0);
++        int callCount = mOnActionCallback.getCallCount();
++
++        selectFileDialog.onIntentCompleted(Activity.RESULT_OK, null);
++
++        assertEquals(0, selectFileDialog.mFileSelectionSuccess);
++        assertEquals(1, selectFileDialog.mFileSelectionAborted);
++        assertEquals(callCount + 1, mOnActionCallback.getCallCount());
++    }
++
++    @Test
++    public void testIntentCompletedWithEmptyResultWithoutCameraOutput() {
++        TestSelectFileDialog selectFileDialog = new TestSelectFileDialog(0);
++        int callCount = mOnActionCallback.getCallCount();
++
++        selectFileDialog.onIntentCompleted(Activity.RESULT_OK, new Intent());
++
++        assertEquals(0, selectFileDialog.mFileSelectionSuccess);
++        assertEquals(1, selectFileDialog.mFileSelectionAborted);
++        assertEquals(callCount + 1, mOnActionCallback.getCallCount());
++    }
++
++    @Test
++    public void testIntentCompletedWithNullResultUsesCameraOutput() {
++        TestSelectFileDialog selectFileDialog = new TestSelectFileDialog(0);
++        WindowAndroid windowAndroid = Mockito.mock(WindowAndroid.class);
++        when(windowAndroid.getApplicationContext()).thenReturn(ContextUtils.getApplicationContext());
++        Uri cameraOutputUri = Uri.parse("file:///storage/emulated/0/DCIM/Camera/IMG_0.jpg");
++        ReflectionHelpers.setField(selectFileDialog, "mWindowAndroid", windowAndroid);
++        ReflectionHelpers.setField(selectFileDialog, "mCameraOutputUri", cameraOutputUri);
++        int callCount = mOnActionCallback.getCallCount();
++
++        selectFileDialog.onIntentCompleted(Activity.RESULT_OK, null);
++
++        assertEquals(1, selectFileDialog.mFileSelectionSuccess);
++        assertEquals(0, selectFileDialog.mFileSelectionAborted);
++        assertEquals(callCount + 1, mOnActionCallback.getCallCount());
++        ArgumentCaptor<Intent> scannerIntent = ArgumentCaptor.forClass(Intent.class);
++        Mockito.verify(windowAndroid).sendBroadcast(scannerIntent.capture());
++        assertEquals(Intent.ACTION_MEDIA_SCANNER_SCAN_FILE, scannerIntent.getValue().getAction());
++        assertEquals(cameraOutputUri, scannerIntent.getValue().getData());
++    }
++
++    @Test
+     @DisableFeatures({UiAndroidFeatures.CHECK_INTENT_CALLER_PERMISSION})
+     public void testIntentCompletedWithCaseVariantClipDataUri() {
+         TestSelectFileDialog selectFileDialog = new TestSelectFileDialog(0);
+@@ -1111,6 +1173,52 @@
+                         ContextUtils.getApplicationContext(), /* isMultiple= */ false, uris);
+         assertEquals(expectedFileSelectionResult, task.doInBackground());
+         assertEquals(expectedGetDisplayNameResult, null != task2.doInBackground());
++    }
++
++    @Test
++    public void testFilePathSelectedTaskSuccessDoesNotShowError() {
++        ToastManager toastManager = Mockito.mock(ToastManager.class);
++        ToastManager.setInstanceForTesting(toastManager);
++        FileUtilsJni.setInstanceForTesting(mFileUtilsMocks);
++        doReturn("/data/local/tmp.jpg").when(mFileUtilsMocks).getAbsoluteFilePath(any());
++
++        TestSelectFileDialog selectFileDialog = new TestSelectFileDialog(0);
++        SelectFileDialog.FilePathSelectedTask task =
++                selectFileDialog
++                .new FilePathSelectedTask(
++                        ContextUtils.getApplicationContext(), "/data/local/tmp.jpg", null);
++        Boolean validPath = task.doInBackground();
++        assertTrue(validPath);
++        task.onPostExecute(validPath);
++
++        assertEquals(1, selectFileDialog.mFileSelectionSuccess);
++        assertEquals(0, selectFileDialog.mFileSelectionAborted);
++        Mockito.verify(toastManager, Mockito.never()).requestShow(any());
++    }
++
++    @Test
++    public void testFilePathSelectedTaskValidationFailureShowsError() {
++        ToastManager toastManager = Mockito.mock(ToastManager.class);
++        ToastManager.setInstanceForTesting(toastManager);
++        FileUtilsJni.setInstanceForTesting(mFileUtilsMocks);
++        doReturn("").when(mFileUtilsMocks).getAbsoluteFilePath(any());
++
++        TestSelectFileDialog selectFileDialog = new TestSelectFileDialog(0);
++        SelectFileDialog.FilePathSelectedTask task =
++                selectFileDialog
++                .new FilePathSelectedTask(
++                        ContextUtils.getApplicationContext(), "/data/local/tmp.jpg", null);
++        Boolean validPath = task.doInBackground();
++        assertFalse(validPath);
++        task.onPostExecute(validPath);
++
++        assertEquals(0, selectFileDialog.mFileSelectionSuccess);
++        assertEquals(1, selectFileDialog.mFileSelectionAborted);
++        ArgumentCaptor<Toast> toast = ArgumentCaptor.forClass(Toast.class);
++        Mockito.verify(toastManager).requestShow(toast.capture());
++        assertEquals(
++                ContextUtils.getApplicationContext().getString(R.string.opening_file_error),
++                toast.getValue().getText());
+     }
+
+     @Test

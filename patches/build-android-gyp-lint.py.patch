@@ -1,8 +1,199 @@
 diff --git a/build/android/gyp/lint.py b/build/android/gyp/lint.py
-index a198c032c8ad5a3743aa9bd758457b578b63bddc..e4912ccde35904d3c4dc6e487757414f3cb3e7bb 100755
+index a198c032c8ad5a3743aa9bd758457b578b63bddc..7e2d8ecbc2135b390740e49d9f06097a6a2064de 100755
 --- a/build/android/gyp/lint.py
 +++ b/build/android/gyp/lint.py
-@@ -521,5 +521,6 @@ def main():
+@@ -8,6 +8,7 @@
+ import argparse
+ import logging
+ import os
++import re
+ import shutil
+ import sys
+ import time
+@@ -60,6 +61,98 @@
+     return os.path.relpath(path, build_utils.DIR_SOURCE_ROOT)
+ 
+ 
++def _FilterLintStderr(output):
++    """Ignores only the parser cache's non-diagnostic JUL INFO record."""
++    pool_header = re.compile(
++        r'(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) '
++        r'(?:[1-9]|[12][0-9]|3[01]), [0-9]{4} '
++        r'(?:[1-9]|1[0-2]):[0-5][0-9]:[0-5][0-9] (?:AM|PM) '
++        r'com\.android\.utils\.PositionXmlParser\$SaxParserPool '
++        r'checkLimitWhenCreate\n')
++    pool_message = ('INFO: Maximum pool size reached in '
++                    'com.android.utils.PositionXmlParser\n')
++    lines = output.splitlines(keepends=True)
++    retained = []
++    index = 0
++    while index < len(lines):
++        if (index + 1 < len(lines) and pool_header.fullmatch(lines[index])
++                and lines[index + 1] == pool_message):
++            # The pinned pool code still creates/returns a parser after this log.
++            index += 2
++        else:
++            retained.append(lines[index])
++            index += 1
++    return build_utils.FilterReflectiveAccessJavaWarnings(''.join(retained))
++
++
++def _CreateLintManifest(android_manifest, source_manifests, output_path):
++    """Preserves existing lint annotations on the effective app declarations."""
++    android = '{http://schemas.android.com/apk/res/android}'
++    tools = '{http://schemas.android.com/tools}'
++    allowed = (tools + 'ignore', tools + 'targetApi')
++    merged = ElementTree.parse(android_manifest).getroot()
++    merged_package = merged.get('package', '')
++
++    def has_annotations(element):
++        return any(any(key in node.attrib for key in allowed)
++                   for node in element.iter())
++
++    def qualified_name(value, package):
++        if value.startswith('.'):
++            return package + value
++        return package + '.' + value if '.' not in value else value
++
++    def shape(element):
++        return (element.tag,
++                tuple(sorted((key, value) for key, value in element.attrib.items()
++                             if not key.startswith(tools))),
++                tuple(shape(child) for child in element))
++
++    def matches(source, target, package):
++        if source.tag != target.tag:
++            return False
++        name = source.get(android + 'name')
++        if name is not None:
++            return qualified_name(name, package) == qualified_name(
++                target.get(android + 'name', ''), merged_package)
++        if source.tag == 'intent-filter':
++            return shape(source) == shape(target)
++        return all(target.get(key) == value for key, value in source.attrib.items()
++                   if not key.startswith(tools))
++
++    def transfer(source, target, package, primary):
++        annotations = [(key, source.get(key)) for key in allowed
++                       if key in source.attrib]
++        if annotations and not primary and source.tag in ('manifest', 'application'):
++            raise ValueError('Dependency annotation would broaden app scope: '
++                             + source.tag)
++        for key, value in annotations:
++            previous = target.get(key)
++            if key == tools + 'ignore':
++                values = [item.strip() for group in (previous, value) if group
++                          for item in group.split(',') if item.strip()]
++                target.set(key, ','.join(dict.fromkeys(values)))
++            elif previous is not None and previous != value:
++                raise ValueError('Conflicting tools:targetApi annotation')
++            else:
++                target.set(key, value)
++        for child in source:
++            if not has_annotations(child):
++                continue
++            candidates = [node for node in target if matches(child, node, package)]
++            if len(candidates) != 1:
++                raise ValueError('No unique effective declaration for annotation: '
++                                 + child.tag + ' ' + child.get(android + 'name', ''))
++            transfer(child, candidates[0], package, primary)
++
++    for index, source_manifest in enumerate(source_manifests):
++        source = ElementTree.parse(source_manifest).getroot()
++        transfer(source, merged, source.get('package', ''), index == 0)
++    # Only this lint-owned copy is written. Packaging and source manifests stay intact.
++    _WriteXmlFile(merged, output_path)
++    return output_path
++
++
+ def _GenerateProjectFile(
+     android_manifest,
+     android_sdk_root,
+@@ -72,6 +165,7 @@
+     aars=None,
+     android_sdk_version=None,
+     baseline_path=None,
++    android_manifests=None,
+ ):
+     project = ElementTree.Element('project')
+     root = ElementTree.SubElement(project, 'root')
+@@ -98,6 +192,17 @@
+     if android_manifest:
+         manifest = ElementTree.SubElement(main_module, 'merged-manifest')
+         manifest.set('file', android_manifest)
++    # Dependency manifests are merge inputs, not standalone applications.
++    # Keep their existing scoped lint annotations on the effective app copy.
++    source_manifests = list(dict.fromkeys(android_manifests or []))
++    if android_manifest and source_manifests:
++        lint_manifest = _CreateLintManifest(
++            android_manifest, source_manifests,
++            os.path.join(os.path.dirname(partials_dir), 'AndroidManifest.lint.xml'))
++        source_manifests = [source_manifests[0], lint_manifest]
++    for source_manifest in dict.fromkeys(source_manifests):
++        manifest = ElementTree.SubElement(main_module, 'manifest')
++        manifest.set('file', source_manifest)
+     if srcjar_sources:
+         srcjar_sources = sorted(set(srcjar_sources))  # Ensure these are unique.
+         for srcjar_file in srcjar_sources:
+@@ -189,6 +294,7 @@
+     baseline,
+     manifest_path,
+     warnings_as_errors=False,
++    android_manifests=None,
+ ):
+     logging.info('Lint starting')
+     if not cache_dir:
+@@ -294,6 +400,7 @@
+         aars,
+         android_sdk_version,
+         baseline,
++        android_manifests,
+     )
+ 
+     project_xml_path = os.path.join(lint_gen_dir, 'project.xml')
+@@ -333,7 +440,7 @@
+             env=env,
+             print_stdout=True,
+             stdout_filter=stdout_filter,
+-            stderr_filter=build_utils.FilterReflectiveAccessJavaWarnings,
++            stderr_filter=_FilterLintStderr,
+             fail_on_output=warnings_as_errors,
+             fail_func=fail_func,
+         )
+@@ -424,6 +531,9 @@
+         '--manifest', help='Path to the merged AndroidManifest.xml.'
+     )
+     parser.add_argument(
++        '--android-manifests', help='GN list of selected unmerged manifests.'
++    )
++    parser.add_argument(
+         '--resource-sources',
+         default=[],
+         action='append',
+@@ -446,6 +556,8 @@
+     )
+ 
+     args = parser.parse_args(build_utils.ExpandFileArgs(argv))
++    if args.android_manifests is not None:
++        args.android_manifests = action_helpers.parse_gn_list(args.android_manifests)
+     args.sources = action_helpers.parse_gn_list(args.sources)
+     args.aars = action_helpers.parse_gn_list(args.aars)
+     args.srcjars = action_helpers.parse_gn_list(args.srcjars)
+@@ -481,6 +593,7 @@
+         + args.resource_zips
+         + sources
+         + resource_sources
++        + (args.android_manifests or [])
+         + [args.baseline, args.manifest]
+     )
+     depfile_deps = [p for p in possible_depfile_deps if p]
+@@ -516,10 +629,12 @@
+         args.baseline,
+         args.manifest,
+         warnings_as_errors=args.warnings_as_errors,
++        android_manifests=args.android_manifests,
+     )
+     logging.info('Creating stamp file')
      server_utils.MaybeTouch(args.stamp)
  
  

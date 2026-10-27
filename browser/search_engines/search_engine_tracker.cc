@@ -15,9 +15,13 @@
 #include "base/strings/string_util.h"
 #include "base/time/time.h"
 #include "brave/components/brave_ads/buildflags/buildflags.h"
+#if !BUILDFLAG(IS_ANDROID) || BUILDFLAG(ENABLE_BRAVE_REWARDS)
 #include "brave/components/brave_rewards/core/pref_names.h"
+#endif  // !BUILDFLAG(IS_ANDROID) || BUILDFLAG(ENABLE_BRAVE_REWARDS)
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_search_conversion/p3a.h"
 #include "brave/components/brave_search_conversion/utils.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/constants/pref_names.h"
 #include "brave/components/p3a_utils/custom_attributes.h"
 #include "brave/components/web_discovery/buildflags/buildflags.h"
@@ -201,12 +205,15 @@ SearchEngineTracker::SearchEngineTracker(
       current_default_engine_ = GetSearchEngineProvider(
           url, template_url->GetEngineType(search_terms));
       RecordDefaultEngine();
+#if !BUILDFLAG(IS_ANDROID) || BUILDFLAG(ENABLE_BRAVE_REWARDS)
       RecordRewardsWalletConnected();
+#endif  // !BUILDFLAG(IS_ANDROID) || BUILDFLAG(ENABLE_BRAVE_REWARDS)
       RecordSwitchP3A(url);
     }
   }
 
   pref_change_registrar_.Init(profile_prefs);
+#if !BUILDFLAG(IS_ANDROID) || BUILDFLAG(ENABLE_BRAVE_REWARDS)
   pref_change_registrar_.Add(brave_rewards::prefs::kEnabled,
                              base::BindRepeating(
                                  [](SearchEngineTracker* self) {
@@ -218,6 +225,7 @@ SearchEngineTracker::SearchEngineTracker(
       brave_rewards::prefs::kExternalWalletType,
       base::BindRepeating(&SearchEngineTracker::RecordRewardsWalletConnected,
                           base::Unretained(this)));
+#endif  // !BUILDFLAG(IS_ANDROID) || BUILDFLAG(ENABLE_BRAVE_REWARDS)
 
 #if BUILDFLAG(ENABLE_WEB_DISCOVERY)
   RecordWebDiscoveryEnabledP3A();
@@ -237,11 +245,13 @@ SearchEngineTracker::SearchEngineTracker(
 
 SearchEngineTracker::~SearchEngineTracker() = default;
 
+#if !BUILDFLAG(IS_ANDROID)
 void SearchEngineTracker::RecordLocationBarQuery() {
   if (current_default_engine_ == SearchEngineP3A::kBrave) {
     brave_search_conversion::p3a::RecordLocationBarQuery(local_state_);
   }
 }
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 void SearchEngineTracker::OnTemplateURLServiceChanged() {
   const TemplateURL* template_url =
@@ -251,19 +261,25 @@ void SearchEngineTracker::OnTemplateURLServiceChanged() {
         template_url_service_->search_terms_data();
     const GURL& url = template_url->GenerateSearchURL(search_terms);
     if (url != default_search_url_) {
+#if !BUILDFLAG(IS_ANDROID)
       SearchEngineP3A last_default_engine = current_default_engine_;
+#endif  // !BUILDFLAG(IS_ANDROID)
       current_default_engine_ = GetSearchEngineProvider(
           url, template_url->GetEngineType(search_terms));
 
       RecordDefaultEngine();
+#if !BUILDFLAG(IS_ANDROID) || BUILDFLAG(ENABLE_BRAVE_REWARDS)
       RecordRewardsWalletConnected();
+#endif  // !BUILDFLAG(IS_ANDROID) || BUILDFLAG(ENABLE_BRAVE_REWARDS)
 
       default_search_url_ = url;
 
+#if !BUILDFLAG(IS_ANDROID)
       if (last_default_engine != current_default_engine_ &&
           last_default_engine == SearchEngineP3A::kBrave) {
         brave_search_conversion::p3a::RecordDefaultEngineChurn(local_state_);
       }
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 #if BUILDFLAG(ENABLE_WEB_DISCOVERY)
       // Update web discovery default engine metric when search engine changes
@@ -304,6 +320,7 @@ void SearchEngineTracker::RecordDefaultEngine() {
       "search_default",
       current_default_engine_ == SearchEngineP3A::kBrave ? "brave" : "other");
 
+#if !BUILDFLAG(IS_ANDROID) || BUILDFLAG(ENABLE_BRAVE_REWARDS)
   // Record rewards-based metrics
   bool rewards_enabled =
       profile_prefs_->GetBoolean(brave_rewards::prefs::kEnabled);
@@ -325,8 +342,10 @@ void SearchEngineTracker::RecordDefaultEngine() {
   base::UmaHistogramExactLinear(
       inactive_histogram_name, INT_MAX - 1,
       static_cast<int>(SearchEngineP3A::kMaxValue) + 1);
+#endif  // !BUILDFLAG(IS_ANDROID) || BUILDFLAG(ENABLE_BRAVE_REWARDS)
 }
 
+#if !BUILDFLAG(IS_ANDROID) || BUILDFLAG(ENABLE_BRAVE_REWARDS)
 void SearchEngineTracker::RecordRewardsWalletConnected() {
   // Record wallet connection status for non-Brave Search users with Rewards
   // enabled
@@ -345,6 +364,7 @@ void SearchEngineTracker::RecordRewardsWalletConnected() {
   UMA_HISTOGRAM_EXACT_LINEAR(kNonBraveSearchWalletConnectedMetric,
                              wallet_connected_answer, 2);
 }
+#endif  // !BUILDFLAG(IS_ANDROID) || BUILDFLAG(ENABLE_BRAVE_REWARDS)
 
 void SearchEngineTracker::RecordSwitchP3A(const GURL& url) {
   const base::Time now = base::Time::Now();
@@ -363,9 +383,11 @@ void SearchEngineTracker::RecordSwitchP3A(const GURL& url) {
     previous_search_url_ = url;
     should_report = true;
 
+#if !BUILDFLAG(IS_ANDROID)
     if (url.DomainIs(kBraveDomain)) {
       brave_search_conversion::p3a::RecordDefaultEngineConversion(local_state_);
     }
+#endif  // !BUILDFLAG(IS_ANDROID)
   } else if (last_report.is_null() ||
              (now - last_report) >= kMinReportInterval) {
     // Report if we haven't reported before or it's been >= 1 day

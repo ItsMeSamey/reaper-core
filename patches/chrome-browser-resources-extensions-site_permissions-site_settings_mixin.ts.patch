@@ -1,0 +1,91 @@
+diff --git a/chrome/browser/resources/extensions/site_permissions/site_settings_mixin.ts b/chrome/browser/resources/extensions/site_permissions/site_settings_mixin.ts
+index 7ee0ab8c07277a9556e771787b70ce95ff87f6c8..5a9377b27e1d8b71783e6c9cedbfa6e3ab4d0b1c 100644
+--- a/chrome/browser/resources/extensions/site_permissions/site_settings_mixin.ts
++++ b/chrome/browser/resources/extensions/site_permissions/site_settings_mixin.ts
+@@ -112,6 +112,78 @@ export const SiteSettingsMixin =
+         accessor restrictedSites: string[] = [];
+         accessor permittedSites: string[] = [];
+ 
++        // <if expr="is_android">
++        private settingsOwner_: {
++          delegate: ItemDelegate&SiteSettingsDelegate,
++          event: ChromeEvent<
++              (settings: chrome.developerPrivate.UserSiteSettings) => void>,
++          listener: (settings: chrome.developerPrivate.UserSiteSettings) => void,
++        }|null = null;
++        private settingsGeneration_: number = 0;
++
++        override connectedCallback() {
++          super.connectedCallback();
++          // CrLitElement completes its initial render in the superclass.
++          this.updateSettingsOwner_();
++        }
++
++        override updated(changedProperties: PropertyValues<this>) {
++          super.updated(changedProperties);
++          if (changedProperties.has('delegate') ||
++              changedProperties.has('enableEnhancedSiteControls')) {
++            this.updateSettingsOwner_();
++          }
++        }
++
++        override disconnectedCallback() {
++          this.retireSettingsOwner_();
++          super.disconnectedCallback();
++        }
++
++        private retireSettingsOwner_() {
++          ++this.settingsGeneration_;
++          const owner = this.settingsOwner_;
++          this.settingsOwner_ = null;
++          owner?.event.removeListener(owner.listener);
++        }
++
++        private updateSettingsOwner_() {
++          if (this.isConnected && this.enableEnhancedSiteControls &&
++              this.settingsOwner_?.delegate === this.delegate) {
++            return;
++          }
++          this.retireSettingsOwner_();
++          if (!this.isConnected || !this.enableEnhancedSiteControls) {
++            return;
++          }
++
++          const delegate = this.delegate;
++          const generation = this.settingsGeneration_;
++          const event = delegate.getUserSiteSettingsChangedTarget();
++          const isCurrent = () => this.isConnected &&
++              this.enableEnhancedSiteControls &&
++              generation === this.settingsGeneration_ &&
++              delegate === this.delegate;
++          let receivedChange = false;
++          const listener =
++              (settings: chrome.developerPrivate.UserSiteSettings) => {
++                if (isCurrent()) {
++                  receivedChange = true;
++                  this.onUserSiteSettingsChanged_(settings);
++                }
++              };
++          this.settingsOwner_ = {delegate, event, listener};
++          event.addListener(listener);
++          delegate.getUserSiteSettings().then(settings => {
++            // A change event is a complete settings snapshot. Keep it if it
++            // arrived while the initial request was still pending.
++            if (!receivedChange && isCurrent()) {
++              this.onUserSiteSettingsChanged_(settings);
++            }
++          });
++        }
++        // </if>
++        // <if expr="not is_android">
+         override firstUpdated(changedProperties: PropertyValues<this>) {
+           super.firstUpdated(changedProperties);
+ 
+@@ -122,6 +194,7 @@ export const SiteSettingsMixin =
+                 this.onUserSiteSettingsChanged_.bind(this));
+           }
+         }
++        // </if>
+ 
+         private onUserSiteSettingsChanged_({
+           permittedSites,

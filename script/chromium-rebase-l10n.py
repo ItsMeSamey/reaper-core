@@ -530,6 +530,20 @@ def main():
             '//message[@name="IDS_INSTALL_OS_NOT_SUPPORTED"]'
         )[0]
         elem1.text = elem1.text.replace('Windows 7', 'Windows 10')
+    elif basename == 'generated_resources':
+        # Rebase starts from clean Chromium strings. Keep the exports required
+        # by Android's desktop-capture consent UI in the generated Brave GRD,
+        # which branding copies over Chromium's resource input before builds.
+        for message_name in (
+            'IDS_DESKTOP_MEDIA_PICKER_TITLE',
+            'IDS_DESKTOP_MEDIA_PICKER_TEXT_DELEGATED',
+            'IDS_DESKTOP_MEDIA_PICKER_ALSO_SHARE_TAB_AUDIO',
+            'IDS_DESKTOP_MEDIA_PICKER_SOURCE_TYPE_SCREEN',
+            'IDS_DESKTOP_MEDIA_PICKER_SHARE',
+        ):
+            messages = xml_tree.xpath('//message[@name=$name]', name=message_name)
+            assert len(messages) == 1, message_name
+            messages[0].set('formatter_data', 'android_java')
     elif basename == 'brave_origin_strings':
         apply_origin_branding(source_string_path, xml_tree)
 

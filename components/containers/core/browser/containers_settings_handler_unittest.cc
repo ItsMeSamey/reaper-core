@@ -19,6 +19,7 @@
 #include "brave/components/containers/core/common/features.h"
 #include "brave/components/containers/core/mojom/containers.mojom-data-view.h"
 #include "brave/components/containers/core/mojom/containers.mojom.h"
+#include "build/build_config.h"
 #include "components/sync_preferences/testing_pref_service_syncable.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
 #include "mojo/public/cpp/bindings/receiver.h"
@@ -28,6 +29,12 @@
 namespace containers {
 
 namespace {
+
+#if BUILDFLAG(IS_ANDROID)
+constexpr char kCanonicalFixtureId1[] = "99cc0001-0000-4000-8000-000000000001";
+#else
+constexpr char kCanonicalFixtureId1[] = "test-id";
+#endif
 
 constexpr struct {
   const char* name;
@@ -189,7 +196,7 @@ TEST_F(ContainersSettingsHandlerTest, AddContainer) {
 
   // Invalid ID.
   handler_->AddContainer(
-      mojom::Container::New("test-id", "", mojom::Icon::kPersonal,
+      mojom::Container::New(kCanonicalFixtureId1, "", mojom::Icon::kPersonal,
                             SK_ColorWHITE),
       error_future.GetCallback());
   EXPECT_EQ(mojom::ContainerOperationError::kIdShouldBeEmpty,
@@ -399,14 +406,54 @@ TEST_F(ContainersSettingsHandlerTest, ReorderContainers) {
 TEST_F(ContainersSettingsHandlerTest, ExternalContainerChanges) {
   // Simulate external change to container list
   std::vector<mojom::ContainerPtr> containers;
-  containers.push_back(mojom::Container::New(
-      "test-id", "Test Container", mojom::Icon::kPersonal, SK_ColorWHITE));
+  containers.push_back(
+      mojom::Container::New(kCanonicalFixtureId1, "Test Container",
+                            mojom::Icon::kPersonal, SK_ColorWHITE));
   SetContainersToPrefs(containers, prefs_);
 
   EXPECT_EQ(1, mock_observer_->containers_changed_count());
   ASSERT_EQ(1u, mock_observer_->last_containers().size());
-  EXPECT_EQ("test-id", mock_observer_->last_containers()[0]->id);
+  EXPECT_EQ(kCanonicalFixtureId1, mock_observer_->last_containers()[0]->id);
   EXPECT_EQ("Test Container", mock_observer_->last_containers()[0]->name);
 }
+
+#if BUILDFLAG(IS_ANDROID)
+TEST_F(ContainersSettingsHandlerTest,
+       AndroidHiddenMalformedRecordsDoNotBlockVisibleReorder) {
+  constexpr char kTemporaryId[] = "t-99cc0002-0000-4000-8000-000000000002";
+  auto record = [](const char* id, const char* name) {
+    return base::DictValue()
+        .Set("id", id)
+        .Set("name", name)
+        .Set("icon", 0)
+        .Set("background_color", static_cast<int>(SK_ColorBLUE));
+  };
+  base::ListValue records;
+  records.Append(record(kCanonicalFixtureId1, "Named"));
+  records.Append(record("", "Hidden default impostor"));
+  records.Append(record("invalid", "Hidden malformed"));
+  records.Append(record(kTemporaryId, "Temporary"));
+  prefs_.SetList(prefs::kContainersList, std::move(records));
+  base::test::TestFuture<std::vector<mojom::ContainerPtr>> containers_future;
+  handler_->GetContainers(containers_future.GetCallback());
+  auto visible = containers_future.Take();
+  ASSERT_EQ(visible.size(), 2u);
+  EXPECT_EQ(visible[0]->id, kCanonicalFixtureId1);
+  EXPECT_EQ(visible[1]->id, kTemporaryId);
+  base::test::TestFuture<std::optional<mojom::ContainerOperationError>> error;
+  handler_->ReorderContainers({kTemporaryId, kCanonicalFixtureId1},
+                              error.GetCallback());
+  EXPECT_EQ(error.Take(), std::nullopt);
+  handler_->GetContainers(containers_future.GetCallback());
+  auto reordered = containers_future.Take();
+  ASSERT_EQ(reordered.size(), 2u);
+  EXPECT_EQ(reordered[0]->id, kTemporaryId);
+  EXPECT_EQ(reordered[1]->id, kCanonicalFixtureId1);
+  EXPECT_EQ(prefs_.GetList(prefs::kContainersList).size(), 2u);
+  ASSERT_EQ(mock_observer_->last_containers().size(), 2u);
+  EXPECT_EQ(mock_observer_->last_containers()[0]->id, kTemporaryId);
+  EXPECT_EQ(mock_observer_->last_containers()[1]->id, kCanonicalFixtureId1);
+}
+#endif  // BUILDFLAG(IS_ANDROID)
 
 }  // namespace containers

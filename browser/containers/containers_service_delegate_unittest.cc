@@ -11,6 +11,8 @@
 #include <vector>
 
 #include "base/containers/flat_set.h"
+#include "base/files/file_util.h"
+#include "base/files/scoped_temp_dir.h"
 #include "base/functional/bind.h"
 #include "base/test/scoped_feature_list.h"
 #include "base/test/test_future.h"
@@ -23,6 +25,8 @@
 #include "components/sessions/core/session_id.h"
 #include "components/sessions/core/tab_restore_service_observer.h"
 #include "components/sessions/core/tab_restore_types.h"
+#include "content/public/browser/storage_partition.h"
+#include "content/public/browser/storage_partition_config.h"
 #include "content/public/test/browser_task_environment.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
@@ -253,6 +257,81 @@ TEST_F(ContainersServiceDelegateTest,
   base::test::TestFuture<bool> future;
   delegate.DeleteContainerStorage("unused-container-id", future.GetCallback());
   EXPECT_TRUE(future.Get());
+}
+
+TEST_F(ContainersServiceDelegateTest,
+       DeleteContainerStorage_LoadedPartitionRetainsBackingDirectory) {
+  const std::string id = "11111111-1111-4111-8111-111111111111";
+  const auto config = content::StoragePartitionConfig::Create(
+      &profile_, kContainersStoragePartitionDomain, id, /*in_memory=*/false);
+  content::StoragePartition* partition =
+      profile_.GetStoragePartition(config, /*can_create=*/true);
+  ASSERT_TRUE(partition);
+  const base::FilePath partition_path = partition->GetPath();
+  ASSERT_TRUE(base::CreateDirectory(partition_path));
+  // This marker detects physical removal, independently of backend data clear.
+  const base::FilePath marker = partition_path.AppendASCII("directory-marker");
+  ASSERT_TRUE(base::WriteFile(marker, "loaded partition"));
+
+  ContainersServiceDelegate delegate(&profile_,
+#if BUILDFLAG(ENABLE_SESSION_SERVICE)
+                                     nullptr,
+#endif
+                                     nullptr);
+  base::test::TestFuture<bool> future;
+  delegate.DeleteContainerStorage(id, future.GetCallback());
+  EXPECT_TRUE(future.Get());
+  task_environment_.RunUntilIdle();
+
+  EXPECT_EQ(partition,
+            profile_.GetStoragePartition(config, /*can_create=*/false));
+  EXPECT_TRUE(base::DirectoryExists(partition_path));
+  EXPECT_TRUE(base::PathExists(marker));
+}
+
+TEST_F(ContainersServiceDelegateTest,
+       DeleteContainerStorage_UnloadedPartitionRemovesBackingDirectory) {
+  const std::string id = "22222222-2222-4222-8222-222222222222";
+  base::ScopedTempDir profile_dir;
+  ASSERT_TRUE(profile_dir.CreateUniqueTempDir());
+  base::FilePath partition_path;
+  {
+    TestingProfile::Builder builder;
+    builder.SetPath(profile_dir.GetPath());
+    auto previous_profile = builder.Build();
+    const auto config = content::StoragePartitionConfig::Create(
+        previous_profile.get(), kContainersStoragePartitionDomain, id,
+        /*in_memory=*/false);
+    content::StoragePartition* partition =
+        previous_profile->GetStoragePartition(config, /*can_create=*/true);
+    ASSERT_TRUE(partition);
+    partition_path = partition->GetPath();
+    ASSERT_TRUE(base::CreateDirectory(partition_path));
+    ASSERT_TRUE(base::WriteFile(partition_path.AppendASCII("directory-marker"),
+                                "closed partition"));
+  }
+  // A fresh Profile has no live contexts for the previous partition directory.
+  task_environment_.RunUntilIdle();
+  TestingProfile::Builder builder;
+  builder.SetPath(profile_dir.GetPath());
+  auto profile = builder.Build();
+  const auto config = content::StoragePartitionConfig::Create(
+      profile.get(), kContainersStoragePartitionDomain, id, /*in_memory=*/false);
+  ASSERT_EQ(nullptr,
+            profile->GetStoragePartition(config, /*can_create=*/false));
+  ASSERT_TRUE(base::DirectoryExists(partition_path));
+
+  ContainersServiceDelegate delegate(profile.get(),
+#if BUILDFLAG(ENABLE_SESSION_SERVICE)
+                                     nullptr,
+#endif
+                                     nullptr);
+  base::test::TestFuture<bool> future;
+  delegate.DeleteContainerStorage(id, future.GetCallback());
+  EXPECT_TRUE(future.Get());
+  EXPECT_FALSE(base::PathExists(partition_path));
+  EXPECT_EQ(nullptr,
+            profile->GetStoragePartition(config, /*can_create=*/false));
 }
 
 #if BUILDFLAG(ENABLE_SESSION_SERVICE)

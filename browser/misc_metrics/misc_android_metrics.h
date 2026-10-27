@@ -15,7 +15,6 @@
 #include "mojo/public/cpp/bindings/receiver_set.h"
 
 class PrefService;
-class SearchEngineTracker;
 class TemplateURLService;
 
 namespace misc_metrics {
@@ -28,7 +27,6 @@ class MiscAndroidMetrics : public mojom::MiscAndroidMetrics {
  public:
   MiscAndroidMetrics(PrefService* local_state,
                      ProcessMiscMetrics* misc_metrics,
-                     SearchEngineTracker* search_engine_tracker,
                      TemplateURLService* template_url_service,
                      PageMetrics* page_metrics);
   ~MiscAndroidMetrics() override;
@@ -59,7 +57,6 @@ class MiscAndroidMetrics : public mojom::MiscAndroidMetrics {
 
  private:
   raw_ptr<ProcessMiscMetrics> misc_metrics_;
-  raw_ptr<SearchEngineTracker> search_engine_tracker_;
   raw_ptr<PageMetrics> page_metrics_;
 
   std::unique_ptr<QuickSearchMetrics> quick_search_metrics_;

@@ -1,0 +1,115 @@
+diff --git a/components/webauthn/android/junit/src/org/chromium/components/webauthn/cred_man/CredManHelperRobolectricTest.java b/components/webauthn/android/junit/src/org/chromium/components/webauthn/cred_man/CredManHelperRobolectricTest.java
+--- a/components/webauthn/android/junit/src/org/chromium/components/webauthn/cred_man/CredManHelperRobolectricTest.java
++++ b/components/webauthn/android/junit/src/org/chromium/components/webauthn/cred_man/CredManHelperRobolectricTest.java
+@@ -61,10 +61,12 @@
+ import org.chromium.components.webauthn.AuthenticationContextProvider;
+ import org.chromium.components.webauthn.Barrier;
+ import org.chromium.components.webauthn.Fido2ApiTestHelper;
++import org.chromium.components.webauthn.RequestMetrics;
+ import org.chromium.components.webauthn.WebauthnBrowserBridge;
+ import org.chromium.components.webauthn.WebauthnFeatures;
+ import org.chromium.components.webauthn.WebauthnModeProvider;
+ import org.chromium.components.webauthn.WebauthnRequestCallback;
++import org.chromium.components.webauthn.WebauthnRequestResponse;
+ import org.chromium.components.webauthn.cred_man.CredManMetricsHelper.CredManCreateRequestEnum;
+ import org.chromium.components.webauthn.cred_man.CredManMetricsHelper.CredManGetRequestEnum;
+ import org.chromium.components.webauthn.cred_man.CredManMetricsHelper.CredManPrepareRequestEnum;
+@@ -125,6 +127,98 @@
+                 }
+             };
+ 
++    private ShadowCredentialManager startGetRequestForRetiredResultTest() {
++        mRequestCallback =
++                WebauthnRequestCallback.forGetCredential(mGetCredentialResponseCallback, null);
++        when(mAuthenticationContextProviderMock.getRequestCallback()).thenReturn(mRequestCallback);
++        int status =
++                mCredManHelper.startGetRequest(
++                        mRequestOptions, mOriginString, null, mClientDataHash, false);
++        assertThat(status).isEqualTo(AuthenticatorStatus.SUCCESS);
++        ShadowCredentialManager manager = Shadow.extract(mCredentialManager);
++        assertThat(manager.getGetCredentialCallback()).isNotNull();
++        // The per-request provider returns null after cancellation, even when a
++        // replacement request in this document is using the same browser bridge.
++        when(mAuthenticationContextProviderMock.getRequestCallback()).thenReturn(null);
++        Mockito.clearInvocations(mBrowserBridge, mGetCredentialResponseCallback, mFrameHost);
++        return manager;
++    }
++
++    @Test
++    @SmallTest
++    public void testRetiredGetErrorDoesNotMutateBrowserDelegate() {
++        ShadowCredentialManager manager = startGetRequestForRetiredResultTest();
++        manager.getGetCredentialCallback()
++                .onError(
++                        new GetCredentialException(
++                                GetCredentialException.TYPE_USER_CANCELED, "late"));
++        Mockito.verifyNoInteractions(mBrowserBridge, mGetCredentialResponseCallback, mFrameHost);
++    }
++
++    @Test
++    @SmallTest
++    public void testRetiredGetResultDoesNotFillOrCleanBrowserDelegate() {
++        ShadowCredentialManager manager = startGetRequestForRetiredResultTest();
++        manager.getGetCredentialCallback()
++                .onResult(
++                        new GetCredentialResponse(
++                                createPasswordCredential("old-user", "old-password")));
++        Mockito.verifyNoInteractions(mBrowserBridge, mGetCredentialResponseCallback, mFrameHost);
++    }
++
++    @Test
++    @SmallTest
++    public void testRetiredConditionalBarrierDoesNotPublishNewBrowserRequest() {
++        mRequestOptions.mediation = Mediation.CONDITIONAL;
++        mRequestCallback =
++                WebauthnRequestCallback.forGetCredential(mGetCredentialResponseCallback, null);
++        when(mAuthenticationContextProviderMock.getRequestCallback()).thenReturn(mRequestCallback);
++        mCredManHelper.startPrefetchRequest(
++                mRequestOptions, mOriginString, null, mClientDataHash, mBarrier, null, false);
++        ShadowCredentialManager manager = Shadow.extract(mCredentialManager);
++        manager.getPrepareGetCredentialCallback()
++                .onResult(Shadow.newInstanceOf(PrepareGetCredentialResponse.class));
++        ArgumentCaptor<Runnable> ready = ArgumentCaptor.forClass(Runnable.class);
++        verify(mBarrier).onCredManSuccessful(ready.capture());
++        when(mAuthenticationContextProviderMock.getRequestCallback()).thenReturn(null);
++        Mockito.clearInvocations(mBrowserBridge, mGetCredentialResponseCallback, mFrameHost);
++
++        // Enumeration completed before cancellation, but the delayed barrier
++        // must not install the old request into a replacement document delegate.
++        ready.getValue().run();
++        Mockito.verifyNoInteractions(mBrowserBridge, mGetCredentialResponseCallback, mFrameHost);
++        assertThat(manager.getGetCredentialCallback()).isNull();
++    }
++
++    @Test
++    @SmallTest
++    public void testCompletionCleanupUsesOriginalBridgeWithoutResolvingReplacement() {
++        WebauthnBrowserBridge replacement = Mockito.mock(WebauthnBrowserBridge.class);
++        java.util.concurrent.atomic.AtomicReference<WebauthnBrowserBridge> currentBridge =
++                new java.util.concurrent.atomic.AtomicReference<>(mBrowserBridge);
++        mCredManHelper =
++                new CredManHelper(
++                        mAuthenticationContextProviderMock,
++                        currentBridge::get,
++                        /* playServicesAvailable= */ true);
++        mCredManHelper.setMetricsHelperForTesting(mMetricsHelper);
++        mRequestCallback =
++                WebauthnRequestCallback.forGetCredential(mGetCredentialResponseCallback, null);
++        when(mAuthenticationContextProviderMock.getRequestCallback()).thenReturn(mRequestCallback);
++        assertThat(
++                        mCredManHelper.startGetRequest(
++                                mRequestOptions, mOriginString, null, mClientDataHash, false))
++                .isEqualTo(AuthenticatorStatus.SUCCESS);
++        // Completion callbacks must not consult a provider that now resolves a
++        // different request's document-scoped bridge.
++        currentBridge.set(replacement);
++        mRequestCallback.onComplete(
++                WebauthnRequestResponse.forFailedGetCredential(
++                        AuthenticatorStatus.ABORT_ERROR, new RequestMetrics.Builder().build()));
++        verify(mBrowserBridge).cleanupRequest(any());
++        Mockito.verifyNoInteractions(replacement);
++    }
++
+     @Before
+     public void setUp() throws Exception {
+         WebContentsStatics.setWebContentsForTesting(null);

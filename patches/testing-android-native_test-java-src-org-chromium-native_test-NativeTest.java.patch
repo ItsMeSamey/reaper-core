@@ -1,0 +1,173 @@
+diff --git a/testing/android/native_test/java/src/org/chromium/native_test/NativeTest.java b/testing/android/native_test/java/src/org/chromium/native_test/NativeTest.java
+--- a/testing/android/native_test/java/src/org/chromium/native_test/NativeTest.java
++++ b/testing/android/native_test/java/src/org/chromium/native_test/NativeTest.java
+@@ -19,15 +19,28 @@
+ 
+ import org.chromium.base.Log;
+ import org.chromium.base.test.util.UrlUtils;
++import org.chromium.build.BuildConfig;
+ import org.chromium.build.gtest_apk.NativeTestIntent;
+ import org.chromium.test.reporter.TestStatusReporter;
+ 
+ import java.io.File;
++import java.io.FileOutputStream;
++import java.io.IOException;
++import java.io.InputStream;
++import java.util.UUID;
+ 
+ /** Helper to run tests inside Activity or NativeActivity. */
+ @JNINamespace("testing::android")
+ public class NativeTest {
+     private static final String TAG = "NativeTest";
++    private static final String REAPER_CHROME_SCRIPT_LOADER_PACKAGE =
++            "app.smallthingz.reaper.tests.scriptloader.unit_tests__library";
++    private static final String REAPER_EXTENSIONS_SCRIPT_LOADER_PACKAGE =
++            "app.smallthingz.reaper.tests.scriptloader.extensions_unittests__library";
++    private static String sReaperScriptLoaderTestDataDir;
++    private static final String REAPER_CONTAINER_BROWSER_PACKAGE =
++            "app.smallthingz.reaper.tests.containers.android_browsertests__library";
++    private static String sReaperContainerBrowserTestDataDir;
+ 
+     private String mCommandLineFilePath;
+     private final StringBuilder mCommandLineFlags = new StringBuilder();
+@@ -56,6 +69,21 @@
+     }
+ 
+     public void preCreate(Activity activity) {
++        String testDataRootName =
++                activity.getIntent().getStringExtra(NativeTestIntent.EXTRA_TEST_DATA_ROOT_NAME);
++        if (activity.getIntent().hasExtra(NativeTestIntent.EXTRA_TEST_DATA_ROOT_NAME)) {
++            if (testDataRootName == null) {
++                throw new IllegalArgumentException("Test data root name must be a string");
++            }
++            String packageName = activity.getPackageName();
++            if (REAPER_CONTAINER_BROWSER_PACKAGE.equals(packageName)
++                    || REAPER_CHROME_SCRIPT_LOADER_PACKAGE.equals(packageName)
++                    || REAPER_EXTENSIONS_SCRIPT_LOADER_PACKAGE.equals(packageName)) {
++                throw new IllegalArgumentException("This fixture uses an app-private test root");
++            }
++        }
++        // Initialize both Java/JNI URL helpers and the native path-provider input.
++        UrlUtils.setIsolatedTestRootName(testDataRootName);
+         String coverageDeviceFile =
+                 activity.getIntent().getStringExtra(NativeTestIntent.EXTRA_COVERAGE_DEVICE_FILE);
+         if (coverageDeviceFile != null) {
+@@ -66,9 +94,17 @@
+             }
+         }
+         // Set TMPDIR to make perfetto_unittests not to use /data/local/tmp as a tmp directory.
++        boolean isolatedBrowser =
++                REAPER_CONTAINER_BROWSER_PACKAGE.equals(activity.getPackageName());
+         try {
+-            Os.setenv("TMPDIR", activity.getApplicationContext().getCacheDir().getPath(), false);
++            Os.setenv(
++                    "TMPDIR",
++                    activity.getApplicationContext().getCacheDir().getPath(),
++                    isolatedBrowser);
+         } catch (ErrnoException e) {
++            if (isolatedBrowser) {
++                throw new IllegalStateException("Cannot set private browser-test temporary root", e);
++            }
+             Log.w(TAG, "failed to set TMPDIR", e);
+         }
+     }
+@@ -171,6 +207,90 @@
+         }
+     }
+ 
++    private static String getContainerBrowserTestDataDirectory(Context context) {
++        if (sReaperContainerBrowserTestDataDir != null) return sReaperContainerBrowserTestDataDir;
++        File root = new File(context.getCacheDir(), "reaper-container-browser-" + UUID.randomUUID());
++        if (!root.mkdir()) throw new IllegalStateException("Cannot create private browser-test root");
++        String[] paths = {
++            "chrome/test/data/title1.html",
++            "net/data/ssl/certificates/root_ca_cert.pem",
++            "paks/browser_tests.pak"
++        };
++        try {
++            byte[] buffer = new byte[64 * 1024];
++            for (String relativePath : paths) {
++                File destination = new File(root, relativePath);
++                File parent = destination.getParentFile();
++                if (!parent.isDirectory() && !parent.mkdirs()) {
++                    throw new IOException("Cannot create private browser-test data directory");
++                }
++                String assetPath =
++                        relativePath.equals("paks/browser_tests.pak")
++                                ? "browser_tests.pak"
++                                : "reaper_container_browser_test_data/" + relativePath;
++                try (InputStream input = context.getAssets().open(assetPath);
++                        FileOutputStream output = new FileOutputStream(destination)) {
++                    int count;
++                    while ((count = input.read(buffer)) != -1) output.write(buffer, 0, count);
++                }
++            }
++        } catch (IOException error) {
++            throw new IllegalStateException("Cannot populate private browser-test root", error);
++        }
++        sReaperContainerBrowserTestDataDir = root.getAbsolutePath();
++        Log.i(TAG, "Using app-private browser-test root: %s", sReaperContainerBrowserTestDataDir);
++        return sReaperContainerBrowserTestDataDir;
++    }
++
++    private static synchronized String getTestDataDirectory(Activity activity) {
++        Context context = activity.getApplicationContext();
++        String packageName = context.getPackageName();
++        if (REAPER_CONTAINER_BROWSER_PACKAGE.equals(packageName)) {
++            return getContainerBrowserTestDataDirectory(context);
++        }
++        boolean chrome = REAPER_CHROME_SCRIPT_LOADER_PACKAGE.equals(packageName);
++        boolean extensions = REAPER_EXTENSIONS_SCRIPT_LOADER_PACKAGE.equals(packageName);
++        if (!chrome && !extensions) return UrlUtils.getIsolatedTestRoot();
++        if (sReaperScriptLoaderTestDataDir != null) return sReaperScriptLoaderTestDataDir;
++
++        // Keep one new app-private root per process. Never read or clear the shared test root.
++        File root = new File(context.getCacheDir(), "reaper-script-loader-" + UUID.randomUUID());
++        if (!root.mkdir()) throw new IllegalStateException("Cannot create private test root");
++        if (chrome && !new File(root, "chrome/test/data").mkdirs()) {
++            throw new IllegalStateException("Cannot create private Chrome test data directory");
++        }
++        String[] paths =
++                chrome
++                        ? new String[] {
++                            "paks/chrome_100_percent.pak", "paks/en-US.pak", "paks/resources.pak"
++                        }
++                        : new String[] {"extensions_shell_and_test.pak"};
++        try {
++            byte[] buffer = new byte[64 * 1024];
++            for (String relativePath : paths) {
++                File destination = new File(root, relativePath);
++                if (extensions && BuildConfig.IS_DESKTOP_ANDROID) {
++                    destination = new File(new File(root, "paks"), relativePath);
++                }
++                File parent = destination.getParentFile();
++                if (!parent.isDirectory() && !parent.mkdirs()) {
++                    throw new IOException("Cannot create private resource directory");
++                }
++                try (InputStream input =
++                                context.getAssets().open("reaper_script_loader_test_data/" + relativePath);
++                        FileOutputStream output = new FileOutputStream(destination)) {
++                    int count;
++                    while ((count = input.read(buffer)) != -1) output.write(buffer, 0, count);
++                }
++            }
++        } catch (IOException error) {
++            throw new IllegalStateException("Cannot populate private script-loader test root", error);
++        }
++        sReaperScriptLoaderTestDataDir = root.getAbsolutePath();
++        Log.i(TAG, "Using app-private script-loader test root: %s", sReaperScriptLoaderTestDataDir);
++        return sReaperScriptLoaderTestDataDir;
++    }
++
+     private void runTests(Activity activity) {
+         String commandLineFlags = mCommandLineFlags.toString();
+         Log.i(TAG, "test run starting with command line flags: %s", commandLineFlags);
+@@ -180,7 +300,7 @@
+                         mCommandLineFilePath,
+                         mStdoutFilePath,
+                         activity.getApplicationContext(),
+-                        UrlUtils.getIsolatedTestRoot());
++                        getTestDataDirectory(activity));
+         Log.i(TAG, "test run finished with command line flags: %s", commandLineFlags);
+         mReporter.testRunFinished(Process.myPid());
+     }

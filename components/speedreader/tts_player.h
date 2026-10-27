@@ -18,6 +18,10 @@
 #include "base/observer_list.h"
 #include "base/types/pass_key.h"
 #include "base/values.h"
+#include "build/build_config.h"
+#if BUILDFLAG(IS_ANDROID)
+#include <cstdint>
+#endif
 #include "content/public/browser/tts_utterance.h"
 #include "content/public/browser/web_contents_observer.h"
 
@@ -88,6 +92,9 @@ class TtsPlayer {
     void SetRequestWebContents(content::WebContents* web_contents);
 
     void Resume(bool recreate_utterance);
+#if BUILDFLAG(IS_ANDROID)
+    void DiscardPausedUtterance();
+#endif
 
     bool HasNextParagraph();
     std::u16string GetParagraphToRead();
@@ -116,6 +123,12 @@ class TtsPlayer {
     std::string current_voice_;
 
     bool continue_next_paragraph_ = false;
+#if BUILDFLAG(IS_ANDROID)
+    uint64_t request_generation_ = 0;
+    int android_utterance_id_ = -1;
+    bool android_paused_ = false;
+    bool android_platform_paused_ = false;
+#endif
     base::WeakPtrFactory<Controller> weak_factory_{this};
   };
 

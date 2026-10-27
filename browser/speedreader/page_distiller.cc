@@ -13,6 +13,10 @@
 #include "brave/browser/speedreader/speedreader_service_factory.h"
 #include "brave/components/speedreader/speedreader_rewriter_service.h"
 #include "brave/components/speedreader/speedreader_util.h"
+#include "build/build_config.h"
+#if BUILDFLAG(IS_ANDROID)
+#include "content/public/browser/render_frame_host.h"
+#endif
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/common/chrome_isolated_world_ids.h"
 #include "content/public/browser/web_contents.h"
@@ -60,11 +64,34 @@ void PageDistiller::GetTextToSpeak(TextToSpeechContentCallback callback) {
   static constexpr char16_t kGetTextToSpeak[] =
       uR"js( speedreaderUtils.extractTextToSpeak() )js";
 
+#if BUILDFLAG(IS_ANDROID)
+  auto* rfh = web_contents_ ? web_contents_->GetPrimaryMainFrame() : nullptr;
+  if (!rfh) {
+    return std::move(callback).Run(base::Value());
+  }
+  rfh->ExecuteJavaScriptInIsolatedWorld(
+      kGetTextToSpeak,
+      base::BindOnce(
+          [](base::WeakPtr<PageDistiller> distiller,
+             content::WeakDocumentPtr source_document,
+             TextToSpeechContentCallback callback, base::Value result) {
+            if (!distiller ||
+                !CheckSourceDocument(distiller->web_contents_, source_document) ||
+                distiller->state_ != State::kDistilled) {
+              return std::move(callback).Run(base::Value());
+            }
+            distiller->OnGetTextToSpeak(std::move(callback), std::move(result));
+          },
+          weak_factory_.GetWeakPtr(), rfh->GetWeakDocumentPtr(),
+          std::move(callback)),
+      ISOLATED_WORLD_ID_BRAVE_INTERNAL);
+#else
   web_contents_->GetPrimaryMainFrame()->ExecuteJavaScriptInIsolatedWorld(
       kGetTextToSpeak,
       base::BindOnce(&PageDistiller::OnGetTextToSpeak,
                      weak_factory_.GetWeakPtr(), std::move(callback)),
       ISOLATED_WORLD_ID_BRAVE_INTERNAL);
+#endif
 }
 
 void PageDistiller::DelayNextPageDistillationForTesting() {

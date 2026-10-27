@@ -63,7 +63,7 @@ async function applyPatches(printPatchFailuresInJson) {
   const allPatchStatus = []
   for (const repo of getPatchedRepositories()) {
     const patcher = new GitPatcher(repo.patchDir, repo.path)
-    const patchStatus = await patcher.applyPatches()
+    const patchStatus = await patcher.applyPatches(config.targetOS === 'android')
     // Log status for all patches. Entries are differentiated for logging by
     // naming each source the way the whole checkout sees it, rather than the
     // way the repository holding it does.
@@ -818,6 +818,9 @@ const util = {
   },
 
   runGclient: (args, options = {}, gclientFile = config.gclientFile) => {
+    if (config.targetOS === 'android' && ['sync', 'runhooks'].includes(args[0])) {
+      args.push('--jobs=2')
+    }
     if (config.gclientVerbose) {
       args.push('--verbose')
     }

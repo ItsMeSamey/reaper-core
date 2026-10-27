@@ -3,6 +3,8 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at https://mozilla.org/MPL/2.0/.
 
+#include "build/build_config.h"
+
 #include "brave/components/brave_shields/core/browser/ad_block_component_service_manager.h"
 
 #include <memory>
@@ -29,7 +31,9 @@
 #include "brave/components/brave_shields/core/browser/ad_block_component_filters_provider.h"
 #include "brave/components/brave_shields/core/browser/ad_block_filters_provider.h"
 #include "brave/components/brave_shields/core/browser/ad_block_filters_provider_manager.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_shields/core/browser/ad_block_list_p3a.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_shields/core/browser/brave_shields_locale_utils.h"
 #include "brave/components/brave_shields/core/browser/filter_list_catalog_entry.h"
 #include "brave/components/brave_shields/core/common/adblock/rs/src/lib.rs.h"
@@ -148,8 +152,11 @@ AdBlockComponentServiceManager::AdBlockComponentServiceManager(
       locale_(locale),
       component_update_service_(cus),
       catalog_provider_(catalog_provider),
-      filters_provider_manager_(filters_provider_manager),
-      list_p3a_(list_p3a) {
+      filters_provider_manager_(filters_provider_manager)
+#if !BUILDFLAG(IS_ANDROID)
+      , list_p3a_(list_p3a)
+#endif  // !BUILDFLAG(IS_ANDROID)
+{
   // The gates block filter set loading until the catalog loads and all
   // component providers are registered, so a single engine build happens
   // once everything is ready. They are scoped to the DAT cache feature
@@ -286,7 +293,9 @@ void AdBlockComponentServiceManager::StartRegionalServices() {
 void AdBlockComponentServiceManager::LoadComponentFiltersProviders() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   StartRegionalServices();
+#if !BUILDFLAG(IS_ANDROID)
   RecordP3ACookieListEnabled();
+#endif  // !BUILDFLAG(IS_ANDROID)
 }
 
 void AdBlockComponentServiceManager::UpdateFilterListPrefs(
@@ -303,15 +312,21 @@ void AdBlockComponentServiceManager::UpdateFilterListPrefs(
     update->Set(uuid, std::move(regional_filter_dict));
   }
 
+#if !BUILDFLAG(IS_ANDROID)
   RecordP3ACookieListEnabled();
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
   list_p3a_->ReportFilterListUsage();
+#endif  // !BUILDFLAG(IS_ANDROID)
 }
 
+#if !BUILDFLAG(IS_ANDROID)
 void AdBlockComponentServiceManager::RecordP3ACookieListEnabled() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   UMA_HISTOGRAM_BOOLEAN(kCookieListEnabledHistogram,
                         IsFilterListEnabled(kCookieListUuid));
 }
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 bool AdBlockComponentServiceManager::IsFilterListAvailable(
     const std::string& uuid) const {
@@ -471,7 +486,9 @@ void AdBlockComponentServiceManager::SetFilterListCatalog(
   filter_list_catalog_ = std::move(catalog);
   LoadComponentFiltersProviders();
 
+#if !BUILDFLAG(IS_ANDROID)
   list_p3a_->OnFilterListCatalogLoaded(filter_list_catalog_, locale_);
+#endif  // !BUILDFLAG(IS_ANDROID)
 }
 
 const std::vector<FilterListCatalogEntry>&

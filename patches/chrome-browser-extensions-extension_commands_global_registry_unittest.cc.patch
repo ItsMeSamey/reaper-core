@@ -1,0 +1,154 @@
+diff --git a/chrome/browser/extensions/extension_commands_global_registry_unittest.cc b/chrome/browser/extensions/extension_commands_global_registry_unittest.cc
+--- a/chrome/browser/extensions/extension_commands_global_registry_unittest.cc
++++ b/chrome/browser/extensions/extension_commands_global_registry_unittest.cc
+@@ -18,6 +18,12 @@
+ #include "testing/gtest/include/gtest/gtest.h"
+ #include "ui/base/accelerators/command.h"
+ #include "ui/base/accelerators/global_accelerator_listener/global_accelerator_listener.h"
++#if BUILDFLAG(IS_ANDROID)
++#include "base/functional/bind.h"
++#include "base/run_loop.h"
++#include "extensions/browser/unloaded_extension_reason.h"
++#include "ui/base/accelerators/global_accelerator_listener/global_accelerator_listener_android.h"
++#endif
+ 
+ static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
+ 
+@@ -313,4 +319,137 @@
+ 
+ }  // namespace
+ 
++#if BUILDFLAG(IS_ANDROID)
++namespace {
++class AndroidGlobalShortcutAvailabilityTest : public ExtensionServiceTestBase {
++ public:
++  void SetUp() override {
++    ExtensionServiceTestBase::SetUp();
++    InitializeEmptyExtensionService();
++    listener_ = static_cast<ui::GlobalAcceleratorListenerAndroid*>(
++        ui::GlobalAcceleratorListener::GetInstance());
++  }
++
++  void TearDown() override {
++    listener_->SetShortcutHandlingSuspended(false);
++    listener_->DetachBackend(this);
++    base::RunLoop().RunUntilIdle();
++    ExtensionServiceTestBase::TearDown();
++  }
++
++ protected:
++  scoped_refptr<const Extension> EnableCommands() {
++    auto extension =
++        ExtensionBuilder("Android hardware shortcuts")
++            .SetID("abababababababababababababababab")
++            .AddJSON(std::string(kManifestWithUnsanitizedShortcuts))
++            .Build();
++    ExtensionRegistry::Get(profile())->AddEnabled(extension);
++    CommandService::Get(profile())->UpdateKeybindingsForTest(extension.get());
++    return extension;
++  }
++
++  bool Connect() {
++    const bool attached = listener_->AttachBackend(
++        this, base::BindRepeating(
++                  [](AndroidGlobalShortcutAvailabilityTest* self,
++                     const ui::Accelerator& accelerator, bool add) {
++                    if (add) {
++                      ++self->registration_attempts_;
++                      return self->accept_;
++                    }
++                    return true;
++                  },
++                  base::Unretained(this)));
++    base::RunLoop().RunUntilIdle();
++    return attached;
++  }
++
++  ExtensionCommandsGlobalRegistry* registry() {
++    return ExtensionCommandsGlobalRegistry::Get(profile());
++  }
++
++  const ui::Accelerator global_{ui::VKEY_5,
++                                ui::EF_CONTROL_DOWN | ui::EF_SHIFT_DOWN};
++  const ui::Accelerator regular_{ui::VKEY_6,
++                                 ui::EF_CONTROL_DOWN | ui::EF_SHIFT_DOWN};
++  raw_ptr<ui::GlobalAcceleratorListenerAndroid> listener_ = nullptr;
++  int registration_attempts_ = 0;
++  bool accept_ = true;
++};
++
++TEST_F(AndroidGlobalShortcutAvailabilityTest, RetriesAfterServiceConnects) {
++  auto extension = EnableCommands();
++  EXPECT_FALSE(registry()->IsRegistered(global_));
++  ASSERT_TRUE(Connect());
++  EXPECT_TRUE(registry()->IsRegistered(global_));
++  EXPECT_FALSE(registry()->IsRegistered(regular_));
++  EXPECT_EQ(registration_attempts_, 1);
++}
++
++TEST_F(AndroidGlobalShortcutAvailabilityTest, DisconnectAndRepeatedReconnect) {
++  auto extension = EnableCommands();
++  ASSERT_TRUE(Connect());
++  listener_->DetachBackend(this);
++  base::RunLoop().RunUntilIdle();
++  EXPECT_FALSE(registry()->IsRegistered(global_));
++  EXPECT_FALSE(listener_->DispatchAccelerator(this, global_));
++  ASSERT_TRUE(Connect());
++  EXPECT_TRUE(registry()->IsRegistered(global_));
++  listener_->RefreshBackendRegistrations();
++  base::RunLoop().RunUntilIdle();
++  EXPECT_TRUE(registry()->IsRegistered(global_));
++  EXPECT_EQ(registration_attempts_, 3);
++}
++
++TEST_F(AndroidGlobalShortcutAvailabilityTest,
++       RealRegistrationFailureStaysInactive) {
++  auto extension = EnableCommands();
++  accept_ = false;
++  ASSERT_TRUE(Connect());
++  EXPECT_FALSE(registry()->IsRegistered(global_));
++  EXPECT_FALSE(listener_->DispatchAccelerator(this, global_));
++  accept_ = true;
++  listener_->RefreshBackendRegistrations();
++  base::RunLoop().RunUntilIdle();
++  EXPECT_TRUE(registry()->IsRegistered(global_));
++}
++
++TEST_F(AndroidGlobalShortcutAvailabilityTest, ConnectDuringShortcutEditing) {
++  auto extension = EnableCommands();
++  registry()->SetShortcutHandlingSuspended(true);
++  ASSERT_TRUE(Connect());
++  EXPECT_FALSE(registry()->IsRegistered(global_));
++  registry()->SetShortcutHandlingSuspended(false);
++  base::RunLoop().RunUntilIdle();
++  EXPECT_TRUE(registry()->IsRegistered(global_));
++}
++
++TEST_F(AndroidGlobalShortcutAvailabilityTest,
++       ExtensionUnloadRevokesRegistration) {
++  auto extension = EnableCommands();
++  ASSERT_TRUE(Connect());
++  auto* extensions = ExtensionRegistry::Get(profile());
++  extensions->RemoveEnabled(extension->id());
++  extensions->TriggerOnUnloaded(extension.get(),
++                                UnloadedExtensionReason::DISABLE);
++  EXPECT_FALSE(registry()->IsRegistered(global_));
++  EXPECT_FALSE(listener_->DispatchAccelerator(this, global_));
++  listener_->RefreshBackendRegistrations();
++  base::RunLoop().RunUntilIdle();
++  EXPECT_FALSE(registry()->IsRegistered(global_));
++}
++
++TEST_F(AndroidGlobalShortcutAvailabilityTest,
++       ChromeScopeDoesNotRetainGlobalGrab) {
++  auto extension = EnableCommands();
++  ASSERT_TRUE(Connect());
++  ASSERT_TRUE(CommandService::Get(profile())->SetScope(
++      extension->id(), "legit_global_shortcut", false));
++  EXPECT_FALSE(registry()->IsRegistered(global_));
++  EXPECT_FALSE(listener_->DispatchAccelerator(this, global_));
++}
++}  // namespace
++#endif
++
+ }  // namespace extensions

@@ -1,0 +1,119 @@
+# Copyright (c) 2026 The Reaper Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+substitutions:
+- description: Integrate reviewed Android extension UI, MV3 lifecycle, authenticated native messaging and artifact-parser source with retained desktop behavior
+  regex:
+    re_pattern: '//\ found\ in\ the\ LICENSE\ file\.\
+
+      \
+
+      \#include\ "extensions/browser/service_worker/service_worker_keepalive\.h"\
+
+      \
+
+      \#include\ "base/check\.h"\
+
+      \#include\ "base/memory/raw_ptr\.h"\
+
+      '
+    replace: '// found in the LICENSE file.
+
+
+      #include "extensions/browser/service_worker/service_worker_keepalive.h"
+
+
+      #include "build/build_config.h"
+
+
+      #if BUILDFLAG(IS_ANDROID)
+
+      #include <utility>
+
+      #endif
+
+
+      #include "base/check.h"
+
+      #include "base/memory/raw_ptr.h"
+
+      '
+- description: Integrate reviewed Android extension UI, MV3 lifecycle, authenticated native messaging and artifact-parser source with retained desktop behavior
+  regex:
+    re_pattern: '\ \ \ \ \ \ activity_type_\(activity_type\),\
+
+      \ \ \ \ \ \ activity_extra_data_\(std::move\(activity_extra_data\)\)\ \{\
+
+      \ \ CHECK\(browser_context_\);\
+
+      \
+
+      \ \ ProcessManager\*\ process_manager\ =\ ProcessManager::Get\(browser_context_\);\
+
+      \ \ CHECK\(process_manager\);\
+
+      '
+    replace: "      activity_type_(activity_type),\n      activity_extra_data_(std::move(activity_extra_data)) {\n  CHECK(browser_context_);\n#if BUILDFLAG(IS_ANDROID)\n  if (browser_context_->ShutdownStarted()) {\n    browser_context_ = nullptr;\n    return;\n  }\n#endif\n\n  ProcessManager* process_manager = ProcessManager::Get(browser_context_);\n  CHECK(process_manager);\n"
+- description: Integrate reviewed Android extension UI, MV3 lifecycle, authenticated native messaging and artifact-parser source with retained desktop behavior
+  regex:
+    re_pattern: '\ \ //\ be\ fixed\)\.\
+
+      \ \ //\ CHECK\(process_manager\->HasServiceWorker\(worker_id_\)\);\
+
+      \
+
+      \ \ request_uuid_\ =\ process_manager\->IncrementServiceWorkerKeepaliveCount\(\
+
+      \ \ \ \ \ \ worker_id_,\ timeout_type,\ activity_type_,\ activity_extra_data_\);\
+
+      \
+
+      '
+    replace: "  // be fixed).\n  // CHECK(process_manager->HasServiceWorker(worker_id_));\n\n#if BUILDFLAG(IS_ANDROID)\n  // Dispatch admits requests only for a PM-tracked worker. Capture its token\n  // before registration; an explicitly supplied token is never replaced.\n  if (auto running_worker =\n          process_manager->GetServiceWorkerRunningInstance(worker_id_)) {\n    worker_id_ = std::move(*running_worker);\n  }\n#endif\n  request_uuid_ = process_manager->IncrementServiceWorkerKeepaliveCount(\n      worker_id_, timeout_type, activity_type_, activity_extra_data_);\n\n"
+- description: Integrate reviewed Android extension UI, MV3 lifecycle, authenticated native messaging and artifact-parser source with retained desktop behavior
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ base::Unretained\(this\)\)\);\
+
+      \}\
+
+      \
+
+      ServiceWorkerKeepalive::ServiceWorkerKeepalive\(ServiceWorkerKeepalive\&\&\)\ =\
+
+      \ \ \ \ default;\
+
+      \
+
+      ServiceWorkerKeepalive::\~ServiceWorkerKeepalive\(\)\ \{\
+
+      \ \ if\ \(!browser_context_\)\ \{\
+
+      \ \ \ \ //\ Shutdown\ has\ started\.\ Bail\.\
+
+      \ \ \ \ return;\
+
+      \ \ \}\
+
+      \
+
+      \ \ ProcessManager\*\ process_manager\ =\ ProcessManager::Get\(browser_context_\);\
+
+      \ \ //\ `process_manager`\ should\ always\ be\ non\-null\ because\ of\ the\ shutdown\ check\
+
+      \ \ //\ above\.\
+
+      \ \ CHECK\(process_manager\);\
+
+      \
+
+      \ \ if\ \(!process_manager\->HasServiceWorker\(worker_id_\)\)\ \{\
+
+      \ \ \ \ //\ The\ service\ worker\ may\ have\ legitimately\ already\ stopped\ \(despite\ this\
+
+      \ \ \ \ //\ keepalive\)\.\ Keepalives\ have\ different\ styles\ \(whether\ they\ extend\ past\
+
+      \ \ \ \ //\ the\ timeout\ limit\),\ and\ the\ worker\ may\ have\ timed\ out\ on\ another\ request\.\
+
+      '
+    replace: "                                          base::Unretained(this)));\n}\n\n#if BUILDFLAG(IS_ANDROID)\nServiceWorkerKeepalive::ServiceWorkerKeepalive(ServiceWorkerKeepalive&& other)\n    : browser_context_(std::exchange(other.browser_context_, nullptr)),\n      worker_id_(std::move(other.worker_id_)),\n      activity_type_(other.activity_type_),\n      activity_extra_data_(std::move(other.activity_extra_data_)),\n      request_uuid_(std::move(other.request_uuid_)) {\n  // A moved subscription still calls the original object's address. Cancel it\n  // and bind the destination; the moved-from owner cannot release this UUID.\n  other.shutdown_subscription_ = base::CallbackListSubscription();\n  if (browser_context_ && browser_context_->ShutdownStarted()) {\n    browser_context_ = nullptr;\n  }\n  if (browser_context_) {\n    shutdown_subscription_ =\n        ServiceWorkerKeepaliveShutdownNotifierFactory::GetInstance()\n            ->Get(browser_context_)\n            ->Subscribe(base::BindRepeating(&ServiceWorkerKeepalive::Shutdown,\n                                            base::Unretained(this)));\n  }\n}\n#else\nServiceWorkerKeepalive::ServiceWorkerKeepalive(ServiceWorkerKeepalive&&) =\n    default;\n#endif\n\nServiceWorkerKeepalive::~ServiceWorkerKeepalive() {\n  if (!browser_context_) {\n    // Shutdown has started. Bail.\n    return;\n  }\n#if BUILDFLAG(IS_ANDROID)\n  if (browser_context_->ShutdownStarted()) {\n    return;\n  }\n#endif\n\n  ProcessManager* process_manager = ProcessManager::Get(browser_context_);\n  // `process_manager` should always be non-null because of the shutdown check\n  // above.\n  CHECK(process_manager);\n\n#if BUILDFLAG(IS_ANDROID)\n  if (!worker_id_.start_token ||\n      !process_manager->GetServiceWorkerRunningInstance(worker_id_)) {\n#else\n  if (!process_manager->HasServiceWorker(worker_id_)) {\n#endif\n    // The service worker may have legitimately already stopped (despite this\n    // keepalive). Keepalives have different styles (whether they extend past\n    // the timeout limit), and the worker may have timed out on another request.\n"

@@ -12,7 +12,9 @@
 namespace webui {
 
 int CurrentChannelLogoResourceId() {
-#if !BUILDFLAG(IS_ANDROID)
+#if BUILDFLAG(IS_ANDROID)
+  return IDR_PRODUCT_LOGO_32;
+#else
   switch (chrome::GetChannel()) {
 #if defined(OFFICIAL_BUILD)
     case version_info::Channel::CANARY:
@@ -33,8 +35,8 @@ int CurrentChannelLogoResourceId() {
     case version_info::Channel::UNKNOWN:
       return IDR_PRODUCT_LOGO_32_DEVELOPMENT;
   }
-#endif  // BUILDFLAG(IS_ANDROID)
   return -1;
+#endif  // BUILDFLAG(IS_ANDROID)
 }
 
 }  // namespace webui

@@ -1,0 +1,155 @@
+substitutions:
+- description: Bind Android delayed Web Store prompts to the original live active document and exercise real held-icon dispatch
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ CreateIconLoaderFactoryWithNetworkAccessChecks\(browser_context\(\)\);\
+
+      \ \ \}\
+
+      \
+
+      \ \ ParseWebstoreData\(\
+
+      \ \ \ \ \ \ loader_factory,\ details\(\)\.id,\ details\(\)\.manifest,\ icon_url,\
+
+      \ \ \ \ \ \ base::BindOnce\(\&WebstorePrivateBeginInstallWithManifest3Function::\
+
+      '
+    replace: "        CreateIconLoaderFactoryWithNetworkAccessChecks(browser_context());\n  }\n\n#if BUILDFLAG(IS_ANDROID)\n  if (auto* frame = render_frame_host()) {\n    requesting_document_ = frame->GetWeakDocumentPtr();\n  }\n#endif\n\n  ParseWebstoreData(\n      loader_factory, details().id, details().manifest, icon_url,\n      base::BindOnce(&WebstorePrivateBeginInstallWithManifest3Function::\n"
+- description: Bind Android delayed Web Store prompts to the original live active document and exercise real held-icon dispatch
+  regex:
+    re_pattern: 'void\ WebstorePrivateBeginInstallWithManifest3Function::OnInstallStatusCheckDone\(\
+
+      \ \ \ \ ExtensionInstallStatus\ install_status,\
+
+      \ \ \ \ std::u16string\ blocked_message\)\ \{\
+
+      \ \ content::WebContents\*\ web_contents\ =\ GetSenderWebContents\(\);\
+
+      \ \ if\ \(install_status\ ==\ kBlockedByPolicy\)\ \{\
+
+      \ \ \ \ blocked_by_policy_error_message_\ =\ std::move\(blocked_message\);\
+
+      '
+    replace: "void WebstorePrivateBeginInstallWithManifest3Function::OnInstallStatusCheckDone(\n    ExtensionInstallStatus install_status,\n    std::u16string blocked_message) {\n#if BUILDFLAG(IS_ANDROID)\n  auto* frame = requesting_document_.AsRenderFrameHostIfValid();\n  if (!frame || frame != render_frame_host() || !frame->IsRenderFrameLive() ||\n      !frame->IsActive()) {\n    Respond(BuildResponse(api::webstore_private::Result::kUserCancelled,\n                          kWebstoreUserCancelledError));\n    return;\n  }\n#endif\n  content::WebContents* web_contents = GetSenderWebContents();\n  if (install_status == kBlockedByPolicy) {\n    blocked_by_policy_error_message_ = std::move(blocked_message);\n"
+- description: Pass3 reviewed Android store otr repair
+  regex:
+    re_pattern: 'WebstorePrivateBeginInstallWithManifest3Function::Run\(\)\ \{\
+
+      \ \ params_\ =\ Params::Create\(args\(\)\);\
+
+      \ \ EXTENSION_FUNCTION_VALIDATE\(params_\);\
+
+      \
+
+      \ \ browser_context_\ =\ browser_context\(\);\
+
+      \ \ if\ \(!crx_file::id_util::IdIsValid\(details\(\)\.id\)\)\ \{\
+
+      '
+    replace: "WebstorePrivateBeginInstallWithManifest3Function::Run() {\n  params_ = Params::Create(args());\n  EXTENSION_FUNCTION_VALIDATE(params_);\n\n#if BUILDFLAG(IS_ANDROID)\n  // completeInstall cannot run in either context. Reject before creating an\n  // approval or an active-install marker shared with the regular profile.\n  if (ExtensionsBrowserClient::Get()->IsGuestSession(browser_context()) ||\n      browser_context()->IsOffTheRecord()) {\n    return RespondNow(\n        BuildResponse(api::webstore_private::Result::kUnknownError,\n                      kIncognitoError));\n  }\n#endif\n\n  browser_context_ = browser_context();\n  if (!crx_file::id_util::IdIsValid(details().id)) {\n"
+- description: Omit Android enterprise request timestamp/justification pending-list collector
+  regex:
+    pattern: "ExtensionInstallStatus AddExtensionToPendingList(\n    const ExtensionId& id,\n    content::BrowserContext*\
+      \ browser_context,\n    const std::string& justification) {\n  // There is no need to check whether the extension's\
+      \ required permissions or\n  // manifest type are blocked  by the enterprise policy because extensions\n  // blocked\
+      \ by those are still requestable.\n  ExtensionInstallStatus status =\n      GetWebstoreExtensionInstallStatus(id, browser_context);\n\
+      \  // We put the |id| into the pending request list if it can be requested.\n  // Ideally we should not get here if\
+      \ the status is not |kCanRequest|. However\n  // policy might be updated between the client calling |requestExtension|\
+      \ or\n  // |beginInstallWithManifest3| and us checking the status here. Handle\n  // approvals and rejections for this\
+      \ case by adding the |id| into the pending\n  // list. ExtensionRequestObserver will observe this update and show the\n\
+      \  // notificaion immediately.\n  // Please note that only the |id| that can be requested will be uploaded to\n  //\
+      \ the server and ExtensionRequestObserver will also show notifications once\n  // it's approved or rejected.\n  // |id|\
+      \ will be removed from the pending list once the notification is\n  // confirmed or closed by the user.\n  if (status\
+      \ != kCanRequest && status != kInstallable &&\n      status != kBlockedByPolicy && status != kForceInstalled) {\n  \
+      \  return status;\n  }\n\n  PrefService* prefs = user_prefs::UserPrefs::Get(browser_context);\n  ScopedDictPrefUpdate\
+      \ pending_requests_update(\n      prefs, enterprise_reporting::kCloudExtensionRequestIds);\n  DCHECK(!pending_requests_update->Find(id));\n\
+      \  base::DictValue request_data;\n  request_data.Set(extension_misc::kExtensionRequestTimestamp,\n                 \
+      \  ::base::TimeToValue(base::Time::Now()));\n  if (!justification.empty()) {\n    request_data.Set(extension_misc::kExtensionWorkflowJustification,\n\
+      \                     justification);\n  }\n  pending_requests_update->Set(id, std::move(request_data));\n  // Query\
+      \ the new extension install status again. It should be changed from\n  // |kCanRequest| to |kRequestPending| if the\
+      \ id has been added into pending\n  // list successfully. Otherwise, it shouldn't be changed.\n  ExtensionInstallStatus\
+      \ new_status =\n      GetWebstoreExtensionInstallStatus(id, browser_context);\n#if DCHECK_IS_ON()\n  if (status == kCanRequest)\
+      \ {\n    DCHECK_EQ(kRequestPending, new_status);\n  } else {\n    DCHECK_EQ(status, new_status);\n  }\n#endif  // DCHECK_IS_ON()\n\
+      \  return new_status;\n}\n"
+    replace: "#if !BUILDFLAG(IS_ANDROID)\nExtensionInstallStatus AddExtensionToPendingList(\n    const ExtensionId& id,\n\
+      \    content::BrowserContext* browser_context,\n    const std::string& justification) {\n  // There is no need to check\
+      \ whether the extension's required permissions or\n  // manifest type are blocked  by the enterprise policy because\
+      \ extensions\n  // blocked by those are still requestable.\n  ExtensionInstallStatus status =\n      GetWebstoreExtensionInstallStatus(id,\
+      \ browser_context);\n  // We put the |id| into the pending request list if it can be requested.\n  // Ideally we should\
+      \ not get here if the status is not |kCanRequest|. However\n  // policy might be updated between the client calling\
+      \ |requestExtension| or\n  // |beginInstallWithManifest3| and us checking the status here. Handle\n  // approvals and\
+      \ rejections for this case by adding the |id| into the pending\n  // list. ExtensionRequestObserver will observe this\
+      \ update and show the\n  // notificaion immediately.\n  // Please note that only the |id| that can be requested will\
+      \ be uploaded to\n  // the server and ExtensionRequestObserver will also show notifications once\n  // it's approved\
+      \ or rejected.\n  // |id| will be removed from the pending list once the notification is\n  // confirmed or closed by\
+      \ the user.\n  if (status != kCanRequest && status != kInstallable &&\n      status != kBlockedByPolicy && status !=\
+      \ kForceInstalled) {\n    return status;\n  }\n\n  PrefService* prefs = user_prefs::UserPrefs::Get(browser_context);\n\
+      \  ScopedDictPrefUpdate pending_requests_update(\n      prefs, enterprise_reporting::kCloudExtensionRequestIds);\n \
+      \ DCHECK(!pending_requests_update->Find(id));\n  base::DictValue request_data;\n  request_data.Set(extension_misc::kExtensionRequestTimestamp,\n\
+      \                   ::base::TimeToValue(base::Time::Now()));\n  if (!justification.empty()) {\n    request_data.Set(extension_misc::kExtensionWorkflowJustification,\n\
+      \                     justification);\n  }\n  pending_requests_update->Set(id, std::move(request_data));\n  // Query\
+      \ the new extension install status again. It should be changed from\n  // |kCanRequest| to |kRequestPending| if the\
+      \ id has been added into pending\n  // list successfully. Otherwise, it shouldn't be changed.\n  ExtensionInstallStatus\
+      \ new_status =\n      GetWebstoreExtensionInstallStatus(id, browser_context);\n#if DCHECK_IS_ON()\n  if (status == kCanRequest)\
+      \ {\n    DCHECK_EQ(kRequestPending, new_status);\n  } else {\n    DCHECK_EQ(status, new_status);\n  }\n#endif  // DCHECK_IS_ON()\n\
+      \  return new_status;\n}\n#endif  // !BUILDFLAG(IS_ANDROID)\n"
+  count: 1
+- description: Omit Android enterprise request consent UI after status denial
+  regex:
+    pattern: '  if (install_status == kCanRequest || install_status == kRequestPending) {
+
+      '
+    replace: "#if !BUILDFLAG(IS_ANDROID)\n  if (install_status == kCanRequest || install_status == kRequestPending) {\n"
+  count: 1
+- description: Keep normal Android installation path after excluding enterprise request prompt
+  regex:
+    pattern: "  } else {\n    ReportWebStoreInstallEsbAllowlistParameter(details().esb_allowlist);\n"
+    replace: "  } else\n#endif  // !BUILDFLAG(IS_ANDROID)\n  {\n    ReportWebStoreInstallEsbAllowlistParameter(details().esb_allowlist);\n"
+  count: 1
+- description: Complete unavailable Android enterprise request callback with explicit policy failure
+  regex:
+    pattern: "void WebstorePrivateBeginInstallWithManifest3Function::OnRequestPromptDone(\n    ExtensionInstallPromptClient::DoneCallbackPayload\
+      \ payload) {\n  switch (payload.result) {\n    case ExtensionInstallPromptClient::Result::ACCEPTED:\n      AddExtensionToPendingList(details().id,\
+      \ browser_context_,\n                                payload.justification);\n      break;\n    case ExtensionInstallPromptClient::Result::USER_CANCELED:\n\
+      \    case ExtensionInstallPromptClient::Result::ABORTED:\n      break;\n    case ExtensionInstallPromptClient::Result::\n\
+      \        ACCEPTED_WITH_WITHHELD_PERMISSIONS:\n      NOTREACHED();\n  }\n\n  Respond(BuildResponse(api::webstore_private::Result::kUserCancelled,\n\
+      \                        kWebstoreUserCancelledError));\n}\n"
+    replace: "void WebstorePrivateBeginInstallWithManifest3Function::OnRequestPromptDone(\n    ExtensionInstallPromptClient::DoneCallbackPayload\
+      \ payload) {\n#if BUILDFLAG(IS_ANDROID)\n  // No enterprise reporting backend exists; never record or claim submission.\n\
+      \  Respond(BuildResponse(api::webstore_private::Result::kBlockedByPolicy,\n                        kWebstoreBlockByPolicy));\n\
+      #else\n  switch (payload.result) {\n    case ExtensionInstallPromptClient::Result::ACCEPTED:\n      AddExtensionToPendingList(details().id,\
+      \ browser_context_,\n                                payload.justification);\n      break;\n    case ExtensionInstallPromptClient::Result::USER_CANCELED:\n\
+      \    case ExtensionInstallPromptClient::Result::ABORTED:\n      break;\n    case ExtensionInstallPromptClient::Result::\n\
+      \        ACCEPTED_WITH_WITHHELD_PERMISSIONS:\n      NOTREACHED();\n  }\n\n  Respond(BuildResponse(api::webstore_private::Result::kUserCancelled,\n\
+      \                        kWebstoreUserCancelledError));\n#endif  // BUILDFLAG(IS_ANDROID)\n}\n"
+  count: 1
+- description: Release the consumed Android approval install marker when its sender is unavailable
+  regex:
+    pattern: "  content::WebContents* web_contents = GetSenderWebContents();\n  if (!web_contents) {\n    return RespondNow(\n        Error(function_constants::kCouldNotFindSenderWebContents));\n  }\n\n  scoped_active_install_ = std::make_unique<ScopedActiveInstall>(\n"
+    replace: "  content::WebContents* web_contents = GetSenderWebContents();\n  if (!web_contents) {\n#if BUILDFLAG(IS_ANDROID)\n    // The approval was consumed, but no installer can take over this marker.\n    ScopedActiveInstall scoped_active_install(\n        ExtensionsBrowserClient::Get()->GetInstallTracker(browser_context()),\n        params->expected_id);\n#endif\n    return RespondNow(\n        Error(function_constants::kCouldNotFindSenderWebContents));\n  }\n\n  scoped_active_install_ = std::make_unique<ScopedActiveInstall>(\n"
+  count: 1
+- description: "Android fixed-stage Web Store diagnostics: explicit logging header"
+  regex:
+    pattern: "#include \"base/lazy_instance.h\"\n"
+    replace: "#include \"base/lazy_instance.h\"\n#include \"base/logging.h\"\n"
+  count: 1
+- description: "Android fixed-stage Web Store diagnostics: ordinary consent callback accepted branch"
+  regex:
+    pattern: "        ACCEPTED_WITH_WITHHELD_PERMISSIONS: {\n      auto* supervised_user_extensions_delegate ="
+    replace: "        ACCEPTED_WITH_WITHHELD_PERMISSIONS: {\n#if BUILDFLAG(IS_ANDROID)\n      LOG(INFO) << \"WebstorePrivate install stage=consent_accepted\";\n#endif\n      auto* supervised_user_extensions_delegate ="
+  count: 1
+- description: "Android fixed-stage Web Store diagnostics: completeInstall Run entry"
+  regex:
+    pattern: "WebstorePrivateCompleteInstallFunction::Run() {\n"
+    replace: "WebstorePrivateCompleteInstallFunction::Run() {\n#if BUILDFLAG(IS_ANDROID)\n  LOG(INFO) << \"WebstorePrivate install stage=complete_install_entered\";\n#endif\n"
+  count: 1
+- description: "Android fixed-stage Web Store diagnostics: installer success callback entry"
+  regex:
+    pattern: "void WebstorePrivateCompleteInstallFunction::OnExtensionInstallSuccess(\n    const std::string& id) {\n"
+    replace: "void WebstorePrivateCompleteInstallFunction::OnExtensionInstallSuccess(\n    const std::string& id) {\n#if BUILDFLAG(IS_ANDROID)\n  LOG(INFO)\n      << \"WebstorePrivate install stage=complete_install_success_callback\";\n#endif\n"
+  count: 1
+- description: "Android fixed-stage Web Store diagnostics: installer failure callback entry existing enum only"
+  regex:
+    pattern: "void WebstorePrivateCompleteInstallFunction::OnExtensionInstallFailure(\n    const std::string& id,\n    const std::string& error,\n    WebstoreInstaller::FailureReason reason) {\n"
+    replace: "void WebstorePrivateCompleteInstallFunction::OnExtensionInstallFailure(\n    const std::string& id,\n    const std::string& error,\n    WebstoreInstaller::FailureReason reason) {\n#if BUILDFLAG(IS_ANDROID)\n  LOG(INFO) << \"WebstorePrivate install stage=complete_install_failure_callback\"\n            << \" reason=\" << static_cast<int>(reason);\n#endif\n"
+  count: 1

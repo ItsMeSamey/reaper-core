@@ -1,0 +1,370 @@
+diff --git a/chrome/browser/extensions/api/permissions/permissions_apitest.cc b/chrome/browser/extensions/api/permissions/permissions_apitest.cc
+--- a/chrome/browser/extensions/api/permissions/permissions_apitest.cc
++++ b/chrome/browser/extensions/api/permissions/permissions_apitest.cc
+@@ -4,11 +4,13 @@
+
+ #include "base/files/file_util.h"
+ #include "base/path_service.h"
++#include "base/test/run_until.h"
+ #include "base/threading/thread_restrictions.h"
+ #include "build/android_buildflags.h"
+ #include "build/build_config.h"
+ #include "build/chromeos_buildflags.h"
+ #include "chrome/browser/extensions/extension_apitest.h"
++#include "chrome/browser/extensions/extension_management.h"
+ #include "chrome/browser/extensions/extension_management_test_util.h"
+ #include "chrome/browser/extensions/extension_with_management_policy_apitest.h"
+ #include "chrome/browser/profiles/profile.h"
+@@ -24,7 +26,23 @@
+ #include "net/dns/mock_host_resolver.h"
+
+ #if BUILDFLAG(IS_ANDROID)
++#include <memory>
++#include <optional>
++#include <string>
++#include <utility>
++
++#include "base/auto_reset.h"
++#include "base/functional/bind.h"
++#include "base/functional/callback.h"
++#include "base/memory/scoped_refptr.h"
++#include "base/run_loop.h"
++#include "base/values.h"
+ #include "chrome/browser/net/chrome_network_delegate.h"
++#include "extensions/browser/background_script_executor.h"
++#include "extensions/browser/extension_registry.h"
++#include "extensions/common/extension.h"
++#include "extensions/test/extension_background_page_waiter.h"
++#include "extensions/test/test_extension_dir.h"
+ #endif
+
+ static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
+@@ -295,4 +313,328 @@
+       << message_;
+ }
+
++#if BUILDFLAG(IS_ANDROID)
++// Exercise the real MV3 dispatcher and updater with consent held across an
++// extension generation change. Only the native prompt UI is replaced by the
++// existing programmatic completion hook.
++class PermissionsRequestLifetimeAndroidTest : public ExtensionApiTest {
++ protected:
++  using ResultCapture = BackgroundScriptExecutor::ResultCapture;
++
++  void SetUpOnMainThread() override {
++    ExtensionApiTest::SetUpOnMainThread();
++    PermissionsRequestFunction::SetIgnoreUserGestureForTests(false);
++    dialog_action_ = PermissionsRequestFunction::SetDialogActionForTests(
++        PermissionsRequestFunction::DialogAction::kProgrammatic);
++    show_dialog_callback_ = base::BindRepeating(
++        &PermissionsRequestLifetimeAndroidTest::OnDialogShown,
++        base::Unretained(this));
++    show_dialog_reset_ =
++        PermissionsRequestFunction::SetShowDialogCallbackForTests(
++            &show_dialog_callback_);
++  }
++
++  void TearDownOnMainThread() override {
++    prompt_shown_.Reset();
++    if (pending_dialog_) {
++      // Balance the request's AddRef even after an ASSERT in a test body.
++      ResolveDialog(false);
++    }
++    show_dialog_reset_.reset();
++    dialog_action_.reset();
++    PermissionsRequestFunction::SetIgnoreUserGestureForTests(false);
++    ExtensionApiTest::TearDownOnMainThread();
++  }
++
++  const Extension* LoadOptionalBookmarksExtension() {
++    test_dir_ = std::make_unique<TestExtensionDir>();
++    test_dir_->WriteManifest(R"({
++      "name": "Delayed optional permission consent",
++      "version": "1.0",
++      "manifest_version": 3,
++      "background": {"service_worker": "worker.js"},
++      "optional_permissions": ["bookmarks"]
++    })");
++    test_dir_->WriteFile(FILE_PATH_LITERAL("worker.js"),
++                         "chrome.runtime.onInstalled.addListener(() => {});");
++    return LoadExtension(test_dir_->UnpackedPath());
++  }
++
++  bool RequestAndWaitForDialog(const Extension& extension,
++                               BackgroundScriptExecutor& executor,
++                               ResultCapture result_capture) {
++    if (pending_dialog_) {
++      ADD_FAILURE() << "A permission prompt is already pending";
++      return false;
++    }
++    ExtensionBackgroundPageWaiter(profile(), extension)
++        .WaitForBackgroundInitialized();
++    // ExecuteScriptAsync's default kDontActivate is required for workers.
++    // runWithUserGesture uses the real worker interaction scope; gesture
++    // enforcement in PermissionsRequestFunction remains enabled.
++    std::string script = R"(
++      chrome.test.runWithUserGesture(() => {
++        chrome.permissions.request({permissions: ['bookmarks']}, granted => {
++          const error = chrome.runtime.lastError;
++    )";
++    if (result_capture == ResultCapture::kSendScriptResult) {
++      script +=
++          "chrome.test.sendScriptResult(error ? error.message : granted);";
++    }
++    script += "}); });";
++
++    base::RunLoop run_loop;
++    prompt_has_window_ = false;
++    prompt_shown_ = run_loop.QuitClosure();
++    if (!executor.ExecuteScriptAsync(extension.id(), script, result_capture)) {
++      prompt_shown_.Reset();
++      return false;
++    }
++    run_loop.Run();
++    prompt_shown_.Reset();
++    // Do not resolve consent in OnDialogShown: production assigns its global
++    // pending request pointer only after that callback returns.
++    return pending_dialog_ && prompt_has_window_;
++  }
++
++  void ResolveDialog(bool accept) {
++    ASSERT_TRUE(pending_dialog_);
++    pending_dialog_ = false;
++    PermissionsRequestFunction::ResolvePendingDialogForTests(accept);
++  }
++
++  void ExpectStoredBookmarkPermission(const ExtensionId& id, bool expected) {
++    ExtensionPrefs* prefs = ExtensionPrefs::Get(profile());
++    const auto check = [expected](const char* store,
++                                  std::unique_ptr<PermissionSet> permissions) {
++      SCOPED_TRACE(store);
++      EXPECT_EQ(expected,
++                permissions && permissions->CheckAPIPermission(
++                                   mojom::APIPermissionID::kBookmark));
++    };
++    check("desired active", prefs->GetDesiredActivePermissions(id));
++    check("granted", prefs->GetGrantedPermissions(id));
++    check("runtime granted", prefs->GetRuntimeGrantedPermissions(id));
++  }
++
++  void ExpectContainsBookmarkPermission(const ExtensionId& id, bool expected) {
++    const Extension* extension =
++        extension_registry()->enabled_extensions().GetByID(id);
++    ASSERT_TRUE(extension);
++    ExtensionBackgroundPageWaiter(profile(), *extension)
++        .WaitForBackgroundInitialized();
++    base::Value result = BackgroundScriptExecutor::ExecuteScript(
++        profile(), id,
++        R"(chrome.permissions.contains({permissions: ['bookmarks']}, granted => {
++          const error = chrome.runtime.lastError;
++          chrome.test.sendScriptResult(error ? error.message : granted);
++        });)",
++        ResultCapture::kSendScriptResult);
++    ASSERT_TRUE(result.is_bool());
++    EXPECT_EQ(expected, result.GetBool());
++  }
++
++ private:
++  void OnDialogShown(gfx::NativeWindow parent_window) {
++    EXPECT_FALSE(pending_dialog_);
++    pending_dialog_ = true;
++    // The programmatic hook otherwise permits a null window that would fail
++    // before showing the real Android dialog.
++    prompt_has_window_ = parent_window != nullptr;
++    EXPECT_TRUE(prompt_has_window_);
++    if (prompt_shown_) {
++      std::move(prompt_shown_).Run();
++    }
++  }
++
++  std::unique_ptr<TestExtensionDir> test_dir_;
++  PermissionsRequestFunction::ShowDialogCallback show_dialog_callback_;
++  std::optional<base::AutoReset<PermissionsRequestFunction::DialogAction>>
++      dialog_action_;
++  std::optional<
++      base::AutoReset<PermissionsRequestFunction::ShowDialogCallback*>>
++      show_dialog_reset_;
++  base::OnceClosure prompt_shown_;
++  bool pending_dialog_ = false;
++  bool prompt_has_window_ = false;
++};
++
++IN_PROC_BROWSER_TEST_F(PermissionsRequestLifetimeAndroidTest,
++                       AcceptCurrentGeneration) {
++  scoped_refptr<const Extension> extension = LoadOptionalBookmarksExtension();
++  ASSERT_TRUE(extension);
++  const ExtensionId id = extension->id();
++  ExpectStoredBookmarkPermission(id, false);
++  ExpectContainsBookmarkPermission(id, false);
++
++  {
++    BackgroundScriptExecutor executor(profile());
++    ASSERT_TRUE(RequestAndWaitForDialog(*extension, executor,
++                                        ResultCapture::kSendScriptResult));
++    ResolveDialog(true);
++    // Observe the response delivered to the actual requesting worker.
++    base::Value result = executor.WaitForResult();
++    ASSERT_TRUE(result.is_bool());
++    EXPECT_TRUE(result.GetBool());
++  }
++  ExpectStoredBookmarkPermission(id, true);
++  ExpectContainsBookmarkPermission(id, true);
++  ASSERT_NO_FATAL_FAILURE(ReloadExtension(id));
++  ExpectContainsBookmarkPermission(id, true);
++}
++
++IN_PROC_BROWSER_TEST_F(PermissionsRequestLifetimeAndroidTest,
++                       RejectAcceptanceAfterReload) {
++  // Keep the retired object alive across reload so the generation comparison
++  // cannot be explained by allocator address reuse.
++  scoped_refptr<const Extension> original = LoadOptionalBookmarksExtension();
++  ASSERT_TRUE(original);
++  const ExtensionId id = original->id();
++  ExpectStoredBookmarkPermission(id, false);
++  ExpectContainsBookmarkPermission(id, false);
++
++  {
++    BackgroundScriptExecutor executor(profile());
++    ASSERT_TRUE(
++        RequestAndWaitForDialog(*original, executor, ResultCapture::kNone));
++  }
++  ASSERT_NO_FATAL_FAILURE(ReloadExtension(id));
++  const Extension* replacement =
++      extension_registry()->enabled_extensions().GetByID(id);
++  ASSERT_TRUE(replacement);
++  ASSERT_NE(original.get(), replacement);
++  ASSERT_EQ(id, replacement->id());
++  ResolveDialog(true);
++
++  // The old worker has been unloaded, so its JS response is not observable.
++  // Check ID-keyed persisted stores and query the replacement through the real
++  // API. A second reload exposes a stale persisted grant in a fresh worker.
++  ExpectStoredBookmarkPermission(id, false);
++  ExpectContainsBookmarkPermission(id, false);
++  ASSERT_NO_FATAL_FAILURE(ReloadExtension(id));
++  ExpectStoredBookmarkPermission(id, false);
++  ExpectContainsBookmarkPermission(id, false);
++}
++
++IN_PROC_BROWSER_TEST_F(PermissionsRequestLifetimeAndroidTest,
++                       RejectAcceptanceWhileDisabled) {
++  scoped_refptr<const Extension> original = LoadOptionalBookmarksExtension();
++  ASSERT_TRUE(original);
++  const ExtensionId id = original->id();
++  ExpectStoredBookmarkPermission(id, false);
++  ExpectContainsBookmarkPermission(id, false);
++
++  {
++    BackgroundScriptExecutor executor(profile());
++    ASSERT_TRUE(
++        RequestAndWaitForDialog(*original, executor, ResultCapture::kNone));
++  }
++  DisableExtension(id);
++  ASSERT_FALSE(extension_registry()->enabled_extensions().Contains(id));
++  ASSERT_TRUE(extension_registry()->disabled_extensions().Contains(id));
++  ResolveDialog(true);
++  ExpectStoredBookmarkPermission(id, false);
++
++  EnableExtension(id);
++  ASSERT_TRUE(extension_registry()->enabled_extensions().Contains(id));
++  ExpectContainsBookmarkPermission(id, false);
++  ASSERT_NO_FATAL_FAILURE(ReloadExtension(id));
++  ExpectStoredBookmarkPermission(id, false);
++  ExpectContainsBookmarkPermission(id, false);
++}
++
++// Use the existing dispatcher/held-consent fixture with the real managed-policy
++// provider. Ordinary lifetime tests above retain their original setup.
++class PermissionsRequestPolicyLifetimeAndroidTest
++    : public PermissionsRequestLifetimeAndroidTest {
++ public:
++  void SetUp() override {
++    policy_provider_.SetDefaultReturns(
++        /*is_initialization_complete_return=*/true,
++        /*is_first_policy_load_complete_return=*/true);
++    policy_provider_.SetAutoRefresh();
++    policy::BrowserPolicyConnector::SetPolicyProviderForTesting(
++        &policy_provider_);
++    PermissionsRequestLifetimeAndroidTest::SetUp();
++  }
++
++ protected:
++  bool SetBookmarksBlocked(const Extension& extension, bool blocked) {
++    {
++      ExtensionManagementPolicyUpdater policy(&policy_provider_);
++      if (blocked) {
++        policy.AddBlockedPermission("*", "bookmarks");
++      } else {
++        policy.ClearBlockedPermissions("*");
++      }
++    }
++    return base::test::RunUntil([this, &extension, blocked] {
++      return BookmarksAllowed(extension) != blocked;
++    });
++  }
++
++  bool BookmarksAllowed(const Extension& extension) {
++    APIPermissionSet apis;
++    apis.insert(mojom::APIPermissionID::kBookmark);
++    const PermissionSet permissions(std::move(apis), ManifestPermissionSet(),
++                                    URLPatternSet(), URLPatternSet());
++    return ExtensionManagementFactory::GetForBrowserContext(profile())
++        ->IsPermissionSetAllowed(&extension, permissions);
++  }
++
++ private:
++  testing::NiceMock<policy::MockConfigurationPolicyProvider> policy_provider_;
++};
++
++IN_PROC_BROWSER_TEST_F(PermissionsRequestPolicyLifetimeAndroidTest,
++                       RejectAcceptanceAfterPolicyBlocksPermission) {
++  scoped_refptr<const Extension> extension = LoadOptionalBookmarksExtension();
++  ASSERT_TRUE(extension);
++  const ExtensionId id = extension->id();
++  ExpectStoredBookmarkPermission(id, false);
++  ExpectContainsBookmarkPermission(id, false);
++
++  BackgroundScriptExecutor executor(profile());
++  ASSERT_TRUE(RequestAndWaitForDialog(*extension, executor,
++                                      ResultCapture::kSendScriptResult));
++  ASSERT_TRUE(SetBookmarksBlocked(*extension, true));
++  ASSERT_FALSE(BookmarksAllowed(*extension));
++  // Policy only revokes active permissions. This optional permission was not
++  // active, so the original requesting instance is still enabled.
++  ASSERT_EQ(extension.get(),
++            extension_registry()->enabled_extensions().GetByID(id));
++  ResolveDialog(true);
++  base::Value result = executor.WaitForResult();
++  ASSERT_TRUE(result.is_string());
++  EXPECT_EQ("Permissions are blocked by enterprise policy.", result.GetString());
++  ExpectStoredBookmarkPermission(id, false);
++  ExpectContainsBookmarkPermission(id, false);
++  ASSERT_NO_FATAL_FAILURE(ReloadExtension(id));
++  ExpectStoredBookmarkPermission(id, false);
++  ExpectContainsBookmarkPermission(id, false);
++}
++
++IN_PROC_BROWSER_TEST_F(PermissionsRequestPolicyLifetimeAndroidTest,
++                       AcceptAfterPolicyRestrictionIsRemoved) {
++  scoped_refptr<const Extension> extension = LoadOptionalBookmarksExtension();
++  ASSERT_TRUE(extension);
++  const ExtensionId id = extension->id();
++  BackgroundScriptExecutor executor(profile());
++  ASSERT_TRUE(RequestAndWaitForDialog(*extension, executor,
++                                      ResultCapture::kSendScriptResult));
++  ASSERT_TRUE(SetBookmarksBlocked(*extension, true));
++  ASSERT_FALSE(BookmarksAllowed(*extension));
++  ASSERT_TRUE(SetBookmarksBlocked(*extension, false));
++  ASSERT_TRUE(BookmarksAllowed(*extension));
++  ASSERT_EQ(extension.get(),
++            extension_registry()->enabled_extensions().GetByID(id));
++  ResolveDialog(true);
++  base::Value result = executor.WaitForResult();
++  ASSERT_TRUE(result.is_bool());
++  EXPECT_TRUE(result.GetBool());
++  ExpectStoredBookmarkPermission(id, true);
++  ExpectContainsBookmarkPermission(id, true);
++}
++#endif  // BUILDFLAG(IS_ANDROID)
++
+ }  // namespace extensions

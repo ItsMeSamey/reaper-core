@@ -1,0 +1,275 @@
+diff --git a/testing/android/junit/javatests/src/org/chromium/testing/local/GtestLoggerTest.java b/testing/android/junit/javatests/src/org/chromium/testing/local/GtestLoggerTest.java
+--- a/testing/android/junit/javatests/src/org/chromium/testing/local/GtestLoggerTest.java
++++ b/testing/android/junit/javatests/src/org/chromium/testing/local/GtestLoggerTest.java
+@@ -4,16 +4,27 @@
+ 
+ package org.chromium.testing.local;
+ 
++import org.json.JSONArray;
++import org.json.JSONObject;
+ import org.junit.Assert;
++import org.junit.Assume;
++import org.junit.Ignore;
+ import org.junit.Test;
+ import org.junit.runner.Description;
++import org.junit.runner.JUnitCore;
++import org.junit.runner.Request;
++import org.junit.runner.Result;
+ import org.junit.runner.RunWith;
+ import org.junit.runners.BlockJUnit4ClassRunner;
+ 
+ import java.io.ByteArrayOutputStream;
++import java.io.File;
+ import java.io.PrintStream;
+ import java.io.Serializable;
++import java.nio.file.Files;
++import java.util.ArrayList;
+ import java.util.Comparator;
++import java.util.List;
+ import java.util.HashSet;
+ import java.util.Set;
+ import java.util.TreeSet;
+@@ -134,6 +145,243 @@
+                 actual.toString());
+     }
+ 
++    @Test
++    public void testJsonListener_PassingTestReportsSuccess() throws Exception {
++        JsonRun run = runJsonFixture("passing");
++        Result result = run.results.get(0);
++        Assert.assertEquals(1, result.getRunCount());
++        Assert.assertEquals(0, result.getFailureCount());
++        Assert.assertEquals(0, result.getIgnoreCount());
++        Assert.assertEquals(0, result.getAssumptionFailureCount());
++        assertJsonStatus(run.report, "passing", "SUCCESS");
++        Assert.assertEquals(1, run.report.getJSONArray("all_tests").length());
++    }
++
++    @Test
++    public void testJsonListener_FailingTestReportsFailure() throws Exception {
++        JsonRun run = runJsonFixture("failing");
++        Result result = run.results.get(0);
++        Assert.assertEquals(1, result.getRunCount());
++        Assert.assertEquals(1, result.getFailureCount());
++        Assert.assertFalse(result.wasSuccessful());
++        assertJsonStatus(run.report, "failing", "FAILURE");
++        Assert.assertEquals(1, run.report.getJSONArray("all_tests").length());
++    }
++
++    @Test
++    public void testJsonListener_IgnoredTestReportsSkipped() throws Exception {
++        JsonRun run = runJsonFixture("ignored");
++        Result result = run.results.get(0);
++        Assert.assertEquals(0, result.getRunCount());
++        Assert.assertEquals(1, result.getIgnoreCount());
++        Assert.assertEquals(0, result.getFailureCount());
++        assertJsonStatus(run.report, "ignored", "SKIPPED");
++        Assert.assertEquals(1, run.report.getJSONArray("all_tests").length());
++    }
++
++    @Test
++    public void testJsonListener_AssumptionReportsSkipped() throws Exception {
++        JsonRun run = runJsonFixture("assumption");
++        Result result = run.results.get(0);
++        Assert.assertEquals(1, result.getRunCount());
++        Assert.assertEquals(1, result.getAssumptionFailureCount());
++        Assert.assertEquals(0, result.getFailureCount());
++        Assert.assertTrue(result.wasSuccessful());
++        assertJsonStatus(run.report, "assumption", "SKIPPED");
++        Assert.assertEquals(1, run.report.getJSONArray("all_tests").length());
++    }
++
++    @Test
++    public void testJsonListener_StateResetsBetweenTests() throws Exception {
++        JsonRun run = runJsonFixture("failing", "assumption", "passing");
++        Assert.assertEquals(1, run.results.get(0).getFailureCount());
++        Assert.assertEquals(1, run.results.get(1).getAssumptionFailureCount());
++        Assert.assertEquals(0, run.results.get(2).getFailureCount());
++        Assert.assertEquals(0, run.results.get(2).getAssumptionFailureCount());
++        assertJsonStatus(run.report, "failing", "FAILURE");
++        assertJsonStatus(run.report, "assumption", "SKIPPED");
++        assertJsonStatus(run.report, "passing", "SUCCESS");
++        Assert.assertEquals(3, run.report.getJSONArray("all_tests").length());
++        Assert.assertEquals(
++                3, run.report.getJSONArray("per_iteration_data").getJSONObject(0).length());
++    }
++
++    private static JsonRun runJsonFixture(String... methods) throws Exception {
++        File output = File.createTempFile("json-listener-test-", ".json");
++        try {
++            JUnitCore core = new JUnitCore();
++            core.addListener(new JsonListener(new JsonLogger(output)));
++            List<Result> results = new ArrayList<>();
++            for (String method : methods) {
++                results.add(core.run(Request.method(JsonListenerFixture.class, method)));
++            }
++            return new JsonRun(new JSONObject(Files.readString(output.toPath())), results);
++        } finally {
++            Files.deleteIfExists(output.toPath());
++        }
++    }
++
++    private static void assertJsonStatus(JSONObject report, String method, String status)
++            throws Exception {
++        JSONArray iterations = report.getJSONArray("per_iteration_data");
++        Assert.assertEquals(1, iterations.length());
++        JSONArray attempts =
++                iterations.getJSONObject(0)
++                        .getJSONArray(JsonListenerFixture.class.getName() + "#" + method);
++        Assert.assertEquals(1, attempts.length());
++        Assert.assertEquals(status, attempts.getJSONObject(0).getString("status"));
++        Assert.assertTrue(attempts.getJSONObject(0).getLong("elapsed_time_ms") >= 0);
++    }
++
++    private static class JsonRun {
++        final JSONObject report;
++        final List<Result> results;
++
++        JsonRun(JSONObject report, List<Result> results) {
++            this.report = report;
++            this.results = results;
++        }
++    }
++
++    // The stock top-level test discovery excludes nested classes containing '$'.
++    @RunWith(BlockJUnit4ClassRunner.class)
++    public static class JsonListenerFixture {
++        @Test
++        public void passing() {}
++
++        @Test
++        public void failing() {
++            Assert.fail("Ordinary assertion failure fixture");
++        }
++
++        @Test
++        @Ignore
++        public void ignored() {
++            Assert.fail("An ignored body must not execute");
++        }
++
++        @Test
++        public void assumption() {
++            Assume.assumeTrue(false);
++            Assert.fail("An assumption-aborted body must not continue");
++        }
++    }
++
++    @Test
++    public void testTestFinishedSkipped() {
++        ByteArrayOutputStream actual = new ByteArrayOutputStream();
++        GtestLogger logger = new GtestLogger(new PrintStream(actual));
++        logger.testSkipped(Description.createTestDescription(GtestLoggerTest.class, "skipped"), 123);
++        Assert.assertEquals(
++                "[  SKIPPED ] org.chromium.testing.local.GtestLoggerTest.skipped (123 ms)\n",
++                actual.toString());
++    }
++
++    @Test
++    public void testTestRunFinishedWithSkipped() {
++        ByteArrayOutputStream actual = new ByteArrayOutputStream();
++        GtestLogger logger = new GtestLogger(new PrintStream(actual));
++        Set<Description> failures = new TreeSet<>(new DescriptionComparator());
++        failures.add(Description.createTestDescription(GtestLoggerTest.class, "failing"));
++        Set<Description> skipped = new TreeSet<>(new DescriptionComparator());
++        skipped.add(Description.createTestDescription(GtestLoggerTest.class, "assumption"));
++        skipped.add(Description.createTestDescription(GtestLoggerTest.class, "ignored"));
++        logger.testRunFinished(1, failures, skipped, 4321);
++        Assert.assertEquals(
++                "[----------] Global test environment tear-down.\n"
++                        + "[==========] 4 tests ran. (4321 ms total)\n"
++                        + "[  PASSED  ] 1 tests.\n"
++                        + "[  SKIPPED ] 2 tests, listed below:\n"
++                        + "[  SKIPPED ] org.chromium.testing.local.GtestLoggerTest.assumption\n"
++                        + "[  SKIPPED ] org.chromium.testing.local.GtestLoggerTest.ignored\n"
++                        + "[  FAILED  ] 1 tests.\n"
++                        + "[  FAILED  ] org.chromium.testing.local.GtestLoggerTest.failing\n\n",
++                actual.toString());
++    }
++
++    @Test
++    public void testGtestListener_RealOutcomesAndStateReset() {
++        GtestListenerFixture.passingBodies = 0;
++        GtestListenerFixture.failingBodies = 0;
++        GtestListenerFixture.assumptionBodies = 0;
++        GtestListenerFixture.assumptionContinued = 0;
++        GtestListenerFixture.ignoredBodies = 0;
++        ByteArrayOutputStream actual = new ByteArrayOutputStream();
++        JUnitCore core = new JUnitCore();
++        core.addListener(new GtestListener(new GtestLogger(new PrintStream(actual))));
++        Result result = core.run(GtestListenerFixture.class);
++        Assert.assertEquals(3, result.getRunCount());
++        Assert.assertEquals(1, result.getFailureCount());
++        Assert.assertEquals(1, result.getAssumptionFailureCount());
++        Assert.assertEquals(1, result.getIgnoreCount());
++        Assert.assertFalse(result.wasSuccessful());
++        Assert.assertEquals(1, GtestListenerFixture.passingBodies);
++        Assert.assertEquals(1, GtestListenerFixture.failingBodies);
++        Assert.assertEquals(1, GtestListenerFixture.assumptionBodies);
++        Assert.assertEquals(0, GtestListenerFixture.assumptionContinued);
++        Assert.assertEquals(0, GtestListenerFixture.ignoredBodies);
++        String output = actual.toString();
++        String fixture = GtestListenerFixture.class.getName() + ".";
++        Assert.assertTrue(output.contains("[       OK ] " + fixture + "passing ("));
++        Assert.assertTrue(output.contains("[   FAILED ] " + fixture + "failing ("));
++        Assert.assertTrue(output.contains("[  SKIPPED ] " + fixture + "assumption ("));
++        Assert.assertTrue(output.contains("[  SKIPPED ] " + fixture + "ignored (0 ms)\n"));
++        Assert.assertFalse(output.contains("[       OK ] " + fixture + "assumption"));
++        Assert.assertFalse(output.contains("[       OK ] " + fixture + "ignored"));
++        Assert.assertTrue(output.contains("[==========] 4 tests ran. ("));
++        Assert.assertTrue(output.contains("[  PASSED  ] 1 tests.\n"));
++        Assert.assertTrue(output.contains("[  SKIPPED ] 2 tests, listed below:\n"));
++        Assert.assertTrue(output.contains("[  FAILED  ] 1 tests.\n"));
++        actual.reset();
++        result = core.run(Request.method(GtestListenerFixture.class, "passing"));
++        Assert.assertEquals(1, result.getRunCount());
++        Assert.assertEquals(0, result.getFailureCount());
++        Assert.assertEquals(0, result.getAssumptionFailureCount());
++        Assert.assertEquals(0, result.getIgnoreCount());
++        Assert.assertEquals(2, GtestListenerFixture.passingBodies);
++        output = actual.toString();
++        Assert.assertTrue(output.contains("[       OK ] " + fixture + "passing ("));
++        Assert.assertTrue(output.contains("[==========] 1 tests ran. ("));
++        Assert.assertTrue(output.contains("[  PASSED  ] 1 tests.\n"));
++        Assert.assertFalse(output.contains("[  SKIPPED ]"));
++        Assert.assertFalse(output.contains("[  FAILED  ]"));
++    }
++
++    // These nested drivers run only through the real JUnitCore in the outer regression.
++    @RunWith(BlockJUnit4ClassRunner.class)
++    public static class GtestListenerFixture {
++        static int passingBodies;
++        static int failingBodies;
++        static int assumptionBodies;
++        static int assumptionContinued;
++        static int ignoredBodies;
++
++        @Test
++        public void passing() {
++            ++passingBodies;
++        }
++
++        @Test
++        public void failing() {
++            ++failingBodies;
++            Assert.fail("Ordinary stdout assertion failure fixture");
++        }
++
++        @Test
++        public void assumption() {
++            ++assumptionBodies;
++            Assume.assumeTrue(false);
++            ++assumptionContinued;
++        }
++
++        @Test
++        @Ignore
++        public void ignored() {
++            ++ignoredBodies;
++            Assert.fail("An ignored stdout fixture body must not execute");
++        }
++    }
++
+     private static class DescriptionComparator implements Comparator<Description>, Serializable {
+         @Override
+         public int compare(Description o1, Description o2) {

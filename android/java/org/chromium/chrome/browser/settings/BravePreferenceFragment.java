@@ -7,7 +7,6 @@ package org.chromium.chrome.browser.settings;
 
 import android.Manifest;
 import android.content.Context;
-import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Bundle;
@@ -15,16 +14,12 @@ import android.view.Menu;
 import android.view.MenuInflater;
 import android.view.MenuItem;
 
-import androidx.preference.Preference;
 import androidx.preference.PreferenceGroupAdapter;
 import androidx.preference.PreferenceScreen;
 
 import org.chromium.base.ContextUtils;
 import org.chromium.build.annotations.NonNull;
 import org.chromium.chrome.R;
-import org.chromium.chrome.browser.BraveRewardsNativeWorker;
-import org.chromium.chrome.browser.ChromeTabbedActivity;
-import org.chromium.chrome.browser.settings.developer.BraveRewardsDebugPreferences;
 
 public abstract class BravePreferenceFragment extends ChromeBaseSettingsFragment {
     protected static final int STORAGE_PERMISSION_EXPORT_REQUEST_CODE = 8000;
@@ -39,17 +34,21 @@ public abstract class BravePreferenceFragment extends ChromeBaseSettingsFragment
 
     @Override
     public void onCreateOptionsMenu(Menu menu, MenuInflater inflater) {
+        if (!(getActivity() instanceof SettingsActivity)) {
+            // Embedded settings use the browser tab's existing close and Back controls.
+            super.onCreateOptionsMenu(menu, inflater);
+            return;
+        }
         menu.clear();
         inflater.inflate(R.menu.exit_settings_menu, menu);
     }
 
     @Override
     public boolean onOptionsItemSelected(MenuItem item) {
-        if (item.getItemId() == R.id.close_menu_id) {
-            Intent intent = new Intent(getActivity(), ChromeTabbedActivity.class);
-            intent.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
-            intent.setAction(Intent.ACTION_VIEW);
-            startActivity(intent);
+        if (item.getItemId() == R.id.close_menu_id
+                && getActivity() instanceof SettingsActivity activity) {
+            BraveSettingsActivity.closeSettingsInTask(activity);
+            return true;
         }
         return false;
     }
@@ -62,20 +61,6 @@ public abstract class BravePreferenceFragment extends ChromeBaseSettingsFragment
     @Override
     public @AnimationType int getAnimationType() {
         return AnimationType.PROPERTY;
-    }
-
-    @Override
-    public void onResume() {
-        super.onResume();
-        BraveRewardsNativeWorker braveRewardsNativeWorker = BraveRewardsNativeWorker.getInstance();
-        if (braveRewardsNativeWorker == null || !braveRewardsNativeWorker.isSupported()) {
-            if (getPreferenceScreen() == null) return;
-            Preference braveRewardsDebugPreference =
-                    getPreferenceScreen().findPreference(BraveRewardsDebugPreferences.KEY);
-            if (braveRewardsDebugPreference != null) {
-                getPreferenceScreen().removePreference(braveRewardsDebugPreference);
-            }
-        }
     }
 
     protected boolean isStoragePermissionGranted(boolean isExport) {

@@ -1,0 +1,94 @@
+diff --git a/chrome/android/java/src/org/chromium/chrome/browser/app/tab_activity_glue/ReparentingTask.java b/chrome/android/java/src/org/chromium/chrome/browser/app/tab_activity_glue/ReparentingTask.java
+index d5e2433177afb42b098127d823c9d9620ba5183e..2c854bfd94c8c1e6020a79f6906277fd6a25f986 100644
+--- a/chrome/android/java/src/org/chromium/chrome/browser/app/tab_activity_glue/ReparentingTask.java
++++ b/chrome/android/java/src/org/chromium/chrome/browser/app/tab_activity_glue/ReparentingTask.java
+@@ -11,8 +11,6 @@
+ import android.os.Bundle;
+ import android.provider.Browser;
+ import android.text.TextUtils;
+-
+-import org.jni_zero.NativeMethods;
+ 
+ import org.chromium.base.ContextUtils;
+ import org.chromium.base.IntentUtils;
+@@ -29,8 +27,13 @@
+ import org.chromium.chrome.browser.tab.TabDelegateFactory;
+ import org.chromium.chrome.browser.tabmodel.TabModelSelector;
+ import org.chromium.chrome.browser.tabmodel.TabReparentingParams;
++import org.chromium.chrome.browser.ui.browser_window.ChromeAndroidTaskTracker;
++import org.chromium.chrome.browser.ui.browser_window.ChromeAndroidTaskTrackerFactory;
+ import org.chromium.content_public.browser.WebContents;
+ import org.chromium.ui.base.WindowAndroid;
++import org.jni_zero.NativeMethods;
++
++import java.lang.ref.WeakReference;
+ 
+ /** Takes care of reparenting a Tab object from one Activity to another. */
+ @NullMarked
+@@ -109,6 +112,12 @@
+         if (context == null) return false;
+         final WindowAndroid originalWindow = mTab.getWindowAndroidChecked();
+         setupIntent(intent, finalizeCallback);
++        Integer pendingId = ChromeAndroidTaskTracker.getPendingTaskIdFromIntent(intent);
++        if (pendingId != null
++                && !ChromeAndroidTaskTrackerFactory.getInstance()
++                        .isPendingTaskAvailable(pendingId)) {
++            return false;
++        }
+ 
+         if (!PopupCreatorFactory.getInstance()
+                 .tryStartActivity(context, intent, startActivityOptions)) {
+@@ -130,6 +139,7 @@
+      */
+     public void setupIntent(Intent intent, @Nullable Runnable finalizeCallback) {
+         if (intent == null) intent = new Intent();
++        Integer pendingId = ChromeAndroidTaskTracker.getPendingTaskIdFromIntent(intent);
+         if (intent.getComponent() == null) {
+             intent.setClass(ContextUtils.getApplicationContext(), ChromeLauncherActivity.class);
+         }
+@@ -149,8 +159,43 @@
+         // ensure the global count of tabs is correct. See https://crbug.com/40469243.
+         IntentHandler.setTabId(intent, mTab.getId());
+         IntentHandler.setPinnedState(intent, mTab.getIsPinned());
+-        AsyncTabParamsManagerSingleton.getInstance()
+-                .add(mTab.getId(), new TabReparentingParams(mTab, finalizeCallback));
++        var params = new TabReparentingParams(mTab, finalizeCallback);
++        var paramsManager = AsyncTabParamsManagerSingleton.getInstance();
++        int tabId = mTab.getId();
++        paramsManager.add(tabId, params);
++        if (pendingId != null) {
++            // Do not retain a Tab after the destination has consumed its params.
++            // Compare the exact entry: another reparenting request can reuse the
++            // numeric tab ID, and consumed/reattached tabs have a different owner.
++            var weakParams = new WeakReference<>(params);
++            boolean admitted =
++                    ChromeAndroidTaskTrackerFactory.getInstance()
++                            .registerPendingTaskTransferCleanup(
++                                    pendingId,
++                                    () -> {
++                                        var expected = weakParams.get();
++                                        if (expected == null
++                                                || paramsManager.getAsyncTabParams().get(tabId)
++                                                        != expected) return;
++                                        var tab = expected.getTabToReparent();
++                                        paramsManager.remove(tabId);
++                                        var contents = tab.getWebContents();
++                                        if (tab.isDetachedFromActivity()
++                                                && (contents == null
++                                                        || contents.getTopLevelNativeWindow()
++                                                                == null)) {
++                                            expected.destroy();
++                                        }
++                                    });
++            if (!admitted) {
++                // No request took ownership. The popup caller still owns the
++                // Tab and will destroy it when begin() reports failure.
++                if (paramsManager.getAsyncTabParams().get(tabId) == params) {
++                    paramsManager.remove(tabId);
++                }
++                return;
++            }
++        }
+ 
+         detach();
+     }

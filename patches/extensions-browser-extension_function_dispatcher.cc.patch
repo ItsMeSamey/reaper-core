@@ -1,0 +1,141 @@
+diff --git a/extensions/browser/extension_function_dispatcher.cc b/extensions/browser/extension_function_dispatcher.cc
+index eeb748843a0b9c7e01a52535d364beef73f2e592..fec86c33332f17592fe230dfa2ef0e30887593a6 100644
+--- a/extensions/browser/extension_function_dispatcher.cc
++++ b/extensions/browser/extension_function_dispatcher.cc
+@@ -26,6 +26,10 @@
+ #include "base/values.h"
+ #include "build/build_config.h"
+ #include "content/public/browser/browser_thread.h"
++#if BUILDFLAG(IS_ANDROID)
++#include "content/public/browser/global_routing_id.h"
++#include "content/public/browser/weak_document_ptr.h"
++#endif
+ #include "content/public/browser/render_frame_host.h"
+ #include "content/public/browser/render_process_host.h"
+ #include "content/public/browser/render_process_host_observer.h"
+@@ -156,11 +160,73 @@ ExtensionFunctionDispatcher::Delegate::GetExtensionWindowController() {
+   return nullptr;
+ }
+ 
++#if BUILDFLAG(IS_ANDROID)
++class ExtensionFunctionDispatcher::ResponseTarget
++    : public content::WebContentsObserver {
++ public:
++  ResponseTarget(ExtensionFunction* function,
++                 base::WeakPtr<ExtensionFunctionDispatcher> dispatcher)
++      : function_(function), dispatcher_(std::move(dispatcher)) {
++    if (auto* frame = function_->render_frame_host()) {
++      sender_frame_id_ = frame->GetGlobalId();
++      sender_document_ = frame->GetWeakDocumentPtr();
++      Observe(content::WebContents::FromRenderFrameHost(frame));
++    } else {
++      CHECK(function_->is_from_service_worker());
++    }
++  }
++
++  ~ResponseTarget() override {
++    // Releasing the function can notify other browser services.
++    Observe(nullptr);
++  }
++
++  ExtensionFunction* function() const { return function_.get(); }
++
++ private:
++  void RenderFrameDeleted(content::RenderFrameHost* frame) override {
++    if (frame->GetGlobalId() == sender_frame_id_) {
++      Cancel();
++    }
++  }
++
++  void DidFinishNavigation(content::NavigationHandle*) override {
++    // Preserve same-document navigation and a still-valid BFCache document.
++    if (!sender_document_.AsRenderFrameHostIfValid()) {
++      Cancel();
++    }
++  }
++
++  void WebContentsDestroyed() override { Cancel(); }
++
++  void Cancel() {
++    if (dispatcher_) {
++      dispatcher_->RemoveResponseTarget(function_.get());
++    }
++    // Removal can destroy this observer. Do not access members afterward.
++  }
++
++  scoped_refptr<ExtensionFunction> function_;
++  base::WeakPtr<ExtensionFunctionDispatcher> dispatcher_;
++  content::GlobalRenderFrameHostId sender_frame_id_;
++  content::WeakDocumentPtr sender_document_;
++};
++
++#endif
++
+ ExtensionFunctionDispatcher::ExtensionFunctionDispatcher(
+     content::BrowserContext* browser_context)
+     : browser_context_(browser_context), delegate_(nullptr) {}
+ 
++#if BUILDFLAG(IS_ANDROID)
++ExtensionFunctionDispatcher::~ExtensionFunctionDispatcher() {
++  // A released function must not call back into a partially destroyed owner.
++  weak_ptr_factory_.InvalidateWeakPtrs();
++  response_targets_.clear();
++}
++#else
+ ExtensionFunctionDispatcher::~ExtensionFunctionDispatcher() = default;
++#endif
+ 
+ void ExtensionFunctionDispatcher::Dispatch(
+     mojom::RequestParamsPtr params,
+@@ -511,11 +577,43 @@ WindowController* ExtensionFunctionDispatcher::GetExtensionWindowController() {
+ }
+ 
+ void ExtensionFunctionDispatcher::AddResponseTarget(ExtensionFunction* func) {
++#if BUILDFLAG(IS_ANDROID)
++  auto it = response_targets_.find(func->request_uuid());
++  if (it != response_targets_.end()) {
++    CHECK_EQ(it->second->function(), func);
++    return;
++  }
++  response_targets_.emplace(
++      func->request_uuid(),
++      std::make_unique<ResponseTarget>(func, weak_ptr_factory_.GetWeakPtr()));
++#else
+   response_targets_.insert(func);
++#endif
+ }
+ 
++#if BUILDFLAG(IS_ANDROID)
++void ExtensionFunctionDispatcher::RemoveResponseTarget(
++    ExtensionFunction* func) {
++  auto it = response_targets_.find(func->request_uuid());
++  if (it == response_targets_.end() || it->second->function() != func) {
++    return;
++  }
++  // Remove the map entry before observer/function destruction can reenter.
++  auto target = response_targets_.extract(it);
++  target.mapped().reset();
++}
++#endif
++
+ void ExtensionFunctionDispatcher::ProcessResponseAck(
+     const base::Uuid& request_uuid) {
++#if BUILDFLAG(IS_ANDROID)
++  auto target = response_targets_.extract(request_uuid);
++  if (target.empty()) {
++    return;
++  }
++  // The local owner keeps the function alive across the callback.
++  target.mapped()->function()->OnResponseAck();
++#else
+   auto iter = std::ranges::find_if(
+       response_targets_, [request_uuid](ExtensionFunction* function) {
+         return function->request_uuid() == request_uuid;
+@@ -527,6 +625,7 @@ void ExtensionFunctionDispatcher::ProcessResponseAck(
+   // referencing it after this!
+   (*iter)->OnResponseAck();
+   response_targets_.erase(iter);
++#endif
+ }
+ 
+ scoped_refptr<ExtensionFunction>

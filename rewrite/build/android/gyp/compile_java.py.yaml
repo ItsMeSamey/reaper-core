@@ -1,0 +1,35 @@
+substitutions:
+  - description: "Apply only the selected Reaper controller budget to Android javac"
+    regex:
+      re_pattern: "def\\ _RunCompiler\\("
+      replace: "def _ApplyReaperJavacBudget(cmd, environment):\n    # This private hint comes from Reaper's selected aggregate-RSS budget. Keep\n    # upstream behavior unchanged outside those controllers and for JavaCmd\n    # callers such as Kythe, which already specify their own JVM heap limit.\n    heap_mib = {'4096': 1024, '8192': 2048}.get(\n        environment.get('REAPER_INTERNAL_SELECTED_RSS_MIB'))\n    if heap_mib is None or cmd[0] != build_utils.JAVAC_PATH:\n        return cmd, None\n\n    heap_bytes = heap_mib * 1024 * 1024\n    heap_arg = f'-J-Xmx{heap_mib}m'\n    initial_bytes = 16 * 1024 * 1024\n    initial_arg = '-J-Xms16m'\n    bounded_cmd = []\n    for arg in cmd:\n        match = re.fullmatch(r'-J-Xm([xs])([0-9]+)([kKmMgG]?)', arg)\n        if match:\n            scale = {'': 1, 'k': 1024, 'm': 1024**2, 'g': 1024**3}\n            size = int(match[2]) * scale[match[3].lower()]\n            if match[1] == 'x' and size < heap_bytes:\n                heap_bytes, heap_arg = size, arg\n            elif match[1] == 's' and size < initial_bytes:\n                initial_bytes, initial_arg = size, arg\n        else:\n            bounded_cmd.append(arg)\n    if initial_bytes > heap_bytes:\n        initial_arg = f'-J-Xms{heap_bytes}'\n    bounded_cmd.extend([heap_arg, initial_arg])\n    env = dict(environment)\n    # JVM environment flags can override explicit maxima or inject warning\n    # output. Do not alter these variables for other build tools or the host.\n    for key in ('JAVA_TOOL_OPTIONS', 'JDK_JAVA_OPTIONS', '_JAVA_OPTIONS',\n                'JDK_JAVAC_OPTIONS'):\n        env.pop(key, None)\n    return bounded_cmd, env\n\n\ndef _RunCompiler("
+  - description: "Build a scoped javac command and subprocess environment"
+    regex:
+      re_pattern: "\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ cmd\\ =\\ list\\(javac_cmd\\)"
+      replace: "            cmd, compiler_env = _ApplyReaperJavacBudget(\n                list(javac_cmd), os.environ)"
+  - description: "Pass the scoped environment only to the actual compiler subprocess"
+    regex:
+      re_pattern: "\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ build_utils\\.CheckOutput\\(\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ cmd,\\\n"
+      replace: "            build_utils.CheckOutput(\n                cmd,\n                env=compiler_env,\n"
+  - description: "Bound javac to one GiB for the explicit six-job ten-GiB controller"
+    regex:
+      re_pattern: "\\ \\ \\ \\ heap_mib\\ =\\ \\{'4096':\\ 1024,\\ '8192':\\ 2048\\}\\.get\\(\\\n\\ \\ \\ \\ \\ \\ \\ \\ environment\\.get\\('REAPER_INTERNAL_SELECTED_RSS_MIB'\\)\\)"
+      replace: "    budget = environment.get('REAPER_INTERNAL_SELECTED_RSS_MIB', '')\n    heap_mib = {'4096': 1024, '6144': 1024, '8192': 2048}.get(budget)\n    if budget.isascii() and budget.isdecimal() and int(budget) >= 10240:\n        heap_mib = 1024"
+    count: 1
+  - description: "Normalize explicit known collector-selection and numeric processor-count overrides only inside the existing selected Reaper JAVAC budget gate."
+    regex:
+      pattern: "    for arg in cmd:\n        match = re.fullmatch(r'-J-Xm([xs])([0-9]+)([kKmMgG]?)', arg)\n"
+      replace: "    for arg in cmd:\n        # Bound JVM startup threads as well as heap within Reaper's budget.\n        if re.fullmatch(\n                r'-J-XX:(?:[+-]Use(?:Serial|Parallel|ParallelOld|ConcMarkSweep|'\n                r'ParNew|G1|Z|Shenandoah|Epsilon)GC|'\n                r'ActiveProcessorCount=[+-]?[0-9]+)', arg):\n            continue\n        match = re.fullmatch(r'-J-Xm([xs])([0-9]+)([kKmMgG]?)', arg)\n"
+    count: 1
+  - description: "Use SerialGC and one logical processor for selected bounded javac without changing the existing heap/Xms limits or environment cleanup."
+    regex:
+      pattern: "    bounded_cmd.extend([heap_arg, initial_arg])\n"
+      replace: "    bounded_cmd.extend([heap_arg, initial_arg,\n                        '-J-XX:+UseSerialGC', '-J-XX:ActiveProcessorCount=1'])\n"
+    count: 1
+  - description: Use explicit JVM ergonomics only after verifying the owned displaced-namespace hard cgroup; retain compiler diagnostics and explicit heaps.
+    regex:
+      re_pattern: '\ \ \ \ return\ bounded_cmd,\ env\
+
+        '
+      replace: "    explicit_flags = build_utils.ReaperExplicitCgroupJvmFlags(\n        str(heap_bytes), prefix='-J', environment=env)\n    # Retain the smaller explicit initial heap already chosen above.\n    bounded_cmd.extend(flag for flag in explicit_flags\n                       if not flag.startswith('-J-Xms'))\n    return bounded_cmd, env\n"
+    count: 1

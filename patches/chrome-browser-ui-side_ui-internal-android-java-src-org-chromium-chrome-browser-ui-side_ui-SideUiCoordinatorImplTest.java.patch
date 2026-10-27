@@ -1,0 +1,145 @@
+diff --git a/chrome/browser/ui/side_ui/internal/android/java/src/org/chromium/chrome/browser/ui/side_ui/SideUiCoordinatorImplTest.java b/chrome/browser/ui/side_ui/internal/android/java/src/org/chromium/chrome/browser/ui/side_ui/SideUiCoordinatorImplTest.java
+--- a/chrome/browser/ui/side_ui/internal/android/java/src/org/chromium/chrome/browser/ui/side_ui/SideUiCoordinatorImplTest.java
++++ b/chrome/browser/ui/side_ui/internal/android/java/src/org/chromium/chrome/browser/ui/side_ui/SideUiCoordinatorImplTest.java
+@@ -1291,4 +1291,141 @@
+                 HeightType.NOT_APPLICABLE,
+                 specsForTabWithoutSideUi.getHeightType(AnchorSide.RIGHT));
+     }
++
++    @Test
++    @Config(sdk = {33, 34})
++    public void testClosingAnimation_UnregisteredOwnerDoesNotReceiveCompletion() {
++        TestSideUiContainer container = startClosingSidePanel();
++        int width = mSideUiContainerView.getLayoutParams().width;
++        mCoordinator.unregisterSideUiContainer(container);
++
++        mCoordinator.endAnimations();
++
++        assertNull(mCoordinator.getSideUiContainerById(SideUiId.SIDE_PANEL));
++        assertEquals(1, container.mNumOnUiUpdateCompletedReceived);
++        assertEquals(width, mSideUiContainerView.getLayoutParams().width);
++        assertNull(mSideUiContainerView.getParent());
++        assertEquals(0, mRightAnchorContainer.getChildCount());
++        assertEquals(View.GONE, mRightAnchorContainer.getVisibility());
++        verify(mSideUiObserver).onTransitionEnded(new SideUiSpecs(0, 0));
++    }
++
++    @Test
++    @Config(sdk = {33, 34})
++    public void testClosingAnimation_DestroyedCoordinatorDoesNotNotify() {
++        TestSideUiContainer container = startClosingSidePanel();
++        int width = mSideUiContainerView.getLayoutParams().width;
++        mCoordinator.destroy();
++
++        mCoordinator.endAnimations();
++
++        assertNull(mCoordinator.getSideUiContainerById(SideUiId.SIDE_PANEL));
++        assertEquals(1, container.mNumOnUiUpdateCompletedReceived);
++        assertEquals(width, mSideUiContainerView.getLayoutParams().width);
++        verify(mSideUiObserver, never()).onTransitionEnded(any());
++        assertEquals(1, mBrowserControlsVisibilityDelegate.mReleaseCount);
++    }
++
++    @Test
++    @Config(sdk = {33, 34})
++    public void testClosingAnimation_SameAnchorReplacementDoesNotReceiveOldCompletion() {
++        TestSideUiContainer oldContainer = startClosingSidePanel();
++        mCoordinator.unregisterSideUiContainer(oldContainer);
++        assertNull(mSideUiContainerView.getParent());
++        assertEquals(0, mRightAnchorContainer.getChildCount());
++        assertEquals(View.GONE, mRightAnchorContainer.getVisibility());
++        View replacementView = new View(mTestActivity);
++        TestSideUiContainer replacement =
++                new TestSideUiContainer(
++                        mCoordinator, replacementView, SideUiId.SIDE_PANEL, AnchorSide.RIGHT);
++        replacement.mHeightType = HeightType.WEB_CONTENTS;
++        doReturn(120).when(mTopControlsStacker).getVisibleTopControlsTotalHeight();
++        mCoordinator.registerSideUiContainer(replacement);
++
++        // A normal UI request first completes the older recorded transition, then opens this owner.
++        mCoordinator.updateUi(
++                new UiUpdateRequest(SideUiId.SIDE_PANEL, /* suppressAnimations= */ true));
++        mCoordinator.endAnimations();
++
++        assertEquals(1, oldContainer.mNumOnUiUpdateCompletedReceived);
++        assertEquals(1, replacement.mNumOnUiUpdateCompletedReceived);
++        assertEquals(
++                Integer.valueOf(replacement.mMaxWidthDp), replacement.mLastNewWidthOnUpdateCompleted);
++        assertEquals(HeightType.WEB_CONTENTS, replacement.mLastNewHeightTypeOnUpdateCompleted);
++        assertEquals(mRightAnchorContainer, replacementView.getParent());
++        assertEquals(replacement.mMaxWidthDp, replacementView.getWidth());
++        assertEquals(
++                HeightType.WEB_CONTENTS,
++                mCoordinator.getCurrentSideUiSpecs().getHeightType(AnchorSide.RIGHT));
++        verify(mSideUiObserver).onTransitionEnded(new SideUiSpecs(0, 0));
++        assertEquals(1, mRightAnchorContainer.getChildCount());
++
++        // The successor must also close normally without an abandoned predecessor child.
++        clearInvocations(mSideUiObserver);
++        replacement.mHasContentForTabMap.put(mTab, false);
++        mCoordinator.updateUi(
++                new UiUpdateRequest(SideUiId.SIDE_PANEL, /* suppressAnimations= */ false));
++        verify(mSideUiObserver).onTransitionBegun(any());
++        mCoordinator.endAnimations();
++        assertEquals(2, replacement.mNumOnUiUpdateCompletedReceived);
++        assertNull(replacementView.getParent());
++        assertEquals(0, mRightAnchorContainer.getChildCount());
++        assertEquals(View.GONE, mRightAnchorContainer.getVisibility());
++        assertEquals(0, replacementView.getLayoutParams().width);
++        verify(mSideUiObserver).onTransitionEnded(new SideUiSpecs(0, 0));
++    }
++
++    @Test
++    @Config(sdk = {33, 34})
++    public void testClosingAnimation_RetiredOwnerPreservesHealthyCompletion() {
++        View leftView = new View(mTestActivity);
++        TestSideUiContainer left =
++                new TestSideUiContainer(
++                        mCoordinator, leftView, SideUiId.VERTICAL_TABS, AnchorSide.LEFT);
++        TestSideUiContainer right =
++                new TestSideUiContainer(
++                        mCoordinator, mSideUiContainerView, SideUiId.SIDE_PANEL, AnchorSide.RIGHT);
++        mCoordinator.registerSideUiContainer(left);
++        mCoordinator.registerSideUiContainer(right);
++        mCoordinator.updateUi(
++                new UiUpdateRequest(/* sideUiId= */ null, /* suppressAnimations= */ true));
++        assertEquals(1, left.mNumOnUiUpdateCompletedReceived);
++        assertEquals(1, right.mNumOnUiUpdateCompletedReceived);
++        left.mHasContentForTabMap.put(mTab, false);
++        right.mHasContentForTabMap.put(mTab, false);
++        mCoordinator.addObserver(mSideUiObserver);
++        clearInvocations(mSideUiObserver);
++        mCoordinator.updateUi(
++                new UiUpdateRequest(/* sideUiId= */ null, /* suppressAnimations= */ false));
++        verify(mSideUiObserver).onTransitionBegun(any());
++        mCoordinator.unregisterSideUiContainer(right);
++
++        mCoordinator.endAnimations();
++
++        assertEquals(2, left.mNumOnUiUpdateCompletedReceived);
++        assertEquals(Integer.valueOf(0), left.mLastNewWidthOnUpdateCompleted);
++        assertEquals(0, leftView.getLayoutParams().width);
++        assertNull(leftView.getParent());
++        assertEquals(1, right.mNumOnUiUpdateCompletedReceived);
++        assertEquals(View.GONE, mLeftAnchorContainer.getVisibility());
++        verify(mSideUiObserver).onTransitionEnded(new SideUiSpecs(0, 0));
++    }
++
++    private TestSideUiContainer startClosingSidePanel() {
++        TestSideUiContainer container =
++                new TestSideUiContainer(
++                        mCoordinator, mSideUiContainerView, SideUiId.SIDE_PANEL, AnchorSide.RIGHT);
++        mCoordinator.registerSideUiContainer(container);
++        mCoordinator.updateUi(
++                new UiUpdateRequest(SideUiId.SIDE_PANEL, /* suppressAnimations= */ true));
++        assertEquals(1, container.mNumOnUiUpdateCompletedReceived);
++        assertTrue(mSideUiContainerView.getWidth() > 0);
++        container.mHasContentForTabMap.put(mTab, false);
++        mCoordinator.addObserver(mSideUiObserver);
++        clearInvocations(mSideUiObserver);
++        mCoordinator.updateUi(
++                new UiUpdateRequest(SideUiId.SIDE_PANEL, /* suppressAnimations= */ false));
++        verify(mSideUiObserver).onTransitionBegun(any());
++        return container;
++    }
+ }

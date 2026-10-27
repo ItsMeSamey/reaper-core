@@ -1,8 +1,34 @@
 diff --git a/chrome/browser/sessions/session_restore_android.cc b/chrome/browser/sessions/session_restore_android.cc
-index cf951bb0609298d32dd98dacba3353d40ef3c1bc..8e2d77880c703c5996d57103a21aa85d3bba7f26 100644
+index cf951bb0609298d32dd98dacba3353d40ef3c1bc..8523b92e94b0bfa031c01bf736e8d2c73b298b09 100644
 --- a/chrome/browser/sessions/session_restore_android.cc
 +++ b/chrome/browser/sessions/session_restore_android.cc
-@@ -24,7 +24,7 @@
+@@ -4,15 +4,25 @@
+ 
+ #include "chrome/browser/sessions/session_restore.h"
+ 
++#include <algorithm>
++#include <memory>
++#include <string>
++#include <utility>
+ #include <vector>
+ 
++#include "brave/browser/containers/android/containers_tab_lifecycle.h"
+ #include "base/barrier_callback.h"
++#include "base/functional/bind.h"
++#include "base/memory/weak_ptr.h"
+ #include "chrome/browser/android/tab_android.h"
+ #include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/tab_list/tab_list_interface.h"
+ #include "chrome/browser/ui/android/tab_model/tab_model.h"
+ #include "chrome/browser/ui/android/tab_model/tab_model_list.h"
++#include "chrome/browser/ui/browser_window/public/browser_window_interface_iterator.h"
+ #include "chrome/browser/ui/browser_window/public/create_browser_window.h"
+ #include "components/sessions/content/content_serialized_navigation_builder.h"
++#include "components/sessions/core/serialized_navigation_entry.h"
+ #include "components/sessions/core/session_types.h"
+ #include "content/public/browser/navigation_controller.h"
+ #include "content/public/browser/navigation_entry.h"
+@@ -24,7 +34,7 @@
  
  namespace {
  
@@ -11,25 +37,338 @@ index cf951bb0609298d32dd98dacba3353d40ef3c1bc..8e2d77880c703c5996d57103a21aa85d
  BrowserWindowInterface::Type BrowserTypeFromWindowType(
      sessions::SessionWindow::WindowType type) {
    switch (type) {
-@@ -41,7 +41,7 @@ BrowserWindowInterface::Type BrowserTypeFromWindowType(
+@@ -41,7 +51,153 @@ BrowserWindowInterface::Type BrowserTypeFromWindowType(
        return BrowserWindowInterface::TYPE_APP_POPUP;
    }
  }
 -#endif  // #if BUILDFLAG(ENABLE_DESKTOP_ANDROID_EXTENSIONS)
++
++// Sync owns SessionWindow/SessionTab records and may replace them while Android
++// creates the window. Retain only the restore data, never pointers into Sync.
++struct ForeignTabSnapshot {
++  std::vector<sessions::SerializedNavigationEntry> navigations;
++  int current_navigation_index;
++  bool pinned;
++  size_t original_index;
++};
++
++struct ForeignWindowSnapshot {
++  BrowserWindowInterface::Type type = BrowserWindowInterface::TYPE_NORMAL;
++  gfx::Rect bounds;
++  std::string app_name;
++  ui::mojom::WindowShowState show_state = ui::mojom::WindowShowState::kDefault;
++  std::vector<ForeignTabSnapshot> tabs;
++  size_t selected_tab_index = 0;
++};
++
++std::unique_ptr<content::WebContents> CreateForeignTabContents(
++    Profile* profile,
++    const ForeignTabSnapshot& tab) {
++  // Reuse the serialized navigation/renderer-free restoration used by
++  // AndroidLiveTabContext::AddRestoredTab. The selected tab loads on
++  // activation.
++  auto params = content::WebContents::CreateParams(profile);
++  auto container_id = containers::android::ConfigureContainerRestore(
++      profile, tab.navigations, tab.current_navigation_index, &params);
++  if (!container_id) return nullptr;
++  params.initially_hidden = true;
++  params.desired_renderer_state =
++      content::WebContents::CreateParams::kNoRendererProcess;
++  auto contents = content::WebContents::Create(params);
++  auto entries =
++      sessions::ContentSerializedNavigationBuilder::ToNavigationEntries(
++          tab.navigations, profile);
++  contents->GetController().Restore(tab.current_navigation_index,
++                                    content::RestoreType::kRestored, &entries);
++  return contents;
++}
++
++BrowserWindowInterface* PopulateForeignWindow(
++    base::WeakPtr<Profile> profile,
++    ForeignWindowSnapshot snapshot,
++    base::WeakPtr<content::WebContents> first_contents,
++    BrowserWindowInterface* browser) {
++  const auto windows = GetAllBrowserWindowInterfaces();
++  if (!browser || std::ranges::find(windows, browser) == windows.end()) {
++    return nullptr;
++  }
++  auto weak_browser = browser->GetWeakPtr();
++  auto get_model = [&]() -> TabModel* {
++    if (!profile || profile->ShutdownStarted() || profile->IsOffTheRecord() ||
++        !weak_browser || weak_browser->GetProfile() != profile.get() ||
++        !first_contents ||
++        first_contents->GetBrowserContext() != profile.get()) {
++      return nullptr;
++    }
++    auto* model =
++        static_cast<TabModel*>(TabListInterface::From(weak_browser.get()));
++    auto* first_tab = TabAndroid::FromWebContents(first_contents.get());
++    return model && model->GetProfile() == profile.get() && first_tab &&
++                   model->HasTab(first_tab)
++               ? model
++               : nullptr;
++  };
++
++  TabModel* model = get_model();
++  if (!model) {
++    return nullptr;
++  }
++  // The first real restored contents was transferred into the new window.
++  // Never manufacture or close a bootstrap tab inside the creation callback.
++  auto* first_tab = TabAndroid::FromWebContents(first_contents.get());
++  if (snapshot.tabs.front().pinned) {
++    model->PinTab(first_tab->GetHandle());
++  }
++  std::vector<base::WeakPtr<content::WebContents>> restored_contents;
++  restored_contents.push_back(first_contents);
++  for (size_t i = 1; i < snapshot.tabs.size(); ++i) {
++    model = get_model();
++    if (!model) {
++      return nullptr;
++    }
++    auto contents = CreateForeignTabContents(profile.get(), snapshot.tabs[i]);
++    if (!contents) return nullptr;
++    model = get_model();
++    if (!model) {
++      return nullptr;
++    }
++    restored_contents.push_back(contents->GetWeakPtr());
++    model->CreateTab(nullptr, std::move(contents), static_cast<int>(i),
++                     TabModel::TabLaunchType::FROM_RECENT_TABS,
++                     snapshot.tabs[i].pinned);
++    // Creation/pinning notifies model observers. Resolve ownership again before
++    // dereferencing anything exposed across that potentially reentrant call.
++    model = get_model();
++    auto contents_weak = restored_contents.back();
++    auto* tab = contents_weak ? TabAndroid::FromWebContents(contents_weak.get())
++                              : nullptr;
++    if (!model || !tab || !model->HasTab(tab)) {
++      return nullptr;
++    }
++  }
++
++  auto restored_tabs_match = [&](TabModel* current_model) {
++    if (!current_model) {
++      return false;
++    }
++    int previous_index = -1;
++    for (size_t i = 0; i < restored_contents.size(); ++i) {
++      const auto& contents = restored_contents[i];
++      auto* tab =
++          contents ? TabAndroid::FromWebContents(contents.get()) : nullptr;
++      if (!tab || tab->GetProfile() != profile.get() ||
++          !current_model->HasTab(tab) ||
++          tab->IsPinned() != snapshot.tabs[i].pinned) {
++        return false;
++      }
++      int index = current_model->GetIndexOfTab(tab->GetHandle());
++      if (index <= previous_index) {
++        return false;
++      }
++      previous_index = index;
++    }
++    return true;
++  };
++  model = get_model();
++  if (!restored_tabs_match(model)) {
++    return nullptr;
++  }
++  auto selected_contents = restored_contents[snapshot.selected_tab_index];
++  auto* selected = TabAndroid::FromWebContents(selected_contents.get());
++  model->SetActiveIndex(model->GetIndexOfTab(selected->GetHandle()));
++  model = get_model();
++  selected = selected_contents
++                 ? TabAndroid::FromWebContents(selected_contents.get())
++                 : nullptr;
++  if (!restored_tabs_match(model) || !selected || !model->HasTab(selected) ||
++      model->GetActiveWebContents() != selected_contents.get()) {
++    return nullptr;
++  }
++  // Failure never closes an already-created window or any partially restored
++  // user state. The API reports failure instead of claiming a complete restore.
++  return weak_browser.get();
++}
 +#endif  // #if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
  
  }  // namespace
  
-@@ -114,7 +114,7 @@ void SessionRestore::RestoreForeignSessionWindows(
+@@ -66,6 +222,10 @@ content::WebContents* SessionRestore::RestoreForeignSessionTab(
+   bool is_background_tab =
+       disposition == WindowOpenDisposition::NEW_BACKGROUND_TAB;
+   content::WebContents::CreateParams create_params(context);
++  auto container_id = containers::android::ConfigureContainerRestore(
++      profile, session_tab.navigations, session_tab.normalized_navigation_index(),
++      &create_params);
++  if (!container_id) return nullptr;
+   if (is_background_tab && skip_renderer_creation) {
+     create_params.initially_hidden = true;
+     create_params.desired_renderer_state =
+@@ -76,7 +236,10 @@ content::WebContents* SessionRestore::RestoreForeignSessionTab(
+   std::unique_ptr<content::WebContents> new_web_contents =
+       content::WebContents::Create(create_params);
+ 
+-  content::WebContents* raw_new_web_contents = new_web_contents.get();
++  auto restored_contents = new_web_contents->GetWeakPtr();
++  auto original_contents = web_contents->GetWeakPtr();
++  auto profile_weak = profile->GetWeakPtr();
++  const auto model_session_id = tab_model->GetSessionId();
+   int selected_index = session_tab.normalized_navigation_index();
+   new_web_contents->GetController().Restore(
+       selected_index, content::RestoreType::kRestored, &entries);
+@@ -86,14 +249,39 @@ content::WebContents* SessionRestore::RestoreForeignSessionTab(
+   // Fake replacing the current tab's WebContents with a new one by creating and
+   // selecting a new tab then closing the old one. Using the current tab as the
+   // parent will ensure group state, position, etc. should be kept.
++  auto get_restored_model = [&]() -> TabModel* {
++    if (!profile_weak || !restored_contents) {
++      return nullptr;
++    }
++    auto* model =
++        TabModelList::GetTabModelForWebContents(restored_contents.get());
++    auto* restored_tab = TabAndroid::FromWebContents(restored_contents.get());
++    if (!model || model->GetSessionId() != model_session_id ||
++        model->GetProfile() != profile_weak.get() || !restored_tab ||
++        !model->HasTab(restored_tab) ||
++        restored_tab->GetContainerId() != *container_id) {
++      return nullptr;
++    }
++    return model;
++  };
+   if (disposition == WindowOpenDisposition::CURRENT_TAB) {
+-    // This will never be a bulk session restore so we can select the tab here.
++    // Creation calls into Java and can reject the replacement or notify
++    // reentrant observers. Keep the old tab until adoption is proven.
+     tab_model->CreateTab(current_tab, std::move(new_web_contents),
+-                         TabModel::kInvalidIndex,
+-                         TabModel::TabLaunchType::FROM_RECENT_TABS_FOREGROUND,
+-                         /*should_pin=*/false);
+-    tab_model->CloseTab(current_tab->GetHandle());
+-    return raw_new_web_contents;
++                        TabModel::kInvalidIndex,
++                        TabModel::TabLaunchType::FROM_RECENT_TABS_FOREGROUND,
++                        /*should_pin=*/false);
++    auto* restored_model = get_restored_model();
++    if (!restored_model) {
++      return nullptr;
++    }
++    if (original_contents) {
++      auto* original_tab = TabAndroid::FromWebContents(original_contents.get());
++      if (original_tab && restored_model->HasTab(original_tab)) {
++        restored_model->CloseTab(original_tab->GetHandle());
++      }
++    }
++    return get_restored_model() ? restored_contents.get() : nullptr;
+   }
+   DCHECK(disposition == WindowOpenDisposition::NEW_FOREGROUND_TAB ||
+          disposition == WindowOpenDisposition::NEW_BACKGROUND_TAB);
+@@ -103,9 +291,9 @@ content::WebContents* SessionRestore::RestoreForeignSessionTab(
+           ? TabModel::TabLaunchType::FROM_RECENT_TABS_FOREGROUND
+           : TabModel::TabLaunchType::FROM_RECENT_TABS;
+   tab_model->CreateTab(current_tab, std::move(new_web_contents),
+-                       TabModel::kInvalidIndex, launch_type,
+-                       /*should_pin=*/false);
+-  return raw_new_web_contents;
++                      TabModel::kInvalidIndex, launch_type,
++                      /*should_pin=*/session_tab.pinned);
++  return get_restored_model() ? restored_contents.get() : nullptr;
+ }
+ 
+ // static
+@@ -114,27 +302,82 @@ void SessionRestore::RestoreForeignSessionWindows(
      std::vector<const sessions::SessionWindow*>::const_iterator begin,
      std::vector<const sessions::SessionWindow*>::const_iterator end,
      base::OnceCallback<void(std::vector<BrowserWindowInterface*>)> callback) {
 -#if BUILDFLAG(ENABLE_DESKTOP_ANDROID_EXTENSIONS)
+-  // The extensions sessions API can restore foreign windows.
+-  size_t window_count = std::distance(begin, end);
+-  // Wait for `window_count` callbacks.
+-  auto barrier_callback = base::BarrierCallback<BrowserWindowInterface*>(
+-      window_count, std::move(callback));
+-  std::vector<BrowserWindowInterface*> windows;
+-  windows.reserve(window_count);
 +#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
-   // The extensions sessions API can restore foreign windows.
-   size_t window_count = std::distance(begin, end);
-   // Wait for `window_count` callbacks.
-@@ -136,5 +136,5 @@ void SessionRestore::RestoreForeignSessionWindows(
++  auto weak_profile = profile->GetWeakPtr();
++  std::vector<ForeignWindowSnapshot> snapshots;
++  snapshots.reserve(std::distance(begin, end));
++  // Snapshot every input before invoking a creator: even a synchronous failure
++  // callback can change the Sync records that supplied the iterator range.
+   for (auto it = begin; it != end; ++it) {
+-    BrowserWindowCreateParams params(*profile,
++    const auto& window = **it;
++    ForeignWindowSnapshot snapshot;
++    snapshot.type = BrowserTypeFromWindowType(window.type);
++    snapshot.bounds = window.bounds;
++    snapshot.app_name = window.app_name;
++    snapshot.show_state = window.show_state;
++    for (size_t i = 0; i < window.tabs.size(); ++i) {
++      const auto& tab = window.tabs[i];
++      if (!tab || tab->navigations.empty()) {
++        continue;
++      }
++      if (static_cast<int>(i) == window.selected_tab_index) {
++        snapshot.selected_tab_index = snapshot.tabs.size();
++      }
++      snapshot.tabs.push_back({tab->navigations,
++                               tab->normalized_navigation_index(), tab->pinned,
++                               i});
++    }
++    // If the selected input was empty/invalid, keep the first surviving tab.
++    // Like desktop restoration and Android insertion, pins form a prefix.
++    // Preserve the selected original identity across that stable normalization.
++    if (!snapshot.tabs.empty()) {
++      const size_t selected_original_index =
++          snapshot.tabs[snapshot.selected_tab_index].original_index;
++      std::stable_partition(snapshot.tabs.begin(), snapshot.tabs.end(),
++                            [](const auto& tab) { return tab.pinned; });
++      for (size_t i = 0; i < snapshot.tabs.size(); ++i) {
++        if (snapshot.tabs[i].original_index == selected_original_index) {
++          snapshot.selected_tab_index = i;
++          break;
++        }
++      }
++    }
++    // Foreign Sync sessions currently carry no group or split metadata.
++    snapshots.push_back(std::move(snapshot));
++  }
++
++  auto barrier_callback = base::BarrierCallback<BrowserWindowInterface*>(
++      snapshots.size(), std::move(callback));
++  for (auto& snapshot : snapshots) {
++    if (!weak_profile || weak_profile->ShutdownStarted() ||
++        weak_profile->IsOffTheRecord() || snapshot.tabs.empty()) {
++      barrier_callback.Run(nullptr);
++      continue;
++    }
++    auto first_contents =
++        CreateForeignTabContents(weak_profile.get(), snapshot.tabs.front());
++    if (!first_contents) {
++      barrier_callback.Run(nullptr);
++      continue;
++    }
++    auto first_contents_weak = first_contents->GetWeakPtr();
++    if (!weak_profile || weak_profile->ShutdownStarted()) {
++      barrier_callback.Run(nullptr);
++      continue;
++    }
++    BrowserWindowCreateParams params(*weak_profile,
+                                      /*from_user_gesture=*/false);
+-    params.type = BrowserTypeFromWindowType((*it)->type);
+-    params.initial_bounds = (*it)->bounds;
+-    params.app_name = (*it)->app_name;
+-    params.initial_show_state = (*it)->show_state;
+-    // When `window_count` windows have been created, `barrier_callback` will
+-    // have accumulated the created BrowserWindowInterfaces and will invoke
+-    // `callback` with them.
+-    CreateBrowserWindow(std::move(params), barrier_callback);
++    params.type = snapshot.type;
++    params.initial_bounds = snapshot.bounds;
++    params.app_name = snapshot.app_name;
++    params.initial_show_state = snapshot.show_state;
++    params.web_contents = std::move(first_contents);
++    CreateBrowserWindow(std::move(params),
++                        base::BindOnce(&PopulateForeignWindow, weak_profile,
++                                       std::move(snapshot), first_contents_weak)
++                            .Then(barrier_callback));
    }
  #else
    NOTREACHED();

@@ -1,0 +1,282 @@
+# Android download UI policy and truthful transfer lifecycle.
+substitutions:
+- description: Name the actual offline-item state enum in native regressions
+  regex:
+    re_pattern: 'namespace\ \{\
+
+      using\ ScopedMockObserver'
+    replace: 'namespace {
+
+      using OfflineItemState = offline_items_collection::OfflineItemState;
+
+      using ScopedMockObserver'
+- description: Include Android extension lifecycle test dependencies in the CORE build
+  regex:
+    re_pattern: '\#if\ BUILDFLAG\(ENABLE_DESKTOP_ANDROID_EXTENSIONS\)\
+
+      \#include\ "chrome/browser/download/download_core_service\.h"'
+    replace: '#if BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+
+      #include "chrome/browser/download/download_core_service.h"'
+- description: Run Android extension lifecycle regressions in the CORE Android build
+  regex:
+    re_pattern: '\#if\ BUILDFLAG\(ENABLE_DESKTOP_ANDROID_EXTENSIONS\)\
+
+      //\ Tests\ that\ when\ the\ UI'
+    replace: '#if BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+
+      // Tests that when the UI'
+- description: Replace the old suppression expectation with truthful transfer updates
+  regex:
+    re_pattern: '//\ Tests\ that\ when\ the\ UI\ is\ hidden\ by\ an\ extension\ updates\ do\ not\ show\.\
+
+      TEST_F\(DownloadOfflineContentProviderTest,\ DoNotShowHiddenByExtension\)'
+    replace: '// Optional UI policy must never hide real updates from notification/continuity observers.
+
+      TEST_F(DownloadOfflineContentProviderTest, DeliverUpdatesWhileOptionalUiHidden)'
+- description: Expect a real progress update while optional UI is disabled
+  regex:
+    re_pattern: 'TEST_F\(DownloadOfflineContentProviderTest,\ DeliverUpdatesWhileOptionalUiHidden\)\ \{\
+
+      \ \ DownloadCoreService\*\ service\ =\
+
+      \ \ \ \ \ \ DownloadCoreServiceFactory::GetForBrowserContext\(\&profile_\);\
+
+      \ \ service\->SetDownloadUiEnabledForTest\(false\);\
+
+      \
+
+      \ \ const\ std::string\ guid\ =\ base::Uuid::GenerateRandomV4\(\)\.AsLowercaseString\(\);\
+
+      \ \ std::unique_ptr<download::MockDownloadItem>\ item\ =\
+
+      \ \ \ \ \ \ CreateMockDownloadItem\(guid\);\
+
+      \
+
+      \ \ ScopedMockObserver\ observer\{\&provider_\};\
+
+      \ \ EXPECT_CALL\(observer,\ OnItemUpdated\(_,\ _\)\)\.Times\(0\);\
+
+      \
+
+      \ \ InitializeDownloads\(true\);\
+
+      \ \ provider_\.OnDownloadUpdated\(item\.get\(\)\);\
+
+      \ \ RunUntilMainThreadIdle\(\);\
+
+      \}\
+
+      \
+
+      '
+    replace: "TEST_F(DownloadOfflineContentProviderTest, DeliverUpdatesWhileOptionalUiHidden) {\n  DownloadCoreService* service =\n      DownloadCoreServiceFactory::GetForBrowserContext(&profile_);\n  service->SetDownloadUiEnabledForTest(false);\n\n  const std::string guid = base::Uuid::GenerateRandomV4().AsLowercaseString();\n  std::unique_ptr<download::MockDownloadItem> item =\n      CreateMockDownloadItem(guid);\n\n  ScopedMockObserver observer{&provider_};\n  EXPECT_CALL(observer, OnItemUpdated(_, _)).Times(1);\n\n  InitializeDownloads(true);\n  provider_.OnDownloadUpdated(item.get());\n  RunUntilMainThreadIdle();\n}\n\n"
+- description: Cover disabling after progress followed by genuine completion and cancellation without fake removal
+  regex:
+    re_pattern: //\ Tests\ that\ when\ the\ UI\ is\ hidden\ by\ an\ extension\ dangerous\ updates\ do\ show\.
+    replace: "TEST_F(DownloadOfflineContentProviderTest, DisabledDuringProgressStillCompletes) {\n  auto* service = DownloadCoreServiceFactory::GetForBrowserContext(&profile_);\n  const std::string guid = base::Uuid::GenerateRandomV4().AsLowercaseString();\n  auto item = CreateMockDownloadItem(guid);\n  ScopedMockObserver observer{&provider_};\n  EXPECT_CALL(observer, OnItemRemoved(_)).Times(0);\n  EXPECT_CALL(observer, OnItemUpdated(\n      Field(&OfflineItem::state, OfflineItemState::IN_PROGRESS), _)).Times(1);\n  InitializeDownloads(true);\n  provider_.OnDownloadUpdated(item.get());\n  RunUntilMainThreadIdle();\n\n  service->SetDownloadUiEnabledForTest(false);\n  ON_CALL(*item, GetState()).WillByDefault(Return(DownloadItem::COMPLETE));\n  EXPECT_CALL(*item, RemoveObserver(&provider_)).Times(1);\n  EXPECT_CALL(observer, OnItemUpdated(\n      Field(&OfflineItem::state, OfflineItemState::COMPLETE),\n      Optional(Field(&UpdateDelta::state_changed, true)))).Times(1);\n  provider_.OnDownloadUpdated(item.get());\n  RunUntilMainThreadIdle();\n}\n\nTEST_F(DownloadOfflineContentProviderTest, DisabledDuringProgressStillCancels) {\n  auto* service = DownloadCoreServiceFactory::GetForBrowserContext(&profile_);\n  const std::string guid = base::Uuid::GenerateRandomV4().AsLowercaseString();\n  auto item = CreateMockDownloadItem(guid);\n  ScopedMockObserver observer{&provider_};\n  EXPECT_CALL(observer, OnItemRemoved(_)).Times(0);\n  EXPECT_CALL(observer, OnItemUpdated(\n      Field(&OfflineItem::state, OfflineItemState::IN_PROGRESS), _)).Times(1);\n  InitializeDownloads(true);\n  provider_.OnDownloadUpdated(item.get());\n  RunUntilMainThreadIdle();\n\n  service->SetDownloadUiEnabledForTest(false);\n  ON_CALL(*item, GetState()).WillByDefault(Return(DownloadItem::CANCELLED));\n  EXPECT_CALL(*item, RemoveObserver(&provider_)).Times(1);\n  EXPECT_CALL(observer, OnItemUpdated(\n      Field(&OfflineItem::state, OfflineItemState::CANCELLED),\n      Optional(Field(&UpdateDelta::state_changed, true)))).Times(1);\n  provider_.OnDownloadUpdated(item.get());\n  RunUntilMainThreadIdle();\n}\n\n// Tests that when the UI is hidden by an extension dangerous updates do show."
+- description: Format modified Android download UI implementation
+  regex:
+    re_pattern: '\}\
+
+      \#endif\ \ //\ BUILDFLAG\(SAFE_BROWSING_DOWNLOAD_PROTECTION\)\ \&\&\ BUILDFLAG\(IS_ANDROID\)\
+
+      \
+
+      \#if\ BUILDFLAG\(IS_ANDROID\)\ \&\&\ BUILDFLAG\(ENABLE_EXTENSIONS_CORE\)\
+
+      //\ Optional\ UI\ policy\ must\ never\ hide\ real\ updates\ from\ notification/continuity\ observers\.\
+
+      TEST_F\(DownloadOfflineContentProviderTest,\ DeliverUpdatesWhileOptionalUiHidden\)\ \{\
+
+      \ \ DownloadCoreService\*\ service\ =\
+
+      \ \ \ \ \ \ DownloadCoreServiceFactory::GetForBrowserContext\(\&profile_\);\
+
+      \ \ service\->SetDownloadUiEnabledForTest\(false\);\
+
+      \
+
+      '
+    replace: "}\n#endif  // BUILDFLAG(SAFE_BROWSING_DOWNLOAD_PROTECTION) && BUILDFLAG(IS_ANDROID)\n\n#if BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_EXTENSIONS_CORE)\n// Optional UI policy must never hide real updates from notification/continuity\n// observers.\nTEST_F(DownloadOfflineContentProviderTest,\n       DeliverUpdatesWhileOptionalUiHidden) {\n  DownloadCoreService* service =\n      DownloadCoreServiceFactory::GetForBrowserContext(&profile_);\n  service->SetDownloadUiEnabledForTest(false);\n\n"
+- description: Format modified Android download UI implementation
+  regex:
+    re_pattern: '\ \ provider_\.OnDownloadUpdated\(item\.get\(\)\);\
+
+      \ \ RunUntilMainThreadIdle\(\);\
+
+      \}\
+
+      \
+
+      TEST_F\(DownloadOfflineContentProviderTest,\ DisabledDuringProgressStillCompletes\)\ \{\
+
+      \ \ auto\*\ service\ =\ DownloadCoreServiceFactory::GetForBrowserContext\(\&profile_\);\
+
+      \ \ const\ std::string\ guid\ =\ base::Uuid::GenerateRandomV4\(\)\.AsLowercaseString\(\);\
+
+      \ \ auto\ item\ =\ CreateMockDownloadItem\(guid\);\
+
+      \ \ ScopedMockObserver\ observer\{\&provider_\};\
+
+      \ \ EXPECT_CALL\(observer,\ OnItemRemoved\(_\)\)\.Times\(0\);\
+
+      \ \ EXPECT_CALL\(observer,\ OnItemUpdated\(\
+
+      \ \ \ \ \ \ Field\(\&OfflineItem::state,\ OfflineItemState::IN_PROGRESS\),\ _\)\)\.Times\(1\);\
+
+      \ \ InitializeDownloads\(true\);\
+
+      \ \ provider_\.OnDownloadUpdated\(item\.get\(\)\);\
+
+      \ \ RunUntilMainThreadIdle\(\);\
+
+      \
+
+      \ \ service\->SetDownloadUiEnabledForTest\(false\);\
+
+      \ \ ON_CALL\(\*item,\ GetState\(\)\)\.WillByDefault\(Return\(DownloadItem::COMPLETE\)\);\
+
+      \ \ EXPECT_CALL\(\*item,\ RemoveObserver\(\&provider_\)\)\.Times\(1\);\
+
+      \ \ EXPECT_CALL\(observer,\ OnItemUpdated\(\
+
+      \ \ \ \ \ \ Field\(\&OfflineItem::state,\ OfflineItemState::COMPLETE\),\
+
+      \ \ \ \ \ \ Optional\(Field\(\&UpdateDelta::state_changed,\ true\)\)\)\)\.Times\(1\);\
+
+      \ \ provider_\.OnDownloadUpdated\(item\.get\(\)\);\
+
+      \ \ RunUntilMainThreadIdle\(\);\
+
+      \}\
+
+      \
+
+      '
+    replace: "  provider_.OnDownloadUpdated(item.get());\n  RunUntilMainThreadIdle();\n}\n\nTEST_F(DownloadOfflineContentProviderTest,\n       DisabledDuringProgressStillCompletes) {\n  auto* service = DownloadCoreServiceFactory::GetForBrowserContext(&profile_);\n  const std::string guid = base::Uuid::GenerateRandomV4().AsLowercaseString();\n  auto item = CreateMockDownloadItem(guid);\n  ScopedMockObserver observer{&provider_};\n  EXPECT_CALL(observer, OnItemRemoved(_)).Times(0);\n  EXPECT_CALL(observer,\n              OnItemUpdated(\n                  Field(&OfflineItem::state, OfflineItemState::IN_PROGRESS), _))\n      .Times(1);\n  InitializeDownloads(true);\n  provider_.OnDownloadUpdated(item.get());\n  RunUntilMainThreadIdle();\n\n  service->SetDownloadUiEnabledForTest(false);\n  ON_CALL(*item, GetState()).WillByDefault(Return(DownloadItem::COMPLETE));\n  EXPECT_CALL(*item, RemoveObserver(&provider_)).Times(1);\n  EXPECT_CALL(\n      observer,\n      OnItemUpdated(Field(&OfflineItem::state, OfflineItemState::COMPLETE),\n                    Optional(Field(&UpdateDelta::state_changed, true))))\n      .Times(1);\n  provider_.OnDownloadUpdated(item.get());\n  RunUntilMainThreadIdle();\n}\n\n"
+- description: Format modified Android download UI implementation
+  regex:
+    re_pattern: '\ \ const\ std::string\ guid\ =\ base::Uuid::GenerateRandomV4\(\)\.AsLowercaseString\(\);\
+
+      \ \ auto\ item\ =\ CreateMockDownloadItem\(guid\);\
+
+      \ \ ScopedMockObserver\ observer\{\&provider_\};\
+
+      \ \ EXPECT_CALL\(observer,\ OnItemRemoved\(_\)\)\.Times\(0\);\
+
+      \ \ EXPECT_CALL\(observer,\ OnItemUpdated\(\
+
+      \ \ \ \ \ \ Field\(\&OfflineItem::state,\ OfflineItemState::IN_PROGRESS\),\ _\)\)\.Times\(1\);\
+
+      \ \ InitializeDownloads\(true\);\
+
+      \ \ provider_\.OnDownloadUpdated\(item\.get\(\)\);\
+
+      \ \ RunUntilMainThreadIdle\(\);\
+
+      \
+
+      \ \ service\->SetDownloadUiEnabledForTest\(false\);\
+
+      \ \ ON_CALL\(\*item,\ GetState\(\)\)\.WillByDefault\(Return\(DownloadItem::CANCELLED\)\);\
+
+      \ \ EXPECT_CALL\(\*item,\ RemoveObserver\(\&provider_\)\)\.Times\(1\);\
+
+      \ \ EXPECT_CALL\(observer,\ OnItemUpdated\(\
+
+      \ \ \ \ \ \ Field\(\&OfflineItem::state,\ OfflineItemState::CANCELLED\),\
+
+      \ \ \ \ \ \ Optional\(Field\(\&UpdateDelta::state_changed,\ true\)\)\)\)\.Times\(1\);\
+
+      \ \ provider_\.OnDownloadUpdated\(item\.get\(\)\);\
+
+      \ \ RunUntilMainThreadIdle\(\);\
+
+      \}\
+
+      \
+
+      '
+    replace: "  const std::string guid = base::Uuid::GenerateRandomV4().AsLowercaseString();\n  auto item = CreateMockDownloadItem(guid);\n  ScopedMockObserver observer{&provider_};\n  EXPECT_CALL(observer, OnItemRemoved(_)).Times(0);\n  EXPECT_CALL(observer,\n              OnItemUpdated(\n                  Field(&OfflineItem::state, OfflineItemState::IN_PROGRESS), _))\n      .Times(1);\n  InitializeDownloads(true);\n  provider_.OnDownloadUpdated(item.get());\n  RunUntilMainThreadIdle();\n\n  service->SetDownloadUiEnabledForTest(false);\n  ON_CALL(*item, GetState()).WillByDefault(Return(DownloadItem::CANCELLED));\n  EXPECT_CALL(*item, RemoveObserver(&provider_)).Times(1);\n  EXPECT_CALL(\n      observer,\n      OnItemUpdated(Field(&OfflineItem::state, OfflineItemState::CANCELLED),\n                    Optional(Field(&UpdateDelta::state_changed, true))))\n      .Times(1);\n  provider_.OnDownloadUpdated(item.get());\n  RunUntilMainThreadIdle();\n}\n\n"
+- description: Repair reviewed AN Android native compiler integration errors without changing intended behavior
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ Field\(\&OfflineItem::state,\ OfflineItemState::IN_PROGRESS\),\ _\)\)\
+
+      \ \ \ \ \ \ \.Times\(1\);\
+
+      \ \ InitializeDownloads\(true\);\
+
+      \ \ provider_\.OnDownloadUpdated\(item\.get\(\)\);\
+
+      \ \ RunUntilMainThreadIdle\(\);\
+
+      \
+
+      \ \ service\->SetDownloadUiEnabledForTest\(false\);\
+
+      \ \ ON_CALL\(\*item,\ GetState\(\)\)\.WillByDefault\(Return\(DownloadItem::COMPLETE\)\);\
+
+      \ \ EXPECT_CALL\(\*item,\ RemoveObserver\(\&provider_\)\)\.Times\(1\);\
+
+      \ \ EXPECT_CALL\(\
+
+      \ \ \ \ \ \ observer,\
+
+      \ \ \ \ \ \ OnItemUpdated\(Field\(\&OfflineItem::state,\ OfflineItemState::COMPLETE\),\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ Optional\(Field\(\&UpdateDelta::state_changed,\ true\)\)\)\)\
+
+      \ \ \ \ \ \ \.Times\(1\);\
+
+      \ \ provider_\.OnDownloadUpdated\(item\.get\(\)\);\
+
+      \ \ RunUntilMainThreadIdle\(\);\
+
+      \}\
+
+      \
+
+      '
+    replace: "                  Field(&OfflineItem::state, OfflineItemState::IN_PROGRESS), _))\n      .Times(1);\n  InitializeDownloads(true);\n  provider_.OnDownloadStarted(item.get());\n  RunUntilMainThreadIdle();\n\n  service->SetDownloadUiEnabledForTest(false);\n  ON_CALL(*item, GetState()).WillByDefault(Return(DownloadItem::COMPLETE));\n  EXPECT_CALL(\n      observer,\n      OnItemUpdated(Field(&OfflineItem::state, OfflineItemState::COMPLETE),\n                    Optional(Field(&UpdateDelta::state_changed, true))))\n      .Times(1);\n  item->NotifyObserversDownloadUpdated();\n  RunUntilMainThreadIdle();\n\n  // Terminal cleanup must detach the provider from the real observer list.\n  item->NotifyObserversDownloadUpdated();\n  RunUntilMainThreadIdle();\n}\n\n"
+- description: Repair reviewed AN Android native compiler integration errors without changing intended behavior
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ Field\(\&OfflineItem::state,\ OfflineItemState::IN_PROGRESS\),\ _\)\)\
+
+      \ \ \ \ \ \ \.Times\(1\);\
+
+      \ \ InitializeDownloads\(true\);\
+
+      \ \ provider_\.OnDownloadUpdated\(item\.get\(\)\);\
+
+      \ \ RunUntilMainThreadIdle\(\);\
+
+      \
+
+      \ \ service\->SetDownloadUiEnabledForTest\(false\);\
+
+      \ \ ON_CALL\(\*item,\ GetState\(\)\)\.WillByDefault\(Return\(DownloadItem::CANCELLED\)\);\
+
+      \ \ EXPECT_CALL\(\*item,\ RemoveObserver\(\&provider_\)\)\.Times\(1\);\
+
+      \ \ EXPECT_CALL\(\
+
+      \ \ \ \ \ \ observer,\
+
+      \ \ \ \ \ \ OnItemUpdated\(Field\(\&OfflineItem::state,\ OfflineItemState::CANCELLED\),\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ Optional\(Field\(\&UpdateDelta::state_changed,\ true\)\)\)\)\
+
+      \ \ \ \ \ \ \.Times\(1\);\
+
+      \ \ provider_\.OnDownloadUpdated\(item\.get\(\)\);\
+
+      \ \ RunUntilMainThreadIdle\(\);\
+
+      \}\
+
+      \
+
+      '
+    replace: "                  Field(&OfflineItem::state, OfflineItemState::IN_PROGRESS), _))\n      .Times(1);\n  InitializeDownloads(true);\n  provider_.OnDownloadStarted(item.get());\n  RunUntilMainThreadIdle();\n\n  service->SetDownloadUiEnabledForTest(false);\n  ON_CALL(*item, GetState()).WillByDefault(Return(DownloadItem::CANCELLED));\n  EXPECT_CALL(\n      observer,\n      OnItemUpdated(Field(&OfflineItem::state, OfflineItemState::CANCELLED),\n                    Optional(Field(&UpdateDelta::state_changed, true))))\n      .Times(1);\n  item->NotifyObserversDownloadUpdated();\n  RunUntilMainThreadIdle();\n\n  // Terminal cleanup must detach the provider from the real observer list.\n  item->NotifyObserversDownloadUpdated();\n  RunUntilMainThreadIdle();\n}\n\n"

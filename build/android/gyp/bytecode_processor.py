@@ -89,6 +89,8 @@ def main(argv):
         + sdk_jars
         + extra_classpath_jars
     )
+    if os.environ.get('REAPER_INTERNAL_VERIFIED_HARD_CGROUP'):
+        cmd.insert(1, '--reaper-owned-cgroup-jvm')
     subprocess.check_call(cmd)
 
 

@@ -1,0 +1,100 @@
+diff --git a/chrome/browser/extensions/api/cookies/cookies_helpers.cc b/chrome/browser/extensions/api/cookies/cookies_helpers.cc
+index a3b89524178022ef6a43cb9e3ce56fa268f18ed1..dddef51fd094b5ee76d29abffbb268d09bf73a19 100644
+--- a/chrome/browser/extensions/api/cookies/cookies_helpers.cc
++++ b/chrome/browser/extensions/api/cookies/cookies_helpers.cc
+@@ -9,10 +9,21 @@
+ #include <stddef.h>
+ 
+ #include <limits>
++#include <string_view>
+ #include <utility>
+ #include <vector>
+ 
+ #include "base/check.h"
++#include "build/build_config.h"
++#include "content/public/browser/storage_partition.h"
++#include "content/public/browser/storage_partition_config.h"
++
++#if BUILDFLAG(IS_ANDROID)
++#include "brave/browser/containers/android/containers_bridge.h"
++#include "chrome/browser/profiles/profile.h"
++#endif
+-#include "base/metrics/histogram_functions.h"
++#if !BUILDFLAG(IS_ANDROID)
++#include "base/metrics/histogram_functions.h"
++#endif  // !BUILDFLAG(IS_ANDROID)
+ #include "base/strings/string_util.h"
+ #include "base/strings/utf_string_conversions.h"
+@@ -97,6 +108,38 @@
+   return nullptr;
+ }
+ 
++content::StoragePartition* ChooseStoragePartitionFromStoreId(
++    const std::string& store_id,
++    content::BrowserContext* browser_context,
++    bool include_incognito) {
++#if BUILDFLAG(IS_ANDROID)
++  constexpr std::string_view kContainerStorePrefix = "container:";
++  if (store_id.starts_with(kContainerStorePrefix)) {
++    // A split-incognito worker cannot reach regular-profile containers.
++    if (browser_context->IsOffTheRecord()) {
++      return nullptr;
++    }
++    const std::string id = store_id.substr(kContainerStorePrefix.size());
++    auto* profile = Profile::FromBrowserContext(browser_context);
++    auto config =
++        containers::android::ResolveContainerStoragePartition(profile, id);
++    if (id.empty() || !config) {
++      return nullptr;
++    }
++    return profile->GetStoragePartition(*config);
++  }
++#endif
++  auto* context = ChooseBrowserContextFromStoreId(store_id, browser_context,
++                                                  include_incognito);
++  return context ? context->GetDefaultStoragePartition() : nullptr;
++}
++
++#if BUILDFLAG(IS_ANDROID)
++std::string GetContainerStoreId(const std::string& container_id) {
++  return "container:" + container_id;
++}
++#endif
++
+ const char* GetStoreIdFromBrowserContext(
+     content::BrowserContext* browser_context) {
+   DCHECK(browser_context);
+@@ -369,15 +412,17 @@
+     return base::unexpected(key.error());
+   }
+-
++
++#if !BUILDFLAG(IS_ANDROID)
+   // Record 'well formatted' uma here so that we count only coercible
+   // partition keys.
+   base::UmaHistogramBoolean(
+       "Extensions.CookieAPIPartitionKeyWellFormatted",
+       net::SchemefulSite::Deserialize(partition_key->top_level_site.value())
+               .Serialize() == partition_key->top_level_site.value());
++#endif  // !BUILDFLAG(IS_ANDROID)
+   return key;
+ }
+-
++
+ bool CookieMatchesPartitionKeyCollection(
+     const net::CookiePartitionKeyCollection& cookie_partition_key_collection,
+     const net::CanonicalCookie& cookie) {
+@@ -463,6 +508,13 @@
+ 
+ bool MatchFilter::MatchesCookie(
+     const net::CanonicalCookie& cookie) {
++#if BUILDFLAG(IS_ANDROID)
++  // The extensions API cannot represent transient cookie partition keys.
++  if (cookie.IsPartitioned() &&
++      !cookie.PartitionKey()->IsSerializeable()) {
++    return false;
++  }
++#endif
+   if (!CookieMatchesPartitionKeyCollection(cookie_partition_key_collection_,
+                                            cookie)) {
+     return false;

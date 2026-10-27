@@ -62,14 +62,7 @@ public final class BravePreferenceKeys {
             "org.chromium.chrome.browser.Brave_Biometrics_For_Wallet_Encrypted";
     public static final String BRAVE_AD_FREE_CALLOUT_DIALOG = "brave_ad_free_callout_dialog";
     public static final String BRAVE_OPENED_YOUTUBE = "brave_opened_youtube";
-    public static final String BRAVE_DEFERRED_DEEPLINK_PLAYLIST =
-            "brave_deferred_deeplink_playlist";
     public static final String BRAVE_DEFERRED_DEEPLINK_VPN = "brave_deferred_deeplink_vpn";
-    // Bridges Play Install Referrer attribution from WelcomeOnboardingActivity to BraveActivity
-    // for first-install users only. Existing users tap the App Link directly and are routed
-    // inline by maybeHandleUrlIntent without going through this pref.
-    public static final String BRAVE_DEFERRED_DEEPLINK_ORIGIN_PROMO =
-            "brave_deferred_deeplink_origin_promo";
     public static final String BRAVE_CLOSE_TABS_ON_EXIT = "close_tabs_on_exit";
     public static final String BRAVE_CLEAR_ON_EXIT = "clear_on_exit";
     public static final String BRAVE_QUICK_ACTION_SEARCH_AND_BOOKMARK_WIDGET_TILES =
@@ -77,27 +70,12 @@ public final class BravePreferenceKeys {
     public static final String ENABLE_MULTI_WINDOWS = "enable_multi_windows";
     public static final String ENABLE_MULTI_WINDOWS_UPGRADE = "enable_multi_windows_upgrade";
 
-    public static final String BRAVE_LEO_AUTOCOMPLETE =
-            "org.chromium.chrome.browser.Brave_Leo_AutoComplete";
-
     public static final String CUSTOMIZABLE_BRAVE_MENU_ITEM_ID_FORMAT =
             "customizable_brave_menu_item_id_%s";
-
-    // Playlist preference keys
-    public static final String PREF_ENABLE_PLAYLIST = "enable_playlist";
-    public static final String PREF_ADD_TO_PLAYLIST_BUTTON = "add_to_playlist_button";
-    public static final String PREF_REMEMBER_FILE_PLAYBACK_POSITION =
-            "remember_file_playback_position";
-    public static final String PREF_REMEMBER_LIST_PLAYBACK_POSITION =
-            "remember_list_playback_position";
-    public static final String PREF_CONTINUOUS_LISTENING = "continuous_listening";
-    public static final String PREF_RESET_PLAYLIST = "reset_playlist";
 
     // These are dynamic keys
     public static final String BRAVE_RECYCLERVIEW_POSITION = "recyclerview_visible_position_";
     public static final String BRAVE_RECYCLERVIEW_OFFSET_POSITION = "recyclerview_offset_position_";
-
-    public static final String BRAVE_IN_APP_UPDATE_TIMING = "in_app_update_timing";
 
     public static final String DAY_ZERO_EXPT_VARIANT = "day_zero_expt_variant";
 
@@ -137,9 +115,6 @@ public final class BravePreferenceKeys {
             "brave_default_search_engine_migrated_jp";
 
     public static final String SEARCH_CHOICE_SCREEN_INSTALL = "search_choice_screen_install";
-
-    public static final String BRAVE_ORIGIN_CREDENTIAL_SUMMARY_CACHED =
-            "brave_origin_credential_summary_cached";
 
     public static final String PREF_PULL_TO_REFRESH = "brave_pull_to_refresh";
 

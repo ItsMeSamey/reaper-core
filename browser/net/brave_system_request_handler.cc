@@ -7,14 +7,18 @@
 
 #include "brave/browser/net/brave_block_safebrowsing_urls.h"
 #include "brave/browser/net/brave_common_static_redirect_network_delegate_helper.h"
-#include "brave/browser/net/brave_speech_to_text_network_delegate_helper.h"
 #include "brave/browser/net/brave_static_redirect_network_delegate_helper.h"
 #include "brave/components/constants/brave_services_key.h"
 #include "brave/components/constants/brave_services_key_helper.h"
 #include "brave/components/constants/network_constants.h"
+#include "build/build_config.h"
 #include "extensions/common/url_pattern.h"
 #include "services/network/public/cpp/resource_request.h"
 #include "url/gurl.h"
+
+#if !BUILDFLAG(IS_ANDROID)
+#include "brave/browser/net/brave_speech_to_text_network_delegate_helper.h"
+#endif
 
 namespace brave {
 
@@ -43,7 +47,9 @@ network::ResourceRequest OnBeforeSystemRequest(
   if (!new_url.is_empty()) {
     patched_request.url = new_url;
   }
+#if !BUILDFLAG(IS_ANDROID)
   stt::OnBeforeURLRequest_SpoofSpeechToText(&patched_request);
+#endif
   AddBraveServicesKeyHeader(&patched_request);
   return patched_request;
 }

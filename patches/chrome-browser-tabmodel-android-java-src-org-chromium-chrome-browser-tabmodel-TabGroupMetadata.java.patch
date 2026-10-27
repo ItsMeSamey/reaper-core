@@ -1,0 +1,132 @@
+diff --git a/chrome/browser/tabmodel/android/java/src/org/chromium/chrome/browser/tabmodel/TabGroupMetadata.java b/chrome/browser/tabmodel/android/java/src/org/chromium/chrome/browser/tabmodel/TabGroupMetadata.java
+--- a/chrome/browser/tabmodel/android/java/src/org/chromium/chrome/browser/tabmodel/TabGroupMetadata.java
++++ b/chrome/browser/tabmodel/android/java/src/org/chromium/chrome/browser/tabmodel/TabGroupMetadata.java
+@@ -16,6 +16,7 @@
+ import org.chromium.build.annotations.Nullable;
+ 
+ import java.util.ArrayList;
++import java.util.List;
+ import java.util.Map;
+ import java.util.Objects;
+ 
+@@ -25,6 +26,7 @@
+  */
+ @NullMarked
+ public class TabGroupMetadata {
++    private static final String KEY_SPLITS = "splitCollections";
+     private static final String KEY_SELECTED_TAB_ID = "selectedTabId";
+     private static final String KEY_SOURCE_WINDOW_ID = "sourceWindowId";
+     private static final String KEY_TAB_GROUP_ID = "tabGroupId";
+@@ -45,6 +47,7 @@
+     public final boolean tabGroupCollapsed;
+     public final boolean isGroupShared;
+     public final boolean isIncognito;
++    public final List<SplitInfo> splits;
+ 
+     /**
+      * See <a href="https://crbug.com/416345985">bug</a> for more details. We previously attempted
+@@ -80,6 +83,18 @@
+             boolean tabGroupCollapsed,
+             boolean isGroupShared,
+             boolean isIncognito) {
++        this(selectedTabId, sourceWindowId, tabGroupId, tabIdsToUrls, tabGroupColor,
++                tabGroupTitle, mhtmlTabTitle, tabGroupCollapsed, isGroupShared,
++                isIncognito, List.of());
++    }
++
++    public TabGroupMetadata(
++            int selectedTabId, int sourceWindowId, Token tabGroupId,
++            ArrayList<Map.Entry<Integer, String>> tabIdsToUrls,
++            @ColorInt int tabGroupColor, String tabGroupTitle, @Nullable String mhtmlTabTitle,
++            boolean tabGroupCollapsed, boolean isGroupShared, boolean isIncognito,
++            List<SplitInfo> splits) {
++        this.splits = List.copyOf(splits);
+         this.selectedTabId = selectedTabId;
+         this.sourceWindowId = sourceWindowId;
+         this.tabGroupId = tabGroupId;
+@@ -99,6 +114,17 @@
+      */
+     public Bundle toBundle() {
+         Bundle bundle = new Bundle();
++        ArrayList<Bundle> splitBundles = new ArrayList<>();
++        for (SplitInfo split : splits) {
++            Bundle value = new Bundle();
++            value.putBundle("token", split.getToken().toBundle());
++            value.putInt("first", split.getFirstTabId());
++            value.putInt("second", split.getSecondTabId());
++            value.putInt("layout", split.getLayout());
++            value.putDouble("ratio", split.getRatio());
++            splitBundles.add(value);
++        }
++        bundle.putParcelableArrayList(KEY_SPLITS, splitBundles);
+         bundle.putInt(KEY_SELECTED_TAB_ID, selectedTabId);
+         bundle.putInt(KEY_SOURCE_WINDOW_ID, sourceWindowId);
+         bundle.putBundle(KEY_TAB_GROUP_ID, tabGroupId.toBundle());
+@@ -110,6 +136,39 @@
+         bundle.putBoolean(KEY_IS_GROUP_SHARED, isGroupShared);
+         bundle.putBoolean(KEY_IS_INCOGNITO, isIncognito);
+         return bundle;
++    }
++
++    private static List<SplitInfo> readSplits(
++            Bundle bundle, ArrayList<Map.Entry<Integer, String>> tabs) {
++        ArrayList<Bundle> encoded = bundle.getParcelableArrayList(KEY_SPLITS);
++        if (encoded == null || encoded.size() > tabs.size() / 2) return List.of();
++        List<SplitInfo> result = new ArrayList<>();
++        java.util.Set<Integer> members = new java.util.HashSet<>();
++        java.util.Set<Integer> validTabs = new java.util.HashSet<>();
++        java.util.Set<Token> tokens = new java.util.HashSet<>();
++        for (Map.Entry<Integer, String> tab : tabs) validTabs.add(tab.getKey());
++        for (Bundle value : encoded) {
++            if (value == null || !value.containsKey("first") || !value.containsKey("second")
++                    || !value.containsKey("layout") || !value.containsKey("ratio")) continue;
++            Token token = Token.maybeCreateFromBundle(value.getBundle("token"));
++            int first = value.getInt("first");
++            int second = value.getInt("second");
++            if (token == null || !validTabs.contains(first) || !validTabs.contains(second)
++                    || members.contains(first) || members.contains(second) || tokens.contains(token)) {
++                continue;
++            }
++            try {
++                SplitInfo split = new SplitInfo(token, first, second,
++                        value.getInt("layout"), value.getDouble("ratio"));
++                result.add(split);
++                tokens.add(token);
++                members.add(first);
++                members.add(second);
++            } catch (IllegalArgumentException invalid) {
++                // Old or malformed split metadata must never discard the actual transferred tabs.
++            }
++        }
++        return result;
+     }
+ 
+     /**
+@@ -146,7 +205,7 @@
+                 bundle.getString(KEY_MHTML_TAB_TITLE),
+                 bundle.getBoolean(KEY_TAB_GROUP_COLLAPSED),
+                 bundle.getBoolean(KEY_IS_GROUP_SHARED),
+-                bundle.getBoolean(KEY_IS_INCOGNITO));
++                bundle.getBoolean(KEY_IS_INCOGNITO), readSplits(bundle, tabIdsToUrls));
+     }
+ 
+     @Override
+@@ -163,7 +222,8 @@
+                 && Objects.equals(tabGroupId, that.tabGroupId)
+                 && Objects.equals(tabIdsToUrls, that.tabIdsToUrls)
+                 && Objects.equals(tabGroupTitle, that.tabGroupTitle)
+-                && Objects.equals(mhtmlTabTitle, that.mhtmlTabTitle);
++                && Objects.equals(mhtmlTabTitle, that.mhtmlTabTitle)
++                && splits.equals(that.splits);
+     }
+ 
+     @Override
+@@ -178,7 +238,7 @@
+                 this.mhtmlTabTitle,
+                 this.tabGroupCollapsed,
+                 this.isGroupShared,
+-                this.isIncognito);
++                this.isIncognito, this.splits);
+     }
+ 
+     public String toDebugString() {

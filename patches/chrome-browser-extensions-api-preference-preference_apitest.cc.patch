@@ -1,0 +1,141 @@
+diff --git a/chrome/browser/extensions/api/preference/preference_apitest.cc b/chrome/browser/extensions/api/preference/preference_apitest.cc
+--- a/chrome/browser/extensions/api/preference/preference_apitest.cc
++++ b/chrome/browser/extensions/api/preference/preference_apitest.cc
+@@ -665,3 +665,137 @@
+                        /*is_incognito_profile=*/true)
+                    ->GetBool());
+ }
++
++#if BUILDFLAG(IS_ANDROID)
++IN_PROC_BROWSER_TEST_F(ExtensionPreferenceApiTest,
++                       AnimationPolicyMv3RoundTrip) {
++  PrefService* prefs = profile_->GetPrefs();
++  ASSERT_TRUE(prefs->FindPreference(prefs::kAnimationPolicy));
++  prefs->SetString(prefs::kAnimationPolicy, "once");
++  extensions::TestExtensionDir dir;
++  dir.WriteManifest(R"({
++    "name": "Android animation policy", "version": "1", "manifest_version": 3,
++    "permissions": ["accessibilityFeatures.read", "accessibilityFeatures.modify"],
++    "background": {"service_worker": "worker.js"}
++  })");
++  dir.WriteFile(FILE_PATH_LITERAL("worker.js"), R"(
++    chrome.test.runTests([function animationPolicy() {
++      async function run() {
++        const features = chrome.accessibilityFeatures;
++        for (const name of ['spokenFeedback', 'largeCursor', 'stickyKeys',
++             'highContrast', 'screenMagnifier', 'autoclick', 'virtualKeyboard',
++             'caretHighlight', 'cursorHighlight', 'cursorColor',
++             'dockedMagnifier', 'focusHighlight', 'selectToSpeak',
++             'switchAccess', 'dictation']) {
++          chrome.test.assertEq(undefined, features[name]);
++        }
++        const setting = features.animationPolicy;
++        const call = (method, details) => new Promise((resolve, reject) => {
++          setting[method](details, result => {
++            const error = chrome.runtime.lastError;
++            if (error) reject(new Error(error.message));
++            else resolve(result);
++          });
++        });
++        chrome.test.assertEq('once', (await call('get', {})).value);
++        const changed = new Promise(resolve => {
++          function listener(result) {
++            setting.onChange.removeListener(listener);
++            resolve(result);
++          }
++          setting.onChange.addListener(listener);
++        });
++        await call('set', {value: 'none'});
++        chrome.test.assertEq('none', (await changed).value);
++        const controlled = await call('get', {});
++        chrome.test.assertEq('none', controlled.value);
++        chrome.test.assertEq('controlled_by_this_extension',
++                             controlled.levelOfControl);
++        let rejected = false;
++        try { await call('set', {value: 'invalid'}); }
++        catch (error) { rejected = true; }
++        chrome.test.assertTrue(rejected);
++        chrome.test.assertEq('none', (await call('get', {})).value);
++        await call('set', {value: 'allowed'});
++        chrome.test.assertEq('allowed', (await call('get', {})).value);
++        await call('clear', {});
++        const cleared = await call('get', {});
++        chrome.test.assertEq('once', cleared.value);
++        chrome.test.assertEq('controllable_by_this_extension',
++                             cleared.levelOfControl);
++      }
++      run().then(() => chrome.test.succeed(),
++                 error => chrome.test.fail(String(error)));
++    }]);
++  )");
++  ASSERT_TRUE(RunExtensionTest(dir.UnpackedPath(), {}, {})) << message_;
++  EXPECT_EQ("once", prefs->GetString(prefs::kAnimationPolicy));
++  EXPECT_FALSE(
++      prefs->FindPreference(prefs::kAnimationPolicy)->IsExtensionControlled());
++}
++
++IN_PROC_BROWSER_TEST_F(ExtensionPreferenceApiTest,
++                       AnimationPolicyMv3ReadDoesNotModify) {
++  PrefService* prefs = profile_->GetPrefs();
++  prefs->SetString(prefs::kAnimationPolicy, "once");
++  extensions::TestExtensionDir dir;
++  dir.WriteManifest(R"({
++    "name": "Read animation policy", "version": "1", "manifest_version": 3,
++    "permissions": ["accessibilityFeatures.read"],
++    "background": {"service_worker": "worker.js"}
++  })");
++  dir.WriteFile(FILE_PATH_LITERAL("worker.js"), R"(
++    const setting = chrome.accessibilityFeatures.animationPolicy;
++    const denied = "You do not have permission to access the preference " +
++        "'animationPolicy'. Be sure to declare in your manifest what " +
++        "permissions you need.";
++    chrome.test.runTests([
++      function read() {
++        setting.get({}, chrome.test.callbackPass(result => {
++          chrome.test.assertEq('once', result.value);
++        }));
++      },
++      function writeDenied() {
++        setting.set({value: 'none'}, chrome.test.callbackFail(denied));
++      },
++      function clearDenied() {
++        setting.clear({}, chrome.test.callbackFail(denied));
++      }
++    ]);
++  )");
++  ASSERT_TRUE(RunExtensionTest(dir.UnpackedPath(), {}, {})) << message_;
++  EXPECT_EQ("once", prefs->GetString(prefs::kAnimationPolicy));
++  EXPECT_FALSE(
++      prefs->FindPreference(prefs::kAnimationPolicy)->IsExtensionControlled());
++}
++
++IN_PROC_BROWSER_TEST_F(ExtensionPreferenceApiTest,
++                       AnimationPolicyMv3ModifyDoesNotRead) {
++  PrefService* prefs = profile_->GetPrefs();
++  prefs->SetString(prefs::kAnimationPolicy, "allowed");
++  extensions::TestExtensionDir dir;
++  dir.WriteManifest(R"({
++    "name": "Modify animation policy", "version": "1", "manifest_version": 3,
++    "permissions": ["accessibilityFeatures.modify"],
++    "background": {"service_worker": "worker.js"}
++  })");
++  dir.WriteFile(FILE_PATH_LITERAL("worker.js"), R"(
++    const setting = chrome.accessibilityFeatures.animationPolicy;
++    const denied = "You do not have permission to access the preference " +
++        "'animationPolicy'. Be sure to declare in your manifest what " +
++        "permissions you need.";
++    chrome.test.runTests([
++      function readDenied() {
++        setting.get({}, chrome.test.callbackFail(denied));
++      },
++      function write() {
++        setting.set({value: 'none'}, chrome.test.callbackPass());
++      }
++    ]);
++  )");
++  ASSERT_TRUE(RunExtensionTest(dir.UnpackedPath(), {}, {})) << message_;
++  EXPECT_EQ("none", prefs->GetString(prefs::kAnimationPolicy));
++  EXPECT_TRUE(
++      prefs->FindPreference(prefs::kAnimationPolicy)->IsExtensionControlled());
++}
++#endif  // BUILDFLAG(IS_ANDROID)

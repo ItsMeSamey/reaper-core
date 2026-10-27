@@ -1,0 +1,159 @@
+# Opt-in Android global extension hardware shortcuts.
+substitutions:
+- description: Move registration callbacks without browser dependencies
+  regex:
+    re_pattern: \#include\ "base/memory/ptr_util\.h"
+    replace: '#include <utility>
+
+
+      #include "base/functional/bind.h"
+
+      #include "base/task/sequenced_task_runner.h"
+
+      #include "base/memory/ptr_util.h"'
+- description: Attach only a ready user-enabled backend and reject stale service events
+  regex:
+    re_pattern: void\ GlobalAcceleratorListenerAndroid::StartListening\(\)\ \{\}
+    replace: "bool GlobalAcceleratorListenerAndroid::AttachBackend(\n    const void* owner, RegistrationCallback callback) {\n  CHECK(BrowserThread::CurrentlyOn(BrowserThread::UI));\n  if (!owner || !callback || backend_owner_)\n    return false;\n  backend_owner_ = owner;\n  registration_callback_ = std::move(callback);\n  RefreshBackendRegistrations();\n  return backend_owner_ == owner;\n}\n\nvoid GlobalAcceleratorListenerAndroid::DetachBackend(const void* owner) {\n  CHECK(BrowserThread::CurrentlyOn(BrowserThread::UI));\n  if (backend_owner_ != owner || !owner)\n    return;\n  backend_owner_ = nullptr;\n  registration_callback_.Reset();\n  registered_accelerators_.clear();\n  RefreshBackendRegistrations();\n}\n\nbool GlobalAcceleratorListenerAndroid::HasBackend() const {\n  return backend_owner_ && registration_callback_;\n}\n\nbase::CallbackListSubscription\nGlobalAcceleratorListenerAndroid::AddBackendObserver(base::RepeatingClosure callback) {\n  return backend_observers_.Add(std::move(callback));\n}\n\nvoid GlobalAcceleratorListenerAndroid::RefreshBackendRegistrations() {\n  CHECK(BrowserThread::CurrentlyOn(BrowserThread::UI));\n  if (refresh_pending_)\n    return;\n  refresh_pending_ = true;\n  // The base listener can hold map iterators while calling the platform\n  // registration callback. Never rebuild browser registrations on that stack.\n  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(\n      FROM_HERE, base::BindOnce(\n          [](base::WeakPtr<GlobalAcceleratorListenerAndroid> self) {\n            if (!self)\n              return;\n            self->refresh_pending_ = false;\n            self->backend_observers_.Notify();\n          }, weak_factory_.GetWeakPtr()));\n}\n\nbool GlobalAcceleratorListenerAndroid::DispatchAccelerator(\n    const void* owner, const Accelerator& accelerator) {\n  CHECK(BrowserThread::CurrentlyOn(BrowserThread::UI));\n  if (!HasBackend() || backend_owner_ != owner ||\n      IsShortcutHandlingSuspended() ||\n      !registered_accelerators_.contains(accelerator))\n    return false;\n  // Dispatch may synchronously unregister or destroy the browser observer.\n  // This process-wide UI listener survives; do not access the observer again.\n  NotifyKeyPressed(accelerator);\n  return true;\n}\n\nvoid GlobalAcceleratorListenerAndroid::StartListening() {}"
+- description: Only report successful actual platform registrations
+  regex:
+    re_pattern: '\ \ return\ false;\
+
+      \}\
+
+      \
+
+      void\ GlobalAcceleratorListenerAndroid::StopListeningForAccelerator\(\
+
+      \ \ \ \ const\ ui::Accelerator\&\ accelerator\)\ \{\}'
+    replace: "  if (!HasBackend())\n    return false;\n  const void* owner = backend_owner_;\n  auto callback = registration_callback_;\n  if (!callback.Run(accelerator, true) || backend_owner_ != owner)\n    return false;\n  registered_accelerators_.insert(accelerator);\n  return true;\n}\n\nvoid GlobalAcceleratorListenerAndroid::StopListeningForAccelerator(\n    const ui::Accelerator& accelerator) {\n  registered_accelerators_.erase(accelerator);\n  if (HasBackend()) {\n    auto callback = registration_callback_;\n    callback.Run(accelerator, false);\n  }\n}"
+- description: Format Android global shortcuts changes
+  regex:
+    re_pattern: '\
+
+      \#include\ <utility>\
+
+      \
+
+      \#include\ "base/functional/bind\.h"\
+
+      \#include\ "base/task/sequenced_task_runner\.h"\
+
+      \#include\ "base/memory/ptr_util\.h"\
+
+      \#include\ "base/no_destructor\.h"\
+
+      \#include\ "content/public/browser/browser_thread\.h"\
+
+      \#include\ "ui/base/accelerators/accelerator\.h"\
+
+      \
+
+      using\ content::BrowserThread;\
+
+      '
+    replace: '
+
+      #include <utility>
+
+
+      #include "base/functional/bind.h"
+
+      #include "base/memory/ptr_util.h"
+
+      #include "base/no_destructor.h"
+
+      #include "base/task/sequenced_task_runner.h"
+
+      #include "content/public/browser/browser_thread.h"
+
+      #include "ui/base/accelerators/accelerator.h"
+
+
+      using content::BrowserThread;
+
+      '
+- description: Format Android global shortcuts changes
+  regex:
+    re_pattern: '\
+
+      GlobalAcceleratorListenerAndroid::\~GlobalAcceleratorListenerAndroid\(\)\ =\ default;\
+
+      \
+
+      bool\ GlobalAcceleratorListenerAndroid::AttachBackend\(\
+
+      \ \ \ \ const\ void\*\ owner,\ RegistrationCallback\ callback\)\ \{\
+
+      \ \ CHECK\(BrowserThread::CurrentlyOn\(BrowserThread::UI\)\);\
+
+      \ \ if\ \(!owner\ \|\|\ !callback\ \|\|\ backend_owner_\)\
+
+      \ \ \ \ return\ false;\
+
+      \ \ backend_owner_\ =\ owner;\
+
+      '
+    replace: "\nGlobalAcceleratorListenerAndroid::~GlobalAcceleratorListenerAndroid() = default;\n\nbool GlobalAcceleratorListenerAndroid::AttachBackend(\n    const void* owner,\n    RegistrationCallback callback) {\n  CHECK(BrowserThread::CurrentlyOn(BrowserThread::UI));\n  if (!owner || !callback || backend_owner_)\n    return false;\n  backend_owner_ = owner;\n"
+- description: Format Android global shortcuts changes
+  regex:
+    re_pattern: '\ \ return\ backend_owner_\ \&\&\ registration_callback_;\
+
+      \}\
+
+      \
+
+      base::CallbackListSubscription\
+
+      GlobalAcceleratorListenerAndroid::AddBackendObserver\(base::RepeatingClosure\ callback\)\ \{\
+
+      \ \ return\ backend_observers_\.Add\(std::move\(callback\)\);\
+
+      \}\
+
+      \
+
+      void\ GlobalAcceleratorListenerAndroid::RefreshBackendRegistrations\(\)\ \{\
+
+      '
+    replace: "  return backend_owner_ && registration_callback_;\n}\n\nbase::CallbackListSubscription\nGlobalAcceleratorListenerAndroid::AddBackendObserver(\n    base::RepeatingClosure callback) {\n  return backend_observers_.Add(std::move(callback));\n}\n\nvoid GlobalAcceleratorListenerAndroid::RefreshBackendRegistrations() {\n"
+- description: Format Android global shortcuts changes
+  regex:
+    re_pattern: '\ \ //\ The\ base\ listener\ can\ hold\ map\ iterators\ while\ calling\ the\ platform\
+
+      \ \ //\ registration\ callback\.\ Never\ rebuild\ browser\ registrations\ on\ that\ stack\.\
+
+      \ \ base::SequencedTaskRunner::GetCurrentDefault\(\)\->PostTask\(\
+
+      \ \ \ \ \ \ FROM_HERE,\ base::BindOnce\(\
+
+      \ \ \ \ \ \ \ \ \ \ \[\]\(base::WeakPtr<GlobalAcceleratorListenerAndroid>\ self\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(!self\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ return;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ self\->refresh_pending_\ =\ false;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ self\->backend_observers_\.Notify\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \},\ weak_factory_\.GetWeakPtr\(\)\)\);\
+
+      \}\
+
+      \
+
+      bool\ GlobalAcceleratorListenerAndroid::DispatchAccelerator\(\
+
+      \ \ \ \ const\ void\*\ owner,\ const\ Accelerator\&\ accelerator\)\ \{\
+
+      \ \ CHECK\(BrowserThread::CurrentlyOn\(BrowserThread::UI\)\);\
+
+      \ \ if\ \(!HasBackend\(\)\ \|\|\ backend_owner_\ !=\ owner\ \|\|\
+
+      \ \ \ \ \ \ IsShortcutHandlingSuspended\(\)\ \|\|\
+
+      \ \ \ \ \ \ !registered_accelerators_\.contains\(accelerator\)\)\
+
+      '
+    replace: "  // The base listener can hold map iterators while calling the platform\n  // registration callback. Never rebuild browser registrations on that stack.\n  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(\n      FROM_HERE, base::BindOnce(\n                     [](base::WeakPtr<GlobalAcceleratorListenerAndroid> self) {\n                       if (!self)\n                         return;\n                       self->refresh_pending_ = false;\n                       self->backend_observers_.Notify();\n                     },\n                     weak_factory_.GetWeakPtr()));\n}\n\nbool GlobalAcceleratorListenerAndroid::DispatchAccelerator(\n    const void* owner,\n    const Accelerator& accelerator) {\n  CHECK(BrowserThread::CurrentlyOn(BrowserThread::UI));\n  if (!HasBackend() || backend_owner_ != owner ||\n      IsShortcutHandlingSuspended() ||\n      !registered_accelerators_.contains(accelerator))\n"

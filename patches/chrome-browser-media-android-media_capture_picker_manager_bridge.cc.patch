@@ -1,0 +1,248 @@
+diff --git a/chrome/browser/media/android/media_capture_picker_manager_bridge.cc b/chrome/browser/media/android/media_capture_picker_manager_bridge.cc
+index 0a5d921c98090fe99c6ef876216145890210d6e9..79c4f84dda6c481654bd8fa42741f8b36e3d758f 100644
+--- a/chrome/browser/media/android/media_capture_picker_manager_bridge.cc
++++ b/chrome/browser/media/android/media_capture_picker_manager_bridge.cc
+@@ -4,14 +4,19 @@
+ 
+ #include "chrome/browser/media/android/media_capture_picker_manager_bridge.h"
+ 
++#include <algorithm>
++#include <limits>
+ #include <string>
+ 
+ #include "base/android/jni_android.h"
+ #include "chrome/browser/media/webrtc/capture_policy_utils.h"
+ #include "content/public/browser/browser_thread.h"
++#include "content/public/browser/navigation_handle.h"
++#include "content/public/browser/render_frame_host.h"
+ #include "content/public/browser/render_process_host.h"
+ #include "content/public/browser/web_contents.h"
+ #include "third_party/blink/public/mojom/mediastream/media_stream.mojom.h"
++#include "ui/android/window_android.h"
+ #include "url/android/gurl_android.h"
+ 
+ // Must come after all headers that specialize FromJniType() / ToJniType().
+@@ -22,14 +27,13 @@
+ int MediaCapturePickerManagerBridge::next_fake_id_ = 1;
+ 
+ MediaCapturePickerManagerBridge::MediaCapturePickerManagerBridge() {
+-  JNIEnv* env = base::android::AttachCurrentThread();
+   java_object_.Reset(Java_MediaCapturePickerManagerBridge_create(
+-      env, reinterpret_cast<intptr_t>(this)));
++      base::android::AttachCurrentThread(), reinterpret_cast<intptr_t>(this)));
+ }
+ 
+ MediaCapturePickerManagerBridge::~MediaCapturePickerManagerBridge() {
+   Java_MediaCapturePickerManagerBridge_destroy(
+-      base::android::AttachCurrentThread(), java_object_);
++      base::android::AttachCurrentThread(), java_object_, false);
+ }
+ 
+ void MediaCapturePickerManagerBridge::Show(
+@@ -37,65 +41,168 @@
+     DesktopMediaPicker::DoneCallback callback) {
+   CHECK(params.web_contents);
+   CHECK(callback_.is_null());
++  params_ = params;
+   callback_ = std::move(callback);
+-  web_contents_filter_ = params.includable_web_contents_filter;
+-
+-  JNIEnv* env = base::android::AttachCurrentThread();
++  Observe(params.web_contents);
++  request_document_ = params.android_request_document.value_or(
++      params.web_contents->GetPrimaryMainFrame()->GetWeakDocumentPtr());
++  CHECK_LT(next_fake_id_, std::numeric_limits<int>::max());
++  capture_id_ = next_fake_id_++;
++  int allowed_source_types = 0;
++  if (IsAllowed(DesktopMediaList::Type::kWebContents))
++    allowed_source_types |= 1;
++  if (IsAllowed(DesktopMediaList::Type::kScreen))
++    allowed_source_types |= 2;
++  if (!allowed_source_types) {
++    OnCancel();
++    return;
++  }
++
+   Java_MediaCapturePickerManagerBridge_showDialog(
+-      env, java_object_, params.web_contents, params.app_name,
++      base::android::AttachCurrentThread(), java_object_, params.web_contents,
++      params.context ? params.context->GetJavaObject()
++                     : decltype(params.context->GetJavaObject())(),
++      request_document_.AsRenderFrameHostIfValid(), params.app_name,
+       params.target_name, params.request_audio, params.exclude_system_audio,
+       static_cast<int>(params.window_audio_preference),
+       static_cast<int>(params.preferred_display_surface),
+       params.capture_this_tab, params.exclude_self_browser_surface,
+       params.exclude_monitor_type_surfaces,
+-      static_cast<int>(params.allowed_capture_level));
+-}
+-
+-void MediaCapturePickerManagerBridge::OnPickTab(
+-    content::WebContents* web_contents,
+-    bool audio_share) {
+-  CHECK(web_contents);
+-  auto desktop_media_id = content::DesktopMediaID(
++      static_cast<int>(params.allowed_capture_level), allowed_source_types,
++      capture_id_);
++}
++
++bool MediaCapturePickerManagerBridge::IsAllowed(
++    DesktopMediaList::Type type) const {
++  auto* frame = request_document_.AsRenderFrameHostIfValid();
++  if (!frame || !frame->IsActive() || callback_.is_null() ||
++      !(std::ranges::contains(params_.android_allowed_sources, type) ||
++        (type == DesktopMediaList::Type::kWebContents &&
++         std::ranges::contains(params_.android_allowed_sources,
++                               DesktopMediaList::Type::kCurrentTab))))
++    return false;
++  auto* initiator = content::WebContents::FromRenderFrameHost(frame);
++  if (initiator != web_contents())
++    return false;
++  auto level =
++      std::min(params_.allowed_capture_level,
++               capture_policy::GetAllowedCaptureLevel(
++                   frame->GetLastCommittedOrigin().GetURL(), initiator));
++  if (type == DesktopMediaList::Type::kScreen) {
++    return level >= AllowedScreenCaptureLevel::kDesktop &&
++           !params_.exclude_monitor_type_surfaces && !params_.capture_this_tab;
++  }
++  // Public Android screen-consent results do not identify a window versus a
++  // complete display. The open-source picker intentionally offers no windows.
++  return type == DesktopMediaList::Type::kWebContents &&
++         level >= AllowedScreenCaptureLevel::kSameOrigin;
++}
++
++bool MediaCapturePickerManagerBridge::ShouldFilterWebContents(
++    content::WebContents* candidate) {
++  if (!candidate || candidate->IsBeingDestroyed() ||
++      !IsAllowed(DesktopMediaList::Type::kWebContents))
++    return true;
++  auto* frame = request_document_.AsRenderFrameHostIfValid();
++  auto* initiator = content::WebContents::FromRenderFrameHost(frame);
++  if (candidate->GetBrowserContext() != initiator->GetBrowserContext() ||
++      (params_.exclude_self_browser_surface && candidate == initiator) ||
++      ((params_.capture_this_tab ||
++        (!std::ranges::contains(params_.android_allowed_sources,
++                                DesktopMediaList::Type::kWebContents) &&
++         std::ranges::contains(params_.android_allowed_sources,
++                               DesktopMediaList::Type::kCurrentTab))) &&
++       candidate != initiator))
++    return true;
++  if (params_.includable_web_contents_filter &&
++      !params_.includable_web_contents_filter.Run(candidate))
++    return true;
++  auto level =
++      std::min(params_.allowed_capture_level,
++               capture_policy::GetAllowedCaptureLevel(
++                   frame->GetLastCommittedOrigin().GetURL(), initiator));
++  return !capture_policy::GetIncludableWebContentsFilter(
++              frame->GetLastCommittedOrigin().GetURL(), level)
++              .Run(candidate);
++}
++
++void MediaCapturePickerManagerBridge::OnPickTab(content::WebContents* candidate,
++                                                bool audio_share) {
++  if (ShouldFilterWebContents(candidate)) {
++    OnCancel();
++    return;
++  }
++  auto* frame = candidate->GetPrimaryMainFrame();
++  if (!frame || !frame->IsActive()) {
++    OnCancel();
++    return;
++  }
++  content::DesktopMediaID id(
+       content::DesktopMediaID::TYPE_WEB_CONTENTS,
+       content::DesktopMediaID::kNullId,
+-      content::WebContentsMediaCaptureId(
+-          web_contents->GetPrimaryMainFrame()->GetProcess()->GetDeprecatedID(),
+-          web_contents->GetPrimaryMainFrame()->GetRoutingID()));
+-  desktop_media_id.audio_share = audio_share;
+-  VLOG(1) << __func__
+-          << " created desktop_media_id=" << desktop_media_id.ToString()
+-          << ", audio share=" << audio_share;
+-  std::move(callback_).Run(desktop_media_id);
++      content::WebContentsMediaCaptureId(frame->GetProcess()->GetDeprecatedID(),
++                                         frame->GetRoutingID()));
++  id.audio_share = params_.request_audio && audio_share;
++  Finish(id);
+ }
+ 
+ void MediaCapturePickerManagerBridge::OnPickWindow() {
+-  auto desktop_media_id = content::DesktopMediaID(
+-      content::DesktopMediaID::TYPE_WINDOW, next_fake_id_++);
+-  VLOG(1) << __func__
+-          << " created desktop_media_id=" << desktop_media_id.ToString();
+-  std::move(callback_).Run(desktop_media_id);
++  OnCancel();
+ }
+ 
+ void MediaCapturePickerManagerBridge::OnPickScreen() {
+-  auto desktop_media_id = content::DesktopMediaID(
+-      content::DesktopMediaID::TYPE_SCREEN, next_fake_id_++);
+-  VLOG(1) << __func__
+-          << " created desktop_media_id=" << desktop_media_id.ToString();
+-  std::move(callback_).Run(desktop_media_id);
++  if (!IsAllowed(DesktopMediaList::Type::kScreen)) {
++    OnCancel();
++    return;
++  }
++  Finish(content::DesktopMediaID(content::DesktopMediaID::TYPE_SCREEN,
++                                 capture_id_));
+ }
+ 
+ void MediaCapturePickerManagerBridge::OnCancel() {
+-  VLOG(1) << __func__;
+-  std::move(callback_).Run(base::unexpected(
++  Finish(base::unexpected(
+       blink::mojom::MediaStreamRequestResult::PERMISSION_DENIED_BY_USER));
+ }
+ 
+-bool MediaCapturePickerManagerBridge::ShouldFilterWebContents(
+-    content::WebContents* web_contents) {
+-  if (!web_contents) {
+-    return true;
+-  }
+-  return !web_contents_filter_.Run(web_contents);
++void MediaCapturePickerManagerBridge::Finish(
++    DesktopMediaPicker::DoneCallbackArgumentType result) {
++  if (callback_.is_null())
++    return;
++  Observe(nullptr);
++  Java_MediaCapturePickerManagerBridge_destroy(
++      base::android::AttachCurrentThread(), java_object_,
++      result.has_value() &&
++          result->type == content::DesktopMediaID::TYPE_SCREEN);
++  std::move(callback_).Run(std::move(result));
++}
++
++void MediaCapturePickerManagerBridge::DidFinishNavigation(
++    content::NavigationHandle* navigation) {
++  if (navigation->HasCommitted() && !navigation->IsSameDocument() &&
++      (navigation->IsInPrimaryMainFrame() ||
++       !request_document_.AsRenderFrameHostIfValid()))
++    OnCancel();
++}
++
++void MediaCapturePickerManagerBridge::RenderFrameDeleted(
++    content::RenderFrameHost* frame) {
++  if (!request_document_.AsRenderFrameHostIfValid() ||
++      frame == request_document_.AsRenderFrameHostIfValid())
++    OnCancel();
++}
++
++void MediaCapturePickerManagerBridge::RenderFrameHostStateChanged(
++    content::RenderFrameHost* frame,
++    content::RenderFrameHost::LifecycleState old_state,
++    content::RenderFrameHost::LifecycleState new_state) {
++  if (frame == request_document_.AsRenderFrameHostIfValid() &&
++      new_state != content::RenderFrameHost::LifecycleState::kActive) {
++    OnCancel();
++  }
++}
++
++void MediaCapturePickerManagerBridge::WebContentsDestroyed() {
++  OnCancel();
+ }
+ 
+ DEFINE_JNI(MediaCapturePickerManagerBridge)

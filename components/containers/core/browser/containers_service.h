@@ -18,8 +18,13 @@
 #include "brave/components/containers/core/browser/container_specifier.h"
 #include "brave/components/containers/core/browser/containers_service_observer.h"
 #include "brave/components/containers/core/mojom/containers.mojom-forward.h"
+#include "build/build_config.h"
 #include "components/keyed_service/core/keyed_service.h"
 #include "components/prefs/pref_change_registrar.h"
+
+#if BUILDFLAG(IS_ANDROID)
+#include "base/callback_list.h"
+#endif
 
 class PrefService;
 
@@ -61,6 +66,16 @@ class ContainersService : public KeyedService {
   void AddObserver(ContainersServiceObserver* observer);
   void RemoveObserver(ContainersServiceObserver* observer);
 
+#if BUILDFLAG(IS_ANDROID)
+  // Called after a storage-removal request completes, including a cancelled or
+  // failed removal, once pending state and used-container prefs are settled.
+  // Keep the subscription alive while listening. Callbacks must not destroy
+  // this service during notification.
+  base::CallbackListSubscription
+  RegisterContainerStorageRemovalCompletedCallback(
+      base::RepeatingClosure callback);
+#endif
+
   // Caches a used-container snapshot: synced metadata when the id exists in
   // the synced list, otherwise a placeholder from `CreateUnknownContainer`.
   void MarkContainerUsed(std::string_view container_id);
@@ -87,6 +102,10 @@ class ContainersService : public KeyedService {
   // Returns the list of user-editable containers.
   std::vector<mojom::ContainerPtr> GetContainers() const;
 
+  // Configured and locally used identities, including restored/frozen tabs.
+  // Excludes identities whose storage is already being removed.
+  std::vector<std::string> GetRuntimeContainerIds() const;
+
   // Returns ids of containers that have been used in this profile. Empty while
   // orphaned-container cleanup is discovering candidates.
   std::vector<std::string> GetUsedContainerIds() const;
@@ -97,6 +116,8 @@ class ContainersService : public KeyedService {
   // Returns the container id for the given container specifier.
   std::optional<std::string> GetContainerIdFromContainerSpecifier(
       const ContainerSpecifier& container_specifier) const;
+
+  bool IsContainerStorageRemovalPending(std::string_view id) const;
 
   void ScheduleOrphanedContainersCleanupForTesting();
 
@@ -130,6 +151,9 @@ class ContainersService : public KeyedService {
   std::unique_ptr<Delegate> delegate_;
   PrefChangeRegistrar pref_change_registrar_;
   base::ObserverList<ContainersServiceObserver> observers_;
+#if BUILDFLAG(IS_ANDROID)
+  base::RepeatingClosureList container_storage_removal_callbacks_;
+#endif
   OrphanedContainersCleanupState orphaned_cleanup_state_ =
       OrphanedContainersCleanupState::kIdle;
   base::flat_set<std::string> orphaned_containers_pending_removal_;

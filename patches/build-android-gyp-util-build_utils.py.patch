@@ -1,0 +1,82 @@
+diff --git a/build/android/gyp/util/build_utils.py b/build/android/gyp/util/build_utils.py
+--- a/build/android/gyp/util/build_utils.py
++++ b/build/android/gyp/util/build_utils.py
+@@ -47,12 +47,78 @@
+ KOTLINC_PATH = os.path.join(KOTLIN_HOME, 'bin', 'kotlinc')
+ 
+ 
++def ReaperExplicitCgroupJvmFlags(xmx, prefix='', environment=None):
++    """Use explicit JVM ergonomics only inside a verified Reaper hard scope.
++
++    HotSpot cannot resolve a scope above the inherited cgroup namespace root.
++    Its automatic container detection is not the kernel memory controller.
++    Retain every compiler/JVM diagnostic; replace only that inaccurate resource
++    discovery with finite heap and worker settings while rechecking kernel caps.
++    The root controller sets this private marker after its normal scope admission.
++    """
++    environment = os.environ if environment is None else environment
++    scope = environment.get('REAPER_INTERNAL_VERIFIED_HARD_CGROUP', '')
++    if not scope:
++        return []
++
++    def require(condition, message):
++        if not condition:
++            raise RuntimeError('Reaper explicit JVM budget: ' + message)
++
++    require(os.path.isabs(scope), 'scope path must be absolute')
++    scope = os.path.realpath(scope)
++    name = os.path.basename(scope)
++    require(re.fullmatch(r'reaper-root[0-9]+-build-[0-9a-f]{16}\.scope', name),
++            'unexpected owned scope name')
++    # Exact reviewed profiles: high, hard, swap and maximum explicit heap GiB.
++    profiles = {'6144': (5, 6, 2, 4), '10240': (8, 10, 4, 8)}
++    budget = environment.get('REAPER_INTERNAL_SELECTED_RSS_MIB', '')
++    require(budget in profiles, 'requires a reviewed six/ten-GiB controller')
++    high_gib, hard_gib, swap_gib, heap_gib = profiles[budget]
++    jobs = environment.get('REAPER_INTERNAL_SELECTED_JOBS', '')
++    require(jobs in ('1', '2'), 'requires the reviewed one/two-job controller')
++    require(0 < len(os.sched_getaffinity(0)) <= int(jobs),
++            'affinity exceeds the selected controller jobs')
++    require(not any(environment.get(k) for k in (
++        'JAVA_TOOL_OPTIONS', 'JDK_JAVA_OPTIONS', '_JAVA_OPTIONS',
++        'JDK_JAVAC_OPTIONS', 'JAVA_OPTS', 'KOTLIN_OPTS')),
++        'inherited JVM option override is not admitted')
++
++    def read(path):
++        with open(path, encoding='utf-8') as stream:
++            return stream.read().strip()
++
++    membership = read('/proc/self/cgroup')
++    require(re.fullmatch(r'0::/(?:\.\./)+app\.slice/' + re.escape(name),
++                         membership),
++            'not the known displaced cgroup namespace layout')
++    for filename, expected in (
++            ('memory.high', high_gib * 1024**3),
++            ('memory.max', hard_gib * 1024**3),
++            ('memory.swap.max', swap_gib * 1024**3)):
++        require(read(os.path.join(scope, filename)) == str(expected),
++                filename + ' differs from the reviewed hard limit')
++    require(str(os.getpid()) in read(os.path.join(scope, 'cgroup.procs')).split(),
++            'this JVM launcher is not in the verified scope')
++    heap = re.fullmatch(r'([1-9][0-9]*)([kKmMgG]?)', xmx)
++    require(heap is not None, 'heap must be an explicit finite size')
++    heap_bytes = int(heap[1]) * {'': 1, 'k': 1024, 'm': 1024**2,
++                               'g': 1024**3}[heap[2].lower()]
++    require(0 < heap_bytes <= heap_gib * 1024**3,
++            'heap must leave space below the selected hard cap')
++    initial = min(16 * 1024**2, heap_bytes)
++    return [prefix + option for option in (
++        '-XX:-UseContainerSupport', '-XX:ActiveProcessorCount=1',
++        '-XX:+UseSerialGC', '-Xms' + str(initial))]
++
++
+ def JavaCmd(xmx='1G'):
+     ret = [JAVA_PATH]
+     # Limit heap to avoid Java not GC'ing when it should, and causing
+     # bots to OOM when many java commands are runnig at the same time
+     # https://crbug.com/1098333
+     ret += ['-Xmx' + xmx]
++    ret += ReaperExplicitCgroupJvmFlags(xmx)
+     # JDK17 bug.
+     # See: https://chromium-review.googlesource.com/c/chromium/src/+/4705883/3
+     # https://github.com/iBotPeaches/Apktool/issues/3174

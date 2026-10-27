@@ -1,0 +1,96 @@
+diff --git a/chrome/services/printing/pdf_to_pwg_raster_converter.cc b/chrome/services/printing/pdf_to_pwg_raster_converter.cc
+--- a/chrome/services/printing/pdf_to_pwg_raster_converter.cc
++++ b/chrome/services/printing/pdf_to_pwg_raster_converter.cc
+@@ -4,17 +4,21 @@
+ 
+ #include "chrome/services/printing/pdf_to_pwg_raster_converter.h"
+ 
++#include <algorithm>
++#include <cmath>
+ #include <limits>
+ #include <string>
+ #include <utility>
+ 
+ #include "base/containers/span.h"
++#include "build/build_config.h"
+ #include "base/memory/read_only_shared_memory_region.h"
+ #include "components/pwg_encoder/bitmap_image.h"
+ #include "components/pwg_encoder/pwg_encoder.h"
+ #include "pdf/pdf.h"
+ #include "printing/mojom/print.mojom.h"
+ #include "printing/pdf_render_settings.h"
++#include "ui/gfx/geometry/size_f.h"
+ 
+ namespace printing {
+ 
+@@ -31,6 +35,19 @@
+     return invalid_pwg_region;
+ 
+   auto pdf_data = pdf_mapping.GetMemoryAsSpan<const uint8_t>();
++#if BUILDFLAG(IS_ANDROID)
++  // Both the document and printer capabilities are extension-controlled.
++  // Bound every raster allocation before constructing the bitmap or encoder.
++  constexpr uint64_t kMaxPagePixels = 16 * 1024 * 1024;
++  constexpr size_t kMaxRasterBytes = 64 * 1024 * 1024;
++  if (pdf_data.size() > kMaxRasterBytes || settings.area.width() <= 0 ||
++      settings.area.height() <= 0 || settings.dpi.width() <= 0 ||
++      settings.dpi.height() <= 0 ||
++      static_cast<uint64_t>(settings.area.width()) * settings.area.height() >
++          kMaxPagePixels) {
++    return invalid_pwg_region;
++  }
++#endif
+ 
+   // Get the page count and reserve 64 KB per page in |pwg_data| below.
+   static constexpr size_t kEstimatedSizePerPage = 64 * 1024;
+@@ -43,6 +60,10 @@
+     return invalid_pwg_region;
+   }
+ 
++#if BUILDFLAG(IS_ANDROID)
++  if (total_page_count > 256)
++    return invalid_pwg_region;
++#endif
+   std::string pwg_data;
+   pwg_data.reserve(total_page_count * kEstimatedSizePerPage);
+   pwg_data = pwg_encoder::PwgEncoder::GetDocumentHeader();
+@@ -53,6 +74,9 @@
+       .autorotate = settings.autorotate,
+       .use_color = settings.use_color,
+       .render_device_type = chrome_pdf::RenderDeviceType::kPrinter,
++#if BUILDFLAG(IS_ANDROID)
++      .bounds_are_device_units = true,
++#endif
+   };
+   for (int i = 0; i < total_page_count; ++i) {
+     int page_number = i;
+@@ -60,6 +84,18 @@
+     if (bitmap_settings.reverse_page_order)
+       page_number = total_page_count - 1 - page_number;
+ 
++#if BUILDFLAG(IS_ANDROID)
++    const auto page_size = chrome_pdf::GetPDFPageSizeByIndex(pdf_data, page_number);
++    if (!page_size || !std::isfinite(page_size->width()) ||
++        !std::isfinite(page_size->height()) || page_size->IsEmpty()) {
++      return invalid_pwg_region;
++    }
++    const double scale = std::max(settings.dpi.width(), settings.dpi.height()) / 72.0;
++    if (page_size->width() * scale >= std::numeric_limits<int>::max() ||
++        page_size->height() * scale >= std::numeric_limits<int>::max()) {
++      return invalid_pwg_region;
++    }
++#endif
+     if (!chrome_pdf::RenderPDFPageToBitmap(pdf_data, page_number,
+                                            image.pixels().data(), image.size(),
+                                            settings.dpi, options)) {
+@@ -116,6 +152,10 @@
+                                                               header_info);
+     if (pwg_page.empty())
+       return invalid_pwg_region;
++#if BUILDFLAG(IS_ANDROID)
++    if (pwg_page.size() > kMaxRasterBytes - pwg_data.size())
++      return invalid_pwg_region;
++#endif
+     pwg_data += pwg_page;
+   }
+ 

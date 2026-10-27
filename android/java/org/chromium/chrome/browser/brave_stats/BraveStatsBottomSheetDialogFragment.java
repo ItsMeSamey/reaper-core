@@ -5,13 +5,10 @@
 
 package org.chromium.chrome.browser.brave_stats;
 
-import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.Dialog;
 import android.content.Context;
 import android.content.pm.ActivityInfo;
-import android.content.pm.PackageManager;
-import android.os.Build;
 import android.os.Bundle;
 import android.util.Pair;
 import android.view.LayoutInflater;
@@ -24,8 +21,6 @@ import android.widget.RadioButton;
 import android.widget.RadioGroup;
 import android.widget.TextView;
 
-import androidx.annotation.NonNull;
-import androidx.core.app.ActivityCompat;
 import androidx.fragment.app.FragmentManager;
 import androidx.fragment.app.FragmentTransaction;
 
@@ -38,7 +33,6 @@ import org.chromium.base.task.AsyncTask;
 import org.chromium.chrome.R;
 import org.chromium.chrome.browser.local_database.DatabaseHelper;
 import org.chromium.chrome.browser.night_mode.GlobalNightModeStateProviderHolder;
-import org.chromium.chrome.browser.notifications.BravePermissionUtils;
 import org.chromium.chrome.browser.util.BraveTouchUtils;
 import org.chromium.ui.base.DeviceFormFactor;
 
@@ -72,7 +66,6 @@ public class BraveStatsBottomSheetDialogFragment extends BottomSheetDialogFragme
     private RadioButton mMonthsRadioButton;
     private RadioButton mTrackersRadioButton;
     private RadioButton mWebsitesRadioButton;
-    private View mStatsNotificationView;
 
     private int mSelectedType = WEBSITES;
     private int mSelectedDuration = DAYS_7;
@@ -148,7 +141,6 @@ public class BraveStatsBottomSheetDialogFragment extends BottomSheetDialogFragme
         mWebsitesLayout = layout.findViewById(R.id.wesites_layout);
         mTrackersLayout = layout.findViewById(R.id.trackers_layout);
         mBraveStatsSubSectionText = layout.findViewById(R.id.brave_stats_sub_section_text);
-        mStatsNotificationView = view.findViewById(R.id.brave_stats_notification_permission);
 
         BraveTouchUtils.ensureMinTouchTarget(mWeekRadioButton);
         BraveTouchUtils.ensureMinTouchTarget(mMonthRadioButton);
@@ -180,65 +172,11 @@ public class BraveStatsBottomSheetDialogFragment extends BottomSheetDialogFragme
                     }
                 });
         updateBraveStatsLayoutAsync();
-        updateNotificationView(view);
 
         dialog.setContentView(view);
         ViewParent parent = view.getParent();
         ((View)parent).getLayoutParams().height = ViewGroup.LayoutParams.MATCH_PARENT;
 
-    }
-
-    public void onRequestPermissionsResult(
-            int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
-        if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-            mStatsNotificationView.setVisibility(View.GONE);
-        }
-    }
-
-    @Override
-    public void onResume() {
-        super.onResume();
-        if (!BravePermissionUtils.hasPermission(
-                        getContext(), Manifest.permission.POST_NOTIFICATIONS)
-                || BravePermissionUtils.isGeneralNotificationPermissionBlocked(getActivity())) {
-            mStatsNotificationView.setVisibility(View.VISIBLE);
-        } else {
-            mStatsNotificationView.setVisibility(View.GONE);
-        }
-    }
-
-    private void updateNotificationView(View view) {
-        ImageView btnDismiss = view.findViewById(R.id.button_dismiss);
-        btnDismiss.setOnClickListener(
-                v -> {
-                    mStatsNotificationView.setVisibility(View.GONE);
-                });
-        View notificationOnButton = view.findViewById(R.id.notification_on_button);
-        notificationOnButton.setOnClickListener(
-                v -> {
-                    int targetSdkVersion =
-                            ContextUtils.getApplicationContext()
-                                    .getApplicationInfo()
-                                    .targetSdkVersion;
-                    if (BravePermissionUtils.isGeneralNotificationPermissionBlocked(getActivity())
-                            || getActivity()
-                                    .shouldShowRequestPermissionRationale(
-                                            Manifest.permission.POST_NOTIFICATIONS)
-                            || (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU
-                                    || targetSdkVersion < Build.VERSION_CODES.TIRAMISU)) {
-                        // other than android 13 redirect to
-                        // setting page and for android 13 Last time don't allow selected in
-                        // permission
-                        // dialog, then enable through setting
-                        BravePermissionUtils.notificationSettingPage(getContext());
-                    } else {
-                        // 1st time request permission
-                        ActivityCompat.requestPermissions(
-                                getActivity(),
-                                new String[] {Manifest.permission.POST_NOTIFICATIONS},
-                                1);
-                    }
-                });
     }
 
     @Override

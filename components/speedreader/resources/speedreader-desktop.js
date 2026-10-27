@@ -17,6 +17,7 @@ class speedreaderUtils {
         minutesText: 'min. read',
         ttsEnabled: false,
         ttsReading: false,
+        androidControls: false,
     }
 
     static $ = (id) => {
@@ -39,9 +40,18 @@ class speedreaderUtils {
     }
 
     static initShowOriginalLink = () => {
-        const link = this.$(this.showOriginalLinkId)
+        let link = this.$(this.showOriginalLinkId)
         if (!link)
             return
+
+        if (this.speedreaderData.androidControls) {
+            const button = document.createElement('button')
+            button.type = 'button'
+            button.id = link.id
+            button.className = link.className
+            link.replaceWith(button)
+            link = button
+        }
 
         link.innerText = this.speedreaderData.showOriginalLinkText
         link.addEventListener('click', (e) => {
@@ -83,12 +93,19 @@ class speedreaderUtils {
     }
 
     static isTtsEnabled() {
+        if (this.speedreaderData.androidControls) {
+            return this.speedreaderData.ttsEnabled
+        }
         return !navigator.userAgentData.mobile || this.speedreaderData.ttsEnabled
     }
 
     static initTextToSpeak = () => {
         if (!this.isTtsEnabled()) {
             return
+        }
+
+        if (this.speedreaderData.androidControls) {
+            document.documentElement.setAttribute('data-speedreader-android-tts', '')
         }
 
         {
@@ -127,11 +144,26 @@ class speedreaderUtils {
             const playButton = document.createElement('span')
             playButton.classList.add('tts-paragraph-player-button', 'tts-play-icon')
             playButton.title = this.speedreaderData.playButtonTitle
-            playButton.onclick = button.onclick = (ev) => {
-                window.speedreader.ttsPlayPause(parseInt(p.getAttribute('tts-paragraph-index')))
+            if (this.speedreaderData.androidControls) {
+                const control = document.createElement('button')
+                control.type = 'button'
+                control.classList.add('tts-paragraph-control')
+                control.setAttribute('aria-label', this.speedreaderData.playButtonTitle)
+                control.setAttribute('aria-pressed', 'false')
+                control.onclick = () => {
+                    window.speedreader.ttsPlayPause(parseInt(p.getAttribute('tts-paragraph-index')))
+                }
+                playButton.setAttribute('aria-hidden', 'true')
+                button.setAttribute('aria-hidden', 'true')
+                control.append(button, playButton)
+                player.append(control)
+            } else {
+                playButton.onclick = button.onclick = (ev) => {
+                    window.speedreader.ttsPlayPause(parseInt(p.getAttribute('tts-paragraph-index')))
+                }
+                player.insertAdjacentElement('afterbegin', playButton)
+                player.insertAdjacentElement('afterbegin', button)
             }
-            player.insertAdjacentElement('afterbegin', playButton)
-            player.insertAdjacentElement('afterbegin', button)
             p.insertAdjacentElement('afterbegin', player)
         }
 
@@ -266,6 +298,10 @@ class speedreaderUtils {
         if (button) {
             button.classList.remove('tts-play-icon', 'tts-pause-icon')
             button.classList.add(i)
+        }
+        if (this.speedreaderData.androidControls) {
+            const control = e?.querySelector('.tts-paragraph-control')
+            control?.setAttribute('aria-pressed', i === 'tts-pause-icon' ? 'true' : 'false')
         }
     }
 

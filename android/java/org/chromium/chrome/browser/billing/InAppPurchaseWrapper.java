@@ -21,7 +21,6 @@ import com.android.billingclient.api.BillingClient;
 import com.android.billingclient.api.BillingClientStateListener;
 import com.android.billingclient.api.BillingFlowParams;
 import com.android.billingclient.api.BillingResult;
-import com.android.billingclient.api.ConsumeParams;
 import com.android.billingclient.api.InAppMessageParams;
 import com.android.billingclient.api.PendingPurchasesParams;
 import com.android.billingclient.api.ProductDetails;
@@ -34,19 +33,14 @@ import org.chromium.base.ApplicationState;
 import org.chromium.base.ApplicationStatus;
 import org.chromium.base.ContextUtils;
 import org.chromium.base.Log;
-import org.chromium.base.ThreadUtils;
 import org.chromium.build.annotations.NullMarked;
 import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.R;
-import org.chromium.chrome.browser.BraveConstants;
 import org.chromium.chrome.browser.app.BraveActivity;
 import org.chromium.chrome.browser.brave_leo.BraveLeoPrefUtils;
 import org.chromium.chrome.browser.brave_leo.BraveLeoUtils;
-import org.chromium.chrome.browser.brave_origin.BraveOriginSubscriptionPrefs;
 import org.chromium.chrome.browser.profiles.Profile;
 import org.chromium.chrome.browser.util.LiveDataUtil;
-import org.chromium.chrome.browser.vpn.utils.BraveVpnPrefUtils;
-import org.chromium.chrome.browser.vpn.utils.BraveVpnUtils;
 import org.chromium.ui.widget.Toast;
 
 import java.util.ArrayList;
@@ -65,23 +59,7 @@ public class InAppPurchaseWrapper {
     private static final String LEO_MONTHLY_SUBSCRIPTION = "brave.leo.monthly";
     private static final String LEO_YEARLY_SUBSCRIPTION = "brave.leo.yearly";
 
-    // Brave Origin one-time purchase (INAPP) product IDs
-    private static final String ORIGIN_PERPETUAL_PURCHASE = "brave.origin.perpetual";
-    private static final String ORIGIN_NIGHTLY_PERPETUAL_PURCHASE = "nightly.origin.perpetual";
-    private static final String ORIGIN_BETA_PERPETUAL_PURCHASE = "beta.origin.perpetual";
-
-    private static final String VPN_NIGHTLY_MONTHLY_SUBSCRIPTION = "nightly.bravevpn.monthly";
-    private static final String VPN_NIGHTLY_YEARLY_SUBSCRIPTION = "nightly.bravevpn.yearly";
-
-    private static final String VPN_BETA_MONTHLY_SUBSCRIPTION = "beta.bravevpn.monthly";
-    private static final String VPN_BETA_YEARLY_SUBSCRIPTION = "beta.bravevpn.yearly";
-
-    public static final String VPN_RELEASE_MONTHLY_SUBSCRIPTION = "brave.vpn.monthly";
-    public static final String VPN_RELEASE_YEARLY_SUBSCRIPTION = "brave.vpn.yearly";
     private @Nullable BillingClient mBillingClient;
-
-    // Profile context for current purchase flow
-    private @Nullable Profile mPurchaseProfile;
 
     private static final long MICRO_UNITS =
             1000000; // 1,000,000 micro-units equal one unit of the currency
@@ -99,69 +77,42 @@ public class InAppPurchaseWrapper {
      * different premium service offering.
      */
     public enum SubscriptionProduct {
-        VPN, // Brave VPN service for secure browsing
-        LEO, // Brave Leo AI Chat premium features
-        ORIGIN // Brave Origin premium privacy and advanced features
+        LEO // Brave Leo AI Chat premium features
     }
 
-    // VPN monthly subscription product details
-    private final MutableLiveData<ProductDetails> mMutableMonthlyProductDetailsVPN =
-            new MutableLiveData<>();
-    private final LiveData<ProductDetails> mMonthlyProductDetailsVPN =
-            mMutableMonthlyProductDetailsVPN;
     // Leo monthly subscription product details
     private final MutableLiveData<ProductDetails> mMutableMonthlyProductDetailsLeo =
             new MutableLiveData<>();
     private final LiveData<ProductDetails> mMonthlyProductDetailsLeo =
             mMutableMonthlyProductDetailsLeo;
-    // Origin one-time purchase product details
-    private final MutableLiveData<ProductDetails> mMutableOriginProductDetails =
-            new MutableLiveData<>();
-    private final LiveData<ProductDetails> mOriginProductDetails = mMutableOriginProductDetails;
 
     /**
      * Sets the monthly subscription product details for the specified subscription product. Updates
      * the appropriate LiveData based on the product type.
      *
      * @param productDetails The Google Play Billing product details
-     * @param product The subscription product type (VPN, LEO, or ORIGIN)
+     * @param product The subscription product type (LEO)
      */
     private void setMonthlyProductDetails(
             @Nullable ProductDetails productDetails, SubscriptionProduct product) {
         if (product.equals(SubscriptionProduct.LEO)) {
             mMutableMonthlyProductDetailsLeo.postValue(productDetails);
-        } else if (product.equals(SubscriptionProduct.VPN)) {
-            mMutableMonthlyProductDetailsVPN.postValue(productDetails);
         }
-    }
-
-    private void setOriginProductDetails(@Nullable ProductDetails productDetails) {
-        mMutableOriginProductDetails.postValue(productDetails);
-    }
-
-    public LiveData<ProductDetails> getOriginProductDetails() {
-        return mOriginProductDetails;
     }
 
     /**
      * Gets the LiveData containing monthly subscription product details for the specified product.
      *
-     * @param product The subscription product type (VPN, LEO, or ORIGIN)
-     * @return LiveData containing the product details, defaults to VPN if product not recognized
+     * @param product The subscription product type (LEO)
+     * @return LiveData containing the product details, for the requested product
      */
     public LiveData<ProductDetails> getMonthlyProductDetails(SubscriptionProduct product) {
         if (product.equals(SubscriptionProduct.LEO)) {
             return mMonthlyProductDetailsLeo;
         }
-        // Default to VPN product details
-        return mMonthlyProductDetailsVPN;
+        throw new IllegalArgumentException("Product has no monthly subscription");
     }
 
-    // VPN yearly subscription product details
-    private final MutableLiveData<ProductDetails> mMutableYearlyProductDetailsVPN =
-            new MutableLiveData<>();
-    private final LiveData<ProductDetails> mYearlyProductDetailsVPN =
-            mMutableYearlyProductDetailsVPN;
     // Leo yearly subscription product details
     private final MutableLiveData<ProductDetails> mMutableYearlyProductDetailsLeo =
             new MutableLiveData<>();
@@ -172,8 +123,6 @@ public class InAppPurchaseWrapper {
             @Nullable ProductDetails productDetails, SubscriptionProduct product) {
         if (product.equals(SubscriptionProduct.LEO)) {
             mMutableYearlyProductDetailsLeo.postValue(productDetails);
-        } else if (product.equals(SubscriptionProduct.VPN)) {
-            mMutableYearlyProductDetailsVPN.postValue(productDetails);
         }
     }
 
@@ -181,7 +130,7 @@ public class InAppPurchaseWrapper {
         if (product.equals(SubscriptionProduct.LEO)) {
             return mYearlyProductDetailsLeo;
         }
-        return mYearlyProductDetailsVPN;
+        throw new IllegalArgumentException("Product has no yearly subscription");
     }
 
     private boolean mSuppressToasts;
@@ -199,12 +148,6 @@ public class InAppPurchaseWrapper {
             }
         }
         return result;
-    }
-
-    public boolean isMonthlySubscription(String productId) {
-        return productId.equals(VPN_NIGHTLY_MONTHLY_SUBSCRIPTION)
-                || productId.equals(VPN_BETA_MONTHLY_SUBSCRIPTION)
-                || productId.equals(VPN_RELEASE_MONTHLY_SUBSCRIPTION);
     }
 
     private void startBillingServiceConnection(
@@ -264,22 +207,7 @@ public class InAppPurchaseWrapper {
     }
 
     public String getProductId(SubscriptionProduct product, SubscriptionType subscriptionType) {
-        if (product.equals(SubscriptionProduct.VPN)) {
-            String bravePackageName = ContextUtils.getApplicationContext().getPackageName();
-            if (bravePackageName.equals(BraveConstants.BRAVE_PRODUCTION_PACKAGE_NAME)) {
-                return subscriptionType == SubscriptionType.MONTHLY ?
-                        VPN_RELEASE_MONTHLY_SUBSCRIPTION
-                        : VPN_RELEASE_YEARLY_SUBSCRIPTION;
-            } else if (bravePackageName.equals(BraveConstants.BRAVE_BETA_PACKAGE_NAME)) {
-                return subscriptionType == SubscriptionType.MONTHLY
-                        ? VPN_BETA_MONTHLY_SUBSCRIPTION
-                        : VPN_BETA_YEARLY_SUBSCRIPTION;
-            } else {
-                return subscriptionType == SubscriptionType.MONTHLY ?
-                        VPN_NIGHTLY_MONTHLY_SUBSCRIPTION
-                        : VPN_NIGHTLY_YEARLY_SUBSCRIPTION;
-            }
-        } else if (product.equals(SubscriptionProduct.LEO)) {
+        if (product.equals(SubscriptionProduct.LEO)) {
             return subscriptionType == SubscriptionType.MONTHLY
                     ? LEO_MONTHLY_SUBSCRIPTION
                     : LEO_YEARLY_SUBSCRIPTION;
@@ -287,108 +215,6 @@ public class InAppPurchaseWrapper {
             assert false;
             return "";
         }
-    }
-
-    /** Returns the one-time purchase product ID for Origin based on the current package name. */
-    public String getOriginProductId() {
-        String bravePackageName = ContextUtils.getApplicationContext().getPackageName();
-        if (bravePackageName.equals(BraveConstants.BRAVE_PRODUCTION_PACKAGE_NAME)) {
-            return ORIGIN_PERPETUAL_PURCHASE;
-        } else if (bravePackageName.equals(BraveConstants.BRAVE_BETA_PACKAGE_NAME)) {
-            return ORIGIN_BETA_PERPETUAL_PURCHASE;
-        } else {
-            return ORIGIN_NIGHTLY_PERPETUAL_PURCHASE;
-        }
-    }
-
-    /** Queries Google Play for Origin one-time purchase (INAPP) product details. */
-    public void queryOriginProductDetailsAsync() {
-        List<QueryProductDetailsParams.Product> products = new ArrayList<>();
-        products.add(
-                QueryProductDetailsParams.Product.newBuilder()
-                        .setProductId(getOriginProductId())
-                        .setProductType(BillingClient.ProductType.INAPP)
-                        .build());
-        QueryProductDetailsParams queryProductDetailsParams =
-                QueryProductDetailsParams.newBuilder().setProductList(products).build();
-
-        MutableLiveData<Boolean> _billingConnectionState = new MutableLiveData<>();
-        LiveData<Boolean> billingConnectionState = _billingConnectionState;
-        startBillingServiceConnection(_billingConnectionState);
-        LiveDataUtil.observeOnce(
-                billingConnectionState,
-                isConnected -> {
-                    if (isConnected && mBillingClient != null) {
-                        mBillingClient.queryProductDetailsAsync(
-                                queryProductDetailsParams,
-                                (billingResult, queryProductDetailsResult) -> {
-                                    endConnection();
-                                    if (billingResult.getResponseCode()
-                                            == BillingClient.BillingResponseCode.OK) {
-                                        for (ProductDetails productDetail :
-                                                queryProductDetailsResult.getProductDetailsList()) {
-                                            if (productDetail
-                                                    .getProductId()
-                                                    .equals(getOriginProductId())) {
-                                                setOriginProductDetails(productDetail);
-                                            }
-                                        }
-                                    } else {
-                                        Log.e(
-                                                TAG,
-                                                "queryOriginProductDetailsAsync failed: "
-                                                        + billingResult.getDebugMessage());
-                                        showToast(billingResult.getDebugMessage());
-                                    }
-                                });
-                    }
-                });
-    }
-
-    /**
-     * Consumes any existing Origin INAPP purchase, clearing the "already owned" state on Google
-     * Play. This is intended for QA/testing use only via Developer Options.
-     */
-    public void consumeExistingOriginPurchase() {
-        MutableLiveData<Boolean> _billingConnectionState = new MutableLiveData<>();
-        LiveData<Boolean> billingConnectionState = _billingConnectionState;
-        startBillingServiceConnection(_billingConnectionState);
-        LiveDataUtil.observeOnce(
-                billingConnectionState,
-                isConnected -> {
-                    if (isConnected && mBillingClient != null) {
-                        mBillingClient.queryPurchasesAsync(
-                                QueryPurchasesParams.newBuilder()
-                                        .setProductType(BillingClient.ProductType.INAPP)
-                                        .build(),
-                                (billingResult, purchases) -> {
-                                    if (billingResult.getResponseCode()
-                                            == BillingClient.BillingResponseCode.OK) {
-                                        for (Purchase purchase : purchases) {
-                                            if (isOriginProduct(purchase.getProducts())) {
-                                                ConsumeParams consumeParams =
-                                                        ConsumeParams.newBuilder()
-                                                                .setPurchaseToken(
-                                                                        purchase.getPurchaseToken())
-                                                                .build();
-                                                if (mBillingClient != null) {
-                                                    mBillingClient.consumeAsync(
-                                                            consumeParams,
-                                                            (consumeResult, token) -> {
-                                                                endConnection();
-                                                                showToast(
-                                                                        "Origin purchase consumed");
-                                                            });
-                                                }
-                                                return;
-                                            }
-                                        }
-                                        showToast("No Origin purchase found");
-                                    }
-                                    endConnection();
-                                });
-                    }
-                });
     }
 
     public void queryProductDetailsAsync(SubscriptionProduct product) {
@@ -451,10 +277,7 @@ public class InAppPurchaseWrapper {
 
     public void queryPurchases(
             MutableLiveData<PurchaseModel> mutableActivePurchases, SubscriptionProduct type) {
-        String productType =
-                type.equals(SubscriptionProduct.ORIGIN)
-                        ? BillingClient.ProductType.INAPP
-                        : BillingClient.ProductType.SUBS;
+        String productType = BillingClient.ProductType.SUBS;
         MutableLiveData<Boolean> _billingConnectionState = new MutableLiveData<>();
         LiveData<Boolean> billingConnectionState = _billingConnectionState;
         startBillingServiceConnection(_billingConnectionState);
@@ -479,16 +302,9 @@ public class InAppPurchaseWrapper {
                                                 continue;
                                             }
                                             List<String> productIds = purchase.getProducts();
-                                            boolean isVPNProduct = isVPNProduct(productIds);
                                             boolean isLeoProduct = isLeoProduct(productIds);
-                                            boolean isOriginProduct = isOriginProduct(productIds);
-                                            if ((isVPNProduct
-                                                            && type.equals(SubscriptionProduct.VPN))
-                                                    || (isLeoProduct
-                                                            && type.equals(SubscriptionProduct.LEO))
-                                                    || (isOriginProduct
-                                                            && type.equals(
-                                                                    SubscriptionProduct.ORIGIN))) {
+                                            if (isLeoProduct
+                                                    && type.equals(SubscriptionProduct.LEO)) {
                                                 activePurchaseModel =
                                                         new PurchaseModel(
                                                                 purchase.getPurchaseToken(),
@@ -546,57 +362,6 @@ public class InAppPurchaseWrapper {
                 });
     }
 
-    /**
-     * Initiates a subscription purchase flow with profile context.
-     *
-     * @param activity The activity to launch the billing flow from
-     * @param productDetails The subscription product details to purchase
-     * @param profile The current user profile for context (can be null)
-     */
-    public void initiatePurchase(
-            Activity activity, ProductDetails productDetails, @Nullable Profile profile) {
-        // Store the profile for use in the asynchronous purchase callback flow
-        mPurchaseProfile = profile;
-
-        // Delegate to the original method
-        initiatePurchase(activity, productDetails);
-    }
-
-    /**
-     * Initiates a one-time (INAPP) purchase flow. Unlike subscription purchases, INAPP products do
-     * not have offer tokens.
-     */
-    public void initiatePurchaseInApp(Activity activity, ProductDetails productDetails) {
-        List<BillingFlowParams.ProductDetailsParams> productDetailsParamsList = new ArrayList<>();
-        productDetailsParamsList.add(
-                BillingFlowParams.ProductDetailsParams.newBuilder()
-                        .setProductDetails(productDetails)
-                        .build());
-
-        BillingFlowParams billingFlowParams =
-                BillingFlowParams.newBuilder()
-                        .setProductDetailsParamsList(productDetailsParamsList)
-                        .build();
-        MutableLiveData<Boolean> _billingConnectionState = new MutableLiveData<>();
-        LiveData<Boolean> billingConnectionState = _billingConnectionState;
-        startBillingServiceConnection(_billingConnectionState);
-        LiveDataUtil.observeOnce(
-                billingConnectionState,
-                isConnected -> {
-                    if (isConnected && mBillingClient != null) {
-                        BillingResult unused_billingResult =
-                                mBillingClient.launchBillingFlow(activity, billingFlowParams);
-                    }
-                });
-    }
-
-    /** Initiates a one-time (INAPP) purchase flow with profile context. */
-    public void initiatePurchaseInApp(
-            Activity activity, ProductDetails productDetails, @Nullable Profile profile) {
-        mPurchaseProfile = profile;
-        initiatePurchaseInApp(activity, productDetails);
-    }
-
     public void processPurchases(Context context, Purchase activePurchase) {
         acknowledgePurchase(context, activePurchase);
     }
@@ -607,9 +372,8 @@ public class InAppPurchaseWrapper {
                         .setPurchaseToken(purchase.getPurchaseToken())
                         .build();
         List<String> productIds = purchase.getProducts();
-        boolean isVPNProduct = isVPNProduct(productIds);
         boolean isLeoProduct = isLeoProduct(productIds);
-        boolean isOriginProduct = isOriginProduct(productIds);
+        if (!isLeoProduct) return;
         if (!purchase.isAcknowledged()) {
             MutableLiveData<Boolean> _billingConnectionState = new MutableLiveData<>();
             LiveData<Boolean> billingConnectionState = _billingConnectionState;
@@ -626,12 +390,7 @@ public class InAppPurchaseWrapper {
                                         endConnection();
                                         if (billingResult.getResponseCode()
                                                 == BillingClient.BillingResponseCode.OK) {
-                                            receiptAcknowledged(
-                                                    context,
-                                                    purchase,
-                                                    isVPNProduct,
-                                                    isLeoProduct,
-                                                    isOriginProduct);
+                                            receiptAcknowledged(context, purchase);
                                         } else {
                                             showToast(
                                                     context.getResources()
@@ -642,34 +401,18 @@ public class InAppPurchaseWrapper {
                         }
                     });
         } else {
-            if (isVPNProduct) {
-                BraveVpnPrefUtils.setSubscriptionPurchase(true);
-            } else if (isLeoProduct) {
-                receiptAcknowledged(context, purchase, false, true, false);
-            } else if (isOriginProduct) {
-                receiptAcknowledged(context, purchase, false, false, true);
-            }
+            receiptAcknowledged(context, purchase);
         }
     }
 
-    private void receiptAcknowledged(
-            Context context,
-            Purchase purchase,
-            boolean isVPNProduct,
-            boolean isLeoProduct,
-            boolean isOriginProduct) {
+    private void receiptAcknowledged(Context context, Purchase purchase) {
         BraveActivity activity = null;
         try {
             activity = BraveActivity.getBraveActivity();
         } catch (BraveActivity.BraveActivityNotFoundException e) {
             Log.e(TAG, "acknowledgePurchase " + e.getMessage());
         }
-        if (isVPNProduct) {
-            BraveVpnPrefUtils.setSubscriptionPurchase(true);
-            if (activity != null) {
-                BraveVpnUtils.openBraveVpnProfileActivity(activity);
-            }
-        } else if (isLeoProduct && activity != null) {
+        if (activity != null) {
             activity.runOnUiThread(
                     new Runnable() {
                         @Override
@@ -682,33 +425,8 @@ public class InAppPurchaseWrapper {
                             BraveLeoUtils.bringMainActivityOnTop();
                         }
                     });
-        } else if (isOriginProduct && activity != null) {
-            final BraveActivity finalActivity = activity;
-            ThreadUtils.runOnUiThread(
-                    () -> {
-                        BraveOriginSubscriptionPrefs.setIsSubscriptionActive(
-                                mPurchaseProfile, true);
-                        BraveOriginSubscriptionPrefs.setOriginPackageName(mPurchaseProfile);
-                        BraveOriginSubscriptionPrefs.setOriginProductId(
-                                mPurchaseProfile, purchase.getProducts().get(0));
-                        BraveOriginSubscriptionPrefs.setOriginPurchaseToken(
-                                mPurchaseProfile, purchase.getPurchaseToken());
-                        BraveOriginSubscriptionPrefs.openOriginPreferences(finalActivity);
-                    });
         }
         showToast(context.getResources().getString(R.string.subscription_consumed));
-
-        // Clear the stored profile after processing
-        mPurchaseProfile = null;
-    }
-
-    private boolean isVPNProduct(List<String> productIds) {
-        return productIds.contains(VPN_NIGHTLY_MONTHLY_SUBSCRIPTION) ||
-                productIds.contains(VPN_NIGHTLY_YEARLY_SUBSCRIPTION) ||
-                productIds.contains(VPN_BETA_MONTHLY_SUBSCRIPTION) ||
-                productIds.contains(VPN_BETA_YEARLY_SUBSCRIPTION) ||
-                productIds.contains(VPN_RELEASE_MONTHLY_SUBSCRIPTION) ||
-                productIds.contains(VPN_RELEASE_YEARLY_SUBSCRIPTION);
     }
 
     private boolean isLeoProduct(List<String> productIds) {
@@ -717,30 +435,17 @@ public class InAppPurchaseWrapper {
     }
 
     /**
-     * Checks if the given product IDs contain any Brave Origin subscription products.
-     *
-     * @param productIds List of product IDs from the purchase
-     * @return true if any Origin product ID is found, false otherwise
-     */
-    private boolean isOriginProduct(List<String> productIds) {
-        return productIds.contains(ORIGIN_PERPETUAL_PURCHASE)
-                || productIds.contains(ORIGIN_NIGHTLY_PERPETUAL_PURCHASE)
-                || productIds.contains(ORIGIN_BETA_PERPETUAL_PURCHASE);
-    }
-
-    /**
      * Asks Play to surface any pending in-app messages for the user's subscriptions (failed
      * renewals, opt-in price-rise consent). Gated on the user having an active Play subscription to
-     * VPN or Leo, and throttled to one call per foreground session. The throttle is reset
+     * Leo, and throttled to one call per foreground session. The throttle is reset
      * automatically when the app is fully backgrounded; callers do not need to manage it.
      */
     public void maybeShowSubscriptionInAppMessages(Activity activity, Profile profile) {
         if (mInAppMessagesShownThisForeground) {
             return;
         }
-        boolean hasVpnSubscription = BraveVpnPrefUtils.isSubscriptionPurchase();
         boolean hasLeoSubscription = BraveLeoPrefUtils.getIsSubscriptionActive(profile);
-        if (!hasVpnSubscription && !hasLeoSubscription) {
+        if (!hasLeoSubscription) {
             return;
         }
         // Register the throttle-reset listener lazily, only after confirming

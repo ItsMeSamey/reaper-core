@@ -1,0 +1,197 @@
+diff --git a/chrome/browser/ui/android/tab_model/tab_collection_tab_model_impl_browsertest.cc b/chrome/browser/ui/android/tab_model/tab_collection_tab_model_impl_browsertest.cc
+index a42e7b303d2a0c8ee4ea7ab6eeaf43eb68a21f1f..9356dfa20e0870d7ff689255af7b63a3ba23c266 100644
+--- a/chrome/browser/ui/android/tab_model/tab_collection_tab_model_impl_browsertest.cc
++++ b/chrome/browser/ui/android/tab_model/tab_collection_tab_model_impl_browsertest.cc
+@@ -5,16 +5,57 @@
+ #include "chrome/browser/ui/android/tab_model/tab_collection_tab_model_impl.h"
+ 
+ #include <optional>
++#include <set>
++#include <vector>
+ 
++#include "base/android/jni_android.h"
++#include "base/android/jni_string.h"
++#include "base/android/token_android.h"
++#include "chrome/browser/android/tab_android.h"
+ #include "chrome/browser/tab_list/tab_list_interface.h"
++#include "chrome/browser/tab_list/tab_list_interface_observer.h"
++#include "chrome/browser/ui/android/tab_model/tab_model_jni_bridge.h"
+ #include "chrome/test/base/android/android_browser_test.h"
++#include "components/split_tabs/split_tab_id.h"
+ #include "components/tab_groups/tab_group_id.h"
+ #include "components/tab_groups/tab_group_visual_data.h"
++#include "components/tabs/public/android/jni_conversion.h"
+ #include "components/tabs/public/tab_interface.h"
++#include "content/public/browser/web_contents.h"
+ #include "content/public/test/browser_test.h"
++#include "url/android/gurl_android.h"
+ 
+ namespace {
+ 
++bool RestoreSplitForTest(TabListInterface* list,
++                         split_tabs::SplitTabId id,
++                         tabs::TabInterface* first,
++                         tabs::TabInterface* second) {
++  auto* bridge = static_cast<TabModelJniBridge*>(list);
++  return TabModelJniBridge::RestoreSplit(
++      base::android::AttachCurrentThread(), bridge->GetJavaObject(), id.token(),
++      std::vector<int>{TabAndroid::FromTabInterface(first)->GetAndroidId(),
++                       TabAndroid::FromTabInterface(second)->GetAndroidId()},
++      0, 0.5);
++}
++
++class SplitChangeRecorder : public TabListInterfaceObserver {
++ public:
++  explicit SplitChangeRecorder(TabListInterface* list) : list_(list) {
++    list_->AddTabListInterfaceObserver(this);
++  }
++  ~SplitChangeRecorder() override {
++    list_->RemoveTabListInterfaceObserver(this);
++  }
++  void OnSplitChanged(TabListInterface&, tabs::TabInterface* tab) override {
++    changes.push_back(TabAndroid::FromTabInterface(tab)->GetAndroidId());
++  }
++  std::vector<int> changes;
++
++ private:
++  raw_ptr<TabListInterface> list_;
++};
++
+ using TabCollectionTabModelImplTest = AndroidBrowserTest;
+ 
+ // Regression test for crash in GetTabGroupTitle().
+@@ -46,4 +87,134 @@ IN_PROC_BROWSER_TEST_F(TabCollectionTabModelImplTest,
+   EXPECT_FALSE(visual_data);
+ }
+ 
++// Uses the session adapter to test real collection semantics without requiring
++// compositor installation in this model fixture. Extension API tests separately
++// exercise the actual UI-capability-gated CreateSplit path.
++IN_PROC_BROWSER_TEST_F(TabCollectionTabModelImplTest, SplitRoundTripAndEvents) {
++  auto* list = GetTabListInterface();
++  auto* first = list->GetTab(0);
++  auto* second = list->OpenTab(GURL("about:blank"), -1);
++  ASSERT_TRUE(first && second);
++  auto id = split_tabs::SplitTabId::GenerateNew();
++  SplitChangeRecorder changes(list);
++  ASSERT_TRUE(RestoreSplitForTest(list, id, first, second));
++  EXPECT_EQ(first->GetSplit(), id);
++  EXPECT_EQ(second->GetSplit(), id);
++  EXPECT_EQ(list->ListSplits(), std::set<split_tabs::SplitTabId>{id});
++  EXPECT_EQ(changes.changes.size(), 2u);
++  list->Unsplit(id);
++  EXPECT_FALSE(first->GetSplit());
++  EXPECT_FALSE(second->GetSplit());
++  EXPECT_TRUE(list->ListSplits().empty());
++  EXPECT_EQ(changes.changes.size(), 4u);
++}
++
++IN_PROC_BROWSER_TEST_F(TabCollectionTabModelImplTest,
++                       ClosingOneSplitTabNormalizesSurvivor) {
++  auto* list = GetTabListInterface();
++  auto* first = list->GetTab(0);
++  auto* second = list->OpenTab(GURL("about:blank"), -1);
++  ASSERT_TRUE(first && second);
++  ASSERT_TRUE(RestoreSplitForTest(list, split_tabs::SplitTabId::GenerateNew(),
++                                  first, second));
++  list->CloseTab(first->GetHandle());
++  EXPECT_FALSE(second->GetSplit());
++  EXPECT_TRUE(list->ListSplits().empty());
++}
++
++IN_PROC_BROWSER_TEST_F(TabCollectionTabModelImplTest,
++                       PinningOneMemberDissolvesSplit) {
++  auto* list = GetTabListInterface();
++  auto* first = list->GetTab(0);
++  auto* second = list->OpenTab(GURL("about:blank"), -1);
++  ASSERT_TRUE(first && second);
++  ASSERT_TRUE(RestoreSplitForTest(list, split_tabs::SplitTabId::GenerateNew(),
++                                  first, second));
++  list->PinTab(first->GetHandle());
++  EXPECT_TRUE(first->IsPinned());
++  EXPECT_FALSE(second->IsPinned());
++  EXPECT_FALSE(first->GetSplit());
++  EXPECT_FALSE(second->GetSplit());
++  EXPECT_TRUE(list->ListSplits().empty());
++}
++
++IN_PROC_BROWSER_TEST_F(TabCollectionTabModelImplTest,
++                       InsertingBetweenSplitMembersDissolvesSplit) {
++  auto* list = GetTabListInterface();
++  auto* first = list->GetTab(0);
++  auto* second = list->OpenTab(GURL("about:blank"), -1);
++  ASSERT_TRUE(first && second);
++  ASSERT_TRUE(RestoreSplitForTest(list, split_tabs::SplitTabId::GenerateNew(),
++                                  first, second));
++  auto* inserted = list->OpenTab(GURL("about:blank"), 1);
++  ASSERT_TRUE(inserted);
++  EXPECT_EQ(list->GetIndexOfTab(inserted->GetHandle()), 1);
++  EXPECT_FALSE(first->GetSplit());
++  EXPECT_FALSE(second->GetSplit());
++  EXPECT_TRUE(list->ListSplits().empty());
++}
++
++IN_PROC_BROWSER_TEST_F(TabCollectionTabModelImplTest,
++                       GroupingAndUngroupingCompleteSplitPreservesToken) {
++  auto* list = GetTabListInterface();
++  auto* first = list->GetTab(0);
++  auto* second = list->OpenTab(GURL("about:blank"), -1);
++  ASSERT_TRUE(first && second);
++  auto id = split_tabs::SplitTabId::GenerateNew();
++  ASSERT_TRUE(RestoreSplitForTest(list, id, first, second));
++  auto group = list->CreateTabGroup({first->GetHandle(), second->GetHandle()});
++  ASSERT_TRUE(group);
++  EXPECT_EQ(first->GetGroup(), group);
++  EXPECT_EQ(second->GetGroup(), group);
++  EXPECT_EQ(first->GetSplit(), id);
++  EXPECT_EQ(second->GetSplit(), id);
++  list->Ungroup({first->GetHandle(), second->GetHandle()});
++  EXPECT_FALSE(first->GetGroup());
++  EXPECT_FALSE(second->GetGroup());
++  EXPECT_EQ(first->GetSplit(), id);
++  EXPECT_EQ(second->GetSplit(), id);
++}
++
++IN_PROC_BROWSER_TEST_F(TabCollectionTabModelImplTest,
++                       SplitRestoreRejectsMissingAdjacencyAndDuplicateId) {
++  auto* list = GetTabListInterface();
++  auto* first = list->GetTab(0);
++  auto* middle = list->OpenTab(GURL("about:blank"), -1);
++  auto* last = list->OpenTab(GURL("about:blank"), -1);
++  ASSERT_TRUE(first && middle && last);
++  auto id = split_tabs::SplitTabId::GenerateNew();
++  EXPECT_FALSE(RestoreSplitForTest(list, id, first, last));
++  EXPECT_TRUE(list->ListSplits().empty());
++  ASSERT_TRUE(RestoreSplitForTest(list, id, first, middle));
++  EXPECT_FALSE(RestoreSplitForTest(list, id, middle, last));
++  EXPECT_EQ(first->GetSplit(), id);
++  EXPECT_FALSE(last->GetSplit());
++}
++
++IN_PROC_BROWSER_TEST_F(TabCollectionTabModelImplTest,
++                       ReorderingSplitMembersPreservesTokenUntilMovedApart) {
++  auto* list = GetTabListInterface();
++  auto* first = list->GetTab(0);
++  auto* second = list->OpenTab(GURL("about:blank"), -1);
++  auto* other = list->OpenTab(GURL("about:blank"), -1);
++  ASSERT_TRUE(first && second && other);
++  auto id = split_tabs::SplitTabId::GenerateNew();
++  ASSERT_TRUE(RestoreSplitForTest(list, id, first, second));
++  SplitChangeRecorder changes(list);
++  list->MoveTab(second->GetHandle(), 0);
++  EXPECT_EQ(list->GetTab(0), second);
++  EXPECT_EQ(list->GetTab(1), first);
++  EXPECT_EQ(first->GetSplit(), id);
++  EXPECT_EQ(second->GetSplit(), id);
++  EXPECT_TRUE(changes.changes.empty());
++  list->MoveTab(first->GetHandle(), 2);
++  EXPECT_EQ(list->GetTab(0), second);
++  EXPECT_EQ(list->GetTab(1), other);
++  EXPECT_EQ(list->GetTab(2), first);
++  EXPECT_FALSE(first->GetSplit());
++  EXPECT_FALSE(second->GetSplit());
++  EXPECT_TRUE(list->ListSplits().empty());
++  EXPECT_EQ(changes.changes.size(), 2u);
++}
++
+ }  // namespace

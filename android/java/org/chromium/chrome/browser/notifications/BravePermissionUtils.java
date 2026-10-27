@@ -21,7 +21,7 @@ import androidx.core.app.ActivityCompat;
 import androidx.core.app.NotificationManagerCompat;
 import androidx.core.content.ContextCompat;
 
-import org.chromium.chrome.browser.notifications.channels.BraveChannelDefinitions;
+import org.chromium.chrome.browser.notifications.channels.ChromeChannelDefinitions;
 
 /**
  * This class is for settings permission related checks
@@ -30,9 +30,6 @@ public class BravePermissionUtils {
     private static final String APP_PACKAGE = "app_package";
     private static final String APP_UID = "app_uid";
     public static final int NOTIFICATION_PERMISSION_CODE = 123;
-
-    public static final String REWARDS_NOTIFICATION_PERMISSION_COUNT =
-            "rewards_notification_permission_count";
 
     public static boolean hasNotificationPermission(Context context) {
         return hasPermission(context, Manifest.permission.POST_NOTIFICATIONS);
@@ -71,12 +68,8 @@ public class BravePermissionUtils {
         }
     }
 
-    public static boolean isBraveAdsNotificationPermissionBlocked(Context context) {
-        return channeGroupIsBlocked(context, BraveChannelDefinitions.ChannelGroupId.BRAVE_ADS);
-    }
-
     public static boolean isGeneralNotificationPermissionBlocked(Context context) {
-        return channeGroupIsBlocked(context, BraveChannelDefinitions.ChannelGroupId.GENERAL);
+        return channeGroupIsBlocked(context, ChromeChannelDefinitions.ChannelGroupId.GENERAL);
     }
 
     public static void requestPermission(Activity activity) {

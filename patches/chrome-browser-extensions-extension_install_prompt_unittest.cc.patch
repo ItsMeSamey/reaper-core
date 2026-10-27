@@ -1,0 +1,122 @@
+diff --git a/chrome/browser/extensions/extension_install_prompt_unittest.cc b/chrome/browser/extensions/extension_install_prompt_unittest.cc
+--- a/chrome/browser/extensions/extension_install_prompt_unittest.cc
++++ b/chrome/browser/extensions/extension_install_prompt_unittest.cc
+@@ -7,12 +7,21 @@
+ #include <stddef.h>
+ 
+ #include <memory>
++#if BUILDFLAG(IS_ANDROID)
++#include <string_view>
++#endif
+ #include <utility>
+ 
+ #include "base/functional/bind.h"
+ #include "base/memory/ref_counted.h"
+ #include "base/run_loop.h"
+ #include "base/test/scoped_feature_list.h"
++#if BUILDFLAG(IS_ANDROID)
++#include "base/test/bind.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/test/mock_render_process_host.h"
++#include "content/public/test/navigation_simulator.h"
++#endif
+ #include "base/test/test_future.h"
+ #include "base/values.h"
+ #include "chrome/browser/extensions/extension_install_prompt_show_params.h"
+@@ -178,6 +187,96 @@
+     EXPECT_TRUE(gfx::BitmapsAreEqual(install_prompt->icon().AsBitmap(),
+                                      *app_icon.bitmap()));
+   }
++
++#if BUILDFLAG(IS_ANDROID)
++  // Exercise the real asynchronous icon reply, including the gap after the
++  // import API has handed work to the installer but before a dialog exists.
++  for (const auto* scenario : {"cross-document", "started", "same-document",
++                               "default", "reenable", "renderer-gone",
++                               "default-renderer-gone",
++                               "renderer-gone-before-show"}) {
++    SCOPED_TRACE(scenario);
++    const GURL initial("https://example.test/import");
++    content::WebContentsTester::For(web_contents.get())->NavigateAndCommit(initial);
++    const bool opt_in = std::string_view(scenario) != "default" &&
++                        std::string_view(scenario) != "default-renderer-gone";
++    const bool renderer_gone =
++        std::string_view(scenario).find("renderer-gone") != std::string_view::npos;
++    const bool gone_before_show =
++        std::string_view(scenario) == "renderer-gone-before-show";
++    const bool same_document = std::string_view(scenario) == "same-document";
++    const bool reenable = std::string_view(scenario) == "reenable";
++    const bool started = std::string_view(scenario) == "started";
++    ExtensionInstallPrompt prompt(
++        web_contents.get(), std::make_unique<InstallPromptData>(
++                                reenable ? InstallPromptData::RE_ENABLE_PROMPT
++                                         : InstallPromptData::INSTALL_PROMPT));
++    if (opt_in) {
++      prompt.CancelOnNavigation(web_contents.get());
++    }
++    // TestWebContents owns a mock host with no real renderer process. Exercise
++    // normal observer dispatch, including the non-opted-in default prompt.
++    auto simulate_renderer_loss = [&] {
++      static_cast<content::MockRenderProcessHost*>(
++          web_contents->GetPrimaryMainFrame()->GetProcess())
++          ->SimulateRenderProcessExit(
++              base::TERMINATION_STATUS_PROCESS_WAS_KILLED, 0);
++    };
++    if (gone_before_show) {
++      simulate_renderer_loss();
++    }
++    ShowDialogTestFuture show_dialog_future;
++    base::test::TestFuture<ExtensionInstallPrompt::DoneCallbackPayload> completed;
++    int completion_count = 0;
++    prompt.ShowDialog(
++        base::BindLambdaForTesting(
++            [&](ExtensionInstallPrompt::DoneCallbackPayload payload) {
++              ++completion_count;
++              completed.SetValue(std::move(payload));
++            }),
++        extension, nullptr, show_dialog_future.GetRepeatingCallback());
++    ASSERT_FALSE(show_dialog_future.IsReady());
++    ASSERT_FALSE(completed.IsReady());
++    std::unique_ptr<content::NavigationSimulator> pending_navigation;
++    if (renderer_gone) {
++      if (!gone_before_show) {
++        simulate_renderer_loss();
++      }
++    } else if (started) {
++      pending_navigation = content::NavigationSimulator::CreateRendererInitiated(
++          GURL("https://example.test/replacement"), web_contents.get());
++      pending_navigation->Start();
++    } else if (same_document) {
++      content::NavigationSimulator::CreateRendererInitiated(
++          GURL("https://example.test/import#same-document"), web_contents.get())
++          ->CommitSameDocument();
++    } else if (!reenable) {
++      content::WebContentsTester::For(web_contents.get())
++          ->NavigateAndCommit(GURL("https://example.test/replacement"));
++    }
++    if (opt_in && !same_document && !reenable) {
++      EXPECT_EQ(ExtensionInstallPrompt::Result::ABORTED,
++                completed.Take().result);
++      EXPECT_FALSE(show_dialog_future.IsReady());
++      EXPECT_FALSE(prompt.did_call_show_dialog());
++    } else {
++      auto [params, done_callback, install_prompt] = show_dialog_future.Take();
++      EXPECT_TRUE(prompt.did_call_show_dialog());
++      EXPECT_FALSE(completed.IsReady());
++      std::move(done_callback).Run(ExtensionInstallPrompt::DoneCallbackPayload(
++          ExtensionInstallPrompt::Result::USER_CANCELED));
++      EXPECT_EQ(ExtensionInstallPrompt::Result::USER_CANCELED,
++                completed.Take().result);
++    }
++    if (pending_navigation) {
++      // Commit only after the delayed image callback was canceled. No dialog
++      // may attach in the gap between navigation start and commit.
++      pending_navigation->Commit();
++    }
++    task_environment()->RunUntilIdle();
++    EXPECT_EQ(1, completion_count);
++  }
++#endif
+ }
+ 
+ class ExtensionInstallPromptTestWithholdingAllowed

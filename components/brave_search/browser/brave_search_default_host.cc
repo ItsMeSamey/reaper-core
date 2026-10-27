@@ -12,8 +12,10 @@
 #include "brave/components/brave_search/browser/brave_search_fallback_host.h"
 #include "brave/components/brave_search/browser/prefs.h"
 #include "brave/components/brave_search/common/features.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_search_conversion/types.h"
 #include "brave/components/brave_search_conversion/utils.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/time_period_storage/daily_storage.h"
 #include "build/build_config.h"
 #include "components/prefs/pref_registry_simple.h"
@@ -21,16 +23,20 @@
 #include "components/search_engines/template_url.h"
 #include "components/search_engines/template_url_service.h"
 
+#if !BUILDFLAG(IS_ANDROID)
 using brave_search_conversion::ConversionType;
 using brave_search_conversion::GetConversionType;
 using brave_search_conversion::IsNTPPromotionEnabled;
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 namespace {
 
+#if !BUILDFLAG(IS_ANDROID)
 bool IsSearchPromotionEnabled(PrefService* prefs, TemplateURLService* service) {
   return (GetConversionType(prefs, service) != ConversionType::kNone) ||
          IsNTPPromotionEnabled(prefs, service);
 }
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 TemplateURL* GetSearchTemplateForSite(TemplateURLService* service,
                                       std::string_view host) {
@@ -114,9 +120,11 @@ bool BraveSearchDefaultHost::CanSetDefaultSearchProvider(TemplateURL* provider,
     return false;
   }
 
+#if !BUILDFLAG(IS_ANDROID)
   // Don't check 24h limit.
   if (can_always_set_default_)
     return true;
+#endif  // !BUILDFLAG(IS_ANDROID)
 
   if (!is_historic) {
     // Limit how often user can be asked. This is not site-specific
@@ -155,12 +163,16 @@ uint64_t BraveSearchDefaultHost::GetMaxTotalCanAskCount() {
 }
 
 void BraveSearchDefaultHost::SetCanAlwaysSetDefault() {
+#if !BUILDFLAG(IS_ANDROID)
   // We have 24h limit if search promotion url is not loaded.
   // When renderer detected that current url is for promotion,
   // renderer requests to remove this limit. In that case,
   // limit is removed when promotion is enabled.
   can_always_set_default_ =
       IsSearchPromotionEnabled(prefs_, template_url_service_);
+#else
+  // The shared Mojo interface remains compatible; Android has no promo bypass.
+#endif
 }
 
 void BraveSearchDefaultHost::GetCanSetDefaultSearchProvider(

@@ -1,0 +1,178 @@
+diff --git a/chrome/android/features/tab_ui/java/src/org/chromium/chrome/browser/tasks/tab_management/TabGridViewBinder.java b/chrome/android/features/tab_ui/java/src/org/chromium/chrome/browser/tasks/tab_management/TabGridViewBinder.java
+index eb6d7adee6d482404bb09ac5adf2e3cda16e1f6e..af02b5589c108f3b7b2681a312a6635b2604b0fa 100644
+--- a/chrome/android/features/tab_ui/java/src/org/chromium/chrome/browser/tasks/tab_management/TabGridViewBinder.java
++++ b/chrome/android/features/tab_ui/java/src/org/chromium/chrome/browser/tasks/tab_management/TabGridViewBinder.java
+@@ -4,7 +4,6 @@
+
+ package org.chromium.chrome.browser.tasks.tab_management;
+
+-import static android.view.View.GONE;
+
+ import static org.chromium.build.NullUtil.assertNonNull;
+ import static org.chromium.chrome.browser.tasks.tab_management.TabListModel.CardProperties.CARD_ALPHA;
+@@ -33,20 +32,18 @@
+ import org.chromium.base.ResettersForTesting;
+ import org.chromium.build.annotations.NullMarked;
+ import org.chromium.build.annotations.Nullable;
++import org.chromium.chrome.browser.containers.ContainerTabBadge;
+ import org.chromium.chrome.browser.tab.TabUtils;
+-import org.chromium.chrome.browser.tab.state.ShoppingPersistedTabData.PriceDrop;
+ import org.chromium.chrome.browser.tab_ui.TabCardThemeUtil;
+ import org.chromium.chrome.browser.tab_ui.TabListFaviconProvider.TabFavicon;
+ import org.chromium.chrome.browser.tab_ui.TabThumbnailView;
+ import org.chromium.chrome.browser.tab_ui.TabThumbnailView.ThumbnailViewState;
+ import org.chromium.chrome.browser.tab_ui.ThumbnailFetcher;
+ import org.chromium.chrome.browser.tasks.tab_management.TabActionButtonData.TabActionButtonType;
+-import org.chromium.chrome.browser.tasks.tab_management.TabListMediator.ShoppingPersistedTabDataFetcher;
+ import org.chromium.chrome.browser.tasks.tab_management.TabListModel.CardProperties;
+ import org.chromium.chrome.browser.tasks.tab_management.TabProperties.TabActionState;
+ import org.chromium.chrome.browser.tasks.tab_management.TabProperties.TabCardHighlightState;
+ import org.chromium.chrome.tab_ui.R;
+-import org.chromium.components.browser_ui.util.TextResolver;
+ import org.chromium.components.tab_groups.TabGroupColorId;
+ import org.chromium.components.tabs.TabAlert;
+ import org.chromium.ui.modelutil.PropertyKey;
+@@ -60,7 +57,6 @@
+ @NullMarked
+ public class TabGridViewBinder {
+     private static @Nullable ThumbnailFetcher sThumbnailFetcherForTesting;
+-    private static final String SHOPPING_METRICS_IDENTIFIER = "EnterTabSwitcher";
+
+     /**
+      * Main entrypoint for binding TabGridView
+@@ -114,6 +110,7 @@
+                     tabGridView.fastFindViewById(R.id.tab_group_color_view_container);
+             TabCardViewBinderUtils.detachTabGroupColorView(container);
+
++            ContainerTabBadge.bind(tabGridView, null);
+             tabGridView.clearHighlight();
+             tabGridView.setThumbnailSpinnerVisibility(false);
+             tabGridView.updateActionButtonBackground(
+@@ -125,7 +122,11 @@
+             PropertyModel model,
+             ViewLookupCachingFrameLayout view,
+             @Nullable PropertyKey propertyKey) {
+-        if (TabProperties.TITLE == propertyKey
++        if (TabProperties.CONTAINER_BADGE == propertyKey
++                || TabProperties.IS_INCOGNITO == propertyKey) {
++            ContainerTabBadge.bind(view, TabListViewBinderUtils.getContainerBadge(model));
++            TabListViewBinderUtils.updateContentDescription(model, view);
++        } else if (TabProperties.TITLE == propertyKey
+                 || TabProperties.IS_PINNED == propertyKey
+                 || TabProperties.ALERT_STATE == propertyKey) {
+             String title = model.get(TabProperties.TITLE);
+@@ -221,9 +222,6 @@
+         } else if (TabProperties.TAB_CONTEXT_CLICK_LISTENER == propertyKey) {
+             TabListViewBinderUtils.setNullableContextClickListener(
+                     model.get(TabProperties.TAB_CONTEXT_CLICK_LISTENER), view, model);
+-        } else if (TabProperties.ACTOR_UI_STATE == propertyKey) {
+-            boolean shouldBeVisible = TabListViewBinderUtils.setupActorIndicator(model, view);
+-            ((TabGridView) view).setActorActiveUiVisible(shouldBeVisible);
+         }
+     }
+
+@@ -236,15 +234,6 @@
+                     .scaleTabGridCardView(model.get(CardProperties.CARD_ANIMATION_STATUS));
+         } else if (TabProperties.ACCESSIBILITY_DELEGATE == propertyKey) {
+             view.setAccessibilityDelegate(model.get(TabProperties.ACCESSIBILITY_DELEGATE));
+-        } else if (TabProperties.SHOPPING_PERSISTED_TAB_DATA_FETCHER == propertyKey) {
+-            fetchPriceDrop(model, (priceDrop) -> onPriceDropFetched(view, model, priceDrop), true);
+-        } else if (TabProperties.SHOULD_SHOW_PRICE_DROP_TOOLTIP == propertyKey) {
+-            if (model.get(TabProperties.SHOULD_SHOW_PRICE_DROP_TOOLTIP)) {
+-                PriceCardView priceCardView = view.fastFindViewById(R.id.price_info_box_outer);
+-                assert priceCardView.getVisibility() == View.VISIBLE;
+-                LargeMessageCardView.showPriceDropTooltip(
+-                        priceCardView.findViewById(R.id.current_price));
+-            }
+         } else if (TabProperties.ACTION_BUTTON_DESCRIPTION_TEXT_RESOLVER == propertyKey) {
+             TabListViewBinderUtils.updateActionButtonContentDescription(
+                     model, view.fastFindViewById(R.id.action_button));
+@@ -305,73 +294,6 @@
+         } else if (TabProperties.TAB_CARD_LABEL_DATA == propertyKey) {
+             // Ignore this data for tab card labels in selectable mode.
+             updateTabCardLabel(view, /* tabCardLabelData= */ null);
+-        }
+-    }
+-
+-    private static void fetchPriceDrop(
+-            PropertyModel model, Callback<@Nullable PriceDrop> callback, boolean shouldLog) {
+-        ShoppingPersistedTabDataFetcher fetcher =
+-                model.get(TabProperties.SHOPPING_PERSISTED_TAB_DATA_FETCHER);
+-        if (fetcher == null) {
+-            callback.onResult(null);
+-            return;
+-        }
+-        fetcher.fetch(
+-                (shoppingPersistedTabData) -> {
+-                    if (shoppingPersistedTabData == null) {
+-                        callback.onResult(null);
+-                        return;
+-                    }
+-                    if (shouldLog) {
+-                        shoppingPersistedTabData.logPriceDropMetrics(SHOPPING_METRICS_IDENTIFIER);
+-                    }
+-                    callback.onResult(shoppingPersistedTabData.getPriceDrop());
+-                });
+-    }
+-
+-    private static void onPriceDropFetched(
+-            ViewLookupCachingFrameLayout rootView,
+-            PropertyModel model,
+-            @Nullable PriceDrop priceDrop) {
+-        if (TabUiUtils.isDataSharingFunctionalityEnabled()) {
+-            // TODO(crbug.com/361169665): Do activity updates or price drops take priority. Assume
+-            // activity updates win for now.
+-            if (model.get(TabProperties.TAB_CARD_LABEL_DATA) != null) return;
+-
+-            if (priceDrop == null) {
+-                updateTabCardLabel(rootView, null);
+-                return;
+-            }
+-
+-            TextResolver contentDescriptionResolver =
+-                    (Context context) ->
+-                            context.getString(
+-                                    R.string.accessibility_tab_price_card,
+-                                    priceDrop.previousPrice,
+-                                    priceDrop.price);
+-            PriceDropTextResolver priceDropResolver =
+-                    new PriceDropTextResolver(priceDrop.price, priceDrop.previousPrice);
+-            TabCardLabelData labelData =
+-                    new TabCardLabelData(
+-                            TabCardLabelType.PRICE_DROP,
+-                            priceDropResolver,
+-                            /* asyncImageFactory= */ null,
+-                            contentDescriptionResolver);
+-            updateTabCardLabel(rootView, labelData);
+-        } else {
+-            PriceCardView priceCardView = rootView.fastFindViewById(R.id.price_info_box_outer);
+-            if (priceDrop == null) {
+-                priceCardView.setVisibility(GONE);
+-                return;
+-            }
+-            priceCardView.setPriceStrings(priceDrop.price, priceDrop.previousPrice);
+-            priceCardView.setVisibility(View.VISIBLE);
+-            priceCardView.setContentDescription(
+-                    rootView.getResources()
+-                            .getString(
+-                                    R.string.accessibility_tab_price_card,
+-                                    priceDrop.previousPrice,
+-                                    priceDrop.price));
+         }
+     }
+
+@@ -462,9 +384,12 @@
+                 TabCardThemeUtil.getCardViewBackgroundColorStateList(
+                         cardView.getContext(), isIncognito, backgroundColor));
+
+-        titleView.setTextColor(
++        final @ColorInt int textColor =
+                 TabCardThemeUtil.getTitleTextColor(
+-                        titleView.getContext(), isIncognito, isSelected, colorId));
++                        titleView.getContext(), isIncognito, isSelected, colorId);
++        titleView.setTextColor(textColor);
++        TextView containerBadgeView = rootView.fastFindViewById(R.id.reaper_tab_container_badge);
++        if (containerBadgeView != null) containerBadgeView.setTextColor(textColor);
+
+         thumbnail.updateThumbnailPlaceholder(isIncognito, isSelected, colorId);
+

@@ -41,10 +41,12 @@ injectStyle(ExtensionsSidebarElement, css`
     display: none !important;
   }
 
+<if expr="not is_android">
   /* Hide the dev-mode "AI coding agents" docs promo. */
   .cr-nav-menu-item:has(#promo-message-text) {
     display: none !important;
   }
+</if>
 `)
 
 export * from './sidebar-chromium.js'

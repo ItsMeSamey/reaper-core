@@ -1,0 +1,92 @@
+diff --git a/chrome/android/junit/src/org/chromium/chrome/browser/fullscreen/FullscreenHtmlApiHandlerLegacyUnitTest.java b/chrome/android/junit/src/org/chromium/chrome/browser/fullscreen/FullscreenHtmlApiHandlerLegacyUnitTest.java
+index c4102f5484db4de755ab61e5b982941376e498c0..b4e7bae380c90648577b9c7411b2d6a9491101ff 100644
+--- a/chrome/android/junit/src/org/chromium/chrome/browser/fullscreen/FullscreenHtmlApiHandlerLegacyUnitTest.java
++++ b/chrome/android/junit/src/org/chromium/chrome/browser/fullscreen/FullscreenHtmlApiHandlerLegacyUnitTest.java
+@@ -4,6 +4,9 @@
+ 
+ package org.chromium.chrome.browser.fullscreen;
+ 
++import org.chromium.chrome.browser.browser_controls.BrowserStateBrowserControlsVisibilityDelegate;
++import org.chromium.components.browser_ui.widget.gesture.BackPressHandler;
++import android.view.View;
+ import static android.view.Display.INVALID_DISPLAY;
+ 
+ import static org.junit.Assert.assertEquals;
+@@ -446,4 +449,77 @@
+         mFullscreenHtmlApiHandlerLegacy.onExitFullscreen(mTab);
+         verify(observer, times(1)).onExitFullscreen(mTab);
+     }
++
++    @Test
++    public void browserFullscreenWithoutTabUsesRealImmersiveFlagsAndRestoresOrdinaryFlags() {
++        var decor = mActivity.getWindow().getDecorView();
++        decor.setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
++        mFullscreenHtmlApiHandlerLegacy.setBrowserFullscreenMode(true);
++        assertTrue(mFullscreenHtmlApiHandlerLegacy.getBrowserFullscreenMode());
++        assertTrue(mFullscreenHtmlApiHandlerLegacy.getFullscreenUiModeSupplier().get());
++        Assert.assertFalse(mFullscreenHtmlApiHandlerLegacy.getPersistentFullscreenMode());
++        assertTrue(mFullscreenHtmlApiHandlerLegacy.isStatusBarHidden(decor));
++        assertTrue(mFullscreenHtmlApiHandlerLegacy.isNavigationBarHidden(decor));
++        assertTrue((decor.getSystemUiVisibility() & View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY) != 0);
++        mFullscreenHtmlApiHandlerLegacy.setBrowserFullscreenMode(false);
++        Assert.assertFalse(mFullscreenHtmlApiHandlerLegacy.getFullscreenUiModeSupplier().get());
++        Assert.assertFalse(mFullscreenHtmlApiHandlerLegacy.isStatusBarHidden(decor));
++        Assert.assertFalse(mFullscreenHtmlApiHandlerLegacy.isNavigationBarHidden(decor));
++        assertTrue((decor.getSystemUiVisibility() & View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR) != 0);
++    }
++
++    @Test
++    public void exitingTabFullscreenPreservesIndependentBrowserFullscreen() {
++        doReturn(null).when(mTab).getWebContents();
++        doReturn(true).when(mTab).isUserInteractable();
++        mFullscreenHtmlApiHandlerLegacy.setTabForTesting(mTab);
++        mFullscreenHtmlApiHandlerLegacy.setBrowserFullscreenMode(true);
++        mFullscreenHtmlApiHandlerLegacy.onEnterFullscreen(
++                mTab, new FullscreenOptions(false, false, INVALID_DISPLAY));
++        assertTrue(mFullscreenHtmlApiHandlerLegacy.getPersistentFullscreenMode());
++        mFullscreenHtmlApiHandlerLegacy.exitPersistentFullscreenMode();
++        Assert.assertFalse(mFullscreenHtmlApiHandlerLegacy.getPersistentFullscreenMode());
++        assertTrue(mFullscreenHtmlApiHandlerLegacy.getFullscreenUiModeSupplier().get());
++        assertTrue(
++                mFullscreenHtmlApiHandlerLegacy.isNavigationBarHidden(
++                        mActivity.getWindow().getDecorView()));
++        mFullscreenHtmlApiHandlerLegacy.setBrowserFullscreenMode(false);
++        Assert.assertFalse(mFullscreenHtmlApiHandlerLegacy.getFullscreenUiModeSupplier().get());
++    }
++
++    @Test
++    public void backExitsBrowserFullscreenAndRetainsExclusiveAccessDelegate() {
++        mFullscreenHtmlApiHandlerLegacy.setBrowserFullscreenMode(true);
++        var tabHandler = Mockito.mock(BackPressHandler.class);
++        var tabState = ObservableSuppliers.createNonNull(true);
++        doReturn(tabState).when(tabHandler).getHandleBackPressChangedSupplier();
++        doReturn(BackPressHandler.BackPressResult.SUCCESS).when(tabHandler).handleBackPress();
++        var handler = new FullscreenBackPressHandler(mFullscreenHtmlApiHandlerLegacy, tabHandler);
++        assertTrue(handler.getHandleBackPressChangedSupplier().get());
++        assertEquals(BackPressHandler.BackPressResult.SUCCESS, handler.handleBackPress());
++        Assert.assertFalse(mFullscreenHtmlApiHandlerLegacy.getBrowserFullscreenMode());
++        verify(tabHandler).handleBackPress();
++        handler.destroy();
++        mFullscreenHtmlApiHandlerLegacy.setBrowserFullscreenMode(true);
++        mFullscreenHtmlApiHandlerLegacy.setBrowserFullscreenMode(false);
++    }
++
++    @Test
++    public void browserAndDomFullscreenDriveActualBrowserControlsVisibilityDelegate() {
++        mFullscreenHtmlApiHandlerLegacy.setBrowserFullscreenMode(true);
++        var controls =
++                new BrowserStateBrowserControlsVisibilityDelegate(
++                        mFullscreenHtmlApiHandlerLegacy.getFullscreenUiModeSupplier());
++        assertEquals(BrowserControlsState.HIDDEN, (int) controls.get());
++        doReturn(null).when(mTab).getWebContents();
++        doReturn(true).when(mTab).isUserInteractable();
++        mFullscreenHtmlApiHandlerLegacy.setTabForTesting(mTab);
++        mFullscreenHtmlApiHandlerLegacy.onEnterFullscreen(
++                mTab, new FullscreenOptions(false, false, INVALID_DISPLAY));
++        mFullscreenHtmlApiHandlerLegacy.exitPersistentFullscreenMode();
++        assertEquals(BrowserControlsState.HIDDEN, (int) controls.get());
++        mFullscreenHtmlApiHandlerLegacy.setBrowserFullscreenMode(false);
++        Assert.assertNotEquals(BrowserControlsState.HIDDEN, (int) controls.get());
++        controls.destroy();
++    }
+ }

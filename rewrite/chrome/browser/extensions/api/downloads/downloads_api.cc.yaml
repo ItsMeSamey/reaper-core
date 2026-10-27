@@ -1,0 +1,350 @@
+# Android download UI policy and truthful transfer lifecycle.
+substitutions:
+- description: Use existing Android tab and DownloadManagerService JNI bridges.
+  regex:
+    pattern: '#if !BUILDFLAG(IS_ANDROID)
+
+      #include "chrome/browser/download/download_item_warning_data.h"'
+    replace: '#if BUILDFLAG(IS_ANDROID)
+
+      #include "base/android/jni_android.h"
+
+      #include "chrome/browser/android/tab_android.h"
+
+      // After WebContents and Profile JNI conversion specializations above.
+
+      #include "chrome/android/chrome_jni_headers/DownloadManagerService_jni.h"
+
+      #endif
+
+
+      #if !BUILDFLAG(IS_ANDROID)
+
+      #include "chrome/browser/download/download_item_warning_data.h"'
+- description: Open the Android collection in the resolved extension window and preserve desktop folder behavior.
+  regex:
+    pattern: "ExtensionFunction::ResponseAction DownloadsShowDefaultFolderFunction::Run() {\n  DownloadManager* manager = nullptr;"
+    replace: "ExtensionFunction::ResponseAction DownloadsShowDefaultFolderFunction::Run() {\n#if BUILDFLAG(IS_ANDROID)\n  WindowController* window_controller =\n      ChromeExtensionFunctionDetails(this).GetCurrentWindowController();\n  content::WebContents* contents =\n      window_controller ? window_controller->GetActiveTab() : nullptr;\n  TabAndroid* tab = contents ? TabAndroid::FromWebContents(contents) : nullptr;\n  if (!tab || !Java_DownloadManagerService_showDownloadsForExtension(\n                  base::android::AttachCurrentThread(), tab->GetJavaObject())) {\n    return RespondNow(Error(download_extension_errors::kInvisibleContext));\n  }\n#else\n  DownloadManager* manager = nullptr;"
+- description: End the desktop-only folder implementation before shared success accounting.
+  regex:
+    pattern: "      platform_util::OPEN_FOLDER, platform_util::OpenOperationCallback());\n  RecordApiFunctions("
+    replace: "      platform_util::OPEN_FOLDER, platform_util::OpenOperationCallback());\n#endif\n  RecordApiFunctions("
+- description: Mark the prompt pending before callbacks can run synchronously
+  regex:
+    re_pattern: \ \ //\ For\ testing,\ callers\ can\ use\ AcceptDialogForTesting\(\)\ to\ pre\-determine
+    replace: "#if BUILDFLAG(IS_ANDROID)\n  pending_open_prompt_ = true;\n#endif\n  // For testing, callers can use AcceptDialogForTesting() to pre-determine"
+- description: Respect synchronous testing completion on Android
+  regex:
+    re_pattern: '\ \ \ \ OpenPromptDone\(params\->download_id,\ /\*accept=\*/true\);\
+
+      \ \ \ \ return\ RespondLater\(\);'
+    replace: "    OpenPromptDone(params->download_id, /*accept=*/true);\n#if BUILDFLAG(IS_ANDROID)\n    return AlreadyResponded();\n#else\n    return RespondLater();\n#endif"
+- description: Handle immediate denial when Android cannot show the confirmation
+  regex:
+    re_pattern: '\ \ RecordApiFunctions\(DownloadsFunctionName::kDownloadsFunctionOpen\);\
+
+      \ \ return\ RespondLater\(\);'
+    replace: "  RecordApiFunctions(DownloadsFunctionName::kDownloadsFunctionOpen);\n#if BUILDFLAG(IS_ANDROID)\n  return did_respond() ? AlreadyResponded() : RespondLater();\n#else\n  return RespondLater();\n#endif"
+- description: Ignore canceled/late results before accessing any browser-context services
+  regex:
+    re_pattern: 'void\ DownloadsOpenFunction::OpenPromptDone\(int\ download_id,\ bool\ accept\)\ \{\
+
+      \ \ DCHECK_CURRENTLY_ON\(BrowserThread::UI\);'
+    replace: "void DownloadsOpenFunction::OpenPromptDone(int download_id, bool accept) {\n  DCHECK_CURRENTLY_ON(BrowserThread::UI);\n#if BUILDFLAG(IS_ANDROID)\n  if (!pending_open_prompt_) {\n    return;\n  }\n  pending_open_prompt_ = false;\n  if (!browser_context()) {\n    Respond(Error(download_extension_errors::kInvisibleContext));\n    return;\n  }\n#endif"
+- description: Resolve pending consent with denial on profile shutdown; late retained callback cannot reopen a file
+  regex:
+    re_pattern: DownloadsSetShelfEnabledFunction::DownloadsSetShelfEnabledFunction\(\)\ =\ default;
+    replace: "#if BUILDFLAG(IS_ANDROID)\nvoid DownloadsOpenFunction::OnBrowserContextShutdown() {\n  if (pending_open_prompt_) {\n    pending_open_prompt_ = false;\n    Respond(Error(download_extension_errors::kOpenPermission));\n  }\n}\n#endif\n\nDownloadsSetShelfEnabledFunction::DownloadsSetShelfEnabledFunction() = default;"
+- description: Notify Android optional UI through its existing message bridge
+  regex:
+    re_pattern: \#include\ "chrome/browser/download/download_core_service\.h"
+    replace: '#if BUILDFLAG(IS_ANDROID)
+
+      #include "chrome/browser/download/android/download_message_bridge.h"
+
+      #endif
+
+      #include "chrome/browser/download/download_core_service.h"'
+- description: Capture aggregate UI policy before changing one extension vote
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ bool\ enabled\)\ \{\
+
+      \ \ auto\ iter\ =\ ui_disabling_extensions_\.find\(extension\);'
+    replace: "                                                 bool enabled) {\n#if BUILDFLAG(IS_ANDROID)\n  const bool was_enabled = IsUiEnabled();\n#endif\n  auto iter = ui_disabling_extensions_.find(extension);"
+- description: Synchronously refresh optional Android messages only when aggregate policy changes
+  regex:
+    re_pattern: '\ \ \ \ ui_disabling_extensions_\.erase\(extension\);\
+
+      \ \ \}\
+
+      \}\
+
+      \
+
+      bool\ ExtensionDownloadsEventRouter::IsUiEnabled\(\)\ const'
+    replace: "    ui_disabling_extensions_.erase(extension);\n  }\n#if BUILDFLAG(IS_ANDROID)\n  if (was_enabled != IsUiEnabled()) {\n    DownloadMessageBridge::NotifyDownloadUiPolicyChanged();\n  }\n#endif\n}\n\nbool ExtensionDownloadsEventRouter::IsUiEnabled() const"
+- description: Reuse aggregate transition notification when an extension unloads
+  regex:
+    re_pattern: '\ \ auto\ iter\ =\ ui_disabling_extensions_\.find\(extension\);\
+
+      \ \ if\ \(iter\ !=\ ui_disabling_extensions_\.end\(\)\)\ \{\
+
+      \ \ \ \ ui_disabling_extensions_\.erase\(iter\);\
+
+      \ \ \}\
+
+      \}\
+
+      \
+
+      void\ ExtensionDownloadsEventRouter::CheckForHistoryFilesRemoval\(\)'
+    replace: "  // Removing the last disabling extension also refreshes Android messages.\n  SetUiEnabled(extension, true);\n}\n\nvoid ExtensionDownloadsEventRouter::CheckForHistoryFilesRemoval()"
+- description: Use the native Android download service interface for folder opening.
+  regex:
+    re_pattern: '\#include\ "chrome/browser/download/android/download_message_bridge\.h"\
+
+      '
+    replace: '#include "chrome/browser/download/android/download_manager_service.h"
+
+      #include "chrome/browser/download/android/download_message_bridge.h"
+
+      '
+- description: Remove the secondary include of the owned DownloadManagerService JNI header.
+  regex:
+    re_pattern: '\#include\ "base/android/jni_android\.h"\
+
+      \#include\ "chrome/browser/android/tab_android\.h"\
+
+      //\ After\ WebContents\ and\ Profile\ JNI\ conversion\ specializations\ above\.\
+
+      \#include\ "chrome/android/chrome_jni_headers/DownloadManagerService_jni\.h"\
+
+      '
+    replace: '#include "chrome/browser/android/tab_android.h"
+
+      '
+- description: Preserve folder-open results through the native owner forwarding method.
+  regex:
+    re_pattern: '\ \ if\ \(!tab\ \|\|\ !Java_DownloadManagerService_showDownloadsForExtension\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ base::android::AttachCurrentThread\(\),\ tab\->GetJavaObject\(\)\)\)\ \{\
+
+      '
+    replace: "  if (!tab || !DownloadManagerService::ShowDownloadsForExtension(\n                  tab->GetJavaObject())) {\n"
+- description: Android Downloads exact-item reveal integration (1).
+  regex:
+    re_pattern: '\#include\ "content/public/browser/web_contents\.h"\
+
+      \#include\ "extensions/browser/event_router\.h"\
+
+      \#include\ "extensions/browser/extension_function_dispatcher\.h"\
+
+      \#include\ "extensions/browser/extension_prefs\.h"\
+
+      \#include\ "extensions/browser/install_prefs_helper\.h"\
+
+      \#include\ "extensions/browser/warning_service\.h"\
+
+      '
+    replace: '#include "content/public/browser/web_contents.h"
+
+      #include "extensions/browser/event_router.h"
+
+      #include "extensions/browser/extension_function_dispatcher.h"
+
+      #include "extensions/browser/extension_registry.h"
+
+      #include "extensions/browser/extension_prefs.h"
+
+      #include "extensions/browser/install_prefs_helper.h"
+
+      #include "extensions/browser/warning_service.h"
+
+      '
+- description: Android Downloads exact-item reveal integration (2).
+  regex:
+    re_pattern: '\
+
+      \#if\ BUILDFLAG\(IS_ANDROID\)\
+
+      \#include\ "chrome/browser/android/tab_android\.h"\
+
+      \#endif\
+
+      \
+
+      \#if\ !BUILDFLAG\(IS_ANDROID\)\
+
+      '
+    replace: '
+
+      #if BUILDFLAG(IS_ANDROID)
+
+      #include "chrome/browser/android/tab_android.h"
+
+      #include "chrome/browser/extensions/api/tabs/windows_util.h"
+
+      #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+
+      #include "content/public/browser/download_item_utils.h"
+
+      #include "extensions/browser/extension_util.h"
+
+      #include "ui/base/base_window.h"
+
+      #endif
+
+
+      #if !BUILDFLAG(IS_ANDROID)
+
+      '
+- description: Android Downloads exact-item reveal integration (3).
+  regex:
+    re_pattern: '\ \ \}\
+
+      \ \ return\ download_item;\
+
+      \}\
+
+      \
+
+      //\ Corresponds\ to\ \|DownloadFunctions\|\ enumeration\ in\ histograms\.xml\.\ Please\
+
+      //\ keep\ these\ in\ sync\.\
+
+      '
+    replace: "  }\n  return download_item;\n}\n\n#if BUILDFLAG(IS_ANDROID)\n// Re-read permission and incognito access when an asynchronous reveal finishes.\n// GetDownload() still supplies the API's normal ID/visibility authorization.\nbool CanRevealAndroidDownload(ExtensionFunction* function,\n                              Profile* item_profile) {\n  content::BrowserContext* context = function->browser_context();\n  if (!context || context->ShutdownStarted() || !item_profile ||\n      item_profile->ShutdownStarted()) {\n    return false;\n  }\n  Profile* caller_profile = Profile::FromBrowserContext(context);\n  if (item_profile->GetOriginalProfile() !=\n          caller_profile->GetOriginalProfile() ||\n      (item_profile->IsOffTheRecord() &&\n       !item_profile->IsPrimaryOTRProfile())) {\n    return false;\n  }\n  const Extension* current_extension =\n      ExtensionRegistry::Get(context)->enabled_extensions().GetByID(\n          function->extension_id());\n  if (!current_extension ||\n      !current_extension->permissions_data()->HasAPIPermission(\n          APIPermissionID::kDownloads)) {\n    return false;\n  }\n  return !item_profile->IsOffTheRecord() ||\n         ((caller_profile->IsOffTheRecord() ||\n           function->include_incognito_information()) &&\n          util::IsIncognitoEnabled(current_extension, context) &&\n          item_profile->GetOriginalProfile()->GetPrimaryOTRProfile(false) ==\n              item_profile);\n}\n\nTabAndroid* GetAndroidDownloadRevealHost(ExtensionFunction* function,\n                                         Profile* item_profile) {\n  const auto usable_tab = [item_profile](content::WebContents* contents) {\n    TabAndroid* tab =\n        contents ? TabAndroid::FromWebContents(contents) : nullptr;\n    return tab && DownloadManagerService::CanShowDownloadItemForExtension(\n                      tab->GetJavaObject(), item_profile)\n               ? tab\n               : nullptr;\n  };\n  const auto usable_window = [function,\n                              item_profile](WindowController* window) {\n    if (!window || !window->GetBrowserWindowInterface() ||\n        window->GetBrowserWindowInterface()->IsDeleteScheduled() ||\n        window->profile()->GetOriginalProfile() !=\n            item_profile->GetOriginalProfile()) {\n      return false;\n    }\n    return windows_util::CanOperateOnWindow(function, window,\n                                            WindowController::kNoWindowFilter);\n  };\n\n  // Prefer the caller's tab, subject to the same window/profile access checks.\n  content::WebContents* sender = function->GetSenderWebContents();\n  for (WindowController* window : *WindowControllerList::GetInstance()) {\n    if (usable_window(window) && window->GetActiveTab() == sender) {\n      if (TabAndroid* tab = usable_tab(sender)) {\n        return tab;\n      }\n    }\n  }\n  WindowController* associated =\n      function->dispatcher()\n          ? function->dispatcher()->GetExtensionWindowController()\n          : nullptr;\n  if (usable_window(associated)) {\n    if (TabAndroid* tab = usable_tab(associated->GetActiveTab())) {\n      return tab;\n    }\n  }\n  // MV3 workers have no sender tab. Only a currently active, accessible browser\n  // window in the item's original profile may anchor the new Downloads surface.\n  for (WindowController* window : *WindowControllerList::GetInstance()) {\n    if (usable_window(window) && window->window()->IsActive()) {\n      if (TabAndroid* tab = usable_tab(window->GetActiveTab())) {\n        return tab;\n      }\n    }\n  }\n  return nullptr;\n}\n#endif\n\n// Corresponds to |DownloadFunctions| enumeration in histograms.xml. Please\n// keep these in sync.\n"
+- description: Android Downloads exact-item reveal integration (4).
+  regex:
+    re_pattern: '\ \ if\ \(InvalidId\(download_item,\ \&error\)\)\ \{\
+
+      \ \ \ \ return\ RespondNow\(Error\(std::move\(error\)\)\);\
+
+      \ \ \}\
+
+      \ \ download_item\->ShowDownloadInShell\(\);\
+
+      \ \ RecordApiFunctions\(DownloadsFunctionName::kDownloadsFunctionShow\);\
+
+      \ \ return\ RespondNow\(NoArguments\(\)\);\
+
+      \}\
+
+      \
+
+      DownloadsShowDefaultFolderFunction::DownloadsShowDefaultFolderFunction\(\)\ =\
+
+      \ \ \ \ default;\
+
+      '
+    replace: "  if (InvalidId(download_item, &error)) {\n    return RespondNow(Error(std::move(error)));\n  }\n#if BUILDFLAG(IS_ANDROID)\n  content::BrowserContext* item_context =\n      content::DownloadItemUtils::GetBrowserContext(download_item);\n  Profile* item_profile =\n      item_context ? Profile::FromBrowserContext(item_context) : nullptr;\n  if (!CanRevealAndroidDownload(this, item_profile)) {\n    return RespondNow(Error(download_extension_errors::kInvalidId));\n  }\n  TabAndroid* tab = GetAndroidDownloadRevealHost(this, item_profile);\n  if (!tab) {\n    return RespondNow(Error(download_extension_errors::kInvisibleContext));\n  }\n  // No user gesture is required by downloads.show. This selects a row in\n  // Downloads; it never opens the downloaded file.\n  waiting_for_android_show_ = true;\n  android_download_id_ = params->download_id;\n  android_download_guid_ = download_item->GetGuid();\n  android_item_profile_ = item_profile->GetWeakPtr();\n  AddRef();  // Balanced by FinishAndroidShow(), including timeout/shutdown.\n  android_show_timeout_.Start(\n      FROM_HERE, base::Seconds(10),\n      base::BindOnce(&DownloadsShowFunction::OnAndroidDownloadShown,\n                     weak_factory_.GetWeakPtr(), false));\n  RecordApiFunctions(DownloadsFunctionName::kDownloadsFunctionShow);\n  const int64_t token = DownloadManagerService::ShowDownloadItemForExtension(\n      tab->GetJavaObject(), download_item,\n      base::BindOnce(&DownloadsShowFunction::OnAndroidDownloadShown,\n                     weak_factory_.GetWeakPtr()));\n  if (waiting_for_android_show_) {\n    android_show_token_ = token;\n    if (!token) {\n      OnAndroidDownloadShown(false);\n    }\n  } else if (token) {\n    // A synchronous callback may finish before Java returns its request token.\n    DownloadManagerService::CancelDownloadItemForExtension(token);\n  }\n  return did_respond() ? AlreadyResponded() : RespondLater();\n#else\n  download_item->ShowDownloadInShell();\n  RecordApiFunctions(DownloadsFunctionName::kDownloadsFunctionShow);\n  return RespondNow(NoArguments());\n#endif\n}\n\n#if BUILDFLAG(IS_ANDROID)\nvoid DownloadsShowFunction::OnAndroidDownloadShown(bool shown) {\n  if (!waiting_for_android_show_) {\n    return;\n  }\n  if (!shown || !CanRevealAndroidDownload(this, android_item_profile_.get())) {\n    FinishAndroidShow(Error(download_extension_errors::kInvisibleContext));\n    return;\n  }\n  DownloadItem* item = GetDownload(\n      browser_context(), include_incognito_information(), android_download_id_);\n  if (!item || item->GetGuid() != android_download_guid_ ||\n      content::DownloadItemUtils::GetBrowserContext(item) !=\n          android_item_profile_.get()) {\n    FinishAndroidShow(Error(download_extension_errors::kInvalidId));\n    return;\n  }\n  FinishAndroidShow(NoArguments());\n}\n\nvoid DownloadsShowFunction::FinishAndroidShow(ResponseValue response) {\n  if (!waiting_for_android_show_) {\n    return;\n  }\n  waiting_for_android_show_ = false;\n  android_show_timeout_.Stop();\n  weak_factory_.InvalidateWeakPtrs();\n  const int64_t token = std::exchange(android_show_token_, 0);\n  android_item_profile_.reset();\n  if (token) {\n    DownloadManagerService::CancelDownloadItemForExtension(token);\n  }\n  Respond(std::move(response));\n  Release();\n}\n\nvoid DownloadsShowFunction::OnBrowserContextShutdown() {\n  if (waiting_for_android_show_) {\n    FinishAndroidShow(Error(download_extension_errors::kInvisibleContext));\n  }\n}\n#endif\n\nDownloadsShowDefaultFolderFunction::DownloadsShowDefaultFolderFunction() =\n    default;\n"
+- description: Revalidate delayed Android download-open authorization (1).
+  regex:
+    re_pattern: '\ \ \ \ Respond\(Error\(std::move\(error\)\)\);\
+
+      \ \ \ \ return;\
+
+      \ \ \}\
+
+      \ \ DownloadItem\*\ download_item\ =\ GetDownload\(\
+
+      \ \ \ \ \ \ browser_context\(\),\ include_incognito_information\(\),\ download_id\);\
+
+      \ \ if\ \(Fault\(!download_item,\ download_extension_errors::kFileAlreadyDeleted,\
+
+      '
+    replace: "    Respond(Error(std::move(error)));\n    return;\n  }\n#if BUILDFLAG(IS_ANDROID)\n  // Consent can arrive after optional permissions are revoked or the extension\n  // is disabled/reloaded. A replacement with the same ID cannot authorize this\n  // older function's pending request.\n  const Extension* current_extension = ExtensionRegistry::Get(browser_context())\n                                           ->enabled_extensions()\n                                           .GetByID(extension_id());\n  if (!current_extension || current_extension != extension() ||\n      !current_extension->permissions_data()->HasAPIPermission(\n          APIPermissionID::kDownloads) ||\n      !current_extension->permissions_data()->HasAPIPermission(\n          APIPermissionID::kDownloadsOpen)) {\n    Respond(Error(download_extension_errors::kOpenPermission));\n    return;\n  }\n#endif\n  DownloadItem* download_item = GetDownload(\n      browser_context(), include_incognito_information(), download_id);\n  if (Fault(!download_item, download_extension_errors::kFileAlreadyDeleted,\n"
+- description: Keep Android download-open confirmation worker alive (1).
+  regex:
+    re_pattern: '\
+
+      DownloadsOpenFunction::\~DownloadsOpenFunction\(\)\ =\ default;\
+
+      \
+
+      ExtensionFunction::ResponseAction\ DownloadsOpenFunction::RunInternal\(\)\ \{\
+
+      \ \ std::optional<downloads::Open::Params>\ params\ =\
+
+      \ \ \ \ \ \ downloads::Open::Params::Create\(args\(\)\);\
+
+      '
+    replace: "\nDownloadsOpenFunction::~DownloadsOpenFunction() = default;\n\n#if BUILDFLAG(IS_ANDROID)\nbool DownloadsOpenFunction::ShouldKeepWorkerAliveIndefinitely() {\n  // Worker calls can wait for explicit user confirmation. The request must\n  // outlive the ordinary worker timeout while that dialog remains pending.\n  return true;\n}\n#endif\n\nExtensionFunction::ResponseAction DownloadsOpenFunction::RunInternal() {\n  std::optional<downloads::Open::Params> params =\n      downloads::Open::Params::Create(args());\n"
+- description: "Android tolerates an unavailable download item during sender cleanup."
+  regex:
+    re_pattern: "\\ \\ if\\ \\(!extension_dispatcher\\ \\|\\|\\ !web_contents\\)\\ \\{\\\n\\ \\ \\ \\ download_item\\->Remove\\(\\);\\\n\\ \\ \\ \\ Respond\\(NoArguments\\(\\)\\);\\\n\\ \\ \\ \\ return;\\\n\\ \\ \\}\\\n"
+    replace: "  if (!extension_dispatcher || !web_contents) {\n#if BUILDFLAG(IS_ANDROID)\n    if (download_item) {\n      download_item->Remove();\n    }\n#else\n    download_item->Remove();\n#endif\n    Respond(NoArguments());\n    return;\n  }\n"
+- description: "Compile the dedicated download measurement enum/helper only on non-Android."
+  regex:
+    re_pattern: "//\\ Corresponds\\ to\\ \\|DownloadFunctions\\|\\ enumeration\\ in\\ histograms\\.xml\\.\\ Please\\\n//\\ keep\\ these\\ in\\ sync\\.\\\nenum\\ class\\ DownloadsFunctionName\\ \\{\\\n\\ \\ kDownloadsFunctionDownload\\ =\\ 0,\\\n\\ \\ kDownloadsFunctionSearch\\ =\\ 1,\\\n\\ \\ kDownloadsFunctionPause\\ =\\ 2,\\\n\\ \\ kDownloadsFunctionResume\\ =\\ 3,\\\n\\ \\ kDownloadsFunctionCancel\\ =\\ 4,\\\n\\ \\ kDownloadsFunctionErase\\ =\\ 5,\\\n\\ \\ //\\ 6\\ unused\\\n\\ \\ kDownloadsFunctionAcceptDanger\\ =\\ 7,\\\n\\ \\ kDownloadsFunctionShow\\ =\\ 8,\\\n\\ \\ kDownloadsFunctionDrag\\ =\\ 9,\\\n\\ \\ kDownloadsFunctionGetFileIcon\\ =\\ 10,\\\n\\ \\ kDownloadsFunctionOpen\\ =\\ 11,\\\n\\ \\ kDownloadsFunctionRemoveFile\\ =\\ 12,\\\n\\ \\ kDownloadsFunctionShowDefaultFolder\\ =\\ 13,\\\n\\ \\ kDownloadsFunctionSetShelfEnabled\\ =\\ 14,\\\n\\ \\ kDownloadsFunctionDetermineFilename\\ =\\ 15,\\\n\\ \\ kDownloadsFunctionSetUiOptions\\ =\\ 16,\\\n\\ \\ //\\ Insert\\ new\\ values\\ here,\\ not\\ at\\ the\\ beginning\\.\\\n\\ \\ kDownloadsFunctionLast\\\n\\};\\\n\\\nvoid\\ RecordApiFunctions\\(DownloadsFunctionName\\ function\\)\\ \\{\\\n\\ \\ UMA_HISTOGRAM_ENUMERATION\\(\"Download\\.ApiFunctions\",\\ function,\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ DownloadsFunctionName::kDownloadsFunctionLast\\);\\\n\\}\\\n"
+    replace: "#if !BUILDFLAG(IS_ANDROID)\n// Corresponds to |DownloadFunctions| enumeration in histograms.xml. Please\n// keep these in sync.\nenum class DownloadsFunctionName {\n  kDownloadsFunctionDownload = 0,\n  kDownloadsFunctionSearch = 1,\n  kDownloadsFunctionPause = 2,\n  kDownloadsFunctionResume = 3,\n  kDownloadsFunctionCancel = 4,\n  kDownloadsFunctionErase = 5,\n  // 6 unused\n  kDownloadsFunctionAcceptDanger = 7,\n  kDownloadsFunctionShow = 8,\n  kDownloadsFunctionDrag = 9,\n  kDownloadsFunctionGetFileIcon = 10,\n  kDownloadsFunctionOpen = 11,\n  kDownloadsFunctionRemoveFile = 12,\n  kDownloadsFunctionShowDefaultFolder = 13,\n  kDownloadsFunctionSetShelfEnabled = 14,\n  kDownloadsFunctionDetermineFilename = 15,\n  kDownloadsFunctionSetUiOptions = 16,\n  // Insert new values here, not at the beginning.\n  kDownloadsFunctionLast\n};\n\nvoid RecordApiFunctions(DownloadsFunctionName function) {\n  UMA_HISTOGRAM_ENUMERATION(\"Download.ApiFunctions\", function,\n                            DownloadsFunctionName::kDownloadsFunctionLast);\n}\n#endif  // !BUILDFLAG(IS_ANDROID)\n"
+- description: "Android downloads.show omits its dedicated measurement."
+  regex:
+    re_pattern: "\\ \\ RecordApiFunctions\\(DownloadsFunctionName::kDownloadsFunctionShow\\);\\\n\\ \\ const\\ int64_t\\ token\\ =\\ DownloadManagerService::ShowDownloadItemForExtension\\("
+    replace: "  const int64_t token = DownloadManagerService::ShowDownloadItemForExtension("
+- description: "Compile the dedicated measurement call only on non-Android."
+  regex:
+    re_pattern: "\\ \\ RecordApiFunctions\\(DownloadsFunctionName::kDownloadsFunctionDownload\\);\\\n"
+    replace: "#if !BUILDFLAG(IS_ANDROID)\n  RecordApiFunctions(DownloadsFunctionName::kDownloadsFunctionDownload);\n#endif  // !BUILDFLAG(IS_ANDROID)\n"
+- description: "Compile the dedicated measurement call only on non-Android."
+  regex:
+    re_pattern: "\\ \\ RecordApiFunctions\\(DownloadsFunctionName::kDownloadsFunctionSearch\\);\\\n"
+    replace: "#if !BUILDFLAG(IS_ANDROID)\n  RecordApiFunctions(DownloadsFunctionName::kDownloadsFunctionSearch);\n#endif  // !BUILDFLAG(IS_ANDROID)\n"
+- description: "Compile the dedicated measurement call only on non-Android."
+  regex:
+    re_pattern: "\\ \\ RecordApiFunctions\\(DownloadsFunctionName::kDownloadsFunctionPause\\);\\\n"
+    replace: "#if !BUILDFLAG(IS_ANDROID)\n  RecordApiFunctions(DownloadsFunctionName::kDownloadsFunctionPause);\n#endif  // !BUILDFLAG(IS_ANDROID)\n"
+- description: "Compile the dedicated measurement call only on non-Android."
+  regex:
+    re_pattern: "\\ \\ RecordApiFunctions\\(DownloadsFunctionName::kDownloadsFunctionResume\\);\\\n"
+    replace: "#if !BUILDFLAG(IS_ANDROID)\n  RecordApiFunctions(DownloadsFunctionName::kDownloadsFunctionResume);\n#endif  // !BUILDFLAG(IS_ANDROID)\n"
+- description: "Compile the dedicated measurement call only on non-Android."
+  regex:
+    re_pattern: "\\ \\ RecordApiFunctions\\(DownloadsFunctionName::kDownloadsFunctionCancel\\);\\\n"
+    replace: "#if !BUILDFLAG(IS_ANDROID)\n  RecordApiFunctions(DownloadsFunctionName::kDownloadsFunctionCancel);\n#endif  // !BUILDFLAG(IS_ANDROID)\n"
+- description: "Compile the dedicated measurement call only on non-Android."
+  regex:
+    re_pattern: "\\ \\ RecordApiFunctions\\(DownloadsFunctionName::kDownloadsFunctionErase\\);\\\n"
+    replace: "#if !BUILDFLAG(IS_ANDROID)\n  RecordApiFunctions(DownloadsFunctionName::kDownloadsFunctionErase);\n#endif  // !BUILDFLAG(IS_ANDROID)\n"
+- description: "Compile the dedicated measurement call only on non-Android."
+  regex:
+    re_pattern: "\\ \\ RecordApiFunctions\\(DownloadsFunctionName::kDownloadsFunctionRemoveFile\\);\\\n"
+    replace: "#if !BUILDFLAG(IS_ANDROID)\n  RecordApiFunctions(DownloadsFunctionName::kDownloadsFunctionRemoveFile);\n#endif  // !BUILDFLAG(IS_ANDROID)\n"
+- description: "Compile the dedicated measurement call only on non-Android."
+  regex:
+    re_pattern: "\\ \\ RecordApiFunctions\\(DownloadsFunctionName::kDownloadsFunctionAcceptDanger\\);\\\n"
+    replace: "#if !BUILDFLAG(IS_ANDROID)\n  RecordApiFunctions(DownloadsFunctionName::kDownloadsFunctionAcceptDanger);\n#endif  // !BUILDFLAG(IS_ANDROID)\n"
+- description: "Compile the dedicated measurement call only on non-Android."
+  regex:
+    re_pattern: "\\ \\ RecordApiFunctions\\(\\\n\\ \\ \\ \\ \\ \\ DownloadsFunctionName::kDownloadsFunctionShowDefaultFolder\\);\\\n"
+    replace: "#if !BUILDFLAG(IS_ANDROID)\n  RecordApiFunctions(\n      DownloadsFunctionName::kDownloadsFunctionShowDefaultFolder);\n#endif  // !BUILDFLAG(IS_ANDROID)\n"
+- description: "Compile the dedicated measurement call only on non-Android."
+  regex:
+    re_pattern: "\\ \\ RecordApiFunctions\\(DownloadsFunctionName::kDownloadsFunctionOpen\\);\\\n"
+    replace: "#if !BUILDFLAG(IS_ANDROID)\n  RecordApiFunctions(DownloadsFunctionName::kDownloadsFunctionOpen);\n#endif  // !BUILDFLAG(IS_ANDROID)\n"
+- description: "Compile the dedicated measurement call only on non-Android."
+  regex:
+    re_pattern: "\\ \\ RecordApiFunctions\\(DownloadsFunctionName::kDownloadsFunctionSetShelfEnabled\\);\\\n"
+    replace: "#if !BUILDFLAG(IS_ANDROID)\n  RecordApiFunctions(DownloadsFunctionName::kDownloadsFunctionSetShelfEnabled);\n#endif  // !BUILDFLAG(IS_ANDROID)\n"
+- description: "Compile the dedicated measurement call only on non-Android."
+  regex:
+    re_pattern: "\\ \\ RecordApiFunctions\\(DownloadsFunctionName::kDownloadsFunctionSetUiOptions\\);\\\n"
+    replace: "#if !BUILDFLAG(IS_ANDROID)\n  RecordApiFunctions(DownloadsFunctionName::kDownloadsFunctionSetUiOptions);\n#endif  // !BUILDFLAG(IS_ANDROID)\n"
+- description: "Compile the dedicated measurement call only on non-Android."
+  regex:
+    re_pattern: "\\ \\ RecordApiFunctions\\(DownloadsFunctionName::kDownloadsFunctionGetFileIcon\\);\\\n"
+    replace: "#if !BUILDFLAG(IS_ANDROID)\n  RecordApiFunctions(DownloadsFunctionName::kDownloadsFunctionGetFileIcon);\n#endif  // !BUILDFLAG(IS_ANDROID)\n"
+- description: "Compile the dedicated measurement call only on non-Android."
+  regex:
+    re_pattern: "\\ \\ RecordApiFunctions\\(\\\n\\ \\ \\ \\ \\ \\ DownloadsFunctionName::kDownloadsFunctionDetermineFilename\\);\\\n"
+    replace: "#if !BUILDFLAG(IS_ANDROID)\n  RecordApiFunctions(\n      DownloadsFunctionName::kDownloadsFunctionDetermineFilename);\n#endif  // !BUILDFLAG(IS_ANDROID)\n"
+- description: Require the same enabled extension instance at Android reveal admission and delayed acknowledgment.
+  regex:
+    pattern: "  if (!current_extension ||\n      !current_extension->permissions_data()->HasAPIPermission(\n"
+    replace: "  if (!current_extension || current_extension != function->extension() ||\n      !current_extension->permissions_data()->HasAPIPermission(\n"
+  count: 1
+- description: "Android downloads acceptDanger synchronous response 1"
+  regex:
+    pattern: "  PromptOrWait(params->download_id, 10);\n  return RespondLater();\n"
+    replace: "  PromptOrWait(params->download_id, 10);\n#if BUILDFLAG(IS_ANDROID)\n  return did_respond() ? AlreadyResponded() : RespondLater();\n#else\n  return RespondLater();\n#endif\n"
+  count: 1

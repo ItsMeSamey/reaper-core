@@ -1,0 +1,74 @@
+diff --git a/chrome/browser/extensions/api/gcm/gcm_api.cc b/chrome/browser/extensions/api/gcm/gcm_api.cc
+--- a/chrome/browser/extensions/api/gcm/gcm_api.cc
++++ b/chrome/browser/extensions/api/gcm/gcm_api.cc
+@@ -26,6 +26,10 @@
+ #include "extensions/browser/event_router.h"
+ #include "extensions/buildflags/buildflags.h"
+ #include "extensions/common/extension.h"
++
++#if BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_DESKTOP_ANDROID_EXTENSIONS)
++#include "brave/browser/extensions/api/gcm/android_extension_gcm_driver.h"
++#endif
+ 
+ static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
+ 
+@@ -77,8 +81,13 @@
+          key.compare(0, std::size(kCollapseKey) - 1, kCollapseKey) != 0 &&
+          lower.compare(0, std::size(kGoogleRestrictedPrefix) - 1,
+                        kGoogleRestrictedPrefix) != 0 &&
++#if BUILDFLAG(IS_ANDROID)
++         lower.compare(0, std::size(kGoogDotRestrictedPrefix) - 1,
++                       kGoogDotRestrictedPrefix) != 0;
++#else
+          lower.compare(0, std::size(kGoogDotRestrictedPrefix),
+                        kGoogDotRestrictedPrefix) != 0;
++#endif
+ }
+ 
+ }  // namespace
+@@ -115,10 +124,18 @@
+       api::gcm::Register::Params::Create(args());
+   EXTENSION_FUNCTION_VALIDATE(params);
+ 
+-#if BUILDFLAG(IS_ANDROID)
+-  // This server API was deprecated by Firebase in 2019. Don't bother trying to
+-  // implement register() on Android - it will just return an error.
+-  // TODO(crbug.com/421235963): Consider deprecating on other platforms.
++#if BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_DESKTOP_ANDROID_EXTENSIONS)
++  auto* handler =
++      ExtensionGCMAppHandler::GetFactoryInstance()->Get(browser_context());
++  auto* driver = handler ? handler->GetAndroidDriver() : nullptr;
++  if (!driver) {
++    return RespondNow(Error(kGCMDisabled));
++  }
++  driver->Register(
++      extension()->id(), params->sender_ids,
++      base::BindOnce(&GcmRegisterFunction::CompleteFunctionWithResult, this));
++  return did_respond() ? AlreadyResponded() : RespondLater();
++#elif BUILDFLAG(IS_ANDROID)
+   return RespondNow(Error(GcmResultToError(gcm::GCMClient::UNKNOWN_ERROR)));
+ #else
+   GetGCMDriver()->Register(
+@@ -149,10 +166,18 @@
+ GcmUnregisterFunction::~GcmUnregisterFunction() = default;
+ 
+ ExtensionFunction::ResponseAction GcmUnregisterFunction::Run() {
+-#if BUILDFLAG(IS_ANDROID)
+-  // This server API was deprecated by Firebase in 2019. Don't bother trying to
+-  // implement register() on Android - it will just return an error.
+-  // TODO(crbug.com/421235963): Consider deprecating on other platforms.
++#if BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_DESKTOP_ANDROID_EXTENSIONS)
++  auto* handler =
++      ExtensionGCMAppHandler::GetFactoryInstance()->Get(browser_context());
++  auto* driver = handler ? handler->GetAndroidDriver() : nullptr;
++  if (!driver) {
++    return RespondNow(Error(kGCMDisabled));
++  }
++  driver->Unregister(
++      extension()->id(),
++      base::BindOnce(&GcmUnregisterFunction::CompleteFunctionWithResult, this));
++  return did_respond() ? AlreadyResponded() : RespondLater();
++#elif BUILDFLAG(IS_ANDROID)
+   return RespondNow(Error(GcmResultToError(gcm::GCMClient::UNKNOWN_ERROR)));
+ #else
+   GetGCMDriver()->Unregister(

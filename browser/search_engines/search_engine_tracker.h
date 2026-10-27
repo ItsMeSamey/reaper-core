@@ -12,7 +12,9 @@
 #include "base/scoped_observation.h"
 #include "base/timer/wall_clock_timer.h"
 #include "brave/components/brave_ads/buildflags/buildflags.h"
+#include "brave/components/brave_rewards/core/buildflags/buildflags.h"
 #include "brave/components/web_discovery/buildflags/buildflags.h"
+#include "build/build_config.h"
 #include "components/keyed_service/content/browser_context_keyed_service_factory.h"
 #include "components/keyed_service/core/keyed_service.h"
 #include "components/pref_registry/pref_registry_syncable.h"
@@ -42,12 +44,14 @@ inline constexpr char kWebDiscoveryAndAdsMetric[] =
 #endif  // BUILDFLAG(ENABLE_BRAVE_ADS)
 inline constexpr char kWebDiscoveryDefaultEngineMetric[] =
     "Brave.Search.WebDiscoveryDefaultEngine";
+#if !BUILDFLAG(IS_ANDROID) || BUILDFLAG(ENABLE_BRAVE_REWARDS)
 inline constexpr char kRewardsDefaultEngineMetric[] =
     "Brave.Search.DefaultEngine.Rewards";
 inline constexpr char kNonRewardsDefaultEngineMetric[] =
     "Brave.Search.DefaultEngine.NonRewards";
 inline constexpr char kNonBraveSearchWalletConnectedMetric[] =
     "Brave.Rewards.NonBraveSearchWalletConnected";
+#endif  // !BUILDFLAG(IS_ANDROID) || BUILDFLAG(ENABLE_BRAVE_REWARDS)
 
 // Note: append-only enumeration! Never remove any existing values, as this enum
 // is used to bucket a UMA histogram, and removing values breaks that.
@@ -123,7 +127,9 @@ class SearchEngineTracker : public KeyedService,
   SearchEngineTracker(const SearchEngineTracker&) = delete;
   SearchEngineTracker& operator=(const SearchEngineTracker&) = delete;
 
+#if !BUILDFLAG(IS_ANDROID)
   void RecordLocationBarQuery();
+#endif  // !BUILDFLAG(IS_ANDROID)
 
  private:
   // TemplateURLServiceObserver overrides:
@@ -134,7 +140,9 @@ class SearchEngineTracker : public KeyedService,
 #endif
 
   void RecordDefaultEngine();
+#if !BUILDFLAG(IS_ANDROID) || BUILDFLAG(ENABLE_BRAVE_REWARDS)
   void RecordRewardsWalletConnected();
+#endif  // !BUILDFLAG(IS_ANDROID) || BUILDFLAG(ENABLE_BRAVE_REWARDS)
 
   void MigrateObsoletePrefs();
 

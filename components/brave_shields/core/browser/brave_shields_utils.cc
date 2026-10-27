@@ -3,6 +3,8 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at https://mozilla.org/MPL/2.0/.
 
+#include "build/build_config.h"
+
 #include "brave/components/brave_shields/core/browser/brave_shields_utils.h"
 
 #include <optional>
@@ -12,7 +14,9 @@
 #include "base/debug/dump_without_crashing.h"
 #include "base/logging.h"
 #include "base/strings/strcat.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_shields/core/browser/brave_shields_p3a.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_shields/core/common/brave_shield_utils.h"
 #include "brave/components/brave_shields/core/common/brave_shields_panel.mojom-data-view.h"
 #include "brave/components/brave_shields/core/common/features.h"
@@ -35,15 +39,19 @@ namespace brave_shields {
 
 namespace {
 
+#if !BUILDFLAG(IS_ANDROID)
 void RecordShieldsToggled(PrefService* local_state) {
   ::brave_shields::MaybeRecordShieldsUsageP3A(::brave_shields::kShutOffShields,
                                               local_state);
 }
+#endif  // !BUILDFLAG(IS_ANDROID)
 
+#if !BUILDFLAG(IS_ANDROID)
 void RecordShieldsSettingChanged(PrefService* local_state) {
   ::brave_shields::MaybeRecordShieldsUsageP3A(
       ::brave_shields::kChangedPerSiteShields, local_state);
 }
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 ContentSetting GetDefaultBlockFromControlType(ControlType type) {
   if (type == ControlType::DEFAULT) {
@@ -226,7 +234,9 @@ void SetBraveShieldsEnabled(HostContentSettingsMap* map,
         ContentSettingsType::BRAVE_SHIELDS, setting);
 
     if (!map->IsOffTheRecord()) {
+#if !BUILDFLAG(IS_ANDROID)
       RecordShieldsToggled(local_state);
+#endif  // !BUILDFLAG(IS_ANDROID)
     }
   } else {
     map->SetContentSettingCustomScope(
@@ -272,7 +282,9 @@ void SetAdControlType(HostContentSettingsMap* map,
                                     ContentSettingsPattern::Wildcard(),
                                     ContentSettingsType::BRAVE_TRACKERS,
                                     GetDefaultBlockFromControlType(type));
+#if !BUILDFLAG(IS_ANDROID)
   RecordShieldsSettingChanged(local_state);
+#endif  // !BUILDFLAG(IS_ANDROID)
 }
 
 ControlType GetAdControlType(HostContentSettingsMap* map, const GURL& url) {
@@ -300,6 +312,7 @@ void SetCosmeticFilteringControlType(HostContentSettingsMap* map,
     return;
   }
 
+#if !BUILDFLAG(IS_ANDROID)
   ControlType prev_setting = GetCosmeticFilteringControlType(map, url);
   content_settings::SettingInfo setting_info;
   base::Value web_setting = map->GetWebsiteSetting(
@@ -307,15 +320,19 @@ void SetCosmeticFilteringControlType(HostContentSettingsMap* map,
       &setting_info);
   bool was_default =
       web_setting.is_none() || setting_info.primary_pattern.MatchesAllHosts();
+#endif  // !BUILDFLAG(IS_ANDROID)
 
   map->SetWebsiteSettingCustomScope(
       primary_pattern, ContentSettingsPattern::Wildcard(),
       CosmeticFilteringSetting::kContentSettingsType,
       CosmeticFilteringSetting::ToValue(type));
 
+#if !BUILDFLAG(IS_ANDROID)
   if (!map->IsOffTheRecord()) {
     // Only report to P3A if not a guest/incognito profile
+#if !BUILDFLAG(IS_ANDROID)
     RecordShieldsSettingChanged(local_state);
+#endif  // !BUILDFLAG(IS_ANDROID)
     if (url.is_empty()) {
       // If global setting changed, report global setting and recalulate
       // domain specific setting counts
@@ -329,6 +346,7 @@ void SetCosmeticFilteringControlType(HostContentSettingsMap* map,
           was_default ? nullptr : &prev_setting, type);
     }
   }
+#endif  // !BUILDFLAG(IS_ANDROID)
 }
 
 ControlType GetCosmeticFilteringControlType(HostContentSettingsMap* map,
@@ -440,7 +458,9 @@ void SetCookieControlType(HostContentSettingsMap* map,
     return;
   }
 
+#if !BUILDFLAG(IS_ANDROID)
   RecordShieldsSettingChanged(local_state);
+#endif  // !BUILDFLAG(IS_ANDROID)
 
   if (patterns.host_pattern == ContentSettingsPattern::Wildcard()) {
     // Default settings.
@@ -551,6 +571,7 @@ void SetFingerprintingControlType(HostContentSettingsMap* map,
     return;
   }
 
+#if !BUILDFLAG(IS_ANDROID)
   ControlType prev_setting = GetFingerprintingControlType(map, url);
   content_settings::SettingInfo setting_info;
   base::Value web_setting = map->GetWebsiteSetting(
@@ -558,6 +579,7 @@ void SetFingerprintingControlType(HostContentSettingsMap* map,
   bool was_default =
       web_setting.is_none() || setting_info.primary_pattern.MatchesAllHosts() ||
       setting_info.source == content_settings::SettingSource::kRemoteList;
+#endif  // !BUILDFLAG(IS_ANDROID)
 
   ContentSetting content_setting;
   if (type == ControlType::DEFAULT || type == ControlType::BLOCK_THIRD_PARTY) {
@@ -570,9 +592,12 @@ void SetFingerprintingControlType(HostContentSettingsMap* map,
   map->SetContentSettingCustomScope(
       primary_pattern, ContentSettingsPattern::Wildcard(),
       ContentSettingsType::BRAVE_FINGERPRINTING_V2, content_setting);
+#if !BUILDFLAG(IS_ANDROID)
   if (!map->IsOffTheRecord()) {
     // Only report to P3A if not a guest/incognito profile
+#if !BUILDFLAG(IS_ANDROID)
     RecordShieldsSettingChanged(local_state);
+#endif  // !BUILDFLAG(IS_ANDROID)
     if (url.is_empty()) {
       // If global setting changed, report global setting and recalulate
       // domain specific setting counts
@@ -586,6 +611,7 @@ void SetFingerprintingControlType(HostContentSettingsMap* map,
           was_default ? nullptr : &prev_setting, type);
     }
   }
+#endif  // !BUILDFLAG(IS_ANDROID)
 }
 
 ControlType GetFingerprintingControlType(HostContentSettingsMap* map,
@@ -653,8 +679,12 @@ void SetHttpsUpgradeControlType(HostContentSettingsMap* map,
         secure_url, GURL(), ContentSettingsType::HTTP_ALLOWED, base::Value());
   }
 
+#if !BUILDFLAG(IS_ANDROID)
   RecordShieldsSettingChanged(local_state);
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
   RecordHTTPSUpgradeSettingP3A(map);
+#endif  // !BUILDFLAG(IS_ANDROID)
 }
 
 ControlType GetHttpsUpgradeControlType(HostContentSettingsMap* map,
@@ -734,7 +764,9 @@ void SetNoScriptControlType(HostContentSettingsMap* map,
       ContentSettingsType::JAVASCRIPT,
       type == ControlType::ALLOW ? CONTENT_SETTING_ALLOW
                                  : CONTENT_SETTING_BLOCK);
+#if !BUILDFLAG(IS_ANDROID)
   RecordShieldsSettingChanged(local_state);
+#endif  // !BUILDFLAG(IS_ANDROID)
 }
 
 ControlType GetNoScriptControlType(HostContentSettingsMap* map,
@@ -767,7 +799,9 @@ void SetWebcompatEnabled(HostContentSettingsMap* map,
   map->SetContentSettingCustomScope(primary_pattern,
                                     ContentSettingsPattern::Wildcard(),
                                     webcompat_settings_type, setting);
+#if !BUILDFLAG(IS_ANDROID)
   RecordShieldsSettingChanged(local_state);
+#endif  // !BUILDFLAG(IS_ANDROID)
 }
 
 bool IsWebcompatEnabled(HostContentSettingsMap* map,

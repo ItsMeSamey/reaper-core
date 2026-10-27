@@ -1,0 +1,260 @@
+diff --git a/chrome/browser/ui/android/exclusive_access/exclusive_access_bubble_android_unittest.cc b/chrome/browser/ui/android/exclusive_access/exclusive_access_bubble_android_unittest.cc
+index 2be564f29c6094b62c03fba8fff375138c3d28c0..a67537ad565579780f029c402f926aa638ad0192 100644
+--- a/chrome/browser/ui/android/exclusive_access/exclusive_access_bubble_android_unittest.cc
++++ b/chrome/browser/ui/android/exclusive_access/exclusive_access_bubble_android_unittest.cc
+@@ -10,8 +10,13 @@
+ 
+ #include "base/android/jni_string.h"
+ #include "base/functional/callback_helpers.h"
++#include "base/test/scoped_feature_list.h"
+ #include "chrome/browser/ui/android/exclusive_access/exclusive_access_context_android.h"
++#include "chrome/browser/ui/ui_features.h"
+ #include "chrome/test/base/chrome_render_view_host_test_harness.h"
++#include "components/fullscreen_control/fullscreen_features.h"
++#include "components/strings/grit/components_strings.h"
++#include "components/url_formatter/elide_url.h"
+ #include "testing/gmock/include/gmock/gmock.h"
+ #include "testing/gtest/include/gtest/gtest.h"
+ #include "ui/base/l10n/l10n_util.h"
+@@ -260,4 +265,241 @@
+   testing::Mock::VerifyAndClearExpectations(mock_bridge_ptr);
+ }
+ 
++TEST_F(ExclusiveAccessBubbleAndroidTest,
++       ExtensionFullscreenTouchNoticeUsesApprovedDisplayName) {
++  base::test::ScopedFeatureList features;
++  features.InitAndEnableFeature(features::kFullscreenBubbleShowOrigin);
++  ExclusiveAccessBubbleParams params;
++  params.type =
++      EXCLUSIVE_ACCESS_BUBBLE_TYPE_EXTENSION_FULLSCREEN_EXIT_INSTRUCTION;
++  params.origin = url::Origin::Create(
++      GURL("chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/"));
++  const std::u16string name = u"Approved fullscreen extension";
++  auto bridge = std::make_unique<MockBridge>();
++  auto* bridge_ptr = bridge.get();
++  EXPECT_CALL(*bridge_ptr, IsVisible()).WillOnce(Return(false));
++  EXPECT_CALL(*bridge_ptr, IsKeyboardConnected()).WillOnce(Return(false));
++  EXPECT_CALL(
++      *bridge_ptr,
++      Update(l10n_util::GetStringFUTF16(
++          IDS_FULLSCREEN_TOUCH_BASED_EXIT_FULLSCREEN_WITH_ORIGIN, name)))
++      .Times(1);
++  EXPECT_CALL(*bridge_ptr, Show()).Times(1);
++  EXPECT_CALL(*bridge_ptr, Hide()).Times(1);
++  ExclusiveAccessBubbleAndroid bubble(params, base::DoNothing(),
++                                      std::move(bridge), name);
++  EXPECT_EQ(bubble.params().type, params.type);
++}
++
++TEST_F(ExclusiveAccessBubbleAndroidTest,
++       ExtensionFullscreenKeyboardNoticeUsesNameAndEscapeFallback) {
++  base::test::ScopedFeatureList features;
++  features.InitWithFeatures(
++      {features::kFullscreenBubbleShowOrigin},
++      {features::kPressAndHoldEscToExitBrowserFullscreen});
++  ExclusiveAccessBubbleParams params;
++  params.type =
++      EXCLUSIVE_ACCESS_BUBBLE_TYPE_EXTENSION_FULLSCREEN_EXIT_INSTRUCTION;
++  params.origin = url::Origin::Create(
++      GURL("chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/"));
++  const std::u16string name = u"Approved fullscreen extension";
++  auto bridge = std::make_unique<MockBridge>();
++  auto* bridge_ptr = bridge.get();
++  EXPECT_CALL(*bridge_ptr, IsVisible()).WillOnce(Return(false));
++  EXPECT_CALL(*bridge_ptr, IsKeyboardConnected()).WillOnce(Return(true));
++  EXPECT_CALL(*bridge_ptr,
++              Update(l10n_util::GetStringFUTF16(
++                  IDS_FULLSCREEN_PRESS_TO_EXIT_FULLSCREEN_WITH_ORIGIN, name,
++                  l10n_util::GetStringUTF16(IDS_APP_ESC_KEY))))
++      .Times(1);
++  EXPECT_CALL(*bridge_ptr, Show()).Times(1);
++  EXPECT_CALL(*bridge_ptr, Hide()).Times(1);
++  ExclusiveAccessBubbleAndroid bubble(params, base::DoNothing(),
++                                      std::move(bridge), name);
++  EXPECT_EQ(bubble.params().type, params.type);
++}
++
++TEST_F(ExclusiveAccessBubbleAndroidTest,
++       ExtensionFullscreenKeyboardNoticeRetainsHoldEscapeInstruction) {
++  base::test::ScopedFeatureList features;
++  features.InitWithFeatures({features::kFullscreenBubbleShowOrigin,
++                             features::kPressAndHoldEscToExitBrowserFullscreen},
++                            {});
++  ExclusiveAccessBubbleParams params;
++  params.type =
++      EXCLUSIVE_ACCESS_BUBBLE_TYPE_EXTENSION_FULLSCREEN_EXIT_INSTRUCTION;
++  params.origin = url::Origin::Create(
++      GURL("chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/"));
++  const std::u16string name = u"Approved fullscreen extension";
++  auto bridge = std::make_unique<MockBridge>();
++  auto* bridge_ptr = bridge.get();
++  EXPECT_CALL(*bridge_ptr, IsVisible()).WillOnce(Return(false));
++  EXPECT_CALL(*bridge_ptr, IsKeyboardConnected()).WillOnce(Return(true));
++  EXPECT_CALL(*bridge_ptr,
++              Update(l10n_util::GetStringFUTF16(
++                  IDS_FULLSCREEN_HOLD_TO_EXIT_FULLSCREEN_WITH_ORIGIN, name,
++                  l10n_util::GetStringUTF16(IDS_APP_ESC_KEY))))
++      .Times(1);
++  EXPECT_CALL(*bridge_ptr, Show()).Times(1);
++  EXPECT_CALL(*bridge_ptr, Hide()).Times(1);
++  ExclusiveAccessBubbleAndroid bubble(params, base::DoNothing(),
++                                      std::move(bridge), name);
++  EXPECT_EQ(bubble.params().type, params.type);
++}
++
++TEST_F(ExclusiveAccessBubbleAndroidTest,
++       ExtensionFullscreenNameRetainsDownloadInstruction) {
++  base::test::ScopedFeatureList features;
++  features.InitWithFeatures(
++      {features::kFullscreenBubbleShowOrigin},
++      {features::kPressAndHoldEscToExitBrowserFullscreen});
++  ExclusiveAccessBubbleParams params;
++  params.type =
++      EXCLUSIVE_ACCESS_BUBBLE_TYPE_EXTENSION_FULLSCREEN_EXIT_INSTRUCTION;
++  params.origin = url::Origin::Create(
++      GURL("chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/"));
++  params.has_download = true;
++  auto bridge = std::make_unique<MockBridge>();
++  auto* bridge_ptr = bridge.get();
++  EXPECT_CALL(*bridge_ptr, IsVisible()).WillOnce(Return(false));
++  EXPECT_CALL(*bridge_ptr, IsKeyboardConnected()).WillOnce(Return(true));
++  EXPECT_CALL(*bridge_ptr, Update(l10n_util::GetStringFUTF16(
++                               IDS_FULLSCREEN_PRESS_TO_SEE_DOWNLOADS,
++                               l10n_util::GetStringUTF16(IDS_APP_ESC_KEY))))
++      .Times(1);
++  EXPECT_CALL(*bridge_ptr, Show()).Times(1);
++  EXPECT_CALL(*bridge_ptr, Hide()).Times(1);
++  ExclusiveAccessBubbleAndroid bubble(params, base::DoNothing(),
++                                      std::move(bridge),
++                                      u"Approved fullscreen extension");
++  EXPECT_EQ(bubble.params().type, params.type);
++}
++
++TEST_F(ExclusiveAccessBubbleAndroidTest,
++       ContextAppliesCopiedNameOnlyToMatchingExtensionOrigin) {
++  base::test::ScopedFeatureList features;
++  features.InitAndEnableFeature(features::kFullscreenBubbleShowOrigin);
++  const GURL extension_url(
++      "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/");
++  ExclusiveAccessBubbleParams params;
++  params.type =
++      EXCLUSIVE_ACCESS_BUBBLE_TYPE_EXTENSION_FULLSCREEN_EXIT_INSTRUCTION;
++  params.origin = url::Origin::Create(extension_url);
++  const auto fallback = url_formatter::FormatOriginForSecurityDisplay(
++      params.origin, url_formatter::SchemeDisplay::OMIT_CRYPTOGRAPHIC);
++  const std::u16string name = u"Approved fullscreen extension";
++  auto bridge = std::make_unique<MockBridge>();
++  auto* bridge_ptr = bridge.get();
++  EXPECT_CALL(*bridge_ptr, IsVisible()).WillRepeatedly(Return(false));
++  EXPECT_CALL(*bridge_ptr, IsKeyboardConnected()).WillRepeatedly(Return(false));
++  EXPECT_CALL(
++      *bridge_ptr,
++      Update(l10n_util::GetStringFUTF16(
++          IDS_FULLSCREEN_TOUCH_BASED_EXIT_FULLSCREEN_WITH_ORIGIN, fallback)))
++      .Times(1);
++  EXPECT_CALL(*bridge_ptr, Show()).Times(1);
++  auto bubble = std::make_unique<ExclusiveAccessBubbleAndroid>(
++      params, base::DoNothing(), std::move(bridge));
++  testing::Mock::VerifyAndClearExpectations(bridge_ptr);
++  ExclusiveAccessContextAndroid context;
++  context.SetBrowserFullscreenExtensionIdentity(extension_url, name);
++  context.SetBubbleForTesting(std::move(bubble));
++  params.force_update = true;
++  EXPECT_CALL(*bridge_ptr, IsVisible()).WillOnce(Return(false));
++  EXPECT_CALL(*bridge_ptr, IsKeyboardConnected()).WillOnce(Return(false));
++  EXPECT_CALL(
++      *bridge_ptr,
++      Update(l10n_util::GetStringFUTF16(
++          IDS_FULLSCREEN_TOUCH_BASED_EXIT_FULLSCREEN_WITH_ORIGIN, name)))
++      .Times(1);
++  EXPECT_CALL(*bridge_ptr, Show()).Times(1);
++  EXPECT_CALL(*bridge_ptr, Hide()).Times(1);
++  context.UpdateExclusiveAccessBubble(params, base::DoNothing());
++}
++
++TEST_F(ExclusiveAccessBubbleAndroidTest,
++       ContextKeepsDifferentOriginOutOfCopiedNameNotice) {
++  base::test::ScopedFeatureList features;
++  features.InitAndEnableFeature(features::kFullscreenBubbleShowOrigin);
++  ExclusiveAccessBubbleParams params;
++  params.type =
++      EXCLUSIVE_ACCESS_BUBBLE_TYPE_EXTENSION_FULLSCREEN_EXIT_INSTRUCTION;
++  params.origin = url::Origin::Create(
++      GURL("chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/"));
++  const auto fallback = url_formatter::FormatOriginForSecurityDisplay(
++      params.origin, url_formatter::SchemeDisplay::OMIT_CRYPTOGRAPHIC);
++  auto bridge = std::make_unique<MockBridge>();
++  auto* bridge_ptr = bridge.get();
++  EXPECT_CALL(*bridge_ptr, IsVisible()).WillRepeatedly(Return(false));
++  EXPECT_CALL(*bridge_ptr, IsKeyboardConnected()).WillRepeatedly(Return(false));
++  EXPECT_CALL(
++      *bridge_ptr,
++      Update(l10n_util::GetStringFUTF16(
++          IDS_FULLSCREEN_TOUCH_BASED_EXIT_FULLSCREEN_WITH_ORIGIN, fallback)))
++      .Times(1);
++  EXPECT_CALL(*bridge_ptr, Show()).Times(1);
++  auto bubble = std::make_unique<ExclusiveAccessBubbleAndroid>(
++      params, base::DoNothing(), std::move(bridge));
++  testing::Mock::VerifyAndClearExpectations(bridge_ptr);
++  ExclusiveAccessContextAndroid context;
++  context.SetBrowserFullscreenExtensionIdentity(
++      GURL("chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/"),
++      u"Approved fullscreen extension");
++  context.SetBubbleForTesting(std::move(bubble));
++  params.force_update = true;
++  EXPECT_CALL(*bridge_ptr, IsVisible()).WillOnce(Return(false));
++  EXPECT_CALL(*bridge_ptr, IsKeyboardConnected()).WillOnce(Return(false));
++  EXPECT_CALL(
++      *bridge_ptr,
++      Update(l10n_util::GetStringFUTF16(
++          IDS_FULLSCREEN_TOUCH_BASED_EXIT_FULLSCREEN_WITH_ORIGIN, fallback)))
++      .Times(1);
++  EXPECT_CALL(*bridge_ptr, Show()).Times(1);
++  EXPECT_CALL(*bridge_ptr, Hide()).Times(1);
++  context.UpdateExclusiveAccessBubble(params, base::DoNothing());
++}
++
++TEST_F(ExclusiveAccessBubbleAndroidTest,
++       RepeatedUserInputNoticeRetainsApprovedExtensionName) {
++  base::test::ScopedFeatureList features;
++  features.InitAndEnableFeature(features::kFullscreenBubbleShowOrigin);
++  const GURL extension_url(
++      "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/");
++  ExclusiveAccessBubbleParams params;
++  params.type =
++      EXCLUSIVE_ACCESS_BUBBLE_TYPE_EXTENSION_FULLSCREEN_EXIT_INSTRUCTION;
++  params.origin = url::Origin::Create(extension_url);
++  const std::u16string name = u"Approved fullscreen extension";
++  const auto expected_text = l10n_util::GetStringFUTF16(
++      IDS_FULLSCREEN_TOUCH_BASED_EXIT_FULLSCREEN_WITH_ORIGIN, name);
++  auto bridge = std::make_unique<MockBridge>();
++  auto* bridge_ptr = bridge.get();
++  EXPECT_CALL(*bridge_ptr, IsVisible()).WillOnce(Return(false));
++  EXPECT_CALL(*bridge_ptr, IsKeyboardConnected()).WillOnce(Return(false));
++  EXPECT_CALL(*bridge_ptr, Update(expected_text)).Times(1);
++  EXPECT_CALL(*bridge_ptr, Show()).Times(1);
++  auto bubble = std::make_unique<ExclusiveAccessBubbleAndroid>(
++      params, base::DoNothing(), std::move(bridge), name);
++  auto* bubble_ptr = bubble.get();
++  testing::Mock::VerifyAndClearExpectations(bridge_ptr);
++  ExclusiveAccessContextAndroid context;
++  context.SetBrowserFullscreenExtensionIdentity(extension_url, name);
++  context.SetBubbleForTesting(std::move(bubble));
++
++  EXPECT_CALL(*bridge_ptr, Update(_)).Times(0);
++  EXPECT_CALL(*bridge_ptr, Show()).Times(0);
++  for (int i = 0; i < 9; ++i) {
++    context.OnExclusiveAccessUserInput();
++  }
++  testing::Mock::VerifyAndClearExpectations(bridge_ptr);
++  EXPECT_CALL(*bridge_ptr, IsVisible()).WillOnce(Return(false));
++  EXPECT_CALL(*bridge_ptr, IsKeyboardConnected()).WillOnce(Return(false));
++  EXPECT_CALL(*bridge_ptr, Update(expected_text)).Times(1);
++  EXPECT_CALL(*bridge_ptr, Show()).Times(1);
++  EXPECT_CALL(*bridge_ptr, Hide()).Times(1);
++  context.OnExclusiveAccessUserInput();
++  EXPECT_EQ(bubble_ptr->params().origin, params.origin);
++  EXPECT_EQ(bubble_ptr->params().type, params.type);
++}
++
+ }  // namespace

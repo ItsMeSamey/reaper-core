@@ -1,0 +1,126 @@
+diff --git a/chrome/browser/ui/browser_window/internal/android/create_browser_window_android.cc b/chrome/browser/ui/browser_window/internal/android/create_browser_window_android.cc
+index d1e54e6e976aa8227c806bad4bcc3601080c65ee..db28e803b822c34a20f9e5d18730bbdbde6d9edf 100644
+--- a/chrome/browser/ui/browser_window/internal/android/create_browser_window_android.cc
++++ b/chrome/browser/ui/browser_window/internal/android/create_browser_window_android.cc
+@@ -6,20 +6,78 @@
+ 
+ #include "base/android/callback_android.h"
+ #include "base/android/jni_android.h"
++#include "base/android/jni_string.h"
+ #include "base/functional/bind.h"
+ #include "base/functional/callback.h"
+ #include "base/notimplemented.h"
++#include "base/strings/utf_string_conversions.h"
++#include "base/task/single_thread_task_runner.h"
+ #include "chrome/browser/prefs/incognito_mode_prefs.h"
+ #include "chrome/browser/profiles/nuke_profile_directory_utils.h"
+ #include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/ui/browser_window/internal/android/android_base_window.h"
++#include "chrome/browser/ui/url_identity.h"
++#include "chrome/common/pref_names.h"
++#include "components/prefs/pref_service.h"
+ #include "content/public/browser/web_contents.h"
++#include "url/gurl.h"
+ 
+ // These must be last.
+ #include "chrome/browser/ui/browser_window/internal/jni/AndroidBrowserWindowCreateParamsImpl_jni.h"
+ #include "chrome/browser/ui/browser_window/internal/jni/BrowserWindowCreatorBridge_jni.h"
+ 
++namespace {
++
++bool CanEnterAndroidBrowserFullscreen(Profile& profile) {
++  return !profile.ShutdownStarted() &&
++         profile.GetPrefs()->GetBoolean(prefs::kFullscreenAllowed);
++}
++
++std::string GetFullscreenExtensionDisplayName(
++    Profile& profile,
++    const std::string& extension_url) {
++  if (extension_url.empty()) {
++    return {};
++  }
++  constexpr UrlIdentity::TypeSet allowed_types = {
++      UrlIdentity::Type::kDefault, UrlIdentity::Type::kChromeExtension};
++  constexpr UrlIdentity::FormatOptions options{
++      .default_options = {
++          UrlIdentity::DefaultFormatOptions::kOmitCryptographicScheme}};
++  return base::UTF16ToUTF8(UrlIdentity::CreateFromUrl(&profile,
++                                                      GURL(extension_url),
++                                                      allowed_types, options)
++                               .name);
++}
++
++}  // namespace
++
++void SetAndroidBrowserWindowFullscreen(BrowserWindowInterface& browser_window,
++                                       bool fullscreen,
++                                       const std::string& extension_url) {
++  if (browser_window.IsDeleteScheduled() ||
++      (fullscreen &&
++       !CanEnterAndroidBrowserFullscreen(*browser_window.GetProfile()))) {
++    return;
++  }
++  // AndroidBrowserWindow is backed by this platform's AndroidBaseWindow. Keep
++  // the private implementation behind the existing public window API target.
++  static_cast<AndroidBaseWindow*>(browser_window.GetWindow())
++      ->SetFullscreen(fullscreen, extension_url,
++                      fullscreen
++                          ? GetFullscreenExtensionDisplayName(
++                                *browser_window.GetProfile(), extension_url)
++                          : std::string());
++}
++
+ BrowserWindowInterface* CreateBrowserWindow(
+     BrowserWindowCreateParams create_params) {
++  if (create_params.initial_show_state ==
++          ui::mojom::WindowShowState::kFullscreen &&
++      !CanEnterAndroidBrowserFullscreen(*create_params.profile)) {
++    return nullptr;
++  }
++
+   JNIEnv* env = base::android::AttachCurrentThread();
+   const gfx::Rect& bounds = create_params.initial_bounds;
+ 
+@@ -33,7 +91,10 @@
+           env, static_cast<int>(create_params.type),
+           create_params.profile->GetJavaObject(), bounds.x(), bounds.y(),
+           bounds.right(), bounds.bottom(),
+-          static_cast<int>(create_params.initial_show_state), raw_web_contents);
++          static_cast<int>(create_params.initial_show_state), raw_web_contents,
++          create_params.fullscreen_extension_url,
++          GetFullscreenExtensionDisplayName(
++              *create_params.profile, create_params.fullscreen_extension_url));
+ 
+   int64_t window_ptr =
+       Java_BrowserWindowCreatorBridge_createBrowserWindow(env, j_create_params);
+@@ -44,6 +105,18 @@
+ void CreateBrowserWindow(
+     BrowserWindowCreateParams create_params,
+     base::OnceCallback<void(BrowserWindowInterface*)> callback) {
++  if (create_params.initial_show_state ==
++          ui::mojom::WindowShowState::kFullscreen &&
++      !CanEnterAndroidBrowserFullscreen(*create_params.profile)) {
++    // Preserve asynchronous completion, including policy-denied creation.
++    // create_params retains and retires any transferred contents on return.
++    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
++        FROM_HERE,
++        base::BindOnce(std::move(callback),
++                       static_cast<BrowserWindowInterface*>(nullptr)));
++    return;
++  }
++
+   JNIEnv* env = base::android::AttachCurrentThread();
+   const gfx::Rect& bounds = create_params.initial_bounds;
+ 
+@@ -57,7 +130,10 @@
+           env, static_cast<int>(create_params.type),
+           create_params.profile->GetJavaObject(), bounds.x(), bounds.y(),
+           bounds.right(), bounds.bottom(),
+-          static_cast<int>(create_params.initial_show_state), raw_web_contents);
++          static_cast<int>(create_params.initial_show_state), raw_web_contents,
++          create_params.fullscreen_extension_url,
++          GetFullscreenExtensionDisplayName(
++              *create_params.profile, create_params.fullscreen_extension_url));
+ 
+   // The callback will be invoked with the native pointer of the created browser
+   // window. The pointer is represented as a int64_t in Java.

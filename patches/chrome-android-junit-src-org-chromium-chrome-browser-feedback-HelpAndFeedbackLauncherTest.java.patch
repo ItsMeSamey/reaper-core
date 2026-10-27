@@ -1,0 +1,223 @@
+diff --git a/chrome/android/junit/src/org/chromium/chrome/browser/feedback/HelpAndFeedbackLauncherTest.java b/chrome/android/junit/src/org/chromium/chrome/browser/feedback/HelpAndFeedbackLauncherTest.java
+--- a/chrome/android/junit/src/org/chromium/chrome/browser/feedback/HelpAndFeedbackLauncherTest.java
++++ b/chrome/android/junit/src/org/chromium/chrome/browser/feedback/HelpAndFeedbackLauncherTest.java
+@@ -4,12 +4,16 @@
+ 
+ package org.chromium.chrome.browser.feedback;
+ 
+-import static org.mockito.ArgumentMatchers.any;
++import static org.mockito.Mockito.clearInvocations;
++import static org.mockito.Mockito.doThrow;
++import static org.mockito.Mockito.mock;
+ import static org.mockito.Mockito.never;
+ import static org.mockito.Mockito.verify;
+ import static org.mockito.Mockito.when;
+ 
+ import android.app.Activity;
++import android.content.Intent;
++import android.provider.Browser;
+ 
+ import org.junit.After;
+ import org.junit.Assert;
+@@ -17,35 +21,65 @@
+ import org.junit.Rule;
+ import org.junit.Test;
+ import org.junit.runner.RunWith;
++import org.mockito.ArgumentCaptor;
+ import org.mockito.Mock;
+ import org.mockito.junit.MockitoJUnit;
+ import org.mockito.junit.MockitoRule;
+ 
++import org.chromium.base.ContextUtils;
+ import org.chromium.base.FeatureOverrides;
+-import org.chromium.base.ServiceLoaderUtil;
+ import org.chromium.base.test.BaseRobolectricTestRunner;
++import org.chromium.base.test.RobolectricUtil;
+ import org.chromium.chrome.R;
+ import org.chromium.chrome.browser.profiles.Profile;
+ 
+-/** Tests for {@link HelpAndFeedbackLauncher}. */
++/** Tests for the Android help-only factory and its ordinary support navigation. */
+ @RunWith(BaseRobolectricTestRunner.class)
+ public class HelpAndFeedbackLauncherTest {
++    private static final String SUPPORT_URL = "https://community.brave.app/";
++    private static final String SAFE_BROWSING_URL =
++            "https://support.brave.app/hc/articles/15222663599629-Safe-Browsing-in-Brave";
++    private static final String PRIVATE_URL = "https://example.invalid/private-context";
++    private static final String SCREENSHOT_TRIPWIRE = "Help must not capture the Activity window";
++
+     @Rule public final MockitoRule mMockitoRule = MockitoJUnit.rule();
+ 
+     @Mock private FeedbackPolicyManager mFeedbackPolicyManager;
+-    @Mock private HelpAndFeedbackLauncherDelegate mDelegate;
+     @Mock private Profile mProfile;
+     @Mock private Activity mActivity;
+ 
+     @Before
+     public void setUp() {
+         FeedbackPolicyManager.setInstanceForTesting(mFeedbackPolicyManager);
+-        ServiceLoaderUtil.setInstanceForTesting(HelpAndFeedbackLauncherDelegate.class, mDelegate);
++        when(mActivity.getResources())
++                .thenReturn(ContextUtils.getApplicationContext().getResources());
++        when(mActivity.getPackageName()).thenReturn("app.smallthingz.reaper");
++        doThrow(new AssertionError(SCREENSHOT_TRIPWIRE)).when(mActivity).getWindow();
+     }
+ 
+     @After
+     public void tearDown() {
+         FeatureOverrides.removeAllIncludingAnnotations();
++    }
++
++    private void assertSupportIntent(String expectedUrl) {
++        // Drain real queued work: a deferred screenshot must not escape this assertion.
++        RobolectricUtil.runAllBackgroundAndUiIncludingDelayed();
++        ArgumentCaptor<Intent> captor = ArgumentCaptor.forClass(Intent.class);
++        verify(mActivity).startActivity(captor.capture());
++        Intent intent = captor.getValue();
++        Assert.assertNotNull("The real launcher must synchronously open support", intent);
++        Assert.assertEquals(Intent.ACTION_VIEW, intent.getAction());
++        Assert.assertEquals(expectedUrl, intent.getDataString());
++        Assert.assertEquals(mActivity.getPackageName(), intent.getPackage());
++        Assert.assertEquals(
++                mActivity.getPackageName(), intent.getStringExtra(Browser.EXTRA_APPLICATION_ID));
++        Assert.assertTrue(intent.getBooleanExtra(Browser.EXTRA_CREATE_NEW_TAB, false));
++        // No current-page URL, profile data, screenshot, category or feedback payload.
++        Assert.assertNotNull(intent.getExtras());
++        Assert.assertEquals(2, intent.getExtras().size());
++        verify(mActivity, never()).getWindow();
++        clearInvocations(mActivity);
+     }
+ 
+     @Test
+@@ -65,19 +99,119 @@
+     public void testShowFeedback_FeedbackDisallowed() {
+         when(mFeedbackPolicyManager.isUserFeedbackAllowed()).thenReturn(false);
+         HelpAndFeedbackLauncher launcher = HelpAndFeedbackLauncherImpl.getForProfile(mProfile);
+-
+-        launcher.showFeedback(mActivity, "url", "category");
+-
+-        verify(mDelegate, never()).showFeedback(any(), any());
+-    }
+-
+-    @Test
+-    public void testShowFeedbackFeed_FeedbackDisallowed() {
++        launcher.showFeedback(mActivity, PRIVATE_URL, "private-category");
++        assertSupportIntent(SUPPORT_URL);
++    }
++
++    @Test
++    public void testShowFeedbackWithScreenshot_FeedbackDisallowed() {
+         when(mFeedbackPolicyManager.isUserFeedbackAllowed()).thenReturn(false);
+         HelpAndFeedbackLauncher launcher = HelpAndFeedbackLauncherImpl.getForProfile(mProfile);
+-
+-        launcher.showFeedback(mActivity, "url", "category", null);
+-
+-        verify(mDelegate, never()).showFeedback(any(), any());
++        launcher.showFeedback(
++                mActivity, PRIVATE_URL, "private-category", ScreenshotMode.DEFAULT, "private-context");
++        assertSupportIntent(SUPPORT_URL);
++    }
++
++    @Test
++    public void testFactoryCachesPerProfile() {
++        HelpAndFeedbackLauncher first = HelpAndFeedbackLauncherImpl.getForProfile(mProfile);
++        Assert.assertSame(first, HelpAndFeedbackLauncherImpl.getForProfile(mProfile));
++        Profile other = mock(Profile.class);
++        HelpAndFeedbackLauncher second = HelpAndFeedbackLauncherImpl.getForProfile(other);
++        Assert.assertNotSame(first, second);
++        Assert.assertSame(second, HelpAndFeedbackLauncherImpl.getForProfile(other));
++        first.show(mActivity, mActivity.getResources().getString(R.string.help_context_general), PRIVATE_URL);
++        assertSupportIntent(SUPPORT_URL);
++        second.show(mActivity, mActivity.getResources().getString(R.string.help_context_general), PRIVATE_URL);
++        assertSupportIntent(SUPPORT_URL);
++    }
++
++    @Test
++    public void testShowOpensDefaultSupportWithoutCollection() {
++        when(mFeedbackPolicyManager.isUserFeedbackAllowed()).thenReturn(true);
++        HelpAndFeedbackLauncherImpl.getForProfile(mProfile)
++                .show(mActivity, mActivity.getResources().getString(R.string.help_context_general), PRIVATE_URL);
++        assertSupportIntent(SUPPORT_URL);
++    }
++
++    @Test
++    public void testShowOpensSafeBrowsingSupportWithoutCollection() {
++        when(mFeedbackPolicyManager.isUserFeedbackAllowed()).thenReturn(true);
++        HelpAndFeedbackLauncherImpl.getForProfile(mProfile)
++                .show(mActivity, mActivity.getResources().getString(R.string.help_context_safe_browsing), PRIVATE_URL);
++        assertSupportIntent(SAFE_BROWSING_URL);
++    }
++
++    @Test
++    public void testShowHelpAndFeedbackForUrlDoesNotForwardContext() {
++        when(mFeedbackPolicyManager.isUserFeedbackAllowed()).thenReturn(true);
++        HelpAndFeedbackLauncherImpl.getForProfile(mProfile)
++                .showHelpAndFeedbackForUrl(mActivity, PRIVATE_URL, "private-action");
++        assertSupportIntent(SUPPORT_URL);
++    }
++
++    @Test
++    public void testShowFeedbackAllowedWithoutCollection() {
++        when(mFeedbackPolicyManager.isUserFeedbackAllowed()).thenReturn(true);
++        HelpAndFeedbackLauncherImpl.getForProfile(mProfile)
++                .showFeedback(mActivity, PRIVATE_URL, "private-category");
++        assertSupportIntent(SUPPORT_URL);
++    }
++
++    @Test
++    public void testShowFeedbackWithScreenshotAllowedWithoutCollection() {
++        when(mFeedbackPolicyManager.isUserFeedbackAllowed()).thenReturn(true);
++        HelpAndFeedbackLauncherImpl.getForProfile(mProfile)
++                .showFeedback(
++                        mActivity, PRIVATE_URL, "private-category",
++                        ScreenshotMode.ANDROID_VIEW, "private-context");
++        assertSupportIntent(SUPPORT_URL);
++    }
++
++    @Test
++    public void testDiagnosticClassesAreAbsent() {
++        // String names avoid reintroducing production diagnostic dependencies for testing.
++        String[] removedClasses = {
++            "org.chromium.chrome.browser.feedback.ChromeFeedbackCollector",
++            "org.chromium.chrome.browser.feedback.ConnectivityChecker",
++            "org.chromium.chrome.browser.feedback.ConnectivityFeedbackSource",
++            "org.chromium.chrome.browser.feedback.ConnectivityTask",
++            "org.chromium.chrome.browser.feedback.FeedbackCollector",
++            "org.chromium.chrome.browser.feedback.FallbackHelpAndFeedbackLauncherDelegate",
++            "org.chromium.chrome.browser.feedback.HelpAndFeedbackLauncherDelegate",
++            "org.chromium.chrome.browser.feedback.ProcessIdFeedbackSource",
++            "org.chromium.chrome.browser.feedback.SystemInfoFeedbackSource",
++            "org.chromium.chrome.browser.feedback.FamilyInfoFeedbackSource",
++            "org.chromium.chrome.browser.feedback.OmniboxFeedbackSource",
++            "org.chromium.chrome.browser.night_mode.AutoDarkFeedbackSource"
++        };
++        for (String name : removedClasses) {
++            Assert.assertThrows(
++                    name,
++                    ClassNotFoundException.class,
++                    () -> Class.forName(name, false, getClass().getClassLoader()));
++        }
++    }
++
++    @Test
++    public void testScreenshotCaptureTripwireIsActive() {
++        // Exercise both real constructors and queued capture paths. This is a
++        // capture tripwire, not a claim that object allocation is observed.
++        for (boolean explicitMode : new boolean[] {false, true}) {
++            ScreenshotTask screenshot =
++                    explicitMode
++                            ? new ScreenshotTask(mActivity, ScreenshotMode.ANDROID_VIEW)
++                            : new ScreenshotTask(mActivity);
++            AssertionError error =
++                    Assert.assertThrows(
++                            AssertionError.class,
++                            () -> {
++                                screenshot.capture(null);
++                                RobolectricUtil.runAllBackgroundAndUiIncludingDelayed();
++                            });
++            Assert.assertEquals(SCREENSHOT_TRIPWIRE, error.getMessage());
++            verify(mActivity).getWindow();
++            clearInvocations(mActivity);
++        }
+     }
+ }

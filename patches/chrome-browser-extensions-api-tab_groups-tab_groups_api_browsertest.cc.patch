@@ -1,0 +1,342 @@
+diff --git a/chrome/browser/extensions/api/tab_groups/tab_groups_api_browsertest.cc b/chrome/browser/extensions/api/tab_groups/tab_groups_api_browsertest.cc
+index 2497777baec1392724f1d3638e31158eedcfd1b7..60235ecab8610b461f64330c0ec6059161c13bfb 100644
+--- a/chrome/browser/extensions/api/tab_groups/tab_groups_api_browsertest.cc
++++ b/chrome/browser/extensions/api/tab_groups/tab_groups_api_browsertest.cc
+@@ -37,6 +37,18 @@
+ #include "ui/base/base_window.h"
+ #include "ui/base/page_transition_types.h"
+ #include "url/gurl.h"
++#if BUILDFLAG(IS_ANDROID)
++
++#include <memory>
++
++#include "base/test/bind.h"
++#include "base/test/run_until.h"
++#include "chrome/browser/ui/android/tab_model/tab_model_list.h"
++#include "chrome/browser/ui/android/tab_model/tab_model_observer.h"
++#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
++#include "chrome/test/base/testing_profile.h"
++#include "extensions/browser/extension_function_dispatcher.h"
++#endif  // BUILDFLAG(IS_ANDROID)
+ 
+ #if BUILDFLAG(ENABLE_EXTENSIONS)
+ #include "chrome/browser/extensions/api/tab_groups/tab_groups_event_router.h"
+@@ -922,6 +934,318 @@
+   EXPECT_TRUE(
+       event_observer.events().contains(api::tab_groups::OnMoved::kEventName));
+ }
++#if BUILDFLAG(IS_ANDROID)
++
++// Create an ordinary destination group from the real incoming-tab hook, before
++// the reparented group is restored. No group-creation notification is simulated.
++class CreateUnrelatedGroupOnIncomingTab : public TabModelObserver {
++ public:
++  CreateUnrelatedGroupOnIncomingTab(TabModel* model,
++                                   TabListInterface* tab_list,
++                                   TabGroupsMoveFunction* function)
++      : model_(model), tab_list_(tab_list), function_(function) {
++    model_->AddObserver(this);
++  }
++
++  ~CreateUnrelatedGroupOnIncomingTab() override {
++    if (model_) {
++      model_->RemoveObserver(this);
++    }
++  }
++
++  void WillAddTab(TabAndroid*, TabModel::TabLaunchType) override {
++    if (handled_incoming_tab_) {
++      return;
++    }
++    handled_incoming_tab_ = true;
++    EXPECT_FALSE(function_->did_respond());
++    unrelated_group_ =
++        tab_list_->CreateTabGroup({tab_list_->GetTab(0)->GetHandle()});
++    EXPECT_TRUE(unrelated_group_.has_value());
++    EXPECT_FALSE(function_->did_respond());
++  }
++
++  void OnTabModelDestroyed(TabModel& model) override {
++    if (&model == model_) {
++      model_ = nullptr;
++    }
++  }
++
++  const std::optional<TabGroupId>& unrelated_group() const {
++    return unrelated_group_;
++  }
++
++ private:
++  raw_ptr<TabModel> model_;
++  raw_ptr<TabListInterface> tab_list_;
++  raw_ptr<TabGroupsMoveFunction> function_;
++  bool handled_incoming_tab_ = false;
++  std::optional<TabGroupId> unrelated_group_;
++};
++
++IN_PROC_BROWSER_TEST_F(TabGroupsApiBrowserTest,
++                       AndroidCrossWindowMoveIgnoresUnrelatedGroupCreation) {
++  ASSERT_TRUE(SupportsTabGroups());
++  auto extension = ExtensionBuilder("MV3 tabGroups move")
++                       .SetManifestVersion(3)
++                       .AddAPIPermission("tabGroups")
++                       .Build();
++  TabGroupId group = CreateTabGroup({2, 3, 4});
++  const int group_id = ExtensionTabUtil::GetGroupId(group);
++  BrowserWindowInterface* target_browser =
++      CreateBrowserWindowWithType(BrowserWindowInterface::TYPE_NORMAL);
++  ASSERT_TRUE(ExtensionTabUtil::SupportsTabGroups(target_browser));
++  target_browser->GetWindow()->Activate();
++  TabListInterface* target_tabs = TabListInterface::From(target_browser);
++  ASSERT_TRUE(target_tabs);
++  ASSERT_EQ(1, target_tabs->GetTabCount());
++  TabModel* target_model = TabModelList::FindTabModelWithWindowSessionId(
++      target_browser->GetSessionID());
++  ASSERT_TRUE(target_model);
++
++  auto function = base::MakeRefCounted<TabGroupsMoveFunction>();
++  function->set_extension(extension);
++  {
++    CreateUnrelatedGroupOnIncomingTab create_unrelated(target_model, target_tabs,
++                                                      function.get());
++    constexpr char kFormatArgs[] =
++        R"([%d, {"windowId": %d, "index": 1}])";
++    const std::string args = base::StringPrintf(
++        kFormatArgs, group_id, ExtensionTabUtil::GetWindowId(target_browser));
++    ASSERT_TRUE(api_test_utils::RunFunction(function.get(), args, profile(),
++                                            api_test_utils::FunctionMode::kNone));
++    ASSERT_TRUE(create_unrelated.unrelated_group());
++    EXPECT_NE(group, *create_unrelated.unrelated_group());
++    const base::ListValue* results = function->GetResultListForTest();
++    ASSERT_TRUE(results);
++    ASSERT_EQ(1u, results->size());
++    ASSERT_TRUE((*results)[0].is_dict());
++    const auto& group_info = (*results)[0].GetDict();
++    ASSERT_TRUE(group_info.FindInt("id"));
++    EXPECT_EQ(group_id, *group_info.FindInt("id"));
++    ASSERT_TRUE(group_info.FindInt("windowId"));
++    EXPECT_EQ(ExtensionTabUtil::GetWindowId(target_browser),
++              *group_info.FindInt("windowId"));
++    EXPECT_TRUE(function->HasOneRef());
++  }
++
++  // The normal matching completion retires the observer and its pending ref.
++  base::RunLoop().RunUntilIdle();
++  ASSERT_EQ(4, target_tabs->GetTabCount());
++  EXPECT_EQ(group, target_tabs->GetTab(1)->GetGroup().value());
++  EXPECT_EQ(group, target_tabs->GetTab(2)->GetGroup().value());
++  EXPECT_EQ(group, target_tabs->GetTab(3)->GetGroup().value());
++  EXPECT_TRUE(function->HasOneRef());
++  for (tabs::TabInterface* tab : target_tabs->GetAllTabs()) {
++    tab->Close();
++  }
++}
++
++// Track only destruction, without retaining the function through its callback.
++class DestructionObservedTabGroupsMoveFunction : public TabGroupsMoveFunction {
++ public:
++  explicit DestructionObservedTabGroupsMoveFunction(
++      std::shared_ptr<bool> destroyed)
++      : destroyed_(std::move(destroyed)) {}
++
++ protected:
++  ~DestructionObservedTabGroupsMoveFunction() override { *destroyed_ = true; }
++
++ private:
++  const std::shared_ptr<bool> destroyed_;
++};
++
++IN_PROC_BROWSER_TEST_F(TabGroupsApiBrowserTest,
++                       AndroidPendingMoveRetiresWhenTargetWindowCloses) {
++  ASSERT_TRUE(SupportsTabGroups());
++  auto extension = ExtensionBuilder("MV3 pending tabGroups move")
++                       .SetManifestVersion(3)
++                       .AddAPIPermission("tabGroups")
++                       .Build();
++  const TabGroupId group = CreateTabGroup({2, 3, 4});
++  BrowserWindowInterface* target_browser =
++      CreateBrowserWindowWithType(BrowserWindowInterface::TYPE_NORMAL);
++  ASSERT_TRUE(ExtensionTabUtil::SupportsTabGroups(target_browser));
++  target_browser->GetWindow()->Activate();
++
++  auto destroyed = std::make_shared<bool>(false);
++  auto function =
++      base::MakeRefCounted<DestructionObservedTabGroupsMoveFunction>(destroyed);
++  function->set_extension(extension);
++  auto dispatcher = std::make_unique<ExtensionFunctionDispatcher>(profile());
++  function->SetDispatcher(dispatcher->AsWeakPtr());
++  function->SetArgs(base::ListValue()
++                        .Append(ExtensionTabUtil::GetGroupId(group))
++                        .Append(base::DictValue()
++                                    .Set("windowId", ExtensionTabUtil::GetWindowId(
++                                                         target_browser))
++                                    .Set("index", 1)));
++  api_test_utils::SendResponseHelper response(function.get());
++  function->RunWithValidation().Execute();
++  // This normal cross-window path defers delivery through the persistent store.
++  EXPECT_FALSE(function->did_respond());
++  EXPECT_FALSE(function->HasOneRef());
++  function.reset();
++  EXPECT_FALSE(*destroyed);
++
++  // Request normal window closure before pumping the queued reparenting work.
++  // No model-destruction or API-completion callback is fabricated.
++  target_browser->GetWindow()->Close();
++  response.WaitForResponse();
++  EXPECT_FALSE(response.GetResponse());
++  base::RunLoop().RunUntilIdle();
++  EXPECT_TRUE(*destroyed);
++}
++
++IN_PROC_BROWSER_TEST_F(TabGroupsApiBrowserTest,
++                       AndroidRejectedCrossWindowMoveBalancesArmedReference) {
++  ASSERT_TRUE(SupportsTabGroups());
++  auto extension = ExtensionBuilder("MV3 rejected tabGroups move")
++                       .SetManifestVersion(3)
++                       .AddAPIPermission("tabGroups")
++                       .Build();
++  const TabGroupId group = CreateTabGroup({2, 3, 4});
++  BrowserWindowInterface* target_browser =
++      CreateBrowserWindowWithType(BrowserWindowInterface::TYPE_NORMAL);
++  target_browser->GetWindow()->Activate();
++  TabListInterface* target_tabs = TabListInterface::From(target_browser);
++  ASSERT_TRUE(target_tabs);
++  ASSERT_TRUE(target_tabs->OpenTab(GURL("about:blank"), 1));
++  ASSERT_TRUE(target_tabs->OpenTab(GURL("about:blank"), 2));
++  ASSERT_TRUE(target_tabs->CreateTabGroup(
++      {target_tabs->GetTab(0)->GetHandle(), target_tabs->GetTab(1)->GetHandle()}));
++
++  auto function = base::MakeRefCounted<TabGroupsMoveFunction>();
++  function->set_extension(extension);
++  const std::string args = base::StringPrintf(
++      R"([%d, {"windowId": %d, "index": 1}])",
++      ExtensionTabUtil::GetGroupId(group),
++      ExtensionTabUtil::GetWindowId(target_browser));
++  EXPECT_EQ(
++      "Cannot move the group to an index that is in the middle of another group.",
++      api_test_utils::RunFunctionAndReturnError(function, args, profile()));
++  EXPECT_TRUE(function->HasOneRef());
++  // Immediate rejection has removed the observer, so a real subsequent group
++  // creation cannot deliver a second response or reacquire the move token.
++  EXPECT_TRUE(
++      target_tabs->CreateTabGroup({target_tabs->GetTab(2)->GetHandle()}));
++  EXPECT_TRUE(function->HasOneRef());
++  for (tabs::TabInterface* tab : target_tabs->GetAllTabs()) {
++    tab->Close();
++  }
++}
++#endif  // BUILDFLAG(IS_ANDROID)
+ 
+ }  // namespace
++#if BUILDFLAG(IS_ANDROID)
++
++// These private arm-helper cases isolate real context-shutdown ownership. The
++// observed browser model belongs to the normal test profile, so they bypass
++// MoveGroup's same-profile eligibility checks and do not prove a full launch.
++class TabGroupsMoveAndroidLifecycleTest : public TabGroupsApiBrowserTest {
++ protected:
++  void ArmPendingMove(TabGroupsMoveFunction* function,
++                      TabModel* model,
++                      TabGroupId group) {
++    function->BeginPendingMove(model, group);
++  }
++};
++
++IN_PROC_BROWSER_TEST_F(TabGroupsMoveAndroidLifecycleTest,
++                       OwningContextShutdownRetiresArmedMove) {
++  TabModel* model = TabModelList::FindTabModelWithWindowSessionId(
++      browser_window_interface()->GetSessionID());
++  ASSERT_TRUE(model);
++  const TabGroupId group = CreateTabGroup({2, 3, 4});
++  ExtensionFunction::EnsureShutdownNotifierFactoryBuilt();
++  auto private_profile = std::make_unique<TestingProfile>();
++  auto dispatcher =
++      std::make_unique<ExtensionFunctionDispatcher>(private_profile.get());
++  auto destroyed = std::make_shared<bool>(false);
++  auto function =
++      base::MakeRefCounted<DestructionObservedTabGroupsMoveFunction>(destroyed);
++  function->SetDispatcher(dispatcher->AsWeakPtr());
++  api_test_utils::SendResponseHelper response(function.get());
++  ArmPendingMove(function.get(), model, group);
++  EXPECT_FALSE(function->HasOneRef());
++
++  // SetDispatcher installed the genuine owning-context shutdown subscription.
++  // Destroy the dispatcher first so it retains no dangling profile pointer.
++  dispatcher.reset();
++  private_profile.reset();
++  EXPECT_EQ(nullptr, function->browser_context());
++  EXPECT_TRUE(function->HasOneRef());
++  EXPECT_FALSE(response.has_response());
++  CreateTabGroup({0});
++  EXPECT_TRUE(function->HasOneRef());
++  EXPECT_FALSE(response.has_response());
++  function.reset();
++  EXPECT_TRUE(*destroyed);
++}
++
++IN_PROC_BROWSER_TEST_F(TabGroupsMoveAndroidLifecycleTest,
++                       UnstartedContextShutdownReleasesNoMoveReference) {
++  ExtensionFunction::EnsureShutdownNotifierFactoryBuilt();
++  auto private_profile = std::make_unique<TestingProfile>();
++  auto dispatcher =
++      std::make_unique<ExtensionFunctionDispatcher>(private_profile.get());
++  auto destroyed = std::make_shared<bool>(false);
++  auto function =
++      base::MakeRefCounted<DestructionObservedTabGroupsMoveFunction>(destroyed);
++  function->SetDispatcher(dispatcher->AsWeakPtr());
++  api_test_utils::SendResponseHelper response(function.get());
++  EXPECT_TRUE(function->HasOneRef());
++  dispatcher.reset();
++  private_profile.reset();
++  EXPECT_EQ(nullptr, function->browser_context());
++  EXPECT_TRUE(function->HasOneRef());
++  EXPECT_FALSE(response.has_response());
++  function.reset();
++  EXPECT_TRUE(*destroyed);
++}
++
++IN_PROC_BROWSER_TEST_F(TabGroupsMoveAndroidLifecycleTest,
++                       TargetRetirementCallbackCanShutdownOwningContext) {
++  ExtensionFunction::EnsureShutdownNotifierFactoryBuilt();
++  struct CallbackState {
++    std::unique_ptr<TestingProfile> profile = std::make_unique<TestingProfile>();
++    std::shared_ptr<bool> destroyed = std::make_shared<bool>(false);
++    int callback_count = 0;
++  };
++  auto state = std::make_shared<CallbackState>();
++  auto dispatcher =
++      std::make_unique<ExtensionFunctionDispatcher>(state->profile.get());
++  BrowserWindowInterface* target_browser =
++      CreateBrowserWindowWithType(BrowserWindowInterface::TYPE_NORMAL);
++  target_browser->GetWindow()->Activate();
++  TabModel* model = TabModelList::FindTabModelWithWindowSessionId(
++      target_browser->GetSessionID());
++  ASSERT_TRUE(model);
++  auto function =
++      base::MakeRefCounted<DestructionObservedTabGroupsMoveFunction>(
++          state->destroyed);
++  function->SetDispatcher(dispatcher->AsWeakPtr());
++  function->set_has_callback(true);
++  function->set_response_callback(base::BindLambdaForTesting(
++      [state](ExtensionFunction::ResponseType response, base::ListValue,
++              const std::string& error, mojom::ExtraResponseDataPtr) {
++        ++state->callback_count;
++        EXPECT_EQ(ExtensionFunction::ResponseType::kFailed, response);
++        EXPECT_EQ("Failed to move group.", error);
++        EXPECT_FALSE(*state->destroyed);
++        state->profile.reset();
++        // The terminal token and callback keeper still protect the function.
++        EXPECT_FALSE(*state->destroyed);
++      }));
++  ArmPendingMove(function.get(), model, CreateTabGroup({2, 3, 4}));
++  dispatcher.reset();
++  function.reset();
++  EXPECT_FALSE(*state->destroyed);
++  target_browser->GetWindow()->Close();
++  ASSERT_TRUE(base::test::RunUntil([&] { return *state->destroyed; }));
++  EXPECT_EQ(1, state->callback_count);
++  EXPECT_FALSE(state->profile);
++}
++
++#endif  // BUILDFLAG(IS_ANDROID)
+ }  // namespace extensions

@@ -5,26 +5,17 @@
 
 package org.chromium.chrome.browser.omnibox.suggestions;
 
-import android.view.LayoutInflater;
 import android.view.View;
 
 import org.chromium.build.annotations.NullMarked;
 import org.chromium.chrome.browser.omnibox.brave.R;
 import org.chromium.chrome.browser.omnibox.suggestions.base.BaseSuggestionView;
 import org.chromium.chrome.browser.omnibox.suggestions.brave_leo.BraveLeoSuggestionViewBinder;
-import org.chromium.chrome.browser.omnibox.suggestions.brave_search.BraveSearchBannerViewBinder;
 
 /** Brave extension of {@link OmniboxViewHolderFactory} that registers Brave suggestion types. */
 @NullMarked
 public class BraveOmniboxViewHolderFactory extends BraveOmniboxViewHolderFactoryDummySuper {
     public BraveOmniboxViewHolderFactory() {
-        registerType(
-                BraveOmniboxSuggestionUiType.BRAVE_SEARCH_PROMO_BANNER,
-                parent ->
-                        LayoutInflater.from(parent.getContext())
-                                .inflate(R.layout.omnibox_brave_search_banner, null),
-                BraveSearchBannerViewBinder::bind);
-
         registerType(
                 BraveOmniboxSuggestionUiType.BRAVE_LEO_SUGGESTION,
                 parent ->

@@ -1,0 +1,455 @@
+diff --git a/chrome/browser/extensions/api/page_capture/page_capture_apitest.cc b/chrome/browser/extensions/api/page_capture/page_capture_apitest.cc
+--- a/chrome/browser/extensions/api/page_capture/page_capture_apitest.cc
++++ b/chrome/browser/extensions/api/page_capture/page_capture_apitest.cc
+@@ -14,6 +14,42 @@
+ #include "net/dns/mock_host_resolver.h"
+ #include "third_party/blink/public/common/switches.h"
+ 
++#if BUILDFLAG(IS_ANDROID)
++#include <memory>
++#include <optional>
++#include <utility>
++#include <vector>
++
++#include "base/check.h"
++#include "base/files/file_util.h"
++#include "base/functional/bind.h"
++#include "base/functional/callback_helpers.h"
++#include "base/run_loop.h"
++#include "base/synchronization/waitable_event.h"
++#include "base/task/bind_post_task.h"
++#include "base/test/bind.h"
++#include "base/test/run_until.h"
++#include "base/test/test_future.h"
++#include "base/test/test_timeouts.h"
++#include "base/threading/thread_restrictions.h"
++#include "base/time/time.h"
++#include "base/timer/timer.h"
++#include "chrome/browser/extensions/browser_window_util.h"
++#include "chrome/browser/extensions/extension_tab_util.h"
++#include "chrome/browser/tab_list/tab_list_interface.h"
++#include "components/tabs/public/tab_interface.h"
++#include "content/public/browser/back_forward_cache.h"
++#include "content/public/browser/browser_task_traits.h"
++#include "content/public/browser/browser_thread.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/weak_document_ptr.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/test/back_forward_cache_util.h"
++#include "content/public/test/browser_test_utils.h"
++#include "extensions/common/extension.h"
++#include "extensions/test/test_extension_dir.h"
++#endif
++
+ static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
+ 
+ namespace extensions {
+@@ -98,4 +134,408 @@
+       << message_;
+ }
+ 
++#if BUILDFLAG(IS_ANDROID)
++// One real API request per test. The IO callback never retains a file reference
++// beyond its invocation; notifications are posted back to UI before futures are
++// accessed. The optional IO gate is always released by fixture teardown.
++class PageCaptureResponseLifetimeDelegate final
++    : public PageCaptureSaveAsMHTMLFunction::TestDelegate {
++ public:
++  PageCaptureResponseLifetimeDelegate()
++      : file_created_on_ui_(base::BindPostTask(
++            content::GetUIThreadTaskRunner({}),
++            file_created_.GetRepeatingCallback<const base::FilePath&>())),
++        final_release_on_ui_(base::BindPostTask(
++            content::GetUIThreadTaskRunner({}),
++            final_release_.GetRepeatingCallback<const base::FilePath&>())) {
++    PageCaptureSaveAsMHTMLFunction::SetTestDelegate(this);
++  }
++
++  ~PageCaptureResponseLifetimeDelegate() {
++    ReleaseIOHold();
++    PageCaptureSaveAsMHTMLFunction::SetTestDelegate(nullptr);
++  }
++
++  void OnTemporaryFileCreated(
++      scoped_refptr<storage::ShareableFileReference> file) override {
++    DCHECK_CURRENTLY_ON(content::BrowserThread::IO);
++    if (file) {
++      file->AddFinalReleaseCallback(base::BindOnce(final_release_on_ui_));
++    }
++    file_created_on_ui_.Run(file ? file->path() : base::FilePath());
++    base::ScopedAllowBaseSyncPrimitivesForTesting allow_wait;
++    if (!continue_io_.TimedWait(TestTimeouts::action_timeout())) {
++      io_hold_timed_out_.store(true);
++    }
++  }
++
++  void OnMHTMLGenerated(int64_t file_size) override {
++    DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
++    generated_size_ = file_size;
++  }
++
++  void OnResponseTargetAdded() override {
++    DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
++    ++response_targets_added_;
++    if (on_response_target_added_) {
++      std::move(on_response_target_added_).Run();
++    }
++  }
++
++  void HoldIO() { continue_io_.Reset(); }
++  void ReleaseIOHold() { continue_io_.Signal(); }
++
++  void SetResponseAction(base::OnceClosure action) {
++    on_response_target_added_ = std::move(action);
++  }
++
++  base::test::TestFuture<base::FilePath>& file_created() {
++    return file_created_;
++  }
++  base::test::TestFuture<base::FilePath>& final_release() {
++    return final_release_;
++  }
++  int response_targets_added() const { return response_targets_added_; }
++  std::optional<int64_t> generated_size() const { return generated_size_; }
++  bool io_hold_timed_out() const { return io_hold_timed_out_.load(); }
++
++ private:
++  base::test::TestFuture<base::FilePath> file_created_;
++  base::test::TestFuture<base::FilePath> final_release_;
++  base::RepeatingCallback<void(const base::FilePath&)> file_created_on_ui_;
++  base::RepeatingCallback<void(const base::FilePath&)> final_release_on_ui_;
++  base::WaitableEvent continue_io_{base::WaitableEvent::ResetPolicy::MANUAL,
++                                   base::WaitableEvent::InitialState::SIGNALED};
++  std::atomic<bool> io_hold_timed_out_{false};
++  base::OnceClosure on_response_target_added_;
++  int response_targets_added_ = 0;
++  std::optional<int64_t> generated_size_;
++};
++
++class ExtensionPageCaptureResponseLifetimeTest
++    : public ExtensionPageCaptureApiTest {
++ public:
++  void SetUpOnMainThread() override {
++    ASSERT_NO_FATAL_FAILURE(ExtensionPageCaptureApiTest::SetUpOnMainThread());
++    ASSERT_TRUE(StartEmbeddedTestServer());
++    extension_dir_.WriteManifest(R"({
++      "name": "Page capture response lifetime",
++      "version": "1.0",
++      "manifest_version": 3,
++      "permissions": ["pageCapture"]
++    })");
++    extension_dir_.WriteFile(FILE_PATH_LITERAL("sender.html"),
++                             "<!doctype html><title>Capture sender</title>");
++    extension_dir_.WriteFile(FILE_PATH_LITERAL("receiver.html"),
++                             "<!doctype html><title>Blob receiver</title>");
++    extension_dir_.WriteFile(
++        FILE_PATH_LITERAL("replacement.html"),
++        "<!doctype html><title>Replacement sender</title>");
++    const Extension* extension = LoadExtension(extension_dir_.UnpackedPath());
++    ASSERT_TRUE(extension);
++    target_url_ = embedded_test_server()->GetURL(
++        "/extensions/api_test/page_capture/google.html");
++    sender_url_ = extension->GetResourceURL("sender.html");
++    replacement_url_ = extension->GetResourceURL("replacement.html");
++    ASSERT_NO_FATAL_FAILURE(OpenPage(target_url_, &target_));
++    ASSERT_NO_FATAL_FAILURE(OpenPage(sender_url_, &sender_));
++    ASSERT_NO_FATAL_FAILURE(
++        OpenPage(extension->GetResourceURL("receiver.html"), &receiver_));
++    ASSERT_NE(target_.get(), sender_.get());
++    ASSERT_NE(sender_.get(), receiver_.get());
++    delegate_ = std::make_unique<PageCaptureResponseLifetimeDelegate>();
++  }
++
++  void TearDownOnMainThread() override {
++    if (delegate_) {
++      delegate_->SetResponseAction({});
++      delegate_->ReleaseIOHold();
++      if (capture_dispatched_) {
++        // Drain this request's actual temporary-file callback before another
++        // fixture can install a delegate. A late ThreadPool create must not
++        // report its result to a later fixture's global delegate.
++        CHECK(delegate_->file_created().Wait());
++      }
++    }
++    // Release live JS Blob roots explicitly: merely removing their frames
++    // need not collect Blob wrappers before the final-release barrier.
++    if (sender_) {
++      ReleasePageBlobs(sender_.get());
++    }
++    if (receiver_) {
++      ReleasePageBlobs(receiver_.get());
++    }
++    // Destroy only this fixture's pages, including after an early assertion.
++    for (const auto& contents : created_pages_) {
++      if (contents) {
++        DestroyPage(contents);
++      }
++    }
++    if (delegate_) {
++      if (capture_dispatched_ && !delegate_->file_created().Get().empty()) {
++        // Closing the pages retires every test-owned Blob. Final release also
++        // confirms that this request's MHTML/function work cannot notify a
++        // future fixture. Do not continue after an unretired request.
++        CHECK(delegate_->final_release().Wait());
++      }
++      ResetDelegateWithIOPark();
++    }
++    ExtensionPageCaptureApiTest::TearDownOnMainThread();
++  }
++
++  void OpenPage(const GURL& url, base::WeakPtr<content::WebContents>* result) {
++    auto* frame = NavigateToURLInNewTab(url);
++    ASSERT_TRUE(frame);
++    auto* contents = content::WebContents::FromRenderFrameHost(frame);
++    ASSERT_TRUE(contents);
++    *result = contents->GetWeakPtr();
++    created_pages_.push_back(*result);
++  }
++
++  void DestroyPage(base::WeakPtr<content::WebContents> contents) {
++    ASSERT_TRUE(contents);
++    auto* tab = tabs::TabInterface::MaybeGetFromContents(contents.get());
++    ASSERT_TRUE(tab);
++    auto* browser = browser_window_util::GetBrowserForTabContents(*contents);
++    ASSERT_TRUE(browser);
++    auto* tab_list = TabListInterface::From(browser);
++    ASSERT_TRUE(tab_list);
++    // Exercise real tab ownership and then destroy its exact WebContents. This
++    // is deterministic sender destruction, not an animated user-close test.
++    auto detached = tab_list->DetachWebContents(tab->GetHandle());
++    ASSERT_EQ(contents.get(), detached.get());
++    detached.reset();
++    EXPECT_FALSE(contents);
++  }
++
++  void ReleasePageBlobs(content::WebContents* contents) {
++    // Match the existing pageCapture test's exposed-gc task boundary. Clear
++    // retained roots and channel handlers while the context is still live.
++    ASSERT_EQ(true, content::EvalJs(contents, R"(
++      new Promise(resolve => setTimeout(() => {
++        globalThis.savedBlob = null;
++        globalThis.receivedBlob = null;
++        for (const name of ['sendBlobChannel', 'receiveBlobChannel']) {
++          if (globalThis[name]) {
++            globalThis[name].onmessage = null;
++            globalThis[name].close();
++            globalThis[name] = null;
++          }
++        }
++        gc();
++        resolve(true);
++      }, 0))
++    )"));
++  }
++
++  void BeginCapture() {
++    ASSERT_TRUE(sender_);
++    ASSERT_TRUE(target_);
++    capture_dispatched_ = true;
++    content::ExecuteScriptAsync(
++        sender_.get(),
++        content::JsReplace(R"(
++          globalThis.captureResult = new Promise((resolve, reject) => {
++            chrome.pageCapture.saveAsMHTML({tabId: $1}, blob => {
++              if (chrome.runtime.lastError) {
++                reject(new Error(chrome.runtime.lastError.message));
++                return;
++              }
++              globalThis.savedBlob = blob;
++              if (globalThis.sendBlobChannel) {
++                sendBlobChannel.postMessage(blob);
++              }
++              resolve(blob.size);
++            });
++          });
++          void 0;
++        )",
++                           ExtensionTabUtil::GetTabId(target_.get())));
++  }
++
++  void WaitForTemporaryFile() {
++    ASSERT_TRUE(delegate_->file_created().Wait());
++    file_path_ = delegate_->file_created().Get();
++    ASSERT_FALSE(file_path_.empty());
++    EXPECT_TRUE(FileExists());
++  }
++
++  bool FileExists() const {
++    base::ScopedAllowBlockingForTesting allow_file_check;
++    return base::PathExists(file_path_);
++  }
++
++  void ExpectPhysicalFileDeletion() {
++    ASSERT_TRUE(delegate_->final_release().Wait());
++    EXPECT_EQ(file_path_, delegate_->final_release().Get());
++    // ShareableFileReference posts its final-release callbacks before posting
++    // deletion. Wake the bounded idle predicate until the actual unlink ran.
++    base::RepeatingTimer poll;
++    poll.Start(FROM_HERE, base::Milliseconds(10), base::DoNothing());
++    EXPECT_TRUE(base::test::RunUntil([this] { return !FileExists(); }));
++  }
++
++  void ResetDelegateWithIOPark() {
++    // The test delegate is a raw global used on both UI and IO. Ordinary IO
++    // barriers cannot exclude a late ThreadPool completion posting another IO
++    // callback. Park IO while unregistering/destroying it on UI; later IO work
++    // then sees null. The shared event outlives every posted task and is always
++    // signaled when this scope exits normally or through a test assertion.
++    auto resume_io = std::make_shared<base::WaitableEvent>();
++    base::ScopedClosureRunner unblock_io(base::BindOnce(
++        [](std::shared_ptr<base::WaitableEvent> event) { event->Signal(); },
++        resume_io));
++    base::test::TestFuture<void> parked;
++    CHECK(content::GetIOThreadTaskRunner({})->PostTask(
++        FROM_HERE,
++        base::BindOnce(
++            [](std::shared_ptr<base::WaitableEvent> event,
++               base::OnceClosure notify_parked) {
++              base::ScopedAllowBaseSyncPrimitivesForTesting allow_wait;
++              std::move(notify_parked).Run();
++              event->Wait();
++            },
++            resume_io,
++            base::BindPostTask(content::GetUIThreadTaskRunner({}),
++                               parked.GetCallback()))));
++    // A broken IO thread is a fatal harness condition: never free a possibly
++    // in-use delegate or continue into another test without confirmed parking.
++    CHECK(parked.Wait());
++    EXPECT_FALSE(delegate_->io_hold_timed_out());
++    delegate_.reset();
++    unblock_io.RunAndReset();
++    DrainIO();
++  }
++
++  void DrainIO() {
++    base::test::TestFuture<void> drained;
++    content::GetIOThreadTaskRunner({})->PostTaskAndReply(
++        FROM_HERE, base::DoNothing(), drained.GetCallback());
++    EXPECT_TRUE(drained.Wait());
++  }
++
++ protected:
++  TestExtensionDir extension_dir_;
++  GURL target_url_;
++  GURL sender_url_;
++  GURL replacement_url_;
++  base::FilePath file_path_;
++  base::WeakPtr<content::WebContents> target_;
++  base::WeakPtr<content::WebContents> sender_;
++  base::WeakPtr<content::WebContents> receiver_;
++  std::vector<base::WeakPtr<content::WebContents>> created_pages_;
++  std::unique_ptr<PageCaptureResponseLifetimeDelegate> delegate_;
++  bool capture_dispatched_ = false;
++};
++
++IN_PROC_BROWSER_TEST_F(ExtensionPageCaptureResponseLifetimeTest,
++                       SenderDestroyedWhileTemporaryFileCallbackIsHeld) {
++  delegate_->HoldIO();
++  ASSERT_NO_FATAL_FAILURE(BeginCapture());
++  ASSERT_NO_FATAL_FAILURE(WaitForTemporaryFile());
++  ASSERT_NO_FATAL_FAILURE(DestroyPage(sender_));
++  ASSERT_FALSE(sender_);
++  ASSERT_TRUE(target_);
++  EXPECT_EQ(target_url_, target_->GetLastCommittedURL());
++  delegate_->ReleaseIOHold();
++
++  ASSERT_NO_FATAL_FAILURE(ExpectPhysicalFileDeletion());
++  ASSERT_TRUE(delegate_->generated_size().has_value());
++  EXPECT_GT(*delegate_->generated_size(), 0);
++  EXPECT_EQ(0, delegate_->response_targets_added());
++  ASSERT_TRUE(target_);
++  EXPECT_EQ(target_url_, target_->GetLastCommittedURL());
++}
++
++IN_PROC_BROWSER_TEST_F(ExtensionPageCaptureResponseLifetimeTest,
++                       SenderDestroyedAfterResponseTargetRegistration) {
++  delegate_->SetResponseAction(base::BindLambdaForTesting(
++      [this] { ASSERT_NO_FATAL_FAILURE(DestroyPage(sender_)); }));
++  ASSERT_NO_FATAL_FAILURE(BeginCapture());
++  ASSERT_NO_FATAL_FAILURE(WaitForTemporaryFile());
++  ASSERT_NO_FATAL_FAILURE(ExpectPhysicalFileDeletion());
++  EXPECT_EQ(1, delegate_->response_targets_added());
++  ASSERT_TRUE(delegate_->generated_size().has_value());
++  EXPECT_GT(*delegate_->generated_size(), 0);
++  EXPECT_FALSE(sender_);
++  ASSERT_TRUE(target_);
++  EXPECT_EQ(target_url_, target_->GetLastCommittedURL());
++}
++
++IN_PROC_BROWSER_TEST_F(ExtensionPageCaptureResponseLifetimeTest,
++                       SenderCrossDocumentNavigationRetiresRegisteredResponse) {
++  content::DisableBackForwardCacheForTesting(
++      sender_.get(), content::BackForwardCache::TEST_REQUIRES_NO_CACHING);
++  auto original_document = sender_->GetPrimaryMainFrame()->GetWeakDocumentPtr();
++  delegate_->SetResponseAction(base::BindLambdaForTesting([this] {
++    ASSERT_TRUE(content::NavigateToURL(sender_.get(), replacement_url_));
++  }));
++  ASSERT_NO_FATAL_FAILURE(BeginCapture());
++  ASSERT_NO_FATAL_FAILURE(WaitForTemporaryFile());
++  ASSERT_NO_FATAL_FAILURE(ExpectPhysicalFileDeletion());
++  EXPECT_EQ(1, delegate_->response_targets_added());
++  ASSERT_TRUE(delegate_->generated_size().has_value());
++  EXPECT_GT(*delegate_->generated_size(), 0);
++  ASSERT_TRUE(sender_);
++  EXPECT_EQ(replacement_url_, sender_->GetLastCommittedURL());
++  EXPECT_FALSE(original_document.AsRenderFrameHostIfValid());
++  ASSERT_TRUE(target_);
++  EXPECT_EQ(target_url_, target_->GetLastCommittedURL());
++}
++
++IN_PROC_BROWSER_TEST_F(
++    ExtensionPageCaptureResponseLifetimeTest,
++    SameDocumentResponseBlobSurvivesTransferAndSenderRemoval) {
++  ASSERT_TRUE(content::ExecJs(receiver_.get(), R"(
++    globalThis.receiveBlobChannel = new BroadcastChannel('capture-lifetime');
++    globalThis.receivedBlobReady = new Promise(resolve => {
++      receiveBlobChannel.onmessage = event => {
++        globalThis.receivedBlob = event.data;
++        resolve(true);
++      };
++    });
++    void 0;
++  )"));
++  ASSERT_TRUE(content::ExecJs(sender_.get(), R"(
++    globalThis.sendBlobChannel = new BroadcastChannel('capture-lifetime');
++  )"));
++  auto original_document = sender_->GetPrimaryMainFrame()->GetWeakDocumentPtr();
++  const GURL same_document_url(sender_url_.spec() + "#same-document");
++  delegate_->SetResponseAction(
++      base::BindLambdaForTesting([this, same_document_url] {
++        ASSERT_TRUE(content::NavigateToURL(sender_.get(), same_document_url));
++      }));
++  ASSERT_NO_FATAL_FAILURE(BeginCapture());
++  ASSERT_NO_FATAL_FAILURE(WaitForTemporaryFile());
++  EXPECT_EQ(true, content::EvalJs(sender_.get(),
++                                  "captureResult.then(size => size > 0)"));
++  EXPECT_EQ(true, content::EvalJs(receiver_.get(), "receivedBlobReady"));
++  EXPECT_EQ(1, delegate_->response_targets_added());
++  ASSERT_TRUE(delegate_->generated_size().has_value());
++  EXPECT_GT(*delegate_->generated_size(), 0);
++  ASSERT_TRUE(sender_);
++  EXPECT_EQ(same_document_url, sender_->GetLastCommittedURL());
++  EXPECT_EQ(sender_->GetPrimaryMainFrame(),
++            original_document.AsRenderFrameHostIfValid());
++  EXPECT_EQ(true, content::EvalJs(receiver_.get(), R"(
++    receivedBlob.text().then(text => text.includes('Welcome to the Google'))
++  )"));
++
++  ASSERT_NO_FATAL_FAILURE(ReleasePageBlobs(sender_.get()));
++  ASSERT_NO_FATAL_FAILURE(DestroyPage(sender_));
++  ASSERT_FALSE(sender_);
++  ASSERT_TRUE(receiver_);
++  EXPECT_EQ(true, content::EvalJs(receiver_.get(), R"(
++    receivedBlob.text().then(text => text.includes('Welcome to the Google'))
++  )"));
++  EXPECT_TRUE(FileExists());
++  EXPECT_FALSE(delegate_->final_release().IsReady());
++  ASSERT_NO_FATAL_FAILURE(ReleasePageBlobs(receiver_.get()));
++  ASSERT_NO_FATAL_FAILURE(DestroyPage(receiver_));
++  ASSERT_NO_FATAL_FAILURE(ExpectPhysicalFileDeletion());
++  ASSERT_TRUE(target_);
++  EXPECT_EQ(target_url_, target_->GetLastCommittedURL());
++}
++#endif  // BUILDFLAG(IS_ANDROID)
++
+ }  // namespace extensions

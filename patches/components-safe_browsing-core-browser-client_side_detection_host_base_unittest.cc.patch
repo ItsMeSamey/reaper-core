@@ -1,0 +1,76 @@
+diff --git a/components/safe_browsing/core/browser/client_side_detection_host_base_unittest.cc b/components/safe_browsing/core/browser/client_side_detection_host_base_unittest.cc
+index 8a33786b270317767c1f0ad5ebb61240f0beda49..00ff61d4a409e70c5a0eff1430a890a1935a850a 100644
+--- a/components/safe_browsing/core/browser/client_side_detection_host_base_unittest.cc
++++ b/components/safe_browsing/core/browser/client_side_detection_host_base_unittest.cc
+@@ -168,6 +168,7 @@
+   using ClientSideDetectionHostBase::is_classifying;
+   using ClientSideDetectionHostBase::is_csd_running;
+   using ClientSideDetectionHostBase::MaybeSendClientPhishingRequest;
++  using ClientSideDetectionHostBase::MaybeStartIntelligentScanForScamDetection;
+   using ClientSideDetectionHostBase::NewRequestTypeTierHigher;
+   using ClientSideDetectionHostBase::OnCreditCardFormVisitCount;
+   using ClientSideDetectionHostBase::OnIntelligentScanDone;
+@@ -469,6 +470,63 @@
+   EXPECT_FALSE(host_->is_classifying());
+ }
+ 
++TEST_F(ClientSideDetectionHostBaseTest,
++       AbsentIntelligentScanDelegatePreservesPhishingRequestAndWarning) {
++  base::HistogramTester histograms;
++  const GURL url("https://example.com/");
++  prefs_.SetBoolean(prefs::kSafeBrowsingEnhanced, false);
++  MockClientSideDetectionServiceBase mock_csd_service;
++  host_ = std::make_unique<TestClientSideDetectionHostBase>(
++      cache_manager_.get(), &prefs_, /*history_service=*/nullptr,
++      mock_csd_service.GetWeakPtr(), /*is_off_the_record=*/false);
++  host_->set_current_url(url);
++  host_->set_is_csd_running(true);
++
++  // Exercise the real null-delegate branch, rather than calling SendRequest
++  // directly. It must retain the normal network verdict and blocking page.
++  EXPECT_CALL(*host_, GetInnerText(_)).Times(0);
++  EXPECT_CALL(*host_, IsAccountSignedIn()).Times(0);
++  EXPECT_CALL(*host_, MaybeStartGeminiAntiscamProtection(url, TRIGGER_MODELS,
++                                                         Optional(false)))
++      .Times(1);
++  EXPECT_CALL(mock_csd_service, SendClientReportPhishingRequest(_, _, ""))
++      .WillOnce([url](std::unique_ptr<ClientPhishingRequest> verdict,
++                      ClientSideDetectionServiceBase::
++                          ClientReportPhishingRequestCallback callback,
++                      const std::string& access_token) {
++        ASSERT_TRUE(verdict);
++        EXPECT_EQ(verdict->url(), url.spec());
++        EXPECT_FLOAT_EQ(verdict->client_score(), 0.9f);
++        EXPECT_EQ(verdict->client_side_detection_type(), TRIGGER_MODELS);
++        EXPECT_FALSE(verdict->has_intelligent_scan_info());
++        EXPECT_TRUE(access_token.empty());
++        std::move(callback).Run(url, true, net::HTTP_OK, std::nullopt);
++      });
++  EXPECT_CALL(*host_, MaybeShowPhishingWarning(
++                          false, TRIGGER_MODELS, Optional(false), url, true,
++                          Optional(net::HTTP_OK),
++                          testing::Eq(std::optional<IntelligentScanVerdict>{})))
++      .WillOnce(testing::Invoke(
++          host_.get(),
++          &TestClientSideDetectionHostBase::CallMaybeShowPhishingWarning));
++  EXPECT_CALL(*host_,
++              ShowBlockingPage(
++                  url, TRIGGER_MODELS,
++                  testing::Eq(std::optional<IntelligentScanVerdict>{}), false))
++      .Times(1);
++
++  auto verdict = std::make_unique<ClientPhishingRequest>();
++  verdict->set_url(url.spec());
++  verdict->set_client_score(0.9f);
++  verdict->set_client_side_detection_type(TRIGGER_MODELS);
++  host_->MaybeStartIntelligentScanForScamDetection(
++      std::move(verdict), /*did_match_high_confidence_allowlist=*/false,
++      /*is_invalid_ip=*/false);
++
++  EXPECT_FALSE(host_->is_csd_running());
++  histograms.ExpectUniqueSample("SBClientPhishing.ServerModelDetectsPhishing",
++                                true, 1);
++}
+ TEST_F(ClientSideDetectionHostBaseTest, SendRequest) {
+   GURL url("https://example.com/");
+   host_->set_current_url(url);

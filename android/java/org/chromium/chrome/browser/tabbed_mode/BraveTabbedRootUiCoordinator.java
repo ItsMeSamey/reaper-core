@@ -272,7 +272,7 @@ public class BraveTabbedRootUiCoordinator extends TabbedRootUiCoordinator {
                 : "Bytecode change was not applied!";
         if (mAdaptiveToolbarUiCoordinator
                 instanceof BraveAdaptiveToolbarUiCoordinator braveCoordinator) {
-            braveCoordinator.initializeBrave(new BookmarkManagerOpenerImpl());
+            braveCoordinator.initializeBrave(new BookmarkManagerOpenerImpl(), mProfileSupplier);
         }
     }
 

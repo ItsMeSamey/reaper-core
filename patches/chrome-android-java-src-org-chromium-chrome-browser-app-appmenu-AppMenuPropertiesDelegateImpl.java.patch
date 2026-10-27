@@ -1,30 +1,137 @@
 diff --git a/chrome/android/java/src/org/chromium/chrome/browser/app/appmenu/AppMenuPropertiesDelegateImpl.java b/chrome/android/java/src/org/chromium/chrome/browser/app/appmenu/AppMenuPropertiesDelegateImpl.java
-index d0e9f16ebc7a377e06101de43505a2f3077486a5..2e9eabb28f5b9711acce1d715574338906308c72 100644
 --- a/chrome/android/java/src/org/chromium/chrome/browser/app/appmenu/AppMenuPropertiesDelegateImpl.java
 +++ b/chrome/android/java/src/org/chromium/chrome/browser/app/appmenu/AppMenuPropertiesDelegateImpl.java
-@@ -40,6 +40,7 @@ import org.chromium.build.annotations.NullMarked;
- import org.chromium.build.annotations.Nullable;
- import org.chromium.build.annotations.RequiresNonNull;
- import org.chromium.chrome.R;
-+import org.chromium.components.embedder_support.util.UrlConstants;
+@@ -23,8 +23,6 @@
+ import androidx.appcompat.content.res.AppCompatResources;
+ import androidx.core.content.ContextCompat;
+ import androidx.core.graphics.drawable.DrawableCompat;
+-
+-import com.google.common.primitives.UnsignedLongs;
+
+ import org.chromium.base.CallbackController;
+ import org.chromium.base.DeviceInfo;
+@@ -43,8 +41,6 @@
  import org.chromium.chrome.browser.ActivityTabProvider;
  import org.chromium.chrome.browser.accessibility.PageZoomMenuItemViewBinder;
  import org.chromium.chrome.browser.bookmarks.BookmarkModel;
-@@ -151,7 +152,7 @@ public abstract class AppMenuPropertiesDelegateImpl implements AppMenuProperties
+-import org.chromium.chrome.browser.bookmarks.PowerBookmarkUtils;
+-import org.chromium.chrome.browser.commerce.ShoppingServiceFactory;
+ import org.chromium.chrome.browser.download.DownloadUtils;
+ import org.chromium.chrome.browser.flags.ChromeFeatureList;
+ import org.chromium.chrome.browser.incognito.IncognitoUtils;
+@@ -88,12 +84,6 @@
+ import org.chromium.components.browser_ui.accessibility.PageZoomUtils;
+ import org.chromium.components.browser_ui.bottomsheet.BottomSheetController;
+ import org.chromium.components.browser_ui.bottomsheet.BottomSheetControllerProvider;
+-import org.chromium.components.commerce.core.CommerceFeatureUtils;
+-import org.chromium.components.commerce.core.CommerceSubscription;
+-import org.chromium.components.commerce.core.IdentifierType;
+-import org.chromium.components.commerce.core.ManagementType;
+-import org.chromium.components.commerce.core.ShoppingService;
+-import org.chromium.components.commerce.core.SubscriptionType;
+ import org.chromium.components.dom_distiller.core.DomDistillerUrlUtils;
+ import org.chromium.components.embedder_support.util.UrlUtilities;
+ import org.chromium.components.tab_group_sync.TabGroupSyncService;
+@@ -151,7 +141,7 @@
      protected @Nullable Runnable mReadAloudAppMenuResetter;
      private boolean mHasReadAloudInserted;
      protected final @Nullable OpenInAppMenuItemProvider mOpenInAppMenuItemProvider;
 -    private final AppMenuItemTheme mAppMenuItemTheme;
 +    protected final AppMenuItemTheme mAppMenuItemTheme;
- 
+
      @VisibleForTesting
      @IntDef({
-@@ -457,7 +458,7 @@ public abstract class AppMenuPropertiesDelegateImpl implements AppMenuProperties
-         //                is not persisted when adding to the homescreen.
-         // * If creating shortcuts it not supported by the current home screen.
-         return WebappsUtils.isAddToHomeIntentSupported()
--                && !isNativePage
-+                && (!isNativePage || (url != null && UrlConstants.CHROME_SCHEME.equals(url.getScheme()) && url.getHost().equals("leo-ai")))
-                 && !isFileScheme
-                 && !isContentScheme
-                 && !isIncognito
+@@ -604,7 +594,9 @@
+                         mContext,
+                         getAppMenuItemTheme(),
+                         R.id.extensions_menu_menu_id,
+-                        R.string.menu_extensions_menu,
++                        !mIsTablet && !DeviceInfo.isDesktop() && !isSubmenusEnabled(mContext)
++                                ? R.string.menu_extensions
++                                : R.string.menu_extensions_menu,
+                         showIcon ? R.drawable.ic_extension_24dp : Resources.ID_NULL,
+                         isMenuIconAtStart()),
+                 showIcon);
+@@ -981,82 +973,6 @@
+                     AppMenuItemProperties.TITLE_CONDENSED,
+                     mContext.getString(R.string.menu_bookmark));
+         }
+-    }
+-
+-    /**
+-     * Builds the appropriate price tracking menu item for the current tab (if any).
+-     *
+-     * @param currentTab The currently selected tab.
+-     * @param showIcon Whether icons should be shown for this menu item.
+-     * @return The price tracking item appropriate for the current conditions (if any).
+-     */
+-    protected @Nullable ListItem maybeBuildPriceTrackingListItem(
+-            @Nullable Tab currentTab, boolean showIcon) {
+-        Boolean show = getPriceTrackingMenuItemInfo(currentTab);
+-        if (show == null) return null;
+-
+-        if (show) {
+-            return new ListItem(
+-                    AppMenuItemType.STANDARD,
+-                    AppMenuItemUtils.buildModelForStandardMenuItem(
+-                            mContext,
+-                            mAppMenuItemTheme,
+-                            R.id.enable_price_tracking_menu_id,
+-                            R.string.enable_price_tracking_menu_item,
+-                            showIcon ? R.drawable.price_tracking_disabled : 0,
+-                            isMenuIconAtStart()));
+-        } else {
+-            return new ListItem(
+-                    AppMenuItemType.STANDARD,
+-                    AppMenuItemUtils.buildModelForStandardMenuItem(
+-                            mContext,
+-                            mAppMenuItemTheme,
+-                            R.id.disable_price_tracking_menu_id,
+-                            R.string.disable_price_tracking_menu_item,
+-                            showIcon ? R.drawable.price_tracking_enabled_filled : 0,
+-                            isMenuIconAtStart()));
+-        }
+-    }
+-
+-    /**
+-     * Determine which menu to show for price tracking feature.
+-     *
+-     * @param currentTab The currently selected tab.
+-     * @return {@code true} to show 'enable'. Shows no option if {@code null}.
+-     */
+-    public @Nullable Boolean getPriceTrackingMenuItemInfo(@Nullable Tab currentTab) {
+-        if (currentTab == null || currentTab.getWebContents() == null) {
+-            return null;
+-        }
+-
+-        Profile profile = currentTab.getProfile();
+-        ShoppingService service = ShoppingServiceFactory.getForProfile(profile);
+-        ShoppingService.ProductInfo info = null;
+-        if (service != null) {
+-            info = service.getAvailableProductInfoForUrl(currentTab.getUrl());
+-        }
+-
+-        // If price tracking isn't enabled or the page isn't eligible, then hide both items.
+-        if (!CommerceFeatureUtils.isShoppingListEligible(service)
+-                || !PowerBookmarkUtils.isPriceTrackingEligible(currentTab)
+-                || mBookmarkModelSupplier.get() == null) {
+-            return null;
+-        }
+-
+-        boolean showStartPriceTracking = true;
+-        if (info != null && info.productClusterId != null) {
+-            CommerceSubscription sub =
+-                    new CommerceSubscription(
+-                            SubscriptionType.PRICE_TRACK,
+-                            IdentifierType.PRODUCT_CLUSTER_ID,
+-                            UnsignedLongs.toString(info.productClusterId),
+-                            ManagementType.USER_MANAGED,
+-                            null);
+-            boolean isSubscribed = service.isSubscribedFromCache(sub);
+-            showStartPriceTracking = !isSubscribed;
+-        }
+-
+-        return showStartPriceTracking;
+     }
+
+     /**

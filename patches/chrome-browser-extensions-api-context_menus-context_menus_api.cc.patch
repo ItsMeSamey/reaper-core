@@ -1,0 +1,102 @@
+diff --git a/chrome/browser/extensions/api/context_menus/context_menus_api.cc b/chrome/browser/extensions/api/context_menus/context_menus_api.cc
+--- a/chrome/browser/extensions/api/context_menus/context_menus_api.cc
++++ b/chrome/browser/extensions/api/context_menus/context_menus_api.cc
+@@ -7,12 +7,14 @@
+ #include <string>
+ #include <utility>
+ 
++#include "base/functional/bind.h"
+ #include "base/strings/string_util.h"
+ #include "base/values.h"
+ #include "chrome/browser/extensions/context_menu_helpers.h"
+ #include "chrome/browser/extensions/menu_manager.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/common/extensions/api/context_menus.h"
++#include "extensions/browser/extension_registry.h"
+ #include "extensions/buildflags/buildflags.h"
+ #include "extensions/common/error_utils.h"
+ #include "extensions/common/manifest_handlers/background_info.h"
+@@ -32,7 +34,55 @@
+ 
+ namespace extensions {
+ 
+-ExtensionFunction::ResponseAction ContextMenusCreateFunction::Run() {
++ExtensionFunction::ResponseAction ContextMenusFunction::Run() {
++#if BUILDFLAG(IS_ANDROID)
++  waiting_for_restore_ = true;
++  pending_restore_request_ =
++      MenuManager::Get(browser_context())
++          ->RunAfterInitialRestore(
++              *extension(),
++              base::BindOnce(&ContextMenusFunction::OnInitialRestoreReady,
++                             this));
++  return did_respond() ? AlreadyResponded() : RespondLater();
++#else
++  return RunOnReady();
++#endif
++}
++
++#if BUILDFLAG(IS_ANDROID)
++void ContextMenusFunction::OnInitialRestoreReady(bool ready) {
++  if (did_respond()) {
++    return;
++  }
++  waiting_for_restore_ = false;
++  pending_restore_request_.RunAndReset();
++  if (!ready || !browser_context() ||
++      Profile::FromBrowserContext(browser_context())->ShutdownStarted() ||
++      ExtensionRegistry::Get(browser_context())
++              ->enabled_extensions()
++              .GetByID(extension_id()) != extension()) {
++    Respond(Error(
++        "Context menu operation cancelled before restoration completed."));
++    return;
++  }
++  RunOnReady().Execute();
++}
++
++void ContextMenusFunction::OnBrowserContextShutdown() {
++  if (!waiting_for_restore_ || did_respond()) {
++    return;
++  }
++  waiting_for_restore_ = false;
++  // ExtensionFunction::Shutdown protects a live last reference while this
++  // cancellation drops the manager's callback. Do not resurrect a zero-ref
++  // function already awaiting DeleteSoon.
++  pending_restore_request_.RunAndReset();
++  Respond(
++      Error("Context menu operation cancelled before restoration completed."));
++}
++#endif
++
++ExtensionFunction::ResponseAction ContextMenusCreateFunction::RunOnReady() {
+   MenuItem::Id id(browser_context()->IsOffTheRecord(),
+                   MenuItem::ExtensionKey(extension_id()));
+   std::optional<api::context_menus::Create::Params> params =
+@@ -66,7 +116,7 @@
+   return RespondNow(NoArguments());
+ }
+ 
+-ExtensionFunction::ResponseAction ContextMenusUpdateFunction::Run() {
++ExtensionFunction::ResponseAction ContextMenusUpdateFunction::RunOnReady() {
+   MenuItem::Id item_id(browser_context()->IsOffTheRecord(),
+                        MenuItem::ExtensionKey(extension_id()));
+   std::optional<api::context_menus::Update::Params> params =
+@@ -90,7 +140,7 @@
+   return RespondNow(NoArguments());
+ }
+ 
+-ExtensionFunction::ResponseAction ContextMenusRemoveFunction::Run() {
++ExtensionFunction::ResponseAction ContextMenusRemoveFunction::RunOnReady() {
+   std::optional<api::context_menus::Remove::Params> params =
+       api::context_menus::Remove::Params::Create(args());
+   EXTENSION_FUNCTION_VALIDATE(params);
+@@ -121,7 +171,7 @@
+   return RespondNow(NoArguments());
+ }
+ 
+-ExtensionFunction::ResponseAction ContextMenusRemoveAllFunction::Run() {
++ExtensionFunction::ResponseAction ContextMenusRemoveAllFunction::RunOnReady() {
+   MenuManager* manager = MenuManager::Get(browser_context());
+   manager->RemoveAllContextItems(MenuItem::ExtensionKey(extension()->id()));
+   manager->WriteToStorage(extension(),

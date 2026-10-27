@@ -1,0 +1,148 @@
+diff --git a/chrome/browser/extensions/api/gcm/gcm_apitest.cc b/chrome/browser/extensions/api/gcm/gcm_apitest.cc
+--- a/chrome/browser/extensions/api/gcm/gcm_apitest.cc
++++ b/chrome/browser/extensions/api/gcm/gcm_apitest.cc
+@@ -6,6 +6,7 @@
+ 
+ #include "base/functional/bind.h"
+ #include "base/run_loop.h"
++#include "base/test/test_future.h"
+ #include "chrome/browser/extensions/api/gcm/extension_gcm_app_handler.h"
+ #include "chrome/browser/extensions/api/gcm/gcm_api.h"
+ #include "chrome/browser/extensions/extension_apitest.h"
+@@ -19,6 +20,19 @@
+ #include "extensions/buildflags/buildflags.h"
+ #include "extensions/test/result_catcher.h"
+ 
++#if BUILDFLAG(IS_ANDROID)
++#include "components/gcm_driver/gcm_driver.h"
++
++#if defined(NDEBUG)
++#include <utility>
++
++#include "base/memory/scoped_refptr.h"
++#include "extensions/browser/extension_function_dispatcher.h"
++#include "extensions/common/extension_builder.h"
++#include "extensions/common/mojom/extra_response_data.mojom.h"
++#endif  // defined(NDEBUG)
++#endif  // BUILDFLAG(IS_ANDROID)
++
+ static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
+ 
+ using extensions::ResultCatcher;
+@@ -62,6 +76,32 @@
+ 
+ namespace extensions {
+ 
++#if BUILDFLAG(IS_ANDROID)
++using GcmAndroidDriverTest = ExtensionApiTest;
++
++IN_PROC_BROWSER_TEST_F(GcmAndroidDriverTest,
++                       UnsupportedSendCompletesAndReleasesId) {
++  auto* driver =
++      gcm::GCMProfileServiceFactory::GetForProfile(profile())->driver();
++  ASSERT_TRUE(driver);
++  gcm::OutgoingMessage message;
++  message.id = "unsupported-android-send";
++  message.data["payload"] = "test";
++  // A second request with the same ID must receive the backend error again,
++  // rather than INVALID_PARAMETER from a leaked in-flight callback.
++  for (int attempt = 0; attempt < 2; ++attempt) {
++    base::test::TestFuture<std::string, gcm::GCMClient::Result> result;
++    driver->Send(
++        "test-extension", "destination-id", message,
++        result.GetCallback<const std::string&, gcm::GCMClient::Result>());
++    base::RunLoop().RunUntilIdle();
++    ASSERT_TRUE(result.IsReady());
++    EXPECT_EQ(message.id, result.Get<0>());
++    EXPECT_EQ(gcm::GCMClient::UNKNOWN_ERROR, result.Get<1>());
++  }
++}
++#endif  // BUILDFLAG(IS_ANDROID)
++
+ class GcmApiTest : public ExtensionApiTest {
+  protected:
+   // BrowserTestBase overrides.
+@@ -116,6 +156,83 @@
+   return extension;
+ }
+ 
++#if BUILDFLAG(IS_ANDROID) && defined(NDEBUG)
++// The JS binding already rejects these names. Exercise the browser's native
++// request boundary directly, because a JS-only test would pass before the fix.
++// Malformed native requests CHECK in debug builds instead of replying.
++IN_PROC_BROWSER_TEST_F(GcmApiTest, NativeSendReservedPrefixBackstop) {
++  StartCollecting();
++  auto extension = ExtensionBuilder("Native GCM prefix validation")
++                       .SetManifestVersion(3)
++                       .AddAPIPermission("gcm")
++                       .Build();
++  auto dispatcher = std::make_unique<ExtensionFunctionDispatcher>(profile());
++  constexpr struct {
++    const char* key;
++    bool bad_message;
++  } kCases[] = {
++      {"goog.", true},
++      {"goog.foo", true},
++      {"GoOg.Foo", true},
++      {"goog", false},
++      {"googx.foo", false},
++      {"xgoog.foo", false},
++      {"google", true},
++      {"GoOgLeFoo", true},
++      {"xgoogle", false},
++      {"collapse_key", true},
++      {"collapse_key_tail", true},
++      {"Collapse_key", false},
++      {"normal", false},
++  };
++  for (const auto& test_case : kCases) {
++    SCOPED_TRACE(test_case.key);
++    const auto previous_data = service()->last_sent_message().data;
++    base::DictValue data;
++    data.Set(test_case.key, "payload");
++    base::DictValue message;
++    message.Set("destinationId", "destination");
++    message.Set("messageId", "native-prefix-boundary");
++    message.Set("data", std::move(data));
++    base::ListValue args;
++    args.Append(std::move(message));
++
++    auto function = base::MakeRefCounted<GcmSendFunction>();
++    function->SetName("gcm.send");
++    function->set_extension(extension);
++    function->SetDispatcher(dispatcher->AsWeakPtr());
++    function->SetArgs(std::move(args));
++    function->set_has_callback(true);
++    function->preserve_results_for_testing();
++    base::test::TestFuture<ExtensionFunction::ResponseType> response;
++    function->set_response_callback(base::BindOnce(
++        [](base::test::TestFuture<ExtensionFunction::ResponseType>* future,
++           ExtensionFunction::ResponseType type, base::ListValue,
++           const std::string&, mojom::ExtraResponseDataPtr) {
++          future->SetValue(type);
++        },
++        &response));
++    function->RunWithValidation().Execute();
++    ASSERT_TRUE(response.Wait());
++    if (test_case.bad_message) {
++      EXPECT_EQ(ExtensionFunction::ResponseType::kBadMessage, response.Get());
++      // No malformed native payload may reach even the existing fake backend.
++      EXPECT_EQ(previous_data, service()->last_sent_message().data);
++    } else {
++      EXPECT_EQ(ExtensionFunction::ResponseType::kSucceeded, response.Get());
++      const auto& sent = service()->last_sent_message();
++      ASSERT_EQ(1u, sent.data.size());
++      EXPECT_EQ("payload", sent.data.at(test_case.key));
++      EXPECT_EQ("destination", service()->last_receiver_id());
++      const auto* result = function->GetResultListForTest();
++      ASSERT_TRUE(result);
++      ASSERT_EQ(1u, result->size());
++      EXPECT_EQ("native-prefix-boundary", (*result)[0].GetString());
++    }
++  }
++}
++#endif  // BUILDFLAG(IS_ANDROID) && defined(NDEBUG)
++
+ #if !BUILDFLAG(IS_ANDROID)
+ // Register and unregister are deprecated on the server. Don't test them.
+ // TODO(crbug.com/421235963): Consider deprecating on other platforms.

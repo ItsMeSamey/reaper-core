@@ -27,9 +27,6 @@ public class BraveAdaptiveToolbarUiCoordinatorClassAdapter extends BraveClassVis
         deleteField(sBraveAdaptiveToolbarUiCoordinator, "mModalDialogManagerSupplier");
         makeProtectedField(sAdaptiveToolbarUiCoordinator, "mModalDialogManagerSupplier");
 
-        deleteField(sBraveAdaptiveToolbarUiCoordinator, "mProfileSupplier");
-        makeProtectedField(sAdaptiveToolbarUiCoordinator, "mProfileSupplier");
-
         deleteField(sBraveAdaptiveToolbarUiCoordinator, "mAdaptiveToolbarButtonController");
         makeProtectedField(sAdaptiveToolbarUiCoordinator, "mAdaptiveToolbarButtonController");
     }

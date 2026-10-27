@@ -11,6 +11,7 @@
 #include <string_view>
 
 #include "base/time/time.h"
+#include "build/build_config.h"
 
 class PrefService;
 
@@ -33,6 +34,7 @@ std::optional<base::Time> GetYMDAsDate(std::string_view ymd,
 
 std::string GetAPIKey();
 
+#if !BUILDFLAG(IS_ANDROID)
 enum : uint8_t {
   kIsInactiveUser = 0,
   kIsDailyUser = (1 << 0),
@@ -42,6 +44,7 @@ enum : uint8_t {
 
 uint8_t UsageBitfieldFromTimestamp(const base::Time& last_usage_time,
                                    const base::Time& last_reported_usage_time);
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 }  // namespace brave_stats
 

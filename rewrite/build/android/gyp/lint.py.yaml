@@ -1,0 +1,84 @@
+substitutions:
+  - description: "Preserve the already-qualified Brave inline override hook from the existing legacy patch."
+    regex:
+      re_pattern: "\\\n\\\nif\\ __name__\\ ==\\ '__main__':\\\n\\ \\ \\ \\ sys\\.exit\\(main\\(\\)\\)\\\n"
+      replace: "\n\nfrom brave_chromium_utils import inline_chromium_src_override; inline_chromium_src_override(globals(), locals())\nif __name__ == '__main__':\n    sys.exit(main())\n"
+    count: 1
+
+  - description: "Lint-only source-routing change 2.1; preserve existing scoped annotations and normal checks."
+    regex:
+      re_pattern: "\\ \\ \\ \\ baseline_path=None,\\\n\\):\\\n\\ \\ \\ \\ project\\ =\\ ElementTree\\.Element\\('project'\\)"
+      replace: "    baseline_path=None,\n    android_manifests=None,\n):\n    project = ElementTree.Element('project')"
+    count: 1
+
+  - description: "Lint-only source-routing change 2.2; preserve existing scoped annotations and normal checks."
+    regex:
+      re_pattern: "\\ \\ \\ \\ \\ \\ \\ \\ manifest\\.set\\('file',\\ android_manifest\\)\\\n\\ \\ \\ \\ if\\ srcjar_sources:"
+      replace: "        manifest.set('file', android_manifest)\n    # Source manifests retain element-scoped tools:ignore annotations removed\n    # by manifest merging. Keep the explicit primary-first build-config order.\n    for source_manifest in dict.fromkeys(android_manifests or []):\n        manifest = ElementTree.SubElement(main_module, 'manifest')\n        manifest.set('file', source_manifest)\n    if srcjar_sources:"
+    count: 1
+
+  - description: "Lint-only source-routing change 2.3; preserve existing scoped annotations and normal checks."
+    regex:
+      re_pattern: "\\ \\ \\ \\ warnings_as_errors=False,\\\n\\):\\\n\\ \\ \\ \\ logging\\.info\\('Lint\\ starting'\\)"
+      replace: "    warnings_as_errors=False,\n    android_manifests=None,\n):\n    logging.info('Lint starting')"
+    count: 1
+
+  - description: "Lint-only source-routing change 2.4; preserve existing scoped annotations and normal checks."
+    regex:
+      re_pattern: "\\ \\ \\ \\ \\ \\ \\ \\ android_sdk_version,\\\n\\ \\ \\ \\ \\ \\ \\ \\ baseline,\\\n\\ \\ \\ \\ \\)"
+      replace: "        android_sdk_version,\n        baseline,\n        android_manifests,\n    )"
+    count: 1
+
+  - description: "Lint-only source-routing change 2.5; preserve existing scoped annotations and normal checks."
+    regex:
+      re_pattern: "\\ \\ \\ \\ parser\\.add_argument\\(\\\n\\ \\ \\ \\ \\ \\ \\ \\ '\\-\\-resource\\-sources',"
+      replace: "    parser.add_argument(\n        '--android-manifests', help='GN list of selected unmerged manifests.'\n    )\n    parser.add_argument(\n        '--resource-sources',"
+    count: 1
+
+  - description: "Lint-only source-routing change 2.6; preserve existing scoped annotations and normal checks."
+    regex:
+      re_pattern: "\\ \\ \\ \\ args\\.sources\\ =\\ action_helpers\\.parse_gn_list\\(args\\.sources\\)"
+      replace: "    if args.android_manifests is not None:\n        args.android_manifests = action_helpers.parse_gn_list(args.android_manifests)\n    args.sources = action_helpers.parse_gn_list(args.sources)"
+    count: 1
+
+  - description: "Lint-only source-routing change 2.7; preserve existing scoped annotations and normal checks."
+    regex:
+      re_pattern: "\\ \\ \\ \\ \\ \\ \\ \\ \\+\\ resource_sources\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\+\\ \\[args\\.baseline,\\ args\\.manifest\\]"
+      replace: "        + resource_sources\n        + (args.android_manifests or [])\n        + [args.baseline, args.manifest]"
+    count: 1
+
+  - description: "Lint-only source-routing change 2.8; preserve existing scoped annotations and normal checks."
+    regex:
+      re_pattern: "\\ \\ \\ \\ \\ \\ \\ \\ warnings_as_errors=args\\.warnings_as_errors,\\\n\\ \\ \\ \\ \\)"
+      replace: "        warnings_as_errors=args.warnings_as_errors,\n        android_manifests=args.android_manifests,\n    )"
+    count: 1
+
+  - description: "Lint effective-app annotation and exact parser-INFO correction 1"
+    regex:
+      re_pattern: "def\\ _GenerateProjectFile\\(\\\n"
+      replace: "def _CreateLintManifest(android_manifest, source_manifests, output_path):\n    \"\"\"Preserves existing lint annotations on the effective app declarations.\"\"\"\n    android = '{http://schemas.android.com/apk/res/android}'\n    tools = '{http://schemas.android.com/tools}'\n    allowed = (tools + 'ignore', tools + 'targetApi')\n    merged = ElementTree.parse(android_manifest).getroot()\n    merged_package = merged.get('package', '')\n\n    def has_annotations(element):\n        return any(any(key in node.attrib for key in allowed)\n                   for node in element.iter())\n\n    def qualified_name(value, package):\n        if value.startswith('.'):\n            return package + value\n        return package + '.' + value if '.' not in value else value\n\n    def shape(element):\n        return (element.tag,\n                tuple(sorted((key, value) for key, value in element.attrib.items()\n                             if not key.startswith(tools))),\n                tuple(shape(child) for child in element))\n\n    def matches(source, target, package):\n        if source.tag != target.tag:\n            return False\n        name = source.get(android + 'name')\n        if name is not None:\n            return qualified_name(name, package) == qualified_name(\n                target.get(android + 'name', ''), merged_package)\n        if source.tag == 'intent-filter':\n            return shape(source) == shape(target)\n        return all(target.get(key) == value for key, value in source.attrib.items()\n                   if not key.startswith(tools))\n\n    def transfer(source, target, package, primary):\n        annotations = [(key, source.get(key)) for key in allowed\n                       if key in source.attrib]\n        if annotations and not primary and source.tag in ('manifest', 'application'):\n            raise ValueError('Dependency annotation would broaden app scope: '\n                             + source.tag)\n        for key, value in annotations:\n            previous = target.get(key)\n            if key == tools + 'ignore':\n                values = [item.strip() for group in (previous, value) if group\n                          for item in group.split(',') if item.strip()]\n                target.set(key, ','.join(dict.fromkeys(values)))\n            elif previous is not None and previous != value:\n                raise ValueError('Conflicting tools:targetApi annotation')\n            else:\n                target.set(key, value)\n        for child in source:\n            if not has_annotations(child):\n                continue\n            candidates = [node for node in target if matches(child, node, package)]\n            if len(candidates) != 1:\n                raise ValueError('No unique effective declaration for annotation: '\n                                 + child.tag + ' ' + child.get(android + 'name', ''))\n            transfer(child, candidates[0], package, primary)\n\n    for index, source_manifest in enumerate(source_manifests):\n        source = ElementTree.parse(source_manifest).getroot()\n        transfer(source, merged, source.get('package', ''), index == 0)\n    # Only this lint-owned copy is written. Packaging and source manifests stay intact.\n    _WriteXmlFile(merged, output_path)\n    return output_path\n\n\ndef _GenerateProjectFile(\n"
+    count: 1
+
+  - description: "Lint effective-app annotation and exact parser-INFO correction 2"
+    regex:
+      re_pattern: "\\ \\ \\ \\ \\#\\ Source\\ manifests\\ retain\\ element\\-scoped\\ tools:ignore\\ annotations\\ removed\\\n\\ \\ \\ \\ \\#\\ by\\ manifest\\ merging\\.\\ Keep\\ the\\ explicit\\ primary\\-first\\ build\\-config\\ order\\.\\\n\\ \\ \\ \\ for\\ source_manifest\\ in\\ dict\\.fromkeys\\(android_manifests\\ or\\ \\[\\]\\):\\\n\\ \\ \\ \\ \\ \\ \\ \\ manifest\\ =\\ ElementTree\\.SubElement\\(main_module,\\ 'manifest'\\)\\\n\\ \\ \\ \\ \\ \\ \\ \\ manifest\\.set\\('file',\\ source_manifest\\)\\\n"
+      replace: "    # Dependency manifests are merge inputs, not standalone applications.\n    # Keep their existing scoped lint annotations on the effective app copy.\n    source_manifests = list(dict.fromkeys(android_manifests or []))\n    if android_manifest and source_manifests:\n        lint_manifest = _CreateLintManifest(\n            android_manifest, source_manifests,\n            os.path.join(os.path.dirname(partials_dir), 'AndroidManifest.lint.xml'))\n        source_manifests = [source_manifests[0], lint_manifest]\n    for source_manifest in dict.fromkeys(source_manifests):\n        manifest = ElementTree.SubElement(main_module, 'manifest')\n        manifest.set('file', source_manifest)\n"
+    count: 1
+
+  - description: "Lint effective-app annotation and exact parser-INFO correction 3"
+    regex:
+      re_pattern: "import\\ os\\\n"
+      replace: "import os\nimport re\n"
+    count: 1
+
+  - description: "Lint effective-app annotation and exact parser-INFO correction 4"
+    regex:
+      re_pattern: "def\\ _CreateLintManifest\\("
+      replace: "def _FilterLintStderr(output):\n    \"\"\"Ignores only the parser cache's non-diagnostic JUL INFO record.\"\"\"\n    pool_header = re.compile(\n        r'(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) '\n        r'(?:[1-9]|[12][0-9]|3[01]), [0-9]{4} '\n        r'(?:[1-9]|1[0-2]):[0-5][0-9]:[0-5][0-9] (?:AM|PM) '\n        r'com\\\\.android\\\\.utils\\\\.PositionXmlParser\\\\$SaxParserPool '\n        r'checkLimitWhenCreate\\\\n')\n    pool_message = ('INFO: Maximum pool size reached in '\n                    'com.android.utils.PositionXmlParser\\\\n')\n    lines = output.splitlines(keepends=True)\n    retained = []\n    index = 0\n    while index < len(lines):\n        if (index + 1 < len(lines) and pool_header.fullmatch(lines[index])\n                and lines[index + 1] == pool_message):\n            # The pinned pool code still creates/returns a parser after this log.\n            index += 2\n        else:\n            retained.append(lines[index])\n            index += 1\n    return build_utils.FilterReflectiveAccessJavaWarnings(''.join(retained))\n\n\ndef _CreateLintManifest("
+    count: 1
+
+  - description: "Lint effective-app annotation and exact parser-INFO correction 5"
+    regex:
+      re_pattern: "stderr_filter=build_utils\\.FilterReflectiveAccessJavaWarnings,"
+      replace: "stderr_filter=_FilterLintStderr,"
+    count: 1

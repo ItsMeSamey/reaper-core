@@ -1,0 +1,73 @@
+diff --git a/chrome/android/java/src/org/chromium/chrome/browser/BrowserExitReasonTracker.java b/chrome/android/java/src/org/chromium/chrome/browser/BrowserExitReasonTracker.java
+--- a/chrome/android/java/src/org/chromium/chrome/browser/BrowserExitReasonTracker.java
++++ b/chrome/android/java/src/org/chromium/chrome/browser/BrowserExitReasonTracker.java
+@@ -4,18 +4,25 @@
+
+ package org.chromium.chrome.browser;
+
++import android.app.ActivityManager;
++import android.app.ApplicationExitInfo;
++import android.content.Context;
+ import android.content.SharedPreferences;
+ import android.os.Build;
+ import android.os.Process;
+
++import androidx.annotation.RequiresApi;
++
++import org.chromium.base.ContextUtils;
+ import org.chromium.base.shared_preferences.SharedPreferencesManager;
+ import org.chromium.build.annotations.NullMarked;
+ import org.chromium.chrome.browser.multiwindow.MultiInstanceOrchestratorFactory;
+ import org.chromium.chrome.browser.preferences.ChromePreferenceKeys;
+ import org.chromium.chrome.browser.preferences.ChromeSharedPreferences;
+-import org.chromium.components.crash.browser.ProcessExitReasonFromSystem;
+
+-/** Records the SystemExitReason for the Browser process. */
++import java.util.List;
++
++/** Preserves browser process exit information for local crash recovery. */
+ @NullMarked
+ public class BrowserExitReasonTracker {
+     private BrowserExitReasonTracker() {}
+@@ -25,9 +32,6 @@
+
+         SharedPreferencesManager prefs = ChromeSharedPreferences.getInstance();
+         if (prefs.contains(ChromePreferenceKeys.LAST_SESSION_BROWSER_EXIT_REASON)) {
+-            int reason = prefs.readInt(ChromePreferenceKeys.LAST_SESSION_BROWSER_EXIT_REASON);
+-            ProcessExitReasonFromSystem.recordAsEnumHistogram(
+-                    "Stability.Android.SystemExitReason.Browser2", reason);
+             MultiInstanceOrchestratorFactory.getInstance().onForegroundBrowserProcessInitialized();
+         }
+         SharedPreferences.Editor ed = prefs.getEditor();
+@@ -43,14 +47,27 @@
+         SharedPreferencesManager prefs = ChromeSharedPreferences.getInstance();
+         int previousPid = prefs.readInt(ChromePreferenceKeys.LAST_SESSION_BROWSER_PID);
+         if (previousPid != 0) {
+-            int reason = ProcessExitReasonFromSystem.getExitReason(previousPid);
++            int reason = getExitReason(previousPid);
+             SharedPreferences.Editor ed = prefs.getEditor();
+             ed.remove(ChromePreferenceKeys.LAST_SESSION_BROWSER_PID);
+-            // If this is a background launch eg. JobScheduler, we may not load native and persist
+-            // histograms. Store the histrogram value to shared prefs to record it on next
+-            // foreground launch.
++            // Preserve the exit reason across a background-only launch so the next foreground
++            // launch can evaluate local crash recovery.
+             ed.putInt(ChromePreferenceKeys.LAST_SESSION_BROWSER_EXIT_REASON, reason);
+             ed.apply();
+         }
+     }
++    @RequiresApi(Build.VERSION_CODES.R)
++    private static int getExitReason(int pid) {
++        ActivityManager am =
++                (ActivityManager)
++                        ContextUtils.getApplicationContext()
++                                .getSystemService(Context.ACTIVITY_SERVICE);
++        // Request only the most recent record for the previous browser process.
++        List<ApplicationExitInfo> reasons =
++                am.getHistoricalProcessExitReasons(/* package_name= */ null, pid, /* maxNum= */ 1);
++        if (reasons.isEmpty() || reasons.get(0) == null || reasons.get(0).getPid() != pid) {
++            return -1;
++        }
++        return reasons.get(0).getReason();
++    }
+ }

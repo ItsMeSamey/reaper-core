@@ -1,0 +1,182 @@
+diff --git a/components/omnibox/browser/android/java/src/org/chromium/components/omnibox/AutocompleteInput.java b/components/omnibox/browser/android/java/src/org/chromium/components/omnibox/AutocompleteInput.java
+--- a/components/omnibox/browser/android/java/src/org/chromium/components/omnibox/AutocompleteInput.java
++++ b/components/omnibox/browser/android/java/src/org/chromium/components/omnibox/AutocompleteInput.java
+@@ -15,7 +15,6 @@
+ import org.chromium.base.supplier.ObservableSuppliers;
+ import org.chromium.base.supplier.SettableNonNullObservableSupplier;
+ import org.chromium.base.supplier.SettableNullableObservableSupplier;
+-import org.chromium.build.BuildConfig;
+ import org.chromium.build.annotations.Initializer;
+ import org.chromium.build.annotations.NullMarked;
+ import org.chromium.build.annotations.Nullable;
+@@ -27,11 +26,10 @@
+ import java.lang.annotation.Retention;
+ import java.lang.annotation.RetentionPolicy;
+ import java.lang.annotation.Target;
+-import java.util.Locale;
+ import java.util.Objects;
+ 
+ /**
+- * AutocompleteInput encompasses the input to autocomplete and fusebox.
++ * AutocompleteInput encompasses the input to ordinary autocomplete.
+  *
+  * <p>This class must have no dependencies on external services or logic and should be fully
+  * serializable.
+@@ -117,9 +115,8 @@
+         int DRAFTING = 2;
+ 
+         /**
+-         * Active input session showing the suggestions popover dropdown list (or expanded Fusebox
+-         * UI in AI mode). Entered when autocomplete suggestions are received or an expanded AI mode
+-         * session is active.
++         * Active input session showing the suggestions popover dropdown list. Entered when ordinary autocomplete suggestions
++         * are received.
+          */
+         int SUGGESTIONS = 3;
+     }
+@@ -181,7 +178,6 @@
+     private @PageClassification int mPageClassification;
+     private String mPageTitle;
+     private boolean mAllowExactKeywordMatch;
+-    private boolean mHasAttachments;
+     private final SettableNonNullObservableSupplier<@AutocompleteState Integer>
+             mAutocompleteStateSupplier =
+                     ObservableSuppliers.createNonNull(AutocompleteState.ENABLED);
+@@ -191,7 +187,6 @@
+     private @RefineActionUsage int mRefineActionUsage;
+     private boolean mSuggestionsListScrolled;
+     private @OmniboxFocusReason int mFocusReason;
+-    private /* ModelMode */ int mModelMode;
+ 
+     private String mInitialUserText = "";
+     private final SettableNonNullObservableSupplier<String> mUserText =
+@@ -243,14 +238,12 @@
+         mPageClassification = other.mPageClassification;
+         mPageTitle = other.mPageTitle;
+         mAllowExactKeywordMatch = other.mAllowExactKeywordMatch;
+-        mHasAttachments = other.mHasAttachments;
+         mAutocompleteStateSupplier.set(other.getAutocompleteState());
+         mDisplayStateSupplier.set(other.getDisplayState());
+         mSelection = other.mSelection; // Copied.
+         mRefineActionUsage = other.mRefineActionUsage;
+         mSuggestionsListScrolled = other.mSuggestionsListScrolled;
+         mFocusReason = other.mFocusReason;
+-        mModelMode = other.mModelMode;
+         mUserText.set(other.mUserText.get());
+         mPreviewText = other.mPreviewText;
+         mAllowUserTextAutocompletion.set(other.mAllowUserTextAutocompletion.get());
+@@ -262,32 +255,10 @@
+ 
+     // LINT.ThenChange(:Members)
+ 
+-    private @PageClassification int getComposeboxEquivalentOfPageClassification() {
+-        return switch (mPageClassification) {
+-            // LINT.IfChange(FuseboxSupportedPageClassifications)
+-            case PageClassification.INSTANT_NTP_WITH_OMNIBOX_AS_STARTING_FOCUS ->
+-                    PageClassification.NTP_OMNIBOX_COMPOSEBOX;
+-            case PageClassification.SEARCH_RESULT_PAGE_NO_SEARCH_TERM_REPLACEMENT ->
+-                    PageClassification.SRP_OMNIBOX_COMPOSEBOX;
+-            case PageClassification.OTHER -> PageClassification.OTHER_OMNIBOX_COMPOSEBOX;
+-            // LINT.ThenChange(/chrome/browser/ui/android/omnibox/java/src/org/chromium/chrome/browser/omnibox/fusebox/FuseboxCoordinator.java:FuseboxSupportedPageClassifications)
+-            default -> {
+-                // TODO(crbug.com/474808407): address the issue with top resumed activity change and
+-                // remove condition, making assertion live again.
+-                if (BuildConfig.ENABLE_DEBUG_LOGS) {
+-                    assert false
+-                            : String.format(
+-                                    Locale.ROOT,
+-                                    "Unrecognized page classification: %d",
+-                                    mPageClassification);
+-                }
+-                yield PageClassification.OTHER_OMNIBOX_COMPOSEBOX;
+-            }
+-        };
+-    }
+-
+-    /**
+-     * Returns the page classification not adjusted for the tools or models.
++
++
++    /**
++     * Returns the raw page classification for ordinary autocomplete.
+      *
+      * @return The raw page classification.
+      */
+@@ -297,9 +268,7 @@
+ 
+     /** Returns the current page classification. */
+     public @PageClassification int getPageClassification() {
+-        return ToolModeUtils.isAimRequest(mRequestTypeSupplier.get())
+-                ? getComposeboxEquivalentOfPageClassification()
+-                : mPageClassification;
++        return mPageClassification;
+     }
+ 
+     /**
+@@ -347,6 +316,10 @@
+ 
+     /** Set the AutocompleteRequestType */
+     public AutocompleteInput setRequestType(@AutocompleteRequestType int type) {
++        if (type != AutocompleteRequestType.SEARCH
++                && type != AutocompleteRequestType.SEARCH_PREFETCH) {
++            throw new IllegalArgumentException("Unsupported autocomplete request type");
++        }
+         mRequestTypeSupplier.set(type);
+         return this;
+     }
+@@ -415,10 +388,7 @@
+         return mRequestTypeSupplier.get() == AutocompleteRequestType.SEARCH;
+     }
+ 
+-    /** Returns the Autocomplete Tool that is currently selected. */
+-    public int getToolMode() {
+-        return ToolModeUtils.getToolModeForRequestType(getRequestType(), mHasAttachments);
+-    }
++
+ 
+     /**
+      * Set the text as currently typed by the User.
+@@ -630,13 +600,9 @@
+         }
+     }
+ 
+-    public void setHasAttachments(boolean hasAttachments) {
+-        mHasAttachments = hasAttachments;
+-    }
+-
+-    public boolean hasAttachments() {
+-        return mHasAttachments;
+-    }
++
++
++
+ 
+     public AutocompleteInput setSelection(TextSelection selection) {
+         mSelection = selection;
+@@ -671,7 +637,6 @@
+         mAllowExactKeywordMatch = false;
+         mPageUrl = GURL.emptyGURL();
+         mPageTitle = "";
+-        mHasAttachments = false;
+         // Selection after all text
+         mSelection = TextSelection.SELECT_END;
+         mRefineActionUsage = RefineActionUsage.NOT_USED;
+@@ -755,15 +720,9 @@
+         return this;
+     }
+ 
+-    /** Returns the current model mode or MODEL_MODE_UNSPECIFIED if never set. */
+-    public /* ModelMode */ int getModelMode() {
+-        return mModelMode;
+-    }
+-
+-    /** Sets the ModelMode that should be used. */
+-    public void setModelMode(int modelMode) {
+-        mModelMode = modelMode;
+-    }
++
++
++
+ 
+     @VisibleForTesting
+     static boolean allowExactKeywordTrigger(String text) {

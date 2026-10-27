@@ -1,0 +1,78 @@
+# Reaper Android containers lifecycle; complete raw-pin ancestry.
+substitutions:
+- description: 'Reaper Android containers: immutable tab identity, trusted CCT admission, persistent partition/SQL/reference lifecycle.'
+  regex:
+    re_pattern: '\
+
+      \#include\ "chrome/browser/ui/navigator/browser_navigator\.h"\
+
+      \
+
+      \#include\ "base/feature_list\.h"\
+
+      \#include\ "base/notimplemented\.h"\
+
+      \#include\ "base/task/single_thread_task_runner\.h"\
+
+      '
+    replace: '
+
+      #include "chrome/browser/ui/navigator/browser_navigator.h"
+
+
+      #include <string>
+
+      #include <variant>
+
+
+      #include "brave/browser/containers/android/containers_bridge.h"
+
+      #include "brave/browser/containers/container_specifier_utils.h"
+
+      #include "brave/components/containers/content/browser/storage_partition_utils.h"
+
+      #include "content/public/browser/security_principal.h"
+
+      #include "content/public/browser/site_instance.h"
+
+      #include "base/feature_list.h"
+
+      #include "base/notimplemented.h"
+
+      #include "base/task/single_thread_task_runner.h"
+
+      '
+- description: 'Reaper Android containers: immutable tab identity, trusted CCT admission, persistent partition/SQL/reference lifecycle.'
+  regex:
+    re_pattern: '\ \ \ \ parent\ =\ TabAndroid::FromWebContents\(params\->source_contents\);\
+
+      \ \ \}\
+
+      \
+
+      \ \ //\ Use\ the\ supplied\ WebContents\ or\ create\ a\ new\ one\.\
+
+      \ \ std::unique_ptr<content::WebContents>\ web_contents;\
+
+      \ \ if\ \(params\->contents_to_insert\)\ \{\
+
+      \ \ \ \ web_contents\ =\ std::move\(params\->contents_to_insert\);\
+
+      \ \ \}\ else\ \{\
+
+      \ \ \ \ content::WebContents::CreateParams\ create_params\(\
+
+      \ \ \ \ \ \ \ \ params\->initiating_profile\);\
+
+      \ \ \ \ web_contents\ =\ content::WebContents::Create\(create_params\);\
+
+      \ \ \}\
+
+      \
+
+      '
+    replace: "    parent = TabAndroid::FromWebContents(params->source_contents);\n  }\n\n  std::string container_id = parent && parent->GetProfile() == params->initiating_profile\n                                 ? parent->GetContainerId() : std::string();\n  bool explicit_container = !std::holds_alternative<std::monostate>(\n      params->container_specifier);\n  if (explicit_container) {\n    auto selected = containers::GetStoragePartitionConfigForContainerSpecifier(\n        params->initiating_profile, params->container_specifier);\n    if (!selected) return nullptr;\n    container_id = selected->partition_name();\n    if (parent && parent->GetContainerId() != container_id) parent = nullptr;\n  }\n\n  // Use the supplied WebContents or create a new one.\n  std::unique_ptr<content::WebContents> web_contents;\n  if (params->contents_to_insert) {\n    const auto& actual = params->contents_to_insert->GetSiteInstance()\n                             ->GetSecurityPrincipal().GetStoragePartitionConfig();\n    std::string actual_id = actual.partition_domain() ==\n                                   containers::kContainersStoragePartitionDomain\n                               ? actual.partition_name() : std::string();\n    if ((explicit_container || parent) && actual_id != container_id) return nullptr;\n    container_id = actual_id;\n    if (!containers::android::WebContentsMatchesContainer(\n            params->initiating_profile, params->contents_to_insert.get(), container_id)) {\n      return nullptr;\n    }\n    web_contents = std::move(params->contents_to_insert);\n  } else {\n    auto partition = containers::android::ResolveContainerStoragePartition(\n        params->initiating_profile, container_id);\n    if (!partition) return nullptr;\n    content::WebContents::CreateParams create_params(params->initiating_profile);\n    if (!container_id.empty()) {\n      create_params.site_instance =\n          content::SiteInstance::CreateForFixedStoragePartition(\n              params->initiating_profile, GURL(), *partition);\n    }\n    web_contents = content::WebContents::Create(create_params);\n  }\n\n"
+- description: "Reaper Android navigation: carry the existing browser weak lifetime across posted dispatch and always complete the callback."
+  regex:
+    re_pattern: "\\ \\ \\ \\ \\ \\ base::SingleThreadTaskRunner::GetCurrentDefault\\(\\)\\->PostTask\\(\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ FROM_HERE,\\ base::BindOnce\\(std::move\\(callback\\),\\ params\\->browser\\)\\);\\\n"
+    replace: "      base::WeakPtr<BrowserWindowInterface> browser;\n      if (params->browser) {\n        browser = params->browser->GetWeakPtr();\n      }\n      base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(\n          FROM_HERE,\n          base::BindOnce(\n              [](base::WeakPtr<BrowserWindowInterface> browser,\n                 base::OnceCallback<void(BrowserWindowInterface*)> callback) {\n                std::move(callback).Run(browser.get());\n              },\n              std::move(browser), std::move(callback)));\n"

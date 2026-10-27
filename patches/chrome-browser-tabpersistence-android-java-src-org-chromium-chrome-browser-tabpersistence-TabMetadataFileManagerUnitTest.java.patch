@@ -1,0 +1,112 @@
+diff --git a/chrome/browser/tabpersistence/android/java/src/org/chromium/chrome/browser/tabpersistence/TabMetadataFileManagerUnitTest.java b/chrome/browser/tabpersistence/android/java/src/org/chromium/chrome/browser/tabpersistence/TabMetadataFileManagerUnitTest.java
+index c9f7a332fdf4cd77fd4d4431d2485722161331f1..150a61f544e2e9b500dc6848c273ecb22a8e271d 100644
+--- a/chrome/browser/tabpersistence/android/java/src/org/chromium/chrome/browser/tabpersistence/TabMetadataFileManagerUnitTest.java
++++ b/chrome/browser/tabpersistence/android/java/src/org/chromium/chrome/browser/tabpersistence/TabMetadataFileManagerUnitTest.java
+@@ -6,6 +6,7 @@
+ 
+ import static org.junit.Assert.assertEquals;
+ import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertNull;
+ import static org.junit.Assert.assertTrue;
+ 
+ import org.junit.Rule;
+@@ -159,4 +160,99 @@
+         assertEquals(TriState.NOT_SET, tab0.isIncognito);
+         assertTrue(tab0.isStandardActiveIndex);
+     }
++    @Test
++    public void testContainerMetadataPreservesDefaultNamedTemporaryAndUnknownIds() throws Exception {
++        File file = mTemporaryFolder.newFile("tab_state_containers");
++        TabModelMetadata normal = new TabModelMetadata(1);
++        String named = "4a4d13b6-c971-4c61-ae11-e7a864f58165";
++        List<String> expected = new ArrayList<>(List.of("", named, "t-" + named));
++        expected.add(null);
++        for (String id : expected) {
++            normal.ids.add(100 + normal.ids.size());
++            normal.urls.add("https://same.example/");
++            normal.containerIds.add(id);
++        }
++        TabMetadataFileManager.saveListToFile(file,
++                new TabModelSelectorMetadata(normal, new TabModelMetadata(-1)));
++        List<String> ids = new ArrayList<>();
++        try (DataInputStream stream = new DataInputStream(new FileInputStream(file))) {
++            TabMetadataFileManager.readSavedMetadataFile(stream, new OnTabStateReadCallback() {
++                @Override
++                public void onDetailsRead(int index, int id, String url,
++                        int incognito, boolean normalActive, boolean otrActive) {}
++                @Override
++                public void onDetailsReadWithContainer(int index, int id, String url,
++                        int incognito, boolean normalActive, boolean otrActive,
++                        String containerId) {
++                    ids.add(containerId);
++                    assertEquals("https://same.example/", url);
++                }
++            }, null);
++        }
++        assertEquals(expected, ids);
++        assertNull(ids.get(3));
++    }
++
++    @Test
++    public void testReadVersionSixContainerMetadata() throws Exception {
++        String named = "4a4d13b6-c971-4c61-ae11-e7a864f58165";
++        List<String> expected = List.of("", named, "t-" + named);
++        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
++        DataOutputStream out = new DataOutputStream(bytes);
++        out.writeInt(6);
++        out.writeInt(expected.size());
++        out.writeInt(0);
++        out.writeInt(-1);
++        out.writeInt(0);
++        for (int i = 0; i < expected.size(); i++) {
++            out.writeInt(100 + i);
++            out.writeUTF("https://same.example/");
++            out.writeUTF(expected.get(i));
++        }
++        out.flush();
++
++        List<String> ids = new ArrayList<>();
++        TabMetadataFileManager.readSavedMetadataFile(
++                new DataInputStream(new ByteArrayInputStream(bytes.toByteArray())),
++                new OnTabStateReadCallback() {
++                    @Override
++                    public void onDetailsRead(
++                            int index, int id, String url, int incognito,
++                            boolean normalActive, boolean otrActive) {}
++
++                    @Override
++                    public void onDetailsReadWithContainer(
++                            int index, int id, String url, int incognito,
++                            boolean normalActive, boolean otrActive, String containerId) {
++                        ids.add(containerId);
++                    }
++                },
++                null);
++        assertEquals(expected, ids);
++    }
++
++    @Test(expected = java.io.IOException.class)
++    public void testMalformedContainerMetadataCannotAuthorizeUrlFallback() throws Exception {
++        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
++        DataOutputStream out = new DataOutputStream(bytes);
++        out.writeInt(6); out.writeInt(1); out.writeInt(0);
++        out.writeInt(-1); out.writeInt(0);
++        out.writeInt(101); out.writeUTF("https://private.example/");
++        out.writeUTF("../../not-a-container");
++        TabMetadataFileManager.readSavedMetadataFile(
++                new DataInputStream(new ByteArrayInputStream(bytes.toByteArray())), null, null);
++    }
++
++    @Test
++    public void testContainerSyntaxRejectsNoncanonicalAliases() {
++        String named = "4a4d13b6-c971-4c61-ae11-e7a864f58165";
++        assertTrue(org.chromium.chrome.browser.tab.Tab.isContainerIdWellFormed(""));
++        assertTrue(org.chromium.chrome.browser.tab.Tab.isContainerIdWellFormed(named));
++        assertTrue(org.chromium.chrome.browser.tab.Tab.isContainerIdWellFormed("t-" + named));
++        assertFalse(org.chromium.chrome.browser.tab.Tab.isContainerIdWellFormed(null));
++        assertFalse(org.chromium.chrome.browser.tab.Tab.isContainerIdWellFormed(named.toUpperCase()));
++        assertFalse(org.chromium.chrome.browser.tab.Tab.isContainerIdWellFormed("t-t-" + named));
++        assertFalse(org.chromium.chrome.browser.tab.Tab.isContainerIdWellFormed("1-1-1-1-1"));
++    }
++
+ }

@@ -1,0 +1,257 @@
+# Android notification compile dependencies and array nullness.
+substitutions:
+- description: Include explicit Android policy callback dependencies
+  regex:
+    re_pattern: \#include\ "base/functional/callback\.h"
+    replace: '#include "base/functional/bind.h"
+
+      #include "base/functional/callback.h"
+
+      #include "base/location.h"'
+- description: Use the existing notification status JNI target
+  regex:
+    re_pattern: '\#if\ BUILDFLAG\(ENABLE_PLATFORM_APPS\)\
+
+      \#include'
+    replace: '#if BUILDFLAG(IS_ANDROID)
+
+      #include "base/android/callback_android.h"
+
+      #include "chrome/browser/notifications/jni_headers/NotificationSystemStatusUtil_jni.h"
+
+      #endif
+
+
+      #if BUILDFLAG(ENABLE_PLATFORM_APPS)
+
+      #include'
+- description: Recheck the currently enabled extension and its current permissions on completion
+  regex:
+    re_pattern: \#include\ "base/android/callback_android\.h"
+    replace: '#include "base/android/callback_android.h"
+
+      #include "extensions/browser/extension_registry.h"
+
+      #include "extensions/common/mojom/api_permission_id.mojom.h"
+
+      #include "extensions/common/permissions/permissions_data.h"'
+- description: Return actual Android app/channel policy with bounded asynchronous completion
+  regex:
+    re_pattern: NotificationsGetPermissionLevelFunction::RunNotificationsApi\(\)\ \{
+    replace: "NotificationsGetPermissionLevelFunction::RunNotificationsApi() {\n#if BUILDFLAG(IS_ANDROID)\n  if (!AreExtensionNotificationsAllowed()) {\n    return RespondNow(WithArguments(\"denied\"));\n  }\n  waiting_for_android_status_ = true;\n  AddRef();  // Balanced by FinishAndroidQuery(), including timeout/shutdown.\n  android_status_timeout_.Start(\n      FROM_HERE, base::Seconds(10),\n      base::BindOnce(&NotificationsGetPermissionLevelFunction::OnAndroidNotificationStatus,\n                     weak_factory_.GetWeakPtr(), 0));\n  Java_NotificationSystemStatusUtil_getExtensionNotificationStatus(\n      base::android::AttachCurrentThread(), extension()->url().spec(),\n      base::BindOnce(&NotificationsGetPermissionLevelFunction::OnAndroidNotificationStatus,\n                     weak_factory_.GetWeakPtr()));\n  return did_respond() ? AlreadyResponded() : RespondLater();\n#else"
+- description: Complete each platform permission query once on result, timeout, or shutdown
+  regex:
+    re_pattern: '\ \ return\ RespondNow\(WithArguments\(api::notifications::ToString\(result\)\)\);\
+
+      \}'
+    replace: "  return RespondNow(WithArguments(api::notifications::ToString(result)));\n#endif\n}\n\n#if BUILDFLAG(IS_ANDROID)\nvoid NotificationsGetPermissionLevelFunction::OnAndroidNotificationStatus(int status) {\n  // NotificationSystemStatusUtil uses 2 for enabled and 3 for disabled. Other\n  // values mean the query failed/timed out, not that the user denied permission.\n  if (status != 2 && status != 3) {\n    FinishAndroidQuery(Error(\"Unable to read Android notification settings.\"));\n    return;\n  }\n  // The original Extension object can outlive disable/unload or permission\n  // revocation while Android policy is read. Consult the current registry entry.\n  const Extension* current_extension = ExtensionRegistry::Get(browser_context())\n                                           ->enabled_extensions()\n                                           .GetByID(extension_id());\n  const bool allowed = current_extension &&\n      current_extension->permissions_data()->HasAPIPermission(\n          mojom::APIPermissionID::kNotifications) &&\n      AreExtensionNotificationsAllowed();\n  FinishAndroidQuery(WithArguments(status == 2 && allowed ? \"granted\" : \"denied\"));\n}\n\nvoid NotificationsGetPermissionLevelFunction::FinishAndroidQuery(ResponseValue response) {\n  if (!waiting_for_android_status_) return;\n  waiting_for_android_status_ = false;\n  android_status_timeout_.Stop();\n  weak_factory_.InvalidateWeakPtrs();\n  Respond(std::move(response));\n  Release();\n}\n\nvoid NotificationsGetPermissionLevelFunction::OnBrowserContextShutdown() {\n  if (waiting_for_android_status_) {\n    FinishAndroidQuery(Error(\"The browser context shut down before notification settings were read.\"));\n  }\n}\n#endif"
+- description: Format modified Android notification implementation
+  regex:
+    re_pattern: '\#include\ "url/gurl\.h"\
+
+      \
+
+      \#if\ BUILDFLAG\(IS_ANDROID\)\
+
+      \#include\ "base/android/callback_android\.h"\
+
+      \#include\ "extensions/browser/extension_registry\.h"\
+
+      \#include\ "extensions/common/mojom/api_permission_id\.mojom\.h"\
+
+      \#include\ "extensions/common/permissions/permissions_data\.h"\
+
+      \#include\ "chrome/browser/notifications/jni_headers/NotificationSystemStatusUtil_jni\.h"\
+
+      \#endif\
+
+      \
+
+      \#if\ BUILDFLAG\(ENABLE_PLATFORM_APPS\)\
+
+      \#include\ "extensions/browser/app_window/app_window\.h"\
+
+      '
+    replace: '#include "url/gurl.h"
+
+
+      #if BUILDFLAG(IS_ANDROID)
+
+      #include "base/android/callback_android.h"
+
+      #include "chrome/browser/notifications/jni_headers/NotificationSystemStatusUtil_jni.h"
+
+      #include "extensions/browser/extension_registry.h"
+
+      #include "extensions/common/mojom/api_permission_id.mojom.h"
+
+      #include "extensions/common/permissions/permissions_data.h"
+
+      #endif
+
+
+      #if BUILDFLAG(ENABLE_PLATFORM_APPS)
+
+      #include "extensions/browser/app_window/app_window.h"
+
+      '
+- description: Format modified Android notification implementation
+  regex:
+    re_pattern: '\ \ waiting_for_android_status_\ =\ true;\
+
+      \ \ AddRef\(\);\ \ //\ Balanced\ by\ FinishAndroidQuery\(\),\ including\ timeout/shutdown\.\
+
+      \ \ android_status_timeout_\.Start\(\
+
+      \ \ \ \ \ \ FROM_HERE,\ base::Seconds\(10\),\
+
+      \ \ \ \ \ \ base::BindOnce\(\&NotificationsGetPermissionLevelFunction::OnAndroidNotificationStatus,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ weak_factory_\.GetWeakPtr\(\),\ 0\)\);\
+
+      \ \ Java_NotificationSystemStatusUtil_getExtensionNotificationStatus\(\
+
+      \ \ \ \ \ \ base::android::AttachCurrentThread\(\),\ extension\(\)\->url\(\)\.spec\(\),\
+
+      \ \ \ \ \ \ base::BindOnce\(\&NotificationsGetPermissionLevelFunction::OnAndroidNotificationStatus,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ weak_factory_\.GetWeakPtr\(\)\)\);\
+
+      \ \ return\ did_respond\(\)\ \?\ AlreadyResponded\(\)\ :\ RespondLater\(\);\
+
+      \#else\
+
+      \ \ api::notifications::PermissionLevel\ result\ =\
+
+      \ \ \ \ \ \ AreExtensionNotificationsAllowed\(\)\
+
+      '
+    replace: "  waiting_for_android_status_ = true;\n  AddRef();  // Balanced by FinishAndroidQuery(), including timeout/shutdown.\n  android_status_timeout_.Start(\n      FROM_HERE, base::Seconds(10),\n      base::BindOnce(\n          &NotificationsGetPermissionLevelFunction::OnAndroidNotificationStatus,\n          weak_factory_.GetWeakPtr(), 0));\n  Java_NotificationSystemStatusUtil_getExtensionNotificationStatus(\n      base::android::AttachCurrentThread(), extension()->url().spec(),\n      base::BindOnce(\n          &NotificationsGetPermissionLevelFunction::OnAndroidNotificationStatus,\n          weak_factory_.GetWeakPtr()));\n  return did_respond() ? AlreadyResponded() : RespondLater();\n#else\n  api::notifications::PermissionLevel result =\n      AreExtensionNotificationsAllowed()\n"
+- description: Format modified Android notification implementation
+  regex:
+    re_pattern: '\#endif\
+
+      \}\
+
+      \
+
+      \#if\ BUILDFLAG\(IS_ANDROID\)\
+
+      void\ NotificationsGetPermissionLevelFunction::OnAndroidNotificationStatus\(int\ status\)\ \{\
+
+      \ \ //\ NotificationSystemStatusUtil\ uses\ 2\ for\ enabled\ and\ 3\ for\ disabled\.\ Other\
+
+      \ \ //\ values\ mean\ the\ query\ failed/timed\ out,\ not\ that\ the\ user\ denied\ permission\.\
+
+      \ \ if\ \(status\ !=\ 2\ \&\&\ status\ !=\ 3\)\ \{\
+
+      \ \ \ \ FinishAndroidQuery\(Error\("Unable\ to\ read\ Android\ notification\ settings\."\)\);\
+
+      \ \ \ \ return;\
+
+      \ \ \}\
+
+      \ \ //\ The\ original\ Extension\ object\ can\ outlive\ disable/unload\ or\ permission\
+
+      \ \ //\ revocation\ while\ Android\ policy\ is\ read\.\ Consult\ the\ current\ registry\ entry\.\
+
+      \ \ const\ Extension\*\ current_extension\ =\ ExtensionRegistry::Get\(browser_context\(\)\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \->enabled_extensions\(\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \.GetByID\(extension_id\(\)\);\
+
+      \ \ const\ bool\ allowed\ =\ current_extension\ \&\&\
+
+      \ \ \ \ \ \ current_extension\->permissions_data\(\)\->HasAPIPermission\(\
+
+      \ \ \ \ \ \ \ \ \ \ mojom::APIPermissionID::kNotifications\)\ \&\&\
+
+      \ \ \ \ \ \ AreExtensionNotificationsAllowed\(\);\
+
+      \ \ FinishAndroidQuery\(WithArguments\(status\ ==\ 2\ \&\&\ allowed\ \?\ "granted"\ :\ "denied"\)\);\
+
+      \}\
+
+      \
+
+      void\ NotificationsGetPermissionLevelFunction::FinishAndroidQuery\(ResponseValue\ response\)\ \{\
+
+      \ \ if\ \(!waiting_for_android_status_\)\ return;\
+
+      \ \ waiting_for_android_status_\ =\ false;\
+
+      \ \ android_status_timeout_\.Stop\(\);\
+
+      \ \ weak_factory_\.InvalidateWeakPtrs\(\);\
+
+      \ \ Respond\(std::move\(response\)\);\
+
+      '
+    replace: "#endif\n}\n\n#if BUILDFLAG(IS_ANDROID)\nvoid NotificationsGetPermissionLevelFunction::OnAndroidNotificationStatus(\n    int status) {\n  // NotificationSystemStatusUtil uses 2 for enabled and 3 for disabled. Other\n  // values mean the query failed/timed out, not that the user denied\n  // permission.\n  if (status != 2 && status != 3) {\n    FinishAndroidQuery(Error(\"Unable to read Android notification settings.\"));\n    return;\n  }\n  // The original Extension object can outlive disable/unload or permission\n  // revocation while Android policy is read. Consult the current registry\n  // entry.\n  const Extension* current_extension = ExtensionRegistry::Get(browser_context())\n                                           ->enabled_extensions()\n                                           .GetByID(extension_id());\n  const bool allowed = current_extension &&\n                       current_extension->permissions_data()->HasAPIPermission(\n                           mojom::APIPermissionID::kNotifications) &&\n                       AreExtensionNotificationsAllowed();\n  FinishAndroidQuery(\n      WithArguments(status == 2 && allowed ? \"granted\" : \"denied\"));\n}\n\nvoid NotificationsGetPermissionLevelFunction::FinishAndroidQuery(\n    ResponseValue response) {\n  if (!waiting_for_android_status_)\n    return;\n  waiting_for_android_status_ = false;\n  android_status_timeout_.Stop();\n  weak_factory_.InvalidateWeakPtrs();\n  Respond(std::move(response));\n"
+- description: Format modified Android notification implementation
+  regex:
+    re_pattern: '\}\
+
+      \
+
+      void\ NotificationsGetPermissionLevelFunction::OnBrowserContextShutdown\(\)\ \{\
+
+      \ \ if\ \(waiting_for_android_status_\)\ \{\
+
+      \ \ \ \ FinishAndroidQuery\(Error\("The\ browser\ context\ shut\ down\ before\ notification\ settings\ were\ read\."\)\);\
+
+      \ \ \}\
+
+      \}\
+
+      \#endif\
+
+      \
+
+      '
+    replace: "}\n\nvoid NotificationsGetPermissionLevelFunction::OnBrowserContextShutdown() {\n  if (waiting_for_android_status_) {\n    FinishAndroidQuery(\n        Error(\"The browser context shut down before notification settings were \"\n              \"read.\"));\n  }\n}\n#endif\n\n"
+- description: Declare thread attachment and std::string JNI conversion before the generated status bridge
+  regex:
+    re_pattern: \#include\ "base/android/callback_android\.h"
+    replace: '#include "base/android/callback_android.h"
+
+      #include "base/android/jni_android.h"
+
+      #include "base/android/jni_string.h"'
+- description: Scope only Android extension IDs
+  regex:
+    pattern: "std::string CreateScopedIdentifier(const ExtensionId& extension_id,\n                                   const\
+      \ std::string& id) {\n  return extension_id + \"-\" + id;\n}"
+    replace: "std::string CreateScopedIdentifier(Profile* profile,\n                                   const ExtensionId&\
+      \ extension_id,\n                                   const std::string& id) {\n#if BUILDFLAG(IS_ANDROID)\n  return CreateProfileScopedNotificationId(profile,\
+      \ extension_id, id);\n#else\n  return extension_id + \"-\" + id;\n#endif\n}"
+  count: 1
+- description: Keep original desktop-only decoder exact
+  regex:
+    pattern: "// Removes the unique internal identifier to send the ID as the\n// extension expects it.\nstd::string StripScopeFromIdentifier(const\
+      \ ExtensionId& extension_id,\n                                     const std::string& scoped_id) {\n  size_t index_of_separator\
+      \ = extension_id.length() + 1;\n  DCHECK_LT(index_of_separator, scoped_id.length());\n\n  return scoped_id.substr(index_of_separator);\n\
+      }"
+    replace: "#if !BUILDFLAG(IS_ANDROID)\n// Removes the unique internal identifier to send the ID as the\n// extension expects\
+      \ it.\nstd::string StripScopeFromIdentifier(const ExtensionId& extension_id,\n                                     const\
+      \ std::string& scoped_id) {\n  size_t index_of_separator = extension_id.length() + 1;\n  DCHECK_LT(index_of_separator,\
+      \ scoped_id.length());\n\n  return scoped_id.substr(index_of_separator);\n}\n#endif"
+  count: 1
+- description: Use caller profile for create/update/clear
+  regex:
+    pattern: CreateScopedIdentifier(extension_->id(),
+    replace: CreateScopedIdentifier(GetProfile(), extension_->id(),
+  count: 3
+- description: Return unchanged public IDs and omit foreign-profile keys
+  regex:
+    pattern: '    result.Set(StripScopeFromIdentifier(extension_->id(), entry), true);'
+    replace: "#if BUILDFLAG(IS_ANDROID)\n    if (auto id = GetUnscopedNotificationId(GetProfile(), extension_->id(), entry))\
+      \ {\n      result.Set(*id, true);\n    }\n#else\n    result.Set(StripScopeFromIdentifier(extension_->id(), entry), true);\n\
+      #endif"
+  count: 1
+- description: Wrap Android decoder call
+  regex:
+    pattern: '    if (auto id = GetUnscopedNotificationId(GetProfile(), extension_->id(), entry)) {'
+    replace: "    if (auto id =\n            GetUnscopedNotificationId(GetProfile(), extension_->id(), entry)) {"
+  count: 1

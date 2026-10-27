@@ -1,0 +1,349 @@
+# Copyright (c) 2026 The Reaper Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+substitutions:
+- description: Prevent duplicate pending Android authentication popups (1).
+  regex:
+    re_pattern: '\#include\ "base/test/test_future\.h"\
+
+      \#include\ "base/test/test_mock_time_task_runner\.h"\
+
+      \#include\ "base/time/time\.h"\
+
+      \#include\ "chrome/browser/extensions/api/identity/web_auth_flow_info_bar_delegate\.h"\
+
+      \#include\ "chrome/browser/extensions/browser_window_util\.h"\
+
+      \#include\ "chrome/browser/infobars/infobar_features\.h"\
+
+      '
+    replace: '#include "base/test/test_future.h"
+
+      #include "base/test/test_mock_time_task_runner.h"
+
+      #include "base/time/time.h"
+
+      #include "build/build_config.h"
+
+      #include "chrome/browser/extensions/api/identity/web_auth_flow_info_bar_delegate.h"
+
+      #include "chrome/browser/extensions/browser_window_util.h"
+
+      #include "chrome/browser/infobars/infobar_features.h"
+
+      '
+- description: Prevent duplicate pending Android authentication popups (2).
+  regex:
+    re_pattern: '\#include\ "chrome/browser/sessions/session_restore\.h"\
+
+      \#include\ "components/keep_alive_registry/keep_alive_types\.h"\
+
+      \#include\ "components/keep_alive_registry/scoped_keep_alive\.h"\
+
+      \#endif\
+
+      \
+
+      namespace\ extensions\ \{\
+
+      '
+    replace: '#include "chrome/browser/sessions/session_restore.h"
+
+      #include "components/keep_alive_registry/keep_alive_types.h"
+
+      #include "components/keep_alive_registry/scoped_keep_alive.h"
+
+      #endif
+
+
+      #if BUILDFLAG(IS_ANDROID)
+
+      #include <set>
+
+      #include <vector>
+
+
+      #include "base/android/jni_android.h"
+
+      #include "base/android/jni_array.h"
+
+      #include "base/memory/weak_ptr.h"
+
+      #include "base/run_loop.h"
+
+      #include "base/test/run_until.h"
+
+
+      // JNI headers follow their type conversions.
+
+      #include "chrome/test/test_support_jni_headers/BrowserWindowCreatorBridge_jni.h"
+
+      #endif
+
+
+      namespace extensions {
+
+      '
+- description: Prevent duplicate pending Android authentication popups (3).
+  regex:
+    re_pattern: '\}\
+
+      \#endif\
+
+      \
+
+      \}\ \ //\ \ namespace\ extensions\
+
+      '
+    replace: "}\n#endif\n\n#if BUILDFLAG(IS_ANDROID)\n// Hold the real pending Android task before Activity creation.\n// Releasing the hold runs the ordinary popup/Tab transfer and native callback.\nclass WebAuthFlowPendingWindowAndroidBrowserTest\n    : public WebAuthFlowBrowserTest {\n public:\n  void SetUpOnMainThread() override {\n    WebAuthFlowBrowserTest::SetUpOnMainThread();\n    for (auto* browser : GetAllBrowserWindowInterfaces()) {\n      initial_window_ids_.insert(browser->GetSessionID().id());\n    }\n    ASSERT_TRUE(HeldPendingTaskIds().empty());\n  }\n\n  void TearDownOnMainThread() override {\n    // Delete the flow before disposing only the test-held pending tasks.\n    // This cleanup also runs if an ASSERT failed with duplicate requests held.\n    if (web_auth_flow()) {\n      DeleteWebAuthFlow();\n    }\n    base::RunLoop().RunUntilIdle();\n    Java_BrowserWindowCreatorBridge_clearActivityCreationPauseForTesting(\n        base::android::AttachCurrentThread());\n\n    std::vector<base::WeakPtr<BrowserWindowInterface>> created_windows;\n    for (auto* browser : GetAllBrowserWindowInterfaces()) {\n      if (!initial_window_ids_.contains(browser->GetSessionID().id())) {\n        created_windows.push_back(browser->GetWeakPtr());\n      }\n    }\n    for (const auto& browser : created_windows) {\n      if (browser) {\n        browser->GetWindow()->Close();\n        EXPECT_TRUE(base::test::RunUntil([&browser] { return !browser; }));\n      }\n    }\n    WebAuthFlowBrowserTest::TearDownOnMainThread();\n  }\n\n  std::vector<int> HeldPendingTaskIds() {\n    JNIEnv* env = base::android::AttachCurrentThread();\n    std::vector<int> ids;\n    base::android::JavaIntArrayToIntVector(\n        env,\n        Java_BrowserWindowCreatorBridge_getHeldPendingTaskIdsForTesting(env),\n        &ids);\n    return ids;\n  }\n\n  void PauseActivityCreation() {\n    Java_BrowserWindowCreatorBridge_pauseActivityCreationForTesting(\n        base::android::AttachCurrentThread());\n  }\n\n  void StartHeldFlow(const GURL& url) {\n    PauseActivityCreation();\n    WebAuthFlowTestNavigationObserver navigation(url);\n    StartWebAuthFlow(url);\n    navigation.Wait();\n    ASSERT_TRUE(\n        base::test::RunUntil([this] { return !HeldPendingTaskIds().empty(); }));\n    ASSERT_EQ(1u, HeldPendingTaskIds().size());\n    ASSERT_TRUE(web_contents());\n  }\n\n  void ResumeAndWaitForPopup() {\n    ASSERT_TRUE(web_auth_flow());\n    const auto ids = HeldPendingTaskIds();\n    ASSERT_EQ(1u, ids.size());\n    base::test::TestFuture<void> displayed;\n    web_auth_flow()->SetPopupDisplayedCallbackForTesting(\n        displayed.GetCallback());\n    Java_BrowserWindowCreatorBridge_resumePendingTaskActivityCreationForTesting(\n        base::android::AttachCurrentThread(), ids.front());\n    ASSERT_TRUE(displayed.Wait());\n    ASSERT_TRUE(HeldPendingTaskIds().empty());\n  }\n\n private:\n  std::set<int> initial_window_ids_;\n};\n\nIN_PROC_BROWSER_TEST_F(WebAuthFlowPendingWindowAndroidBrowserTest,\n                       PendingSecondNavigationTransfersOriginalContentsOnce) {\n  const size_t initial_windows = GetAllBrowserWindowInterfaces().size();\n  EXPECT_CALL(mock(), OnAuthFlowFailure(testing::_)).Times(0);\n  const GURL first_url = embedded_test_server()->GetURL(\"/title1.html\");\n  ASSERT_NO_FATAL_FAILURE(StartHeldFlow(first_url));\n  const auto original = web_contents()->GetWeakPtr();\n  const auto held_ids = HeldPendingTaskIds();\n\n  const GURL second_url = embedded_test_server()->GetURL(\"/title2.html\");\n  EXPECT_CALL(mock(), OnAuthFlowURLChange(second_url));\n  ASSERT_TRUE(content::NavigateToURLFromRenderer(original.get(), second_url));\n  ASSERT_TRUE(content::WaitForLoadStop(original.get()));\n  base::RunLoop().RunUntilIdle();\n  EXPECT_EQ(held_ids, HeldPendingTaskIds());\n  EXPECT_EQ(initial_windows, GetAllBrowserWindowInterfaces().size());\n  ASSERT_TRUE(original);\n  ASSERT_EQ(original.get(), web_contents());\n\n  ASSERT_NO_FATAL_FAILURE(ResumeAndWaitForPopup());\n  ASSERT_TRUE(original);\n  auto* popup = browser_window_util::GetBrowserForTabContents(*original);\n  ASSERT_TRUE(popup);\n  EXPECT_EQ(BrowserWindowInterface::TYPE_POPUP, popup->GetType());\n  EXPECT_EQ(GetProfile(), popup->GetProfile());\n  EXPECT_EQ(initial_windows + 1, GetAllBrowserWindowInterfaces().size());\n  auto* tabs = TabListInterface::From(popup);\n  ASSERT_TRUE(tabs);\n  // The existing creator may bootstrap another tab before WebAuthFlow inserts\n  // the provider contents. This regression only promises one popup request and\n  // one transfer of the original contents, not removal of that bootstrap tab.\n  int original_contents_count = 0;\n  for (auto* tab : tabs->GetAllTabs()) {\n    if (tab->GetContents() == original.get()) {\n      ++original_contents_count;\n    }\n  }\n  EXPECT_EQ(1, original_contents_count);\n  EXPECT_EQ(original.get(), web_contents());\n  EXPECT_EQ(second_url, original->GetLastCommittedURL());\n}\n\n#endif  // BUILDFLAG(IS_ANDROID)\n\n}  //  namespace extensions\n"
+- description: Repair reviewed AN Android native compiler integration errors without changing intended behavior
+  regex:
+    re_pattern: '\#include\ "base/memory/weak_ptr\.h"\
+
+      \#include\ "base/run_loop\.h"\
+
+      \#include\ "base/test/run_until\.h"\
+
+      \
+
+      //\ JNI\ headers\ follow\ their\ type\ conversions\.\
+
+      \#include\ "chrome/test/test_support_jni_headers/BrowserWindowCreatorBridge_jni\.h"\
+
+      '
+    replace: '#include "base/memory/weak_ptr.h"
+
+      #include "base/run_loop.h"
+
+      #include "base/test/run_until.h"
+
+      #include "components/sessions/core/session_id.h"
+
+
+      // JNI headers follow their type conversions.
+
+      #include "chrome/test/test_support_jni_headers/BrowserWindowCreatorBridge_jni.h"
+
+      '
+
+- description: Owned Android window/auth/options/fullscreen and fixture routing final integration (1)
+  regex:
+    re_pattern: '\#include\ <vector>\
+
+      \
+
+      \#include\ "base/android/jni_android\.h"\
+
+      \#include\ "base/android/jni_array\.h"\
+
+      \#include\ "base/memory/weak_ptr\.h"\
+
+      \#include\ "base/run_loop\.h"\
+
+      \#include\ "base/test/run_until\.h"\
+
+      \#include\ "components/sessions/core/session_id\.h"\
+
+      \
+
+      //\ JNI\ headers\ follow\ their\ type\ conversions\.\
+
+      \#include\ "chrome/test/test_support_jni_headers/BrowserWindowCreatorBridge_jni\.h"\
+
+      \#endif\
+
+      \
+
+      namespace\ extensions\ \{\
+
+      \
+
+      '
+    replace: '#include <vector>
+
+
+      #include "base/android/jni_android.h"
+
+      #include "base/android/jni_array.h"
+
+      #include "base/functional/bind.h"
+
+      #include "base/functional/callback_helpers.h"
+
+      #include "base/memory/raw_ptr.h"
+
+      #include "base/memory/weak_ptr.h"
+
+      #include "base/run_loop.h"
+
+      #include "base/scoped_observation.h"
+
+      #include "base/test/run_until.h"
+
+      #include "chrome/browser/net/profile_network_context_service.h"
+
+      #include "chrome/browser/net/profile_network_context_service_factory.h"
+
+      #include "chrome/browser/profiles/profile_destroyer.h"
+
+      #include "chrome/test/base/testing_profile.h"
+
+      #include "chrome/browser/ui/browser_window/public/browser_collection_observer.h"
+
+      #include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
+
+      #include "components/sessions/core/session_id.h"
+
+
+      // JNI headers follow their type conversions.
+
+      #include "chrome/test/test_support_jni_headers/BrowserWindowCreatorBridge_jni.h"
+
+      #include "chrome/test/test_support_jni_headers/WebAuthFlowTestBridge_jni.h"
+
+      #endif
+
+
+      namespace extensions {
+
+
+      '
+- description: Owned Android window/auth/options/fullscreen and fixture routing final integration (2)
+  regex:
+    re_pattern: '\}\
+
+      \#endif\
+
+      \
+
+      \#if\ BUILDFLAG\(IS_ANDROID\)\
+
+      //\ Hold\ the\ real\ pending\ Android\ task\ before\ Activity\ creation\.\
+
+      //\ Releasing\ the\ hold\ runs\ the\ ordinary\ popup/Tab\ transfer\ and\ native\ callback\.\
+
+      class\ WebAuthFlowPendingWindowAndroidBrowserTest\
+
+      \ \ \ \ :\ public\ WebAuthFlowBrowserTest\ \{\
+
+      '
+    replace: "}\n#endif\n\n#if BUILDFLAG(IS_ANDROID)\n// Observe actual native window creation/destruction, including a popup\
+      \ that\n// closes inside its asynchronous creation callback before the test can poll.\nclass PendingAuthPopupObserver\
+      \ : public BrowserCollectionObserver {\n public:\n  explicit PendingAuthPopupObserver(Profile* profile) : profile_(profile)\
+      \ {\n    for (auto* browser : GetAllBrowserWindowInterfaces()) {\n      initial_windows_.push_back(browser->GetWeakPtr());\n\
+      \      initial_ids_.insert(browser->GetSessionID().id());\n    }\n    observation_.Observe(GlobalBrowserCollection::GetInstance());\n\
+      \  }\n\n  void OnBrowserCreated(BrowserWindowInterface* browser) override {\n    if (browser->GetProfile() != profile_\
+      \ ||\n        browser->GetType() != BrowserWindowInterface::TYPE_POPUP ||\n        initial_ids_.contains(browser->GetSessionID().id()))\
+      \ {\n      return;\n    }\n    ++created_count_;\n    created_window_ = browser->GetWeakPtr();\n  }\n\n  bool CreatedPopupWasDestroyed()\
+      \ const {\n    return created_count_ == 1 && !created_window_;\n  }\n\n  int created_count() const { return created_count_;\
+      \ }\n  base::WeakPtr<BrowserWindowInterface> created_window() const {\n    return created_window_;\n  }\n\n  void ExpectInitialWindowsStillLive()\
+      \ const {\n    for (const auto& browser : initial_windows_) {\n      EXPECT_TRUE(browser);\n      if (browser) {\n \
+      \       EXPECT_TRUE(initial_ids_.contains(browser->GetSessionID().id()));\n      }\n    }\n  }\n\n private:\n  const\
+      \ raw_ptr<Profile> profile_;\n  std::set<int> initial_ids_;\n  std::vector<base::WeakPtr<BrowserWindowInterface>> initial_windows_;\n\
+      \  int created_count_ = 0;\n  base::WeakPtr<BrowserWindowInterface> created_window_;\n  base::ScopedObservation<GlobalBrowserCollection,\
+      \ BrowserCollectionObserver>\n      observation_{this};\n};\n\n// Hold the real pending Android task before Activity\
+      \ creation.\n// Releasing the hold runs the ordinary popup/Tab transfer and native callback.\nclass WebAuthFlowPendingWindowAndroidBrowserTest\n\
+      \    : public WebAuthFlowBrowserTest {\n"
+- description: Owned Android window/auth/options/fullscreen and fixture routing final integration (3)
+  regex:
+    re_pattern: '\ \ \ \ ASSERT_TRUE\(displayed\.Wait\(\)\);\
+
+      \ \ \ \ ASSERT_TRUE\(HeldPendingTaskIds\(\)\.empty\(\)\);\
+
+      \ \ \}\
+
+      \
+
+      \ private:\
+
+      \ \ std::set<int>\ initial_window_ids_;\
+
+      \};\
+
+      \
+
+      '
+    replace: "    ASSERT_TRUE(displayed.Wait());\n    ASSERT_TRUE(HeldPendingTaskIds().empty());\n  }\n\n  void ResumeAndWaitForClosedPopup(PendingAuthPopupObserver&\
+      \ observer) {\n    const auto ids = HeldPendingTaskIds();\n    ASSERT_EQ(1u, ids.size());\n    Java_BrowserWindowCreatorBridge_resumePendingTaskActivityCreationForTesting(\n\
+      \        base::android::AttachCurrentThread(), ids.front());\n    ASSERT_TRUE(base::test::RunUntil(\n        [&observer]\
+      \ { return observer.CreatedPopupWasDestroyed(); }));\n    EXPECT_TRUE(HeldPendingTaskIds().empty());\n    observer.ExpectInitialWindowsStillLive();\n\
+      \  }\n\n private:\n  std::set<int> initial_window_ids_;\n};\n\n"
+- description: Owned Android window/auth/options/fullscreen and fixture routing final integration (4)
+  regex:
+    re_pattern: '\ \ EXPECT_EQ\(original\.get\(\),\ web_contents\(\)\);\
+
+      \ \ EXPECT_EQ\(second_url,\ original\->GetLastCommittedURL\(\)\);\
+
+      \}\
+
+      \
+
+      \#endif\ \ //\ BUILDFLAG\(IS_ANDROID\)\
+
+      \
+
+      \}\ \ //\ \ namespace\ extensions\
+
+      '
+    replace: "  EXPECT_EQ(original.get(), web_contents());\n  EXPECT_EQ(second_url, original->GetLastCommittedURL());\n}\n\
+      \nIN_PROC_BROWSER_TEST_F(WebAuthFlowPendingWindowAndroidBrowserTest,\n                       PendingCancellationClosesOnlyItsLatePopup)\
+      \ {\n  PendingAuthPopupObserver observer(GetProfile());\n  EXPECT_CALL(mock(), OnAuthFlowFailure(testing::_)).Times(0);\n\
+      \  ASSERT_NO_FATAL_FAILURE(\n      StartHeldFlow(embedded_test_server()->GetURL(\"/title1.html\")));\n  const auto provider_contents\
+      \ = web_contents()->GetWeakPtr();\n  DeleteWebAuthFlow();\n  base::RunLoop().RunUntilIdle();\n  ASSERT_FALSE(provider_contents);\n\
+      \  ASSERT_NO_FATAL_FAILURE(ResumeAndWaitForClosedPopup(observer));\n}\n\nIN_PROC_BROWSER_TEST_F(WebAuthFlowPendingWindowAndroidBrowserTest,\n\
+      \                       PendingProfileShutdownClosesOnlyItsLatePopup) {\n  PendingAuthPopupObserver observer(GetProfile());\n\
+      \  EXPECT_CALL(mock(), OnAuthFlowFailure(testing::_)).Times(0);\n  ASSERT_NO_FATAL_FAILURE(\n      StartHeldFlow(embedded_test_server()->GetURL(\"\
+      /title1.html\")));\n  const auto provider_contents = web_contents()->GetWeakPtr();\n  GetProfile()->NotifyWillBeDestroyed();\n\
+      \  ASSERT_TRUE(GetProfile()->ShutdownStarted());\n  ASSERT_NO_FATAL_FAILURE(ResumeAndWaitForClosedPopup(observer));\n\
+      \  ASSERT_TRUE(provider_contents);\n  EXPECT_FALSE(\n      browser_window_util::GetBrowserForTabContents(*provider_contents));\n\
+      \  DeleteWebAuthFlow();\n  base::RunLoop().RunUntilIdle();\n  EXPECT_FALSE(provider_contents);\n}\n\nIN_PROC_BROWSER_TEST_F(WebAuthFlowPendingWindowAndroidBrowserTest,\n\
+      \                       PendingProfileNotificationDiscardsContentsAndLatePopup) {\n  PendingAuthPopupObserver observer(GetProfile());\n\
+      \  EXPECT_CALL(mock(), OnAuthFlowFailure(testing::_)).Times(0);\n  ASSERT_NO_FATAL_FAILURE(\n      StartHeldFlow(embedded_test_server()->GetURL(\"\
+      /title1.html\")));\n  const auto provider_contents = web_contents()->GetWeakPtr();\n  // Exercise the existing Chromium\
+      \ fixture's destruction-notification pattern.\n  static_cast<ProfileObserver*>(web_auth_flow())\n      ->OnProfileWillBeDestroyed(GetProfile());\n\
+      \  ASSERT_FALSE(provider_contents);\n  ASSERT_NO_FATAL_FAILURE(ResumeAndWaitForClosedPopup(observer));\n}\n\nIN_PROC_BROWSER_TEST_F(\n\
+      \    WebAuthFlowPendingWindowAndroidBrowserTest,\n    PendingOrdinarySuccessKeepsFreshPopupAndOriginalContents) {\n\
+      \  PendingAuthPopupObserver observer(GetProfile());\n  EXPECT_CALL(mock(), OnAuthFlowFailure(testing::_)).Times(0);\n\
+      \  ASSERT_NO_FATAL_FAILURE(\n      StartHeldFlow(embedded_test_server()->GetURL(\"/title1.html\")));\n  const auto provider_contents\
+      \ = web_contents()->GetWeakPtr();\n  ASSERT_NO_FATAL_FAILURE(ResumeAndWaitForPopup());\n  ASSERT_TRUE(provider_contents);\n\
+      \  ASSERT_EQ(observer.created_count(), 1);\n  auto popup = observer.created_window();\n  ASSERT_TRUE(popup);\n  EXPECT_EQ(browser_window_util::GetBrowserForTabContents(*provider_contents),\n\
+      \            popup.get());\n  EXPECT_EQ(GetProfile(), popup->GetProfile());\n  EXPECT_EQ(popup->GetType(), BrowserWindowInterface::TYPE_POPUP);\n\
+      \  observer.ExpectInitialWindowsStillLive();\n}\n\nIN_PROC_BROWSER_TEST_F(\n    WebAuthFlowPendingWindowAndroidBrowserTest,\n\
+      \    PendingRealRegularProfileDestructionRetiresFlowAndRequest) {\n  // WebAuthFlow supports regular Profiles. Keep\
+      \ the live browser's Profile\n  // while this test independently owns and destroys another regular Profile.\n  ASSERT_FALSE(GetProfile()->IsOffTheRecord());\n\
+      \  const size_t initial_windows = GetAllBrowserWindowInterfaces().size();\n  PendingAuthPopupObserver unrelated_windows(GetProfile());\n\
+      \n  // TestingProfile installs a new global fake facade. Preserve the effective\n  // facade of the running browser\
+      \ explicitly; native browsertests do not enable\n  // ResettersForTesting. The fixture-only generated JNI helper keeps\
+      \ this route\n  // reachable when the test APK is shrunk, without keeping production test APIs.\n  JNIEnv* env = base::android::AttachCurrentThread();\n\
+      \  auto prior_facade = base::android::ScopedJavaGlobalRef<jobject>(\n      Java_WebAuthFlowTestBridge_getAccountManagerFacade(env));\n\
+      \  ASSERT_FALSE(prior_facade.is_null());\n  base::ScopedClosureRunner restore_facade(base::BindOnce(\n      [](base::android::ScopedJavaGlobalRef<jobject>\
+      \ facade) {\n        Java_WebAuthFlowTestBridge_restoreAccountManagerFacade(\n            base::android::AttachCurrentThread(),\
+      \ facade);\n      },\n      std::move(prior_facade)));\n\n  // The ordinary network factory is null by default for TestingProfile.\
+      \ Install\n  // its actual public service before keyed-service initialization so navigation\n  // uses the real regular-profile\
+      \ context and declared factory dependencies.\n  TestingProfile::Builder builder;\n  builder.AddTestingFactory(\n   \
+      \   ProfileNetworkContextServiceFactory::GetInstance(),\n      base::BindOnce([](content::BrowserContext* context)\n\
+      \                         -> std::unique_ptr<KeyedService> {\n        return std::make_unique<ProfileNetworkContextService>(\n\
+      \            Profile::FromBrowserContext(context));\n      }));\n  auto owned_profile = builder.Build();\n  restore_facade.RunAndReset();\n\
+      \  ASSERT_TRUE(owned_profile);\n  ASSERT_FALSE(owned_profile->IsOffTheRecord());\n  ASSERT_EQ(owned_profile.get(), owned_profile->GetOriginalProfile());\n\
+      \  const auto profile_lifetime = owned_profile->GetWeakPtr();\n  base::ScopedClosureRunner cleanup_profile(base::BindOnce(\n\
+      \      [](std::unique_ptr<TestingProfile>* owner,\n         base::WeakPtr<Profile> lifetime) {\n        if (*owner)\
+      \ {\n          ProfileDestroyer::DestroyOriginalProfileWhenAppropriate(\n              std::move(*owner));\n       \
+      \ }\n        EXPECT_TRUE(base::test::RunUntil([lifetime] { return !lifetime; }));\n      },\n      &owned_profile, profile_lifetime));\n\
+      \  ASSERT_FALSE(owned_profile->GetJavaObject().is_null());\n  ASSERT_TRUE(ProfileNetworkContextServiceFactory::GetForContext(\n\
+      \      owned_profile.get()));\n\n  EXPECT_CALL(mock(), OnAuthFlowFailure(testing::_)).Times(0);\n  PauseActivityCreation();\n\
+      \  const GURL auth_url = embedded_test_server()->GetURL(\"/title1.html\");\n  WebAuthFlowTestNavigationObserver navigation(auth_url);\n\
+      \  StartWebAuthFlow(auth_url, WebAuthFlow::Mode::INTERACTIVE,\n                   owned_profile.get());\n  navigation.Wait();\n\
+      \  ASSERT_TRUE(\n      base::test::RunUntil([this] { return !HeldPendingTaskIds().empty(); }));\n  ASSERT_EQ(1u, HeldPendingTaskIds().size());\n\
+      \  ASSERT_TRUE(web_contents());\n  ASSERT_EQ(owned_profile.get(), web_contents()->GetBrowserContext());\n  const auto\
+      \ provider_contents = web_contents()->GetWeakPtr();\n  base::test::TestFuture<void> displayed;\n  web_auth_flow()->SetPopupDisplayedCallbackForTesting(displayed.GetCallback());\n\
+      \n  // Move the independently owned regular Profile into the real ordinary\n  // destroyer. Its Java notification cancels\
+      \ the exact pending native request\n  // before native ProfileObservers retire the auth flow. Never reuse its pointer.\n\
+      \  ProfileDestroyer::DestroyOriginalProfileWhenAppropriate(\n      std::move(owned_profile));\n  EXPECT_TRUE(HeldPendingTaskIds().empty());\n\
+      \  EXPECT_FALSE(provider_contents);\n  ASSERT_TRUE(web_auth_flow());\n  EXPECT_FALSE(web_contents());\n  EXPECT_FALSE(displayed.IsReady());\n\
+      \  unrelated_windows.ExpectInitialWindowsStillLive();\n  EXPECT_EQ(initial_windows, GetAllBrowserWindowInterfaces().size());\n\
+      \n  // Notification alone is insufficient: wait for the Profile's actual object\n  // deletion, including renderer-deferred\
+      \ disposal, through its captured weak.\n  ASSERT_TRUE(base::test::RunUntil(\n      [profile_lifetime] { return !profile_lifetime;\
+      \ }));\n  EXPECT_TRUE(HeldPendingTaskIds().empty());\n  EXPECT_FALSE(displayed.IsReady());\n  unrelated_windows.ExpectInitialWindowsStillLive();\n\
+      \  EXPECT_EQ(initial_windows, GetAllBrowserWindowInterfaces().size());\n  DeleteWebAuthFlow();\n  base::RunLoop().RunUntilIdle();\n\
+      }\n\n#endif  // BUILDFLAG(IS_ANDROID)\n\n}  //  namespace extensions\n"

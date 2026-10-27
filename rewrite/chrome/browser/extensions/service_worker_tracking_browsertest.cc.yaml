@@ -1,0 +1,104 @@
+# Copyright (c) 2026 The Reaper Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+substitutions:
+- description: Integrate reviewed Android extension UI, MV3 lifecycle, authenticated native messaging and artifact-parser source with retained desktop behavior
+  regex:
+    re_pattern: '\#include\ "base/test/test_future\.h"\
+
+      \#include\ "base/test/with_feature_override\.h"\
+
+      \#include\ "base/threading/thread_restrictions\.h"\
+
+      \#include\ "chrome/browser/extensions/extension_apitest\.h"\
+
+      \#include\ "chrome/browser/extensions/extension_browsertest\.h"\
+
+      \#include\ "chrome/browser/profiles/profile\.h"\
+
+      '
+    replace: '#include "base/test/test_future.h"
+
+      #include "base/test/with_feature_override.h"
+
+      #include "base/threading/thread_restrictions.h"
+
+      #include "build/build_config.h"
+
+      #include "chrome/browser/extensions/extension_apitest.h"
+
+      #include "chrome/browser/extensions/extension_browsertest.h"
+
+      #include "chrome/browser/profiles/profile.h"
+
+      '
+- description: Integrate reviewed Android extension UI, MV3 lifecycle, authenticated native messaging and artifact-parser source with retained desktop behavior
+  regex:
+    re_pattern: '\#include\ "testing/gtest/include/gtest/gtest\.h"\
+
+      \#include\ "third_party/blink/public/common/service_worker/service_worker_status_code\.h"\
+
+      \#include\ "url/gurl\.h"\
+
+      \
+
+      static_assert\(BUILDFLAG\(ENABLE_EXTENSIONS_CORE\)\);\
+
+      \
+
+      '
+    replace: '#include "testing/gtest/include/gtest/gtest.h"
+
+      #include "third_party/blink/public/common/service_worker/service_worker_status_code.h"
+
+      #include "url/gurl.h"
+
+
+      #if BUILDFLAG(IS_ANDROID)
+
+      #include "base/run_loop.h"
+
+      #include "extensions/browser/api/runtime/runtime_api.h"
+
+      #include "extensions/browser/extension_function_registry.h"
+
+      #endif
+
+
+      static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
+
+
+      '
+- description: Integrate reviewed Android extension UI, MV3 lifecycle, authenticated native messaging and artifact-parser source with retained desktop behavior
+  regex:
+    re_pattern: '\ \ \ \ \ \ int\ worker_thread_id,\
+
+      \ \ \ \ \ \ const\ blink::ServiceWorkerToken\&\ service_worker_token\)\ override\ \{\}\
+
+      \};\
+
+      \
+
+      class\ ServiceWorkerTrackingBrowserTest\ :\ public\ ExtensionBrowserTest\ \{\
+
+      \ public:\
+
+      '
+    replace: "      int worker_thread_id,\n      const blink::ServiceWorkerToken& service_worker_token) override {}\n};\n\n#if BUILDFLAG(IS_ANDROID)\nint g_initialized_platform_info_runs = 0;\n\n// Inspects the real immediate API registration and then runs its original body.\nclass InitializedPlatformInfoFunction : public RuntimeGetPlatformInfoFunction {\n private:\n  ~InitializedPlatformInfoFunction() override = default;\n\n  ResponseAction Run() override {\n    ++g_initialized_platform_info_runs;\n    EXPECT_TRUE(worker_id());\n    ProcessManager* pm = ProcessManager::Get(browser_context());\n    const auto workers = pm->GetServiceWorkersForExtension(extension()->id());\n    EXPECT_EQ(1u, workers.size());\n    if (workers.size() == 1) {\n      EXPECT_TRUE(workers[0].start_token);\n      size_t matching_records = 0;\n      for (const auto& record :\n           pm->GetServiceWorkerKeepaliveDataForRecords(extension()->id())) {\n        if (record.activity_type == Activity::API_FUNCTION &&\n            record.extra_data == \"runtime.getPlatformInfo\") {\n          ++matching_records;\n          EXPECT_EQ(workers[0], record.worker_id);\n          EXPECT_TRUE(record.worker_id.start_token == workers[0].start_token);\n        }\n      }\n      EXPECT_EQ(1u, matching_records);\n    }\n    return RuntimeGetPlatformInfoFunction::Run();\n  }\n};\n#endif\n\nclass ServiceWorkerTrackingBrowserTest : public ExtensionBrowserTest {\n public:\n"
+- description: Integrate reviewed Android extension UI, MV3 lifecycle, authenticated native messaging and artifact-parser source with retained desktop behavior
+  regex:
+    re_pattern: '\ \ EXPECT_TRUE\(has_started\);\
+
+      \}\
+
+      \
+
+      //\ Test\ that\ if\ a\ browser\ stop\ notification\ is\ received\ after\ the\ "renderer\
+
+      //\ initialized"\ notification\ but\ before\ the\ "renderer\ start"\ notification,\ it\
+
+      //\ correctly\ resets\ the\ worker''s\ browser\ and\ renderer\ active\ state\ to\ inactive\.\
+
+      '
+    replace: "  EXPECT_TRUE(has_started);\n}\n\n#if BUILDFLAG(IS_ANDROID)\nIN_PROC_BROWSER_TEST_F(ServiceWorkerTrackingBrowserTest,\n                       ApiKeepaliveCapturesInitializedWorkerToken) {\n  auto sw_host_factory_callback = base::BindRepeating(\n      [](content::RenderProcessHost* render_process_host,\n         mojo::PendingAssociatedReceiver<mojom::ServiceWorkerHost> receiver)\n          -> std::unique_ptr<ServiceWorkerHost> {\n        return std::make_unique<ServiceWorkerHostNoStartNotification>(\n            render_process_host, std::move(receiver));\n      });\n  auto sw_host_factory =\n      ServiceWorkerHost::SetFactoryForTesting(&sw_host_factory_callback);\n\n  auto& registry = ExtensionFunctionRegistry::GetInstance();\n  const auto original =\n      registry.GetFactoriesForTesting().at(\"runtime.getPlatformInfo\");\n  ASSERT_TRUE(registry.OverrideFunctionForTesting(\n      \"runtime.getPlatformInfo\",\n      &NewExtensionFunction<InitializedPlatformInfoFunction>));\n  base::ScopedClosureRunner restore_factory(base::BindOnce(\n      [](ExtensionFunctionRegistry::FactoryEntry entry) {\n        ExtensionFunctionRegistry::GetInstance().Register(entry);\n      },\n      original));\n  base::AutoReset<int> reset_runs(&g_initialized_platform_info_runs, 0);\n\n  TestExtensionDir test_dir;\n  test_dir.WriteManifest(R\"({\n    \"name\": \"Initialized API accounting\",\n    \"manifest_version\": 3,\n    \"version\": \"1.0\",\n    \"background\": {\"service_worker\": \"background.js\"}\n  })\");\n  test_dir.WriteFile(FILE_PATH_LITERAL(\"background.js\"), R\"(\n    chrome.runtime.getPlatformInfo(() => {\n      chrome.test.assertNoLastError();\n      chrome.test.sendMessage('initialized API completed');\n    });\n  )\");\n  ExtensionTestMessageListener completed(\"initialized API completed\");\n  const Extension* extension = LoadExtension(\n      test_dir.UnpackedPath(),\n      {.wait_for_renderers = false, .wait_for_registration_stored = true});\n  ASSERT_TRUE(extension);\n  extension_ = extension;\n  ASSERT_TRUE(completed.WaitUntilSatisfied());\n  EXPECT_EQ(1, g_initialized_platform_info_runs);\n  ServiceWorkerState* worker_state = GetWorkerState();\n  ASSERT_TRUE(worker_state);\n  EXPECT_EQ(ServiceWorkerState::RendererState::kInitialized,\n            worker_state->renderer_state());\n  base::RunLoop().RunUntilIdle();\n  EXPECT_TRUE(ProcessManager::Get(profile())\n                  ->GetServiceWorkerKeepaliveDataForRecords(extension->id())\n                  .empty());\n  browsertest_util::StopServiceWorkerForExtensionGlobalScope(profile(),\n                                                            extension->id());\n}\n#endif\n\n// Test that if a browser stop notification is received after the \"renderer\n// initialized\" notification but before the \"renderer start\" notification, it\n// correctly resets the worker's browser and renderer active state to inactive.\n"

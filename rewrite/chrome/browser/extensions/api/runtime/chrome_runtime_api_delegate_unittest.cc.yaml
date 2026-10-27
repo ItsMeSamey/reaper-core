@@ -1,0 +1,125 @@
+# Android runtime ownership and attached DevTools window metadata.
+substitutions:
+- description: Use the existing Android tab ownership and render-host test fixtures
+  regex:
+    re_pattern: \#include\ "testing/gtest/include/gtest/gtest\.h"
+    replace: '#include "testing/gtest/include/gtest/gtest.h"
+
+
+      #if BUILDFLAG(IS_ANDROID)
+
+      #include "chrome/browser/android/tab_android.h"
+
+      #include "chrome/browser/ui/android/tab_model/tab_model_test_helper.h"
+
+      #include "chrome/test/base/chrome_render_view_host_test_harness.h"
+
+      #include "components/sessions/content/session_tab_helper.h"
+
+      #include "components/sessions/core/session_id.h"
+
+      #include "content/public/browser/navigation_controller.h"
+
+      #include "content/public/browser/navigation_entry.h"
+
+      #include "content/public/browser/web_contents.h"
+
+      #include "extensions/browser/view_type_utils.h"
+
+      #include "extensions/common/constants.h"
+
+      #include "extensions/common/mojom/view_type.mojom.h"
+
+      #endif'
+- description: Exercise actual delegate ownership failure, exact profile/model selection and attached DevTools IDs
+  regex:
+    re_pattern: TEST_F\(ChromeRuntimeAPIDelegateTest,\ RequestUpdateCheck\)\ \{
+    replace: "#if BUILDFLAG(IS_ANDROID)\nclass RuntimeURLTestTabModel : public OwningTestTabModel {\n public:\n  enum class Result { kAccept, kReject, kDestroyDuringCreation };\n\n  RuntimeURLTestTabModel(Profile* profile,\n                        TabModelType type = TabModelType::kStandard,\n                        Result result = Result::kAccept)\n      : OwningTestTabModel(profile, chrome::android::ActivityType::kTabbed, type),\n        result_(result) {}\n\n  tabs::TabInterface* CreateTab(\n      TabAndroid* parent,\n      std::unique_ptr<content::WebContents> contents,\n      int index,\n      TabLaunchType launch_type,\n      bool should_pin) override {\n    ++creation_count;\n    last_contents = contents->GetWeakPtr();\n    if (result_ == Result::kReject) {\n      return nullptr;\n    }\n    tabs::TabInterface* tab = OwningTestTabModel::CreateTab(\n        parent, std::move(contents), index, launch_type, should_pin);\n    if (result_ == Result::kDestroyDuringCreation) {\n      // Simulate synchronous closure after the tab creator reports success.\n      // The delegate must not dereference either pointer after this callback.\n      ForceCloseAllTabs();\n    }\n    return tab;\n  }\n\n  int creation_count = 0;\n  base::WeakPtr<content::WebContents> last_contents;\n\n private:\n  const Result result_;\n};\n\nusing ChromeRuntimeAPIAndroidTest = ChromeRenderViewHostTestHarness;\n\nTEST_F(ChromeRuntimeAPIAndroidTest, UninstallURLRequiresStandardMatchingProfile) {\n  Profile* incognito = profile()->GetPrimaryOTRProfile(/*create_if_needed=*/true);\n  RuntimeURLTestTabModel other_profile(incognito);\n  RuntimeURLTestTabModel archived(profile(), TabModel::TabModelType::kArchived);\n  RuntimeURLTestTabModel regular(profile());\n  std::unique_ptr<RuntimeAPIDelegate> delegate =\n      std::make_unique<ChromeRuntimeAPIDelegate>(profile());\n  const GURL uninstall_url(\"https://example.test/uninstalled\");\n  delegate->OpenURL(uninstall_url);\n\n  EXPECT_EQ(0, other_profile.creation_count);\n  EXPECT_EQ(0, archived.creation_count);\n  EXPECT_EQ(1, regular.creation_count);\n  ASSERT_TRUE(regular.last_contents);\n  auto* entry = regular.last_contents->GetController().GetPendingEntry();\n  ASSERT_TRUE(entry);\n  EXPECT_EQ(uninstall_url, entry->GetURL());\n  EXPECT_EQ(profile(), regular.last_contents->GetBrowserContext());\n}\n\nTEST_F(ChromeRuntimeAPIAndroidTest, UninstallURLDoesNotUseNonstandardModel) {\n  RuntimeURLTestTabModel archived(profile(), TabModel::TabModelType::kArchived);\n  std::unique_ptr<RuntimeAPIDelegate> delegate =\n      std::make_unique<ChromeRuntimeAPIDelegate>(profile());\n  delegate->OpenURL(GURL(\"https://example.test/uninstalled\"));\n  EXPECT_EQ(0, archived.creation_count);\n}\n\nTEST_F(ChromeRuntimeAPIAndroidTest, UninstallURLDoesNotUseOtherProfile) {\n  RuntimeURLTestTabModel incognito(\n      profile()->GetPrimaryOTRProfile(/*create_if_needed=*/true));\n  std::unique_ptr<RuntimeAPIDelegate> delegate =\n      std::make_unique<ChromeRuntimeAPIDelegate>(profile());\n  delegate->OpenURL(GURL(\"https://example.test/uninstalled\"));\n  EXPECT_EQ(0, incognito.creation_count);\n}\n\nTEST_F(ChromeRuntimeAPIAndroidTest, UninstallURLCreationFailureIsSafe) {\n  for (auto result : {RuntimeURLTestTabModel::Result::kReject,\n                      RuntimeURLTestTabModel::Result::kDestroyDuringCreation}) {\n    RuntimeURLTestTabModel model(profile(), TabModel::TabModelType::kStandard,\n                                result);\n    std::unique_ptr<RuntimeAPIDelegate> delegate =\n        std::make_unique<ChromeRuntimeAPIDelegate>(profile());\n    delegate->OpenURL(GURL(\"https://example.test/uninstalled\"));\n    EXPECT_EQ(1, model.creation_count);\n    EXPECT_FALSE(model.last_contents);\n    EXPECT_EQ(0, model.GetTabCount());\n  }\n}\n\nTEST_F(ChromeRuntimeAPIAndroidTest, DevToolsUsesItsAttachedWindowSessionID) {\n  std::unique_ptr<RuntimeAPIDelegate> delegate =\n      std::make_unique<ChromeRuntimeAPIDelegate>(profile());\n  EXPECT_EQ(extension_misc::kUnknownWindowId,\n            delegate->GetDeveloperToolsWindowId(nullptr));\n  auto contents = CreateTestWebContents();\n  extensions::SetViewType(contents.get(),\n                          extensions::mojom::ViewType::kDeveloperTools);\n  EXPECT_EQ(extension_misc::kUnknownWindowId,\n            delegate->GetDeveloperToolsWindowId(contents.get()));\n  sessions::SessionTabHelper::CreateForWebContents(\n      contents.get(), sessions::SessionTabHelper::DelegateLookup());\n  auto tab = TabAndroid::CreateForTesting(profile(), 1234, std::move(contents));\n  const SessionID window_id = SessionID::NewUnique();\n  tab->SetWindowSessionID(window_id);\n  EXPECT_EQ(window_id.id(),\n            delegate->GetDeveloperToolsWindowId(tab->GetContents()));\n\n  // Reattachment changes the real session ID; no active-window cache is used.\n  const SessionID next_window_id = SessionID::NewUnique();\n  tab->SetWindowSessionID(next_window_id);\n  EXPECT_EQ(next_window_id.id(),\n            delegate->GetDeveloperToolsWindowId(tab->GetContents()));\n}\n#endif  // BUILDFLAG(IS_ANDROID)\n\nTEST_F(ChromeRuntimeAPIDelegateTest, RequestUpdateCheck) {"
+- description: Format modified Android runtime lifecycle code
+  regex:
+    re_pattern: '\ public:\
+
+      \ \ enum\ class\ Result\ \{\ kAccept,\ kReject,\ kDestroyDuringCreation\ \};\
+
+      \
+
+      \ \ RuntimeURLTestTabModel\(Profile\*\ profile,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ TabModelType\ type\ =\ TabModelType::kStandard,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ Result\ result\ =\ Result::kAccept\)\
+
+      \ \ \ \ \ \ :\ OwningTestTabModel\(profile,\ chrome::android::ActivityType::kTabbed,\ type\),\
+
+      \ \ \ \ \ \ \ \ result_\(result\)\ \{\}\
+
+      \
+
+      \ \ tabs::TabInterface\*\ CreateTab\(\
+
+      \ \ \ \ \ \ TabAndroid\*\ parent,\
+
+      \ \ \ \ \ \ std::unique_ptr<content::WebContents>\ contents,\
+
+      \ \ \ \ \ \ int\ index,\
+
+      \ \ \ \ \ \ TabLaunchType\ launch_type,\
+
+      \ \ \ \ \ \ bool\ should_pin\)\ override\ \{\
+
+      \ \ \ \ \+\+creation_count;\
+
+      \ \ \ \ last_contents\ =\ contents\->GetWeakPtr\(\);\
+
+      \ \ \ \ if\ \(result_\ ==\ Result::kReject\)\ \{\
+
+      \ \ \ \ \ \ return\ nullptr;\
+
+      '
+    replace: " public:\n  enum class Result { kAccept, kReject, kDestroyDuringCreation };\n\n  RuntimeURLTestTabModel(Profile* profile,\n                         TabModelType type = TabModelType::kStandard,\n                         Result result = Result::kAccept)\n      : OwningTestTabModel(profile,\n                           chrome::android::ActivityType::kTabbed,\n                           type),\n        result_(result) {}\n\n  tabs::TabInterface* CreateTab(TabAndroid* parent,\n                                std::unique_ptr<content::WebContents> contents,\n                                int index,\n                                TabLaunchType launch_type,\n                                bool should_pin) override {\n    ++creation_count;\n    last_contents = contents->GetWeakPtr();\n    if (result_ == Result::kReject) {\n      return nullptr;\n"
+- description: Format modified Android runtime lifecycle code
+  regex:
+    re_pattern: '\};\
+
+      \
+
+      using\ ChromeRuntimeAPIAndroidTest\ =\ ChromeRenderViewHostTestHarness;\
+
+      \
+
+      TEST_F\(ChromeRuntimeAPIAndroidTest,\ UninstallURLRequiresStandardMatchingProfile\)\ \{\
+
+      \ \ Profile\*\ incognito\ =\ profile\(\)\->GetPrimaryOTRProfile\(/\*create_if_needed=\*/true\);\
+
+      \ \ RuntimeURLTestTabModel\ other_profile\(incognito\);\
+
+      \ \ RuntimeURLTestTabModel\ archived\(profile\(\),\ TabModel::TabModelType::kArchived\);\
+
+      \ \ RuntimeURLTestTabModel\ regular\(profile\(\)\);\
+
+      \ \ std::unique_ptr<RuntimeAPIDelegate>\ delegate\ =\
+
+      '
+    replace: "};\n\nusing ChromeRuntimeAPIAndroidTest = ChromeRenderViewHostTestHarness;\n\nTEST_F(ChromeRuntimeAPIAndroidTest,\n       UninstallURLRequiresStandardMatchingProfile) {\n  Profile* incognito =\n      profile()->GetPrimaryOTRProfile(/*create_if_needed=*/true);\n  RuntimeURLTestTabModel other_profile(incognito);\n  RuntimeURLTestTabModel archived(profile(), TabModel::TabModelType::kArchived);\n  RuntimeURLTestTabModel regular(profile());\n  std::unique_ptr<RuntimeAPIDelegate> delegate =\n"
+- description: Format modified Android runtime lifecycle code
+  regex:
+    re_pattern: 'TEST_F\(ChromeRuntimeAPIAndroidTest,\ UninstallURLCreationFailureIsSafe\)\ \{\
+
+      \ \ for\ \(auto\ result\ :\ \{RuntimeURLTestTabModel::Result::kReject,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ RuntimeURLTestTabModel::Result::kDestroyDuringCreation\}\)\ \{\
+
+      \ \ \ \ RuntimeURLTestTabModel\ model\(profile\(\),\ TabModel::TabModelType::kStandard,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ result\);\
+
+      \ \ \ \ std::unique_ptr<RuntimeAPIDelegate>\ delegate\ =\
+
+      \ \ \ \ \ \ \ \ std::make_unique<ChromeRuntimeAPIDelegate>\(profile\(\)\);\
+
+      \ \ \ \ delegate\->OpenURL\(GURL\("https://example\.test/uninstalled"\)\);\
+
+      \ \ \ \ EXPECT_EQ\(1,\ model\.creation_count\);\
+
+      '
+    replace: "TEST_F(ChromeRuntimeAPIAndroidTest, UninstallURLCreationFailureIsSafe) {\n  for (auto result : {RuntimeURLTestTabModel::Result::kReject,\n                      RuntimeURLTestTabModel::Result::kDestroyDuringCreation}) {\n    RuntimeURLTestTabModel model(profile(), TabModel::TabModelType::kStandard,\n                                 result);\n    std::unique_ptr<RuntimeAPIDelegate> delegate =\n        std::make_unique<ChromeRuntimeAPIDelegate>(profile());\n    delegate->OpenURL(GURL(\"https://example.test/uninstalled\"));\n    EXPECT_EQ(1, model.creation_count);\n"

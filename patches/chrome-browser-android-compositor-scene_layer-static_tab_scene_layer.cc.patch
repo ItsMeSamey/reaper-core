@@ -1,0 +1,159 @@
+diff --git a/chrome/browser/android/compositor/scene_layer/static_tab_scene_layer.cc b/chrome/browser/android/compositor/scene_layer/static_tab_scene_layer.cc
+--- a/chrome/browser/android/compositor/scene_layer/static_tab_scene_layer.cc
++++ b/chrome/browser/android/compositor/scene_layer/static_tab_scene_layer.cc
+@@ -34,7 +34,7 @@
+     return true;
+   }
+ 
+-  for (const auto& child : layer->children()) {
++  for (const auto &child : layer->children()) {
+     if (LayerDraws(child)) {
+       return true;
+     }
+@@ -42,12 +42,11 @@
+   return false;
+ }
+ 
+-}  // namespace
++} // namespace
+ 
+-StaticTabSceneLayer::StaticTabSceneLayer(JNIEnv* env,
+-                                         const JavaRef<jobject>& jobj)
+-    : SceneLayer(env, jobj),
+-      tab_content_manager_(nullptr),
++StaticTabSceneLayer::StaticTabSceneLayer(JNIEnv *env,
++                                         const JavaRef<jobject> &jobj)
++    : SceneLayer(env, jobj), tab_content_manager_(nullptr),
+       background_color_(SK_ColorWHITE) {}
+ 
+ StaticTabSceneLayer::~StaticTabSceneLayer() = default;
+@@ -57,21 +56,23 @@
+   return root && root->bounds() != layer_->bounds();
+ }
+ 
+-SkColor StaticTabSceneLayer::GetBackgroundColor() {
+-  return background_color_;
+-}
++SkColor StaticTabSceneLayer::GetBackgroundColor() { return background_color_; }
+ 
+-void StaticTabSceneLayer::UpdateTabLayer(JNIEnv* env,
+-                                         int32_t id,
++void StaticTabSceneLayer::UpdateTabLayer(JNIEnv *env, int32_t id,
+                                          bool can_use_live_layer,
+                                          int32_t default_background_color,
+-                                         float x,
+-                                         float y,
+-                                         const JavaRef<jobject>& joffset_tag) {
++                                         float x, float y,
++                                         const JavaRef<jobject> &joffset_tag) {
+   DCHECK(tab_content_manager_)
+       << "TabContentManager must be set before updating the layer";
+ 
+   background_color_ = default_background_color;
++  if (content_layer_)
++    content_layer_->layer()->SetMasksToBounds(false);
++  if (second_content_layer_) {
++    second_content_layer_->layer()->SetHideLayerAndSubtree(true);
++    second_content_layer_->layer()->RemoveAllChildren();
++  }
+   if (!content_layer_.get()) {
+     content_layer_ = android::ContentLayer::Create(tab_content_manager_);
+     layer_->AddChild(content_layer_->layer());
+@@ -88,12 +89,13 @@
+     if (update_visible_ids) {
+       tab_content_manager_->UpdateVisibleIds({id}, id);
+     }
+-    TabAndroid* tab = tab_content_manager_->GetTab(id);
++    TabAndroid *tab = tab_content_manager_->GetTab(id);
+     if (tab && tab->web_contents() && tab->web_contents()->GetNativeView()) {
+       tab->web_contents()->GetNativeView()->set_content_offset_x(x);
+     }
+   }
+ 
++  content_layer_->layer()->SetHideLayerAndSubtree(false);
+   content_layer_->SetProperties(
+       id, can_use_live_layer, /* static_to_view_blend= */ 0.f,
+       /* should_override_content_alpha= */ false,
+@@ -107,22 +109,76 @@
+   content_layer_->layer()->SetOffsetTag(tag);
+ }
+ 
++void StaticTabSceneLayer::HideSplitTabLayers(JNIEnv *env) {
++  for (auto *pane : {content_layer_.get(), second_content_layer_.get()}) {
++    if (!pane)
++      continue;
++    pane->layer()->SetHideLayerAndSubtree(true);
++    pane->layer()->RemoveAllChildren();
++  }
++}
++
++void StaticTabSceneLayer::UpdateSplitTabLayers(
++    JNIEnv *env, int32_t first_id, int32_t second_id, bool first_live,
++    bool second_live, int32_t background_color, int32_t first_x,
++    int32_t first_y, int32_t first_width, int32_t first_height,
++    int32_t second_x, int32_t second_y, int32_t second_width,
++    int32_t second_height) {
++  DCHECK(tab_content_manager_);
++  if (first_id < 0 || second_id < 0 || first_id == second_id ||
++      first_width <= 0 || first_height <= 0 || second_width <= 0 ||
++      second_height <= 0) {
++    HideSplitTabLayers(env);
++    return;
++  }
++  background_color_ = background_color;
++  if (!content_layer_) {
++    content_layer_ = ContentLayer::Create(tab_content_manager_);
++    layer_->AddChild(content_layer_->layer());
++  }
++  if (!second_content_layer_) {
++    second_content_layer_ = ContentLayer::Create(tab_content_manager_);
++    layer_->AddChild(second_content_layer_->layer());
++  }
++  tab_content_manager_->UpdateVisibleIds({first_id, second_id}, first_id);
++  auto update_pane = [&](ContentLayer *pane, int id, bool live, int x, int y,
++                         int width, int height) {
++    pane->SetProperties(id, live, live ? 0.f : 1.f, false, 1.f, 1.f, true,
++                        gfx::Rect(width, height));
++    pane->layer()->SetHideLayerAndSubtree(false);
++    pane->layer()->SetPosition(gfx::PointF(x, y));
++    pane->layer()->SetBounds(gfx::Size(width, height));
++    pane->layer()->SetMasksToBounds(true);
++    pane->layer()->SetIsDrawable(true);
++    // Pane coordinates already include browser controls and pane header.
++    pane->layer()->SetOffsetTag(viz::OffsetTag());
++    if (TabAndroid *tab = tab_content_manager_->GetTab(id);
++        tab && tab->web_contents() && tab->web_contents()->GetNativeView()) {
++      // The Android ContentView itself is placed at the pane's X coordinate.
++      tab->web_contents()->GetNativeView()->set_content_offset_x(0);
++    }
++  };
++  update_pane(content_layer_.get(), first_id, first_live, first_x, first_y,
++              first_width, first_height);
++  update_pane(second_content_layer_.get(), second_id, second_live, second_x,
++              second_y, second_width, second_height);
++}
++
+ void StaticTabSceneLayer::SetTabContentManager(
+-    JNIEnv* env,
+-    const base::android::JavaRef<jobject>& jtab_content_manager) {
++    JNIEnv *env, const base::android::JavaRef<jobject> &jtab_content_manager) {
+   if (!tab_content_manager_) {
+     tab_content_manager_ =
+         TabContentManager::FromJavaObject(jtab_content_manager);
+   }
+ }
+ 
+-static int64_t JNI_StaticTabSceneLayer_Init(JNIEnv* env,
+-                                            const JavaRef<jobject>& jobj) {
++static int64_t JNI_StaticTabSceneLayer_Init(JNIEnv *env,
++                                            const JavaRef<jobject> &jobj) {
+   // This will automatically bind to the Java object and pass ownership there.
+-  StaticTabSceneLayer* scene_layer = new StaticTabSceneLayer(env, jobj);
++  StaticTabSceneLayer *scene_layer = new StaticTabSceneLayer(env, jobj);
+   return reinterpret_cast<intptr_t>(scene_layer);
+ }
+ 
+-}  // namespace android
++} // namespace android
+ 
+ DEFINE_JNI(StaticTabSceneLayer)

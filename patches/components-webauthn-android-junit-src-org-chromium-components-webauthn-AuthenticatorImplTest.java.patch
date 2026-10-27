@@ -1,0 +1,464 @@
+diff --git a/components/webauthn/android/junit/src/org/chromium/components/webauthn/AuthenticatorImplTest.java b/components/webauthn/android/junit/src/org/chromium/components/webauthn/AuthenticatorImplTest.java
+--- a/components/webauthn/android/junit/src/org/chromium/components/webauthn/AuthenticatorImplTest.java
++++ b/components/webauthn/android/junit/src/org/chromium/components/webauthn/AuthenticatorImplTest.java
+@@ -5,13 +5,19 @@
+ package org.chromium.components.webauthn;
+ 
+ import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertNotNull;
++import static org.junit.Assert.assertNull;
+ import static org.junit.Assert.assertThrows;
++import static org.junit.Assert.assertTrue;
+ import static org.mockito.ArgumentMatchers.any;
++import static org.mockito.ArgumentMatchers.anyBoolean;
+ import static org.mockito.ArgumentMatchers.anyInt;
++import static org.mockito.ArgumentMatchers.anyLong;
+ import static org.mockito.ArgumentMatchers.eq;
+ import static org.mockito.Mockito.doAnswer;
+ import static org.mockito.Mockito.mock;
+ import static org.mockito.Mockito.never;
++import static org.mockito.Mockito.times;
+ import static org.mockito.Mockito.verify;
+ import static org.mockito.Mockito.when;
+ 
+@@ -34,9 +40,12 @@
+ import org.chromium.blink.mojom.AuthenticatorStatus;
+ import org.chromium.blink.mojom.GetCredentialOptions;
+ import org.chromium.blink.mojom.GetCredentialResponse;
++import org.chromium.blink.mojom.MakeCredentialAuthenticatorResponse;
++import org.chromium.blink.mojom.Mediation;
+ import org.chromium.blink.mojom.PublicKeyCredentialCreationOptions;
+ import org.chromium.blink.mojom.PublicKeyCredentialRequestOptions;
+ import org.chromium.blink.mojom.WebAuthnClientCapability;
++import org.chromium.blink.mojom.WebAuthnDomExceptionDetails;
+ import org.chromium.components.ukm.UkmRecorder;
+ import org.chromium.components.ukm.UkmRecorderJni;
+ import org.chromium.content_public.browser.LifecycleState;
+@@ -54,6 +63,7 @@
+     private Origin mOrigin;
+     private Origin mTopOrigin;
+ 
++    @Mock private WebAuthenticationProxyBridge.Natives mProxyNatives;
+     @Mock private WebContents mWebContents;
+     @Mock private RenderFrameHost mRenderFrameHost;
+     @Mock private FidoIntentSender mIntentSender;
+@@ -80,6 +90,7 @@
+ 
+     @Before
+     public void setUp() {
++        WebAuthenticationProxyBridgeJni.setInstanceForTesting(mProxyNatives);
+         mOrigin = Origin.create(new GURL("https://example.com"));
+         mTopOrigin = Origin.create(new GURL("https://example.com"));
+ 
+@@ -108,10 +119,411 @@
+ 
+     @After
+     public void tearDown() {
++        WebAuthenticationProxyBridgeJni.setInstanceForTesting(null);
+         WebauthnModeProvider.setInstanceForTesting(null);
+         AuthenticatorImpl.overrideFido2CredentialRequestForTesting(null);
+         WebauthnBrowserBridgeJni.setInstanceForTesting(null);
+         UkmRecorderJni.setInstanceForTesting(null);
++    }
++
++    @Test
++    public void testProxyCannotAcceptConfirmationAfterNativeSuspension() {
++        GmsCoreUtils.setGmsCoreVersionForTesting(GmsCoreUtils.GMSCORE_MIN_VERSION);
++        CreateConfirmationUiDelegate confirmation = mock(CreateConfirmationUiDelegate.class);
++        when(confirmation.show(any(), any())).thenReturn(true);
++        mAuthenticator = new AuthenticatorImpl(ApplicationProvider.getApplicationContext(),
++                mWebContents, mIntentSender, confirmation, mRenderFrameHost, mTopOrigin);
++        enableProxy();
++        when(mProxyNatives.isActive(1L)).thenReturn(false);
++        Authenticator.MakeCredential_Response callback =
++                mock(Authenticator.MakeCredential_Response.class);
++        mAuthenticator.makeCredential(Fido2ApiTestHelper.createDefaultMakeCredentialOptions(), callback);
++        ArgumentCaptor<Runnable> accept = ArgumentCaptor.forClass(Runnable.class);
++        verify(confirmation).show(accept.capture(), any());
++        // A proxy attaches only after suspension invalidated the original document watch.
++        when(mProxyNatives.startRequestGuard(eq(1L), anyLong(), anyBoolean())).thenReturn(true);
++        when(mProxyNatives.isRequestValid(eq(1L), anyLong())).thenReturn(true);
++        when(mProxyNatives.beginRequestInteraction(eq(1L), anyLong())).thenReturn(true);
++        when(mProxyNatives.canCompleteRequest(eq(1L), anyLong())).thenReturn(true);
++        when(mProxyNatives.isActive(1L)).thenReturn(true);
++        // Java cancellation is still queued when the old acceptance arrives.
++        when(mProxyNatives.finishConfirmation(eq(1L), anyLong())).thenReturn(false);
++        accept.getValue().run();
++        verify(confirmation).cancel();
++        verify(callback).call(eq(AuthenticatorStatus.ABORT_ERROR), any(), any());
++        verify(mProxyNatives, never()).makeCredential(anyLong(), any());
++        verify(mFido2CredentialRequestMock, never())
++                .handleMakeCredentialRequest(any(), any(), any(), any(), any());
++    }
++
++    @Test
++    public void testProxyDocumentSuspensionClosesIncognitoConfirmation() {
++        GmsCoreUtils.setGmsCoreVersionForTesting(0);
++        CreateConfirmationUiDelegate confirmation = mock(CreateConfirmationUiDelegate.class);
++        when(confirmation.show(any(), any())).thenReturn(true);
++        mAuthenticator = new AuthenticatorImpl(ApplicationProvider.getApplicationContext(),
++                mWebContents, mIntentSender, confirmation, mRenderFrameHost, mTopOrigin);
++        WebAuthenticationProxyBridge bridge = enableProxy();
++        Authenticator.MakeCredential_Response callback =
++                mock(Authenticator.MakeCredential_Response.class);
++        mAuthenticator.makeCredential(Fido2ApiTestHelper.createDefaultMakeCredentialOptions(), callback);
++        ArgumentCaptor<Runnable> accept = ArgumentCaptor.forClass(Runnable.class);
++        verify(confirmation).show(accept.capture(), any());
++        ArgumentCaptor<Long> id = ArgumentCaptor.forClass(Long.class);
++        verify(mProxyNatives).watchConfirmation(eq(1L), id.capture());
++        bridge.onConfirmationCancelled(id.getValue());
++        verify(confirmation).cancel();
++        verify(callback).call(eq(AuthenticatorStatus.ABORT_ERROR), any(), any());
++        accept.getValue().run();
++        verify(mProxyNatives, never()).makeCredential(anyLong(), any());
++    }
++
++    @Test
++    public void testProxyCancelIncognitoConfirmationDiscardsOldAcceptance() {
++        GmsCoreUtils.setGmsCoreVersionForTesting(0);
++        CreateConfirmationUiDelegate confirmation = mock(CreateConfirmationUiDelegate.class);
++        when(confirmation.show(any(), any())).thenReturn(true);
++        mAuthenticator = new AuthenticatorImpl(ApplicationProvider.getApplicationContext(),
++                mWebContents, mIntentSender, confirmation, mRenderFrameHost, mTopOrigin);
++        enableProxy();
++        Authenticator.MakeCredential_Response callback =
++                mock(Authenticator.MakeCredential_Response.class);
++        mAuthenticator.makeCredential(Fido2ApiTestHelper.createDefaultMakeCredentialOptions(), callback);
++        ArgumentCaptor<Runnable> accept = ArgumentCaptor.forClass(Runnable.class);
++        verify(confirmation).show(accept.capture(), any());
++        mAuthenticator.cancel();
++        verify(confirmation).cancel();
++        verify(callback).call(eq(AuthenticatorStatus.ABORT_ERROR), any(), any());
++        accept.getValue().run();
++        verify(mProxyNatives, never()).makeCredential(anyLong(), any());
++        verify(mFido2CredentialRequestMock, never())
++                .handleMakeCredentialRequest(any(), any(), any(), any(), any());
++    }
++
++    @Test
++    public void testProxyCapabilitiesWithoutGms() {
++        GmsCoreUtils.setGmsCoreVersionForTesting(0);
++        WebAuthenticationProxyBridge bridge = enableProxy();
++        Authenticator.GetClientCapabilities_Response callback =
++                mock(Authenticator.GetClientCapabilities_Response.class);
++        mAuthenticator.getClientCapabilities(callback);
++        ArgumentCaptor<Integer> id = ArgumentCaptor.forClass(Integer.class);
++        verify(mProxyNatives).isUvpaa(eq(1L), id.capture());
++        bridge.onUvpaaResponse(id.getValue(), true);
++        verify(callback).call(mCapabilitiesCaptor.capture());
++        assertEquals(10, mCapabilitiesCaptor.getValue().length);
++        for (WebAuthnClientCapability capability : mCapabilitiesCaptor.getValue()) {
++            if (capability.name.equals(AuthenticatorConstants.CAPABILITY_UVPAA)) {
++                assertEquals(true, capability.supported);
++            }
++            if (capability.name.equals(AuthenticatorConstants.CAPABILITY_CONDITIONAL_GET)) {
++                assertEquals(false, capability.supported);
++            }
++        }
++    }
++
++    private WebAuthenticationProxyBridge enableProxy() {
++        when(mProxyNatives.create(any(), eq(mRenderFrameHost))).thenReturn(1L);
++        when(mProxyNatives.startRequestGuard(eq(1L), anyLong(), anyBoolean())).thenReturn(true);
++        when(mProxyNatives.isRequestValid(eq(1L), anyLong())).thenReturn(true);
++        when(mProxyNatives.beginRequestInteraction(eq(1L), anyLong())).thenReturn(true);
++        when(mProxyNatives.canCompleteRequest(eq(1L), anyLong())).thenReturn(true);
++        when(mProxyNatives.isActive(1L)).thenReturn(true);
++        when(mProxyNatives.finishConfirmation(eq(1L), anyLong())).thenReturn(true);
++        when(mProxyNatives.makeCredential(eq(1L), any())).thenReturn(true);
++        when(mProxyNatives.getCredential(eq(1L), any())).thenReturn(true);
++        when(mProxyNatives.isUvpaa(eq(1L), anyInt())).thenReturn(true);
++        mAuthenticator.enableRequestProxy();
++        ArgumentCaptor<WebAuthenticationProxyBridge> bridge =
++                ArgumentCaptor.forClass(WebAuthenticationProxyBridge.class);
++        verify(mProxyNatives).create(bridge.capture(), eq(mRenderFrameHost));
++        return bridge.getValue();
++    }
++
++    private WebAuthenticationProxyBridge enableOrdinaryRequestGuard() {
++        GmsCoreUtils.setGmsCoreVersionForTesting(GmsCoreUtils.GMSCORE_MIN_VERSION);
++        WebAuthenticationProxyBridge bridge = enableProxy();
++        when(mProxyNatives.isActive(1L)).thenReturn(false);
++        when(mProxyNatives.makeCredential(eq(1L), any())).thenReturn(false);
++        when(mProxyNatives.getCredential(eq(1L), any())).thenReturn(false);
++        return bridge;
++    }
++
++    private AuthenticationContextProvider capturedContext() {
++        ArgumentCaptor<AuthenticationContextProvider> context =
++                ArgumentCaptor.forClass(AuthenticationContextProvider.class);
++        verify(mFido2CredentialRequestMock).setAuthenticationContextProvider(context.capture());
++        return context.getValue();
++    }
++
++    @Test
++    public void testInactivePaneCannotStartCredentialRequest() {
++        enableOrdinaryRequestGuard();
++        when(mProxyNatives.startRequestGuard(eq(1L), anyLong(), anyBoolean())).thenReturn(false);
++        Authenticator.MakeCredential_Response callback =
++                mock(Authenticator.MakeCredential_Response.class);
++        mAuthenticator.makeCredential(
++                Fido2ApiTestHelper.createDefaultMakeCredentialOptions(), callback);
++        verify(callback).call(eq(AuthenticatorStatus.NOT_FOCUSED), any(), any());
++        verify(mFido2CredentialRequestMock, never())
++                .handleMakeCredentialRequest(any(), any(), any(), any(), any());
++        verify(mProxyNatives, never()).makeCredential(anyLong(), any());
++    }
++
++    @Test
++    public void testCancelledRequestProviderCannotResolveReplacement() {
++        WebAuthenticationProxyBridge bridge = enableOrdinaryRequestGuard();
++        Authenticator.MakeCredential_Response first =
++                mock(Authenticator.MakeCredential_Response.class);
++        mAuthenticator.makeCredential(
++                Fido2ApiTestHelper.createDefaultMakeCredentialOptions(), first);
++        AuthenticationContextProvider oldContext = capturedContext();
++        WebauthnRequestCallback oldCallback = oldContext.getRequestCallback();
++        ArgumentCaptor<Long> id = ArgumentCaptor.forClass(Long.class);
++        verify(mProxyNatives).startRequestGuard(eq(1L), id.capture(), eq(false));
++        bridge.onRequestInvalidated(id.getValue());
++        verify(first).call(eq(AuthenticatorStatus.ABORT_ERROR), any(), any());
++        assertNull(oldContext.getRequestCallback());
++        Authenticator.MakeCredential_Response replacement =
++                mock(Authenticator.MakeCredential_Response.class);
++        mAuthenticator.makeCredential(
++                Fido2ApiTestHelper.createDefaultMakeCredentialOptions(), replacement);
++        // Old OS work can retain both the provider and the original callback.
++        assertNull(oldContext.getRequestCallback());
++        assertTrue(oldContext.shouldBlockUserInteraction());
++        oldCallback.onComplete(
++                WebauthnRequestResponse.forSuccessfulMakeCredential(
++                        new MakeCredentialAuthenticatorResponse(),
++                        new RequestMetrics.Builder().build()));
++        bridge.onRequestInvalidated(id.getValue());
++        verify(first, times(1)).call(anyInt(), any(), any());
++        verify(replacement, never()).call(anyInt(), any(), any());
++        verify(mProxyNatives, times(2)).startRequestGuard(eq(1L), anyLong(), eq(false));
++    }
++
++    @Test
++    public void testCredentialSuccessRechecksActiveOwner() {
++        enableOrdinaryRequestGuard();
++        Authenticator.MakeCredential_Response callback =
++                mock(Authenticator.MakeCredential_Response.class);
++        mAuthenticator.makeCredential(
++                Fido2ApiTestHelper.createDefaultMakeCredentialOptions(), callback);
++        WebauthnRequestCallback pending = capturedContext().getRequestCallback();
++        when(mProxyNatives.canCompleteRequest(eq(1L), anyLong())).thenReturn(false);
++        pending.onComplete(
++                WebauthnRequestResponse.forSuccessfulMakeCredential(
++                        new MakeCredentialAuthenticatorResponse(),
++                        new RequestMetrics.Builder().build()));
++        verify(callback).call(eq(AuthenticatorStatus.NOT_FOCUSED), any(), any());
++    }
++
++    @Test
++    public void testOsAuthenticatorActivityHideDoesNotRejectValidOwner() {
++        enableOrdinaryRequestGuard();
++        Authenticator.MakeCredential_Response callback =
++                mock(Authenticator.MakeCredential_Response.class);
++        mAuthenticator.makeCredential(
++                Fido2ApiTestHelper.createDefaultMakeCredentialOptions(), callback);
++        WebauthnRequestCallback pending = capturedContext().getRequestCallback();
++        when(mWebContents.getVisibility()).thenReturn(Visibility.HIDDEN);
++        MakeCredentialAuthenticatorResponse response = new MakeCredentialAuthenticatorResponse();
++        pending.onComplete(
++                WebauthnRequestResponse.forSuccessfulMakeCredential(
++                        response, new RequestMetrics.Builder().build()));
++        verify(callback).call(eq(AuthenticatorStatus.SUCCESS), eq(response), any());
++    }
++
++    @Test
++    public void testConditionalRequestWaitsButRechecksInteractivePromotion() {
++        enableOrdinaryRequestGuard();
++        when(mWebContents.getVisibility()).thenReturn(Visibility.HIDDEN);
++        Authenticator.GetCredential_Response callback =
++                mock(Authenticator.GetCredential_Response.class);
++        GetCredentialOptions options = proxyGetOptions();
++        options.mediation = Mediation.CONDITIONAL;
++        mAuthenticator.getCredential(options, callback);
++        verify(mProxyNatives).startRequestGuard(eq(1L), anyLong(), eq(true));
++        verify(mProxyNatives, never()).beginRequestInteraction(anyLong(), anyLong());
++        AuthenticationContextProvider context = capturedContext();
++        assertNotNull(context.getRequestCallback());
++        when(mProxyNatives.beginRequestInteraction(eq(1L), anyLong())).thenReturn(false);
++        assertTrue(context.shouldBlockUserInteraction());
++        verify(callback, never()).call(any());
++    }
++
++    @Test
++    public void testClosedAuthenticatorDropsProviderAndGuardReplies() {
++        WebAuthenticationProxyBridge bridge = enableOrdinaryRequestGuard();
++        Authenticator.MakeCredential_Response callback =
++                mock(Authenticator.MakeCredential_Response.class);
++        mAuthenticator.makeCredential(
++                Fido2ApiTestHelper.createDefaultMakeCredentialOptions(), callback);
++        AuthenticationContextProvider context = capturedContext();
++        ArgumentCaptor<Long> id = ArgumentCaptor.forClass(Long.class);
++        verify(mProxyNatives).startRequestGuard(eq(1L), id.capture(), eq(false));
++        mAuthenticator.close();
++        assertNull(context.getRequestCallback());
++        bridge.onRequestInvalidated(id.getValue());
++        verify(callback, never()).call(anyInt(), any(), any());
++    }
++
++    @Test
++    public void testNativeInvalidationBlocksProviderBeforePostedCancellation() {
++        WebAuthenticationProxyBridge bridge = enableOrdinaryRequestGuard();
++        Authenticator.MakeCredential_Response callback =
++                mock(Authenticator.MakeCredential_Response.class);
++        mAuthenticator.makeCredential(
++                Fido2ApiTestHelper.createDefaultMakeCredentialOptions(), callback);
++        AuthenticationContextProvider context = capturedContext();
++        ArgumentCaptor<Long> id = ArgumentCaptor.forClass(Long.class);
++        verify(mProxyNatives).startRequestGuard(eq(1L), id.capture(), eq(false));
++        when(mProxyNatives.isRequestValid(eq(1L), anyLong())).thenReturn(false);
++        assertNull(context.getRequestCallback());
++        verify(callback, never()).call(anyInt(), any(), any());
++        bridge.onRequestInvalidated(id.getValue());
++        verify(callback).call(eq(AuthenticatorStatus.ABORT_ERROR), any(), any());
++    }
++
++    private GetCredentialOptions proxyGetOptions() {
++        GetCredentialOptions options = new GetCredentialOptions();
++        options.publicKey = Fido2ApiTestHelper.createDefaultGetAssertionOptions();
++        return options;
++    }
++
++    @Test
++    public void testProxyCreateWithoutGmsAndStructuredError() {
++        GmsCoreUtils.setGmsCoreVersionForTesting(0);
++        WebAuthenticationProxyBridge bridge = enableProxy();
++        Authenticator.MakeCredential_Response callback =
++                mock(Authenticator.MakeCredential_Response.class);
++        mAuthenticator.makeCredential(Fido2ApiTestHelper.createDefaultMakeCredentialOptions(), callback);
++        verify(mProxyNatives).makeCredential(eq(1L), any());
++        verify(mFido2CredentialRequestMock, never())
++                .handleMakeCredentialRequest(any(), any(), any(), any(), any());
++        WebAuthnDomExceptionDetails error = new WebAuthnDomExceptionDetails();
++        error.name = "InvalidStateError";
++        error.message = "The remote credential already exists.";
++        java.nio.ByteBuffer serialized = error.serialize();
++        byte[] bytes = new byte[serialized.remaining()];
++        serialized.get(bytes);
++        bridge.onMakeResponse(AuthenticatorStatus.ERROR_WITH_DOM_EXCEPTION_DETAILS, null, bytes);
++        ArgumentCaptor<WebAuthnDomExceptionDetails> returned =
++                ArgumentCaptor.forClass(WebAuthnDomExceptionDetails.class);
++        verify(callback).call(eq(AuthenticatorStatus.ERROR_WITH_DOM_EXCEPTION_DETAILS),
++                any(), returned.capture());
++        assertEquals(error.name, returned.getValue().name);
++        assertEquals(error.message, returned.getValue().message);
++    }
++
++    @Test
++    public void testProxyCreateCancelDoesNotReachLocalProvider() {
++        GmsCoreUtils.setGmsCoreVersionForTesting(0);
++        WebAuthenticationProxyBridge bridge = enableProxy();
++        Authenticator.MakeCredential_Response callback =
++                mock(Authenticator.MakeCredential_Response.class);
++        mAuthenticator.makeCredential(Fido2ApiTestHelper.createDefaultMakeCredentialOptions(), callback);
++        mAuthenticator.cancel();
++        verify(mProxyNatives).cancel(1L);
++        bridge.onMakeResponse(AuthenticatorStatus.ABORT_ERROR, null, null);
++        verify(callback).call(eq(AuthenticatorStatus.ABORT_ERROR), any(), any());
++    }
++
++    @Test
++    public void testProxyGetWithoutGmsAndCancel() {
++        GmsCoreUtils.setGmsCoreVersionForTesting(0);
++        WebAuthenticationProxyBridge bridge = enableProxy();
++        Authenticator.GetCredential_Response callback =
++                mock(Authenticator.GetCredential_Response.class);
++        mAuthenticator.getCredential(proxyGetOptions(), callback);
++        verify(mProxyNatives).getCredential(eq(1L), any());
++        verify(mFido2CredentialRequestMock, never())
++                .handleGetCredentialRequest(any(), any(), any(), any());
++        mAuthenticator.cancel();
++        verify(mProxyNatives).cancel(1L);
++        bridge.onGetResponse(AuthenticatorStatus.ABORT_ERROR, null, null);
++        ArgumentCaptor<GetCredentialResponse> response =
++                ArgumentCaptor.forClass(GetCredentialResponse.class);
++        verify(callback).call(response.capture());
++        assertEquals(AuthenticatorStatus.ABORT_ERROR,
++                response.getValue().getGetAssertionResponse().status);
++    }
++
++    @Test
++    public void testProxyDoesNotBypassEmbedderRejection() {
++        enableProxy();
++        when(mWebauthnBrowserBridgeNativesMock.shouldDisallowCredentialRequest(mRenderFrameHost))
++                .thenReturn(true);
++        Authenticator.MakeCredential_Response callback =
++                mock(Authenticator.MakeCredential_Response.class);
++        mAuthenticator.makeCredential(Fido2ApiTestHelper.createDefaultMakeCredentialOptions(), callback);
++        verify(callback).call(eq(AuthenticatorStatus.NOT_ALLOWED_ERROR), any(), any());
++        verify(mProxyNatives, never()).makeCredential(anyLong(), any());
++    }
++
++    @Test
++    public void testProxyDoesNotBypassHiddenDocument() {
++        enableProxy();
++        when(mWebContents.getVisibility()).thenReturn(Visibility.HIDDEN);
++        Authenticator.GetCredential_Response callback =
++                mock(Authenticator.GetCredential_Response.class);
++        mAuthenticator.getCredential(proxyGetOptions(), callback);
++        verify(mProxyNatives, never()).getCredential(anyLong(), any());
++        ArgumentCaptor<GetCredentialResponse> response =
++                ArgumentCaptor.forClass(GetCredentialResponse.class);
++        verify(callback).call(response.capture());
++        assertEquals(AuthenticatorStatus.NOT_FOCUSED,
++                response.getValue().getGetAssertionResponse().status);
++    }
++
++    @Test
++    public void testProxyUvpaaWithoutGms() {
++        GmsCoreUtils.setGmsCoreVersionForTesting(0);
++        WebAuthenticationProxyBridge bridge = enableProxy();
++        Authenticator.IsUserVerifyingPlatformAuthenticatorAvailable_Response callback =
++                mock(Authenticator.IsUserVerifyingPlatformAuthenticatorAvailable_Response.class);
++        mAuthenticator.isUserVerifyingPlatformAuthenticatorAvailable(callback);
++        ArgumentCaptor<Integer> id = ArgumentCaptor.forClass(Integer.class);
++        verify(mProxyNatives).isUvpaa(eq(1L), id.capture());
++        bridge.onUvpaaResponse(id.getValue(), true);
++        verify(callback).call(true);
++        verify(mFido2CredentialRequestMock, never())
++                .handleIsUserVerifyingPlatformAuthenticatorAvailableRequest(any());
++    }
++
++    @Test
++    public void testProxyDisablesConditionalMediation() {
++        GmsCoreUtils.setGmsCoreVersionForTesting(GmsCoreUtils.GMSCORE_MIN_VERSION);
++        enableProxy();
++        Authenticator.IsConditionalMediationAvailable_Response callback =
++                mock(Authenticator.IsConditionalMediationAvailable_Response.class);
++        mAuthenticator.isConditionalMediationAvailable(callback);
++        verify(callback).call(false);
++        verify(mFido2CredentialRequestMock, never())
++                .handleIsUserVerifyingPlatformAuthenticatorAvailableRequest(any());
++    }
++
++    @Test
++    public void testProxyCloseDiscardsLateCallback() {
++        GmsCoreUtils.setGmsCoreVersionForTesting(0);
++        WebAuthenticationProxyBridge bridge = enableProxy();
++        Authenticator.MakeCredential_Response callback =
++                mock(Authenticator.MakeCredential_Response.class);
++        mAuthenticator.makeCredential(Fido2ApiTestHelper.createDefaultMakeCredentialOptions(), callback);
++        mAuthenticator.close();
++        verify(mProxyNatives).destroy(1L);
++        bridge.onMakeResponse(AuthenticatorStatus.ABORT_ERROR, null, null);
++        verify(callback, never()).call(anyInt(), any(), any());
++    }
++
++    @Test
++    public void testProxyDetachFallsBackToLocalProvider() {
++        GmsCoreUtils.setGmsCoreVersionForTesting(GmsCoreUtils.GMSCORE_MIN_VERSION);
++        enableProxy();
++        when(mProxyNatives.makeCredential(eq(1L), any())).thenReturn(false);
++        mAuthenticator.makeCredential(Fido2ApiTestHelper.createDefaultMakeCredentialOptions(),
++                mock(Authenticator.MakeCredential_Response.class));
++        verify(mFido2CredentialRequestMock)
++                .handleMakeCredentialRequest(any(), any(), any(), any(), any());
+     }
+ 
+     @Test

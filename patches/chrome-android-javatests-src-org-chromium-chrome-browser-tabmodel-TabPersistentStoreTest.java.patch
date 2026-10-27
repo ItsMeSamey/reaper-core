@@ -1,0 +1,104 @@
+diff --git a/chrome/android/javatests/src/org/chromium/chrome/browser/tabmodel/TabPersistentStoreTest.java b/chrome/android/javatests/src/org/chromium/chrome/browser/tabmodel/TabPersistentStoreTest.java
+--- a/chrome/android/javatests/src/org/chromium/chrome/browser/tabmodel/TabPersistentStoreTest.java
++++ b/chrome/android/javatests/src/org/chromium/chrome/browser/tabmodel/TabPersistentStoreTest.java
+@@ -33,6 +33,7 @@
+ import org.chromium.base.ApplicationStatus;
+ import org.chromium.base.ApplicationStatus.ActivityStateListener;
+ import org.chromium.base.ContextUtils;
++import org.chromium.base.ResettersForTesting;
+ import org.chromium.base.ThreadUtils;
+ import org.chromium.base.TriState;
+ import org.chromium.base.lifetime.Destroyable;
+@@ -78,7 +79,8 @@
+ import org.chromium.chrome.browser.tab.TabStateAttributesRegistry;
+ import org.chromium.chrome.browser.tab.TabStateExtractor;
+ import org.chromium.chrome.browser.tab.WebContentsState;
+-import org.chromium.chrome.browser.tab.state.ShoppingPersistedTabData;
++import org.chromium.chrome.browser.tab.state.ArchivePersistedTabData;
++import org.chromium.chrome.browser.tab.state.PersistedTabData;
+ import org.chromium.chrome.browser.tab_ui.TabContentManager;
+ import org.chromium.chrome.browser.tabmodel.NextTabPolicy.NextTabPolicySupplier;
+ import org.chromium.chrome.browser.tabmodel.PersistentStoreMigrationManager.StoreType;
+@@ -887,6 +889,20 @@
+     @Feature("TabPersistentStore")
+     public void testMaintenance() throws Exception {
+         Looper.prepare();
++        ThreadUtils.runOnUiThreadBlocking(
++                () -> {
++                    if (PersistedTabData.getSupportedMaintenanceClassesForTesting()
++                            .add(ArchivePersistedTabData.class)) {
++                        ResettersForTesting.register(
++                                () ->
++                                        ThreadUtils.runOnUiThreadBlocking(
++                                                () -> {
++                                                    PersistedTabData
++                                                            .getSupportedMaintenanceClassesForTesting()
++                                                            .remove(ArchivePersistedTabData.class);
++                                                }));
++                    }
++                });
+         mMockDirectory.writeTabModelFiles(TestTabModelDirectory.GOOGLE_CA_GOOGLE_COM, true, 0);
+         mMockDirectory.writeTabModelFiles(TestTabModelDirectory.TEXTAREA_DUCK_DUCK_GO, true, 1);
+
+@@ -940,18 +956,23 @@
+                 ThreadUtils.runOnUiThreadBlocking(
+                         () -> {
+                             MockTab newTab =
+-                                    new MockTab(tabId, ProfileManager.getLastUsedRegularProfile());
+-                            SettableNonNullObservableSupplier<Boolean> observableSupplier =
+-                                    ObservableSuppliers.createNonNull(true);
+-                            ShoppingPersistedTabData.from(newTab)
+-                                    .registerIsTabSaveEnabledSupplier(observableSupplier);
+-                            ShoppingPersistedTabData.from(newTab).save();
+-                            ShoppingPersistedTabData.from(newTab)
+-                                    .existsInStorage(
+-                                            (res) -> {
+-                                                assertTrue(res);
+-                                                helper.notifyCalled();
+-                                            });
++                                    MockTab.createAndInitialize(
++                                            tabId, ProfileManager.getLastUsedRegularProfile());
++                            newTab.setIsInitialized(true);
++                            ArchivePersistedTabData.from(
++                                    newTab,
++                                    data -> {
++                                        assertNotNull(data);
++                                        SettableNonNullObservableSupplier<Boolean> supplier =
++                                                ObservableSuppliers.createNonNull(true);
++                                        data.registerIsTabSaveEnabledSupplier(supplier);
++                                        data.save();
++                                        data.existsInStorage(
++                                                res -> {
++                                                    assertTrue(res);
++                                                    helper.notifyCalled();
++                                                });
++                                    });
+                             return newTab;
+                         });
+         helper.waitForCallback(0);
+@@ -961,14 +982,17 @@
+     private static void checkEntryExists(Tab tab, boolean expectedExists) throws TimeoutException {
+         CallbackHelper helper = new CallbackHelper();
+         ThreadUtils.runOnUiThreadBlocking(
+-                () -> {
+-                    ShoppingPersistedTabData.from(tab)
+-                            .existsInStorage(
+-                                    (res) -> {
+-                                        assertEquals(expectedExists, res);
+-                                        helper.notifyCalled();
+-                                    });
+-                });
++                () ->
++                        ArchivePersistedTabData.from(
++                                tab,
++                                data -> {
++                                    assertNotNull(data);
++                                    data.existsInStorage(
++                                            res -> {
++                                                assertEquals(expectedExists, res);
++                                                helper.notifyCalled();
++                                            });
++                                }));
+         helper.waitForCallback(0);
+     }
+

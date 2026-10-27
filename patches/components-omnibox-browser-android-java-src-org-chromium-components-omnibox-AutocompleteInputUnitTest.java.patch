@@ -1,0 +1,152 @@
+diff --git a/components/omnibox/browser/android/java/src/org/chromium/components/omnibox/AutocompleteInputUnitTest.java b/components/omnibox/browser/android/java/src/org/chromium/components/omnibox/AutocompleteInputUnitTest.java
+--- a/components/omnibox/browser/android/java/src/org/chromium/components/omnibox/AutocompleteInputUnitTest.java
++++ b/components/omnibox/browser/android/java/src/org/chromium/components/omnibox/AutocompleteInputUnitTest.java
+@@ -24,10 +24,8 @@
+ import org.chromium.base.test.util.Features.DisableFeatures;
+ import org.chromium.base.test.util.Features.EnableFeatures;
+ import org.chromium.components.metrics.OmniboxEventProtosIntDef.PageClassification;
+-import org.chromium.components.omnibox.AimModelsProto.ModelMode;
+ import org.chromium.components.omnibox.AutocompleteInput.AutocompleteState;
+ import org.chromium.components.omnibox.AutocompleteInput.SiteSearchData;
+-import org.chromium.components.omnibox.ToolModeProto.ToolMode;
+ import org.chromium.url.GURL;
+ import org.chromium.url.JUnitTestGURLs;
+ 
+@@ -268,46 +266,16 @@
+     }
+ 
+     @Test
+-    public void getPageClassification_forFuseboxRequests() {
+-        Map<@PageClassification Integer, @PageClassification Integer> testCases =
+-                Map.of(
+-                        // NTP
+-                        PageClassification.INSTANT_NTP_WITH_OMNIBOX_AS_STARTING_FOCUS,
+-                        PageClassification.NTP_OMNIBOX_COMPOSEBOX,
+-                        // SRP
+-                        PageClassification.SEARCH_RESULT_PAGE_NO_SEARCH_TERM_REPLACEMENT,
+-                        PageClassification.SRP_OMNIBOX_COMPOSEBOX,
+-                        // Web
+-                        PageClassification.OTHER, //
+-                        PageClassification.OTHER_OMNIBOX_COMPOSEBOX);
+-
+-        for (@AutocompleteRequestType
+-        int requestType :
+-                List.of(
+-                        AutocompleteRequestType.AI_MODE,
+-                        AutocompleteRequestType.IMAGE_GENERATION,
+-                        AutocompleteRequestType.DEEP_SEARCH,
+-                        AutocompleteRequestType.CANVAS)) {
++    public void getPageClassification_forNormalRequests() {
++        for (int requestType :
++                List.of(AutocompleteRequestType.SEARCH, AutocompleteRequestType.SEARCH_PREFETCH)) {
+             mInput.setRequestType(requestType);
+-            for (@PageClassification int givePageClass = PageClassification.MIN_VALUE;
+-                    givePageClass <= PageClassification.MAX_VALUE;
+-                    givePageClass++) {
+-                @PageClassification
+-                Integer wantPageClass = testCases.getOrDefault(givePageClass, null);
+-                String message =
+-                        String.format(
+-                                "Unexpected results in mode %d for page class %d",
+-                                requestType, givePageClass);
+-
+-                if (wantPageClass != null) {
+-                    // Page classes known to Fusebox.
+-                    mInput.setPageClassification(givePageClass);
+-                    assertEquals(message, (int) wantPageClass, mInput.getPageClassification());
+-                } else {
+-                    // These page classes not recognized by Fusebox.
+-                    mInput.setPageClassification(givePageClass);
+-                    assertThrows(message, AssertionError.class, mInput::getPageClassification);
+-                }
++            for (int pageClass = PageClassification.MIN_VALUE;
++                    pageClass <= PageClassification.MAX_VALUE;
++                    pageClass++) {
++                mInput.setPageClassification(pageClass);
++                assertEquals(pageClass, mInput.getPageClassification());
++                assertEquals(pageClass, mInput.getRawPageClassification());
+             }
+         }
+     }
+@@ -381,28 +349,26 @@
+     }
+ 
+     @Test
+-    public void testGetToolMode() {
+-        assertEquals(ToolMode.TOOL_MODE_UNSPECIFIED_VALUE, mInput.getToolMode());
+-        mInput.setRequestType(AutocompleteRequestType.IMAGE_GENERATION);
+-        assertEquals(ToolMode.TOOL_MODE_IMAGE_GEN_VALUE, mInput.getToolMode());
+-        mInput.setHasAttachments(true);
+-        assertEquals(ToolMode.TOOL_MODE_IMAGE_GEN_UPLOAD_VALUE, mInput.getToolMode());
+-    }
+-
+-    @Test
+-    public void testToolModeConsistentDuringRequestTypeChange() {
++    public void testRejectUnsupportedRequestWithoutChangingNormalState() {
++        mInput.setRequestType(AutocompleteRequestType.SEARCH_PREFETCH);
++        org.junit.Assert.assertThrows(
++                IllegalArgumentException.class,
++                () -> mInput.setRequestType(AutocompleteRequestType.AI_MODE));
++        assertEquals(AutocompleteRequestType.SEARCH_PREFETCH, mInput.getRequestType());
++    }
++
++    @Test
++    public void testNormalRequestObserverSeesCommittedState() {
+         boolean[] called = new boolean[1];
+         mInput.getRequestTypeSupplier()
+                 .addSyncObserver(
+                         requestType -> {
+-                            if (requestType == AutocompleteRequestType.IMAGE_GENERATION) {
+-                                assertEquals(
+-                                        ToolMode.TOOL_MODE_IMAGE_GEN_VALUE, mInput.getToolMode());
++                            if (requestType == AutocompleteRequestType.SEARCH_PREFETCH) {
++                                assertEquals(requestType.intValue(), mInput.getRequestType());
+                                 called[0] = true;
+                             }
+                         });
+-
+-        mInput.setRequestType(AutocompleteRequestType.IMAGE_GENERATION);
++        mInput.setRequestType(AutocompleteRequestType.SEARCH_PREFETCH);
+         assertTrue(called[0]);
+     }
+ 
+@@ -513,14 +479,12 @@
+         String pageTitle = "pageTitle";
+         String userText = "initialUserText";
+         String initialUserText = "initialUserText";
+-        boolean hasAttachments = true;
+         int autocompleteState = AutocompleteState.STANDBY;
+         int selectionStart = 1;
+         int selectionEnd = 2;
+         int refineActionUsage = AutocompleteInput.RefineActionUsage.SEARCH_WITH_PREFIX;
+         int focusReason = OmniboxFocusReason.OMNIBOX_TAP;
+-        int modelMode = ModelMode.MODEL_MODE_GEMINI_REGULAR_VALUE;
+-        int requestType = AutocompleteRequestType.IMAGE_GENERATION;
++        int requestType = AutocompleteRequestType.SEARCH_PREFETCH;
+         SiteSearchData siteSearchData = new SiteSearchData("keyword", "name");
+ 
+         AutocompleteInput input1 = new AutocompleteInput();
+@@ -530,13 +494,11 @@
+         input1.setPageTitle(pageTitle);
+         input1.setUserText(userText);
+         input1.setInitialUserText(initialUserText);
+-        input1.setHasAttachments(hasAttachments);
+         input1.setAutocompleteState(autocompleteState);
+         input1.setSelection(new TextSelection(selectionStart, selectionEnd));
+         input1.setRefineActionUsage(refineActionUsage);
+         input1.setSuggestionsListScrolled();
+         input1.setFocusReason(focusReason);
+-        input1.setModelMode(modelMode);
+         input1.setRequestType(requestType);
+         input1.setSiteSearchData(siteSearchData);
+ 
+@@ -556,9 +518,7 @@
+         assertEquals(refineActionUsage, input2.getRefineActionUsage());
+         assertTrue(input2.isSuggestionsListScrolled());
+         assertEquals(focusReason, input2.getFocusReason());
+-        assertEquals(modelMode, input2.getModelMode());
+         assertEquals(requestType, input2.getRequestType());
+-        assertEquals(ToolMode.TOOL_MODE_IMAGE_GEN_UPLOAD_VALUE, input2.getToolMode());
+         assertEquals(siteSearchData, input2.getSiteSearchData());
+     }
+ 

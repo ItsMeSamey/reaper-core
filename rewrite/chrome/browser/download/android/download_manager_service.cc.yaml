@@ -1,0 +1,104 @@
+# Android download UI policy and truthful transfer lifecycle.
+substitutions:
+- description: Read the existing per-profile aggregate extension UI policy
+  regex:
+    re_pattern: \#include\ "chrome/browser/download/offline_item_utils\.h"
+    replace: '#include "chrome/browser/download/download_core_service.h"
+
+      #include "chrome/browser/download/download_core_service_factory.h"
+
+      #include "chrome/browser/download/offline_item_utils.h"'
+- description: Query optional UI policy on the actual existing profile without changing download state
+  regex:
+    re_pattern: static\ int64_t\ JNI_DownloadManagerService_Init
+    replace: "static bool JNI_DownloadManagerService_ShouldSuppressDownloadUi(\n    JNIEnv* env, Profile* profile) {\n  if (!profile) {\n    return true;\n  }\n  DownloadCoreService* service =\n      DownloadCoreServiceFactory::GetForBrowserContext(profile);\n  return service && !service->IsDownloadUiEnabled();\n}\n\nstatic int64_t JNI_DownloadManagerService_Init"
+- description: Format modified Android download UI implementation
+  regex:
+    re_pattern: '\ \ \ \ \ \ item\->IsTransient\(\),\ item\->AllowAutoOpenAfterCompletion\(\)\);\
+
+      \}\
+
+      \
+
+      static\ bool\ JNI_DownloadManagerService_ShouldSuppressDownloadUi\(\
+
+      \ \ \ \ JNIEnv\*\ env,\ Profile\*\ profile\)\ \{\
+
+      \ \ if\ \(!profile\)\ \{\
+
+      \ \ \ \ return\ true;\
+
+      \ \ \}\
+
+      \ \ DownloadCoreService\*\ service\ =\
+
+      '
+    replace: "      item->IsTransient(), item->AllowAutoOpenAfterCompletion());\n}\n\nstatic bool JNI_DownloadManagerService_ShouldSuppressDownloadUi(\n    JNIEnv* env,\n    Profile* profile) {\n  if (!profile) {\n    return true;\n  }\n  DownloadCoreService* service =\n"
+- description: Keep the folder-opening Java call in the DownloadManagerService JNI owner.
+  regex:
+    re_pattern: 'static\ bool\ JNI_DownloadManagerService_ShouldSuppressDownloadUi\(\
+
+      '
+    replace: "// static\nbool DownloadManagerService::ShowDownloadsForExtension(\n    const JavaRef<jobject>& tab) {\n  return Java_DownloadManagerService_showDownloadsForExtension(\n      base::android::AttachCurrentThread(), tab);\n}\n\nstatic bool JNI_DownloadManagerService_ShouldSuppressDownloadUi(\n"
+- description: Android Downloads exact-item reveal integration (1).
+  regex:
+    re_pattern: '\#include\ "base/android/callback_android\.h"\
+
+      \#include\ "base/android/jni_string\.h"\
+
+      \#include\ "base/android/path_utils\.h"\
+
+      \#include\ "base/functional/bind\.h"\
+
+      \#include\ "base/location\.h"\
+
+      \#include\ "base/memory/singleton\.h"\
+
+      '
+    replace: '#include "base/android/callback_android.h"
+
+      #include "base/android/jni_string.h"
+
+      #include "base/android/path_utils.h"
+
+      #include "base/check_is_test.h"
+
+      #include "base/functional/bind.h"
+
+      #include "base/location.h"
+
+      #include "base/memory/singleton.h"
+
+      '
+- description: Android Downloads exact-item reveal integration (2).
+  regex:
+    re_pattern: '\
+
+      //\ The\ remaining\ time\ for\ a\ download\ item\ if\ it\ cannot\ be\ calculated\.\
+
+      constexpr\ int64_t\ kUnknownRemainingTime\ =\ \-1;\
+
+      \
+
+      bool\ ShouldShowDownloadItem\(download::DownloadItem\*\ item\)\ \{\
+
+      \ \ return\ !item\->IsTemporary\(\)\ \&\&\ !item\->IsTransient\(\);\
+
+      '
+    replace: "\n// The remaining time for a download item if it cannot be calculated.\nconstexpr int64_t kUnknownRemainingTime = -1;\n\nconst DownloadManagerService::DownloadItemRevealCallbacksForTesting*\n    g_download_item_reveal_callbacks_for_testing = nullptr;\n\nbool ShouldShowDownloadItem(download::DownloadItem* item) {\n  return !item->IsTemporary() && !item->IsTransient();\n"
+- description: Android Downloads exact-item reveal integration (3).
+  regex:
+    re_pattern: '\ \ \ \ const\ JavaRef<jobject>\&\ tab\)\ \{\
+
+      \ \ return\ Java_DownloadManagerService_showDownloadsForExtension\(\
+
+      \ \ \ \ \ \ base::android::AttachCurrentThread\(\),\ tab\);\
+
+      \}\
+
+      \
+
+      static\ bool\ JNI_DownloadManagerService_ShouldSuppressDownloadUi\(\
+
+      '
+    replace: "    const JavaRef<jobject>& tab) {\n  return Java_DownloadManagerService_showDownloadsForExtension(\n      base::android::AttachCurrentThread(), tab);\n}\n\n// static\nbool DownloadManagerService::CanShowDownloadItemForExtension(\n    const JavaRef<jobject>& tab,\n    Profile* item_profile) {\n  return !tab.is_null() && item_profile && !item_profile->ShutdownStarted() &&\n         Java_DownloadManagerService_canShowDownloadItemForExtension(\n             base::android::AttachCurrentThread(), tab,\n             item_profile->GetJavaObject());\n}\n\n// static\nint64_t DownloadManagerService::ShowDownloadItemForExtension(\n    const JavaRef<jobject>& tab,\n    download::DownloadItem* item,\n    base::OnceCallback<void(bool)> callback) {\n  content::BrowserContext* context =\n      item ? content::DownloadItemUtils::GetBrowserContext(item) : nullptr;\n  Profile* item_profile =\n      context ? Profile::FromBrowserContext(context) : nullptr;\n  if (!item || item->GetGuid().empty() ||\n      !CanShowDownloadItemForExtension(tab, item_profile)) {\n    std::move(callback).Run(false);\n    return 0;\n  }\n  if (g_download_item_reveal_callbacks_for_testing) {\n    return g_download_item_reveal_callbacks_for_testing->show.Run(\n        item, std::move(callback));\n  }\n  const auto id = OfflineItemUtils::GetContentIdForDownload(item);\n  return Java_DownloadManagerService_showDownloadItemForExtension(\n      base::android::AttachCurrentThread(), tab, item_profile->GetJavaObject(),\n      id.name_space, id.id, std::move(callback));\n}\n\n// static\nvoid DownloadManagerService::CancelDownloadItemForExtension(int64_t token) {\n  if (token && g_download_item_reveal_callbacks_for_testing) {\n    g_download_item_reveal_callbacks_for_testing->cancel.Run(token);\n    return;\n  }\n  if (token) {\n    Java_DownloadManagerService_cancelDownloadItemForExtension(\n        base::android::AttachCurrentThread(), token);\n  }\n}\n\n// static\nbase::AutoReset<\n    const DownloadManagerService::DownloadItemRevealCallbacksForTesting*>\nDownloadManagerService::SetDownloadItemRevealCallbacksForTesting(\n    const DownloadItemRevealCallbacksForTesting* callbacks) {\n  CHECK_IS_TEST();\n  return base::AutoReset<const DownloadItemRevealCallbacksForTesting*>(\n      &g_download_item_reveal_callbacks_for_testing, callbacks);\n}\n\nstatic bool JNI_DownloadManagerService_ShouldSuppressDownloadUi(\n"

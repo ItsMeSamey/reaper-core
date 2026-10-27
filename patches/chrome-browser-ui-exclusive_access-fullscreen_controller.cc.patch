@@ -1,0 +1,153 @@
+diff --git a/chrome/browser/ui/exclusive_access/fullscreen_controller.cc b/chrome/browser/ui/exclusive_access/fullscreen_controller.cc
+--- a/chrome/browser/ui/exclusive_access/fullscreen_controller.cc
++++ b/chrome/browser/ui/exclusive_access/fullscreen_controller.cc
+@@ -18,8 +18,10 @@
+ #include "chrome/browser/browser_process.h"
+ #include "chrome/browser/history/history_service_factory.h"
+ #include "chrome/browser/profiles/profile.h"
++#if !BUILDFLAG(IS_ANDROID)
+ #include "chrome/browser/ui/bookmarks/bookmark_bar_controller.h"
+ #include "chrome/browser/ui/browser_command_controller.h"
++#endif  // !BUILDFLAG(IS_ANDROID)
+ #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+ #include "chrome/browser/ui/exclusive_access/exclusive_access_context.h"
+ #include "chrome/browser/ui/exclusive_access/exclusive_access_manager.h"
+@@ -121,6 +123,17 @@
+                                /*user_initiated=*/false);
+ }
+
++#if BUILDFLAG(IS_ANDROID)
++void FullscreenController::SetAndroidBrowserFullscreenExtensionUrl(
++    const GURL& extension_url) {
++  if (extension_url.is_empty()) {
++    extension_url_.reset();
++  } else {
++    extension_url_ = extension_url;
++  }
++}
++#endif
++
+ bool FullscreenController::IsWindowFullscreenForTabOrPending() const {
+   return exclusive_access_tab() || is_tab_fullscreen_for_testing_;
+ }
+@@ -179,6 +192,12 @@
+     return false;
+   }
+
++#if BUILDFLAG(IS_ANDROID)
++  Profile* profile = exclusive_access_manager()->context()->GetProfile();
++  if (!profile || !profile->GetPrefs()->GetBoolean(prefs::kFullscreenAllowed)) {
++    return false;
++  }
++#endif
+   return true;
+ }
+
+@@ -249,7 +268,9 @@
+         exclusive_access_manager()->context();
+     // This is needed on Mac as entering into Tab Fullscreen might change the
+     // top UI style.
++#if !BUILDFLAG(IS_ANDROID)
+     exclusive_access_context->UpdateUIForTabFullscreen();
++#endif
+
+     state_prior_to_tab_fullscreen_ =
+         IsFullscreenForBrowser() ? STATE_BROWSER_FULLSCREEN : STATE_NORMAL;
+@@ -264,7 +285,21 @@
+     // We need to update the fullscreen exit bubble, e.g., going from browser
+     // fullscreen to tab fullscreen will need to show different content.
+     tab_fullscreen_ = true;
++#if BUILDFLAG(IS_ANDROID)
++    // The window is already fullscreen, but Java still needs the accepted DOM
++    // request after its native owner and browser return state are committed.
++    fullscreen_parameters_ = fullscreen_tab_params;
++    auto weak_ptr = weak_ptr_factory_.GetWeakPtr();
++    exclusive_access_context->EnterFullscreen(
++        GetRequestingOrigin(),
++        exclusive_access_manager()->GetExclusiveAccessExitBubbleType(),
++        fullscreen_tab_params);
++    if (!weak_ptr) {
++      return;
++    }
++#else
+     exclusive_access_manager()->UpdateBubble(base::NullCallback());
++#endif
+   }
+
+   // This is only a change between Browser and Tab fullscreen. We generate
+@@ -305,11 +340,35 @@
+   const bool was_browser_fullscreen =
+       state_prior_to_tab_fullscreen_ == STATE_BROWSER_FULLSCREEN;
+
++#if BUILDFLAG(IS_ANDROID)
++  // Capture the accepted Java request before renderer exit can accept a new one.
++  base::OnceClosure tab_fullscreen_exit;
++  if (was_browser_fullscreen) {
++    tab_fullscreen_exit =
++        exclusive_access_context->GetTabFullscreenExitCallback();
++  }
++  auto weak_ptr = weak_ptr_factory_.GetWeakPtr();
++#endif
+   NotifyTabExclusiveAccessLost();
++#if BUILDFLAG(IS_ANDROID)
++  if (!weak_ptr) {
++    return;
++  }
++#endif
+   if (was_browser_fullscreen) {
++#if BUILDFLAG(IS_ANDROID)
++    if (tab_fullscreen_exit) {
++      std::move(tab_fullscreen_exit).Run();
++    }
++    if (!weak_ptr) {
++      return;
++    }
++#else
+     exclusive_access_context->UpdateUIForTabFullscreen();
+-  }
+-
++#endif
++  }
++
++#if !BUILDFLAG(IS_ANDROID)
+   // For Tab Fullscreen -> Browser Fullscreen, enter browser fullscreen on the
+   // display that originated the browser fullscreen prior to the tab fullscreen.
+   // crbug.com/40832401.
+@@ -322,6 +381,8 @@
+     return;
+   }
+
++#endif  // !BUILDFLAG(IS_ANDROID)
++
+   // Notify observers now, when reverting from Tab fullscreen to Browser
+   // fullscreen on the same display. Exiting fullscreen, or reverting to Browser
+   // fullscreen on another display, triggers additional controller logic above,
+@@ -419,7 +480,6 @@
+     // Activate any popup windows created while content fullscreen, after exit.
+     popunder_preventer_.reset();
+   }
+-#endif  // !BUILDFLAG(IS_ANDROID)
+
+   if (browser_command_controller_) {
+     browser_command_controller_->FullscreenStateChanged();
+@@ -428,8 +488,10 @@
+     bookmark_bar_controller_->UpdateBookmarkBarState(
+         BookmarkBarController::StateChangeReason::kToggleFullscreen);
+   }
+-}
+-
++#endif  // !BUILDFLAG(IS_ANDROID)
++}
++
++#if !BUILDFLAG(IS_ANDROID)
+ void FullscreenController::FullscreenTopUIStateChanged() {
+   if (browser_command_controller_) {
+     browser_command_controller_->FullscreenStateChanged();
+@@ -439,6 +501,7 @@
+         BookmarkBarController::StateChangeReason::kToolbarOptionChange);
+   }
+ }
++#endif  // !BUILDFLAG(IS_ANDROID)
+
+ void FullscreenController::RunOrDeferUntilTransitionIsComplete(
+     base::OnceClosure callback) {

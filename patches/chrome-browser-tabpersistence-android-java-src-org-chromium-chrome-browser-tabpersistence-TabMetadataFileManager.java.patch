@@ -1,0 +1,137 @@
+diff --git a/chrome/browser/tabpersistence/android/java/src/org/chromium/chrome/browser/tabpersistence/TabMetadataFileManager.java b/chrome/browser/tabpersistence/android/java/src/org/chromium/chrome/browser/tabpersistence/TabMetadataFileManager.java
+index 7cc96d6b9c7baa8f7cb0b4f0bf2a4cdf9a43f5c9..a71397948003f46a03fd5782db10e7df2a6f34ce 100644
+--- a/chrome/browser/tabpersistence/android/java/src/org/chromium/chrome/browser/tabpersistence/TabMetadataFileManager.java
++++ b/chrome/browser/tabpersistence/android/java/src/org/chromium/chrome/browser/tabpersistence/TabMetadataFileManager.java
+@@ -14,6 +14,7 @@
+ import org.chromium.base.TriStateUtils;
+ import org.chromium.build.annotations.NullMarked;
+ import org.chromium.build.annotations.Nullable;
++import org.chromium.chrome.browser.tab.Tab;
+ import org.chromium.chrome.browser.tabmodel.TabModel;
+ 
+ import java.io.BufferedOutputStream;
+@@ -34,8 +35,10 @@
+     /**
+      * The current version of the saved state file. Version 4: In addition to the tab's ID, save the
+      * tab's last URL. Version 5: In addition to the total tab count, save the incognito tab count.
+-     */
+-    private static final int SAVED_STATE_VERSION = 5;
++     * Version 6: Save each tab's container identity. Version 7: Preserve unknown legacy identities
++     * while tabs are still being restored, separately from the explicit Default identity.
++     */
++    private static final int SAVED_STATE_VERSION = 7;
+ 
+     /**
+      * The prefix of the name of the file where the metadata is saved. Values returned by {@link
+@@ -51,12 +54,15 @@
+         public int index;
+         public final List<Integer> ids;
+         public final List<String> urls;
++        // Null means pre-container metadata: the per-tab state remains authoritative.
++        public final List<@Nullable String> containerIds;
+ 
+         @VisibleForTesting(otherwise = VisibleForTesting.PACKAGE_PRIVATE)
+         public TabModelMetadata(int selectedIndex) {
+             index = selectedIndex;
+             ids = new ArrayList<>();
+             urls = new ArrayList<>();
++            containerIds = new ArrayList<>();
+         }
+ 
+         @Override
+@@ -65,12 +71,13 @@
+             if (!(o instanceof TabModelMetadata that)) return false;
+             return index == that.index
+                     && Objects.equals(ids, that.ids)
+-                    && Objects.equals(urls, that.urls);
++                    && Objects.equals(urls, that.urls)
++                    && Objects.equals(containerIds, that.containerIds);
+         }
+ 
+         @Override
+         public int hashCode() {
+-            return Objects.hash(index, ids, urls);
++            return Objects.hash(index, ids, urls, containerIds);
+         }
+     }
+ 
+@@ -120,6 +127,15 @@
+                 @TriState int isIncognito,
+                 boolean isStandardActiveIndex,
+                 boolean isIncognitoActiveIndex);
++
++        /** New metadata route; null identity means a pre-container metadata version. */
++        default void onDetailsReadWithContainer(
++                int index, int id, String url, @TriState int isIncognito,
++                boolean isStandardActiveIndex, boolean isIncognitoActiveIndex,
++                @Nullable String containerId) {
++            onDetailsRead(index, id, url, isIncognito,
++                    isStandardActiveIndex, isIncognitoActiveIndex);
++        }
+     }
+ 
+     /**
+@@ -140,6 +156,7 @@
+         boolean skipUrlRead = false;
+         boolean skipIncognitoCount = false;
+         final int version = stream.readInt();
++        if (version > SAVED_STATE_VERSION) throw new IOException("Unsupported tab metadata");
+         if (version != SAVED_STATE_VERSION) {
+             // We don't support restoring Tab data from before M18.
+             if (version < 3) return 0;
+@@ -165,6 +182,13 @@
+         for (int i = 0; i < count; i++) {
+             int id = stream.readInt();
+             String tabUrl = skipUrlRead ? "" : stream.readUTF();
++            @Nullable String containerId = null;
++            if (version == 6 || (version >= 7 && stream.readBoolean())) {
++                containerId = stream.readUTF();
++            }
++            if (containerId != null && !Tab.isContainerIdWellFormed(containerId)) {
++                throw new IOException("Malformed metadata storage identity");
++            }
+             if (id >= nextId) nextId = id + 1;
+             if (tabIds != null) tabIds.append(id, true);
+ 
+@@ -173,13 +197,14 @@
+                     incognitoCount < 0 ? TriState.NOT_SET : TriStateUtils.from(i < incognitoCount);
+ 
+             if (callback != null) {
+-                callback.onDetailsRead(
++                callback.onDetailsReadWithContainer(
+                         i,
+                         id,
+                         tabUrl,
+                         isIncognito,
+                         i == standardActiveIndex,
+-                        i == incognitoActiveIndex);
++                        i == incognitoActiveIndex,
++                        containerId);
+             }
+         }
+         return nextId;
+@@ -220,10 +245,24 @@
+                 for (int i = 0; i < incognitoCount; i++) {
+                     stream.writeInt(metadata.incognitoModelMetadata.ids.get(i));
+                     stream.writeUTF(metadata.incognitoModelMetadata.urls.get(i));
++                    @Nullable String containerId = metadata.incognitoModelMetadata.containerIds.isEmpty()
++                            ? "" : metadata.incognitoModelMetadata.containerIds.get(i);
++                    if (containerId != null && !Tab.isContainerIdWellFormed(containerId)) {
++                        throw new IOException("Malformed metadata storage identity");
++                    }
++                    stream.writeBoolean(containerId != null);
++                    if (containerId != null) stream.writeUTF(containerId);
+                 }
+                 for (int i = 0; i < standardCount; i++) {
+                     stream.writeInt(metadata.normalModelMetadata.ids.get(i));
+                     stream.writeUTF(metadata.normalModelMetadata.urls.get(i));
++                    @Nullable String containerId = metadata.normalModelMetadata.containerIds.isEmpty()
++                            ? "" : metadata.normalModelMetadata.containerIds.get(i);
++                    if (containerId != null && !Tab.isContainerIdWellFormed(containerId)) {
++                        throw new IOException("Malformed metadata storage identity");
++                    }
++                    stream.writeBoolean(containerId != null);
++                    if (containerId != null) stream.writeUTF(containerId);
+                 }
+ 
+                 stream.flush();

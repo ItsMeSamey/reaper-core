@@ -1,0 +1,52 @@
+diff --git a/extensions/browser/api/alarms/alarms_api.cc b/extensions/browser/api/alarms/alarms_api.cc
+--- a/extensions/browser/api/alarms/alarms_api.cc
++++ b/extensions/browser/api/alarms/alarms_api.cc
+@@ -145,11 +145,13 @@
+   AlarmManager* const alarm_manager = AlarmManager::Get(browser_context());
+   EXTENSION_FUNCTION_VALIDATE(alarm_manager);
+ 
++#if !BUILDFLAG(IS_ANDROID)
+   if (alarm_manager->GetCountForExtension(extension_id()) >=
+       AlarmManager::kMaxAlarmsPerExtension) {
+     return RespondNow(Error(base::StringPrintf(
+         kMaxAlarmsError, AlarmManager::kMaxAlarmsPerExtension)));
+   }
++#endif
+ 
+   if (!params->alarm_info.name.has_value()) {
+     params->alarm_info.name = params->name.value_or(kDefaultAlarmName);
+@@ -169,17 +171,34 @@
+       Manifest::IsUnpackedLocation(extension()->location()),
+       extension()->manifest_version());
+   Alarm alarm(params->alarm_info, granularity, clock_->Now());
++#if BUILDFLAG(IS_ANDROID)
++  alarm_manager->AddAlarmWithQuota(
++      extension_id(), std::move(alarm),
++      base::BindOnce(&AlarmsCreateFunction::CallbackWithQuota, this));
++#else
+   alarm_manager->AddAlarm(
+       extension_id(), std::move(alarm),
+       base::BindOnce(&AlarmsCreateFunction::Callback, this));
++#endif
+ 
+   // AddAlarm might have already responded.
+   return did_respond() ? AlreadyResponded() : RespondLater();
+ }
+ 
++#if BUILDFLAG(IS_ANDROID)
++void AlarmsCreateFunction::CallbackWithQuota(bool added) {
++  if (!added) {
++    Respond(Error(base::StringPrintf(kMaxAlarmsError,
++                                    AlarmManager::kMaxAlarmsPerExtension)));
++    return;
++  }
++  Respond(NoArguments());
++}
++#else
+ void AlarmsCreateFunction::Callback() {
+   Respond(NoArguments());
+ }
++#endif
+ 
+ ExtensionFunction::ResponseAction AlarmsGetFunction::Run() {
+   std::optional<alarms::Get::Params> params =

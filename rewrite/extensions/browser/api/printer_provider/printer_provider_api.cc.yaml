@@ -1,0 +1,82 @@
+# Copyright 2026 The Reaper Authors.
+# Use of this source code is governed by the Mozilla Public License, v. 2.0.
+
+substitutions:
+- description: Do not pull the legacy USB extension backend into Android.
+  regex:
+    re_pattern: \#include\ "extensions/browser/api/usb/usb_device_manager\.h"
+    replace: '#include "build/build_config.h"
+
+      #if !BUILDFLAG(IS_ANDROID)
+
+      #include "extensions/browser/api/usb/usb_device_manager.h"
+
+      #endif'
+- description: Find Android print jobs by native client token.
+  regex:
+    re_pattern: '\ \ //\ Gets\ print\ job\ associated\ with\ a\ request\.\
+
+      \ \ const\ PrinterProviderPrintJob\*\ GetPrintJob\(int\ request_id\)\ const;'
+    replace: "#if BUILDFLAG(IS_ANDROID)\n  bool Cancel(const base::UnguessableToken& client_token);\n#endif\n\n  // Gets print job associated with a request.\n  const PrinterProviderPrintJob* GetPrintJob(int request_id) const;"
+- description: Implement Android print service cancellation.
+  regex:
+    re_pattern: '\ \ void\ DispatchPrintRequested\(PrinterProviderPrintJob\ job,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ PrintCallback\ callback\)\ override;'
+    replace: "  void DispatchPrintRequested(PrinterProviderPrintJob job,\n                              PrintCallback callback) override;\n#if BUILDFLAG(IS_ANDROID)\n  void CancelPrintJob(const base::UnguessableToken& client_token) override;\n#endif"
+- description: Release canceled Android print bytes before notifying callbacks.
+  regex:
+    re_pattern: void\ PendingPrintRequests::FailAll\(\)\ \{
+    replace: "#if BUILDFLAG(IS_ANDROID)\nbool PendingPrintRequests::Cancel(const base::UnguessableToken& client_token) {\n  if (client_token.is_empty()) return false;\n  for (const auto& [id, request] : pending_requests_) {\n    if (request.job.client_token == client_token) {\n      return Complete(id, api::printer_provider::PrintError::kFailed);\n    }\n  }\n  return false;\n}\n#endif\n\nvoid PendingPrintRequests::FailAll() {"
+- description: Route Android cancellation without changing desktop dispatch behavior.
+  regex:
+    re_pattern: const\ PrinterProviderPrintJob\*\ PrinterProviderAPIImpl::GetPrintJob\(
+    replace: "#if BUILDFLAG(IS_ANDROID)\nvoid PrinterProviderAPIImpl::CancelPrintJob(\n    const base::UnguessableToken& client_token) {\n  for (auto& [extension_id, requests] : pending_print_requests_) {\n    if (requests.Cancel(client_token)) return;\n  }\n}\n#endif\n\nconst PrinterProviderPrintJob* PrinterProviderAPIImpl::GetPrintJob("
+- description: Keep unsupported legacy USB discovery outside the Android printer provider.
+  regex:
+    re_pattern: '\ \ EventRouter\*\ event_router\ =\ EventRouter::Get\(browser_context_\);\
+
+      \ \ if\ \(!event_router\->ExtensionHasEventListener\(\
+
+      \ \ \ \ \ \ \ \ \ \ extension_id,\
+
+      \ \ \ \ \ \ \ \ \ \ api::printer_provider::OnGetUsbPrinterInfoRequested::kEventName\)\)\ \{\
+
+      \ \ \ \ std::move\(callback\)\.Run\(base::DictValue\(\)\);\
+
+      \ \ \ \ return;\
+
+      \ \ \}\
+
+      \
+
+      \ \ int\ request_id\ =\
+
+      \ \ \ \ \ \ pending_usb_printer_info_requests_\[extension_id\]\.Add\(std::move\(callback\)\);\
+
+      \ \ api::usb::Device\ api_device;\
+
+      \ \ UsbDeviceManager::Get\(browser_context_\)\->GetApiDevice\(device,\ \&api_device\);\
+
+      \
+
+      \ \ base::ListValue\ internal_args;\
+
+      \ \ //\ Request\ id\ is\ not\ part\ of\ the\ public\ API\ and\ it\ will\ be\ massaged\ out\ in\
+
+      \ \ //\ custom\ bindings\.\
+
+      \ \ internal_args\.Append\(request_id\);\
+
+      \ \ internal_args\.Append\(api_device\.ToValue\(\)\);\
+
+      \ \ auto\ event\ =\ std::make_unique<Event>\(\
+
+      \ \ \ \ \ \ events::PRINTER_PROVIDER_ON_GET_USB_PRINTER_INFO_REQUESTED,\
+
+      \ \ \ \ \ \ api::printer_provider::OnGetUsbPrinterInfoRequested::kEventName,\
+
+      \ \ \ \ \ \ std::move\(internal_args\)\);\
+
+      \ \ event_router\->DispatchEventToExtension\(extension_id,\ std::move\(event\)\);'
+    replace: "#if BUILDFLAG(IS_ANDROID)\n  // chrome.usb and ChromeOS USB printer discovery are not Android APIs.\n  std::move(callback).Run(base::DictValue());\n#else\n  EventRouter* event_router = EventRouter::Get(browser_context_);\n  if (!event_router->ExtensionHasEventListener(\n          extension_id,\n          api::printer_provider::OnGetUsbPrinterInfoRequested::kEventName)) {\n    std::move(callback).Run(base::DictValue());\n    return;\n  }\n\n  int request_id =\n      pending_usb_printer_info_requests_[extension_id].Add(std::move(callback));\n  api::usb::Device api_device;\n  UsbDeviceManager::Get(browser_context_)->GetApiDevice(device, &api_device);\n\n  base::ListValue internal_args;\n  // Request id is not part of the public API and it will be massaged out in\n  // custom bindings.\n  internal_args.Append(request_id);\n  internal_args.Append(api_device.ToValue());\n  auto event = std::make_unique<Event>(\n      events::PRINTER_PROVIDER_ON_GET_USB_PRINTER_INFO_REQUESTED,\n      api::printer_provider::OnGetUsbPrinterInfoRequested::kEventName,\n      std::move(internal_args));\n  event_router->DispatchEventToExtension(extension_id, std::move(event));\n#endif"

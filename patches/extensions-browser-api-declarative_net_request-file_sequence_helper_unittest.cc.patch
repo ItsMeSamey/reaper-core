@@ -1,0 +1,587 @@
+diff --git a/extensions/browser/api/declarative_net_request/file_sequence_helper_unittest.cc b/extensions/browser/api/declarative_net_request/file_sequence_helper_unittest.cc
+--- a/extensions/browser/api/declarative_net_request/file_sequence_helper_unittest.cc
++++ b/extensions/browser/api/declarative_net_request/file_sequence_helper_unittest.cc
+@@ -5,32 +5,47 @@
+ #include "extensions/browser/api/declarative_net_request/file_sequence_helper.h"
+ 
+ #include <functional>
++#include <string_view>
+ #include <utility>
+ #include <vector>
+ 
++#include "base/barrier_closure.h"
+ #include "base/files/file_util.h"
++#include "base/files/scoped_temp_dir.h"
++#include "base/functional/callback_helpers.h"
+ #include "base/format_macros.h"
+ #include "base/functional/bind.h"
+ #include "base/run_loop.h"
+ #include "base/strings/stringprintf.h"
++#include "base/strings/strcat.h"
++#include "base/strings/string_number_conversions.h"
+ #include "base/strings/utf_ostream_operators.h"
+ #include "base/strings/utf_string_conversions.h"
+ #include "base/test/metrics/histogram_tester.h"
++#include "base/synchronization/waitable_event.h"
+ #include "base/threading/thread_restrictions.h"
+ #include "base/version.h"
++#include "build/build_config.h"
+ #include "components/crx_file/id_util.h"
++#include "content/public/browser/browser_task_traits.h"
+ #include "extensions/browser/api/declarative_net_request/constants.h"
+ #include "extensions/browser/api/declarative_net_request/file_backed_ruleset_source.h"
+ #include "extensions/browser/api/declarative_net_request/parse_info.h"
++#include "extensions/browser/api/declarative_net_request/prefs_helper.h"
+ #include "extensions/browser/api/declarative_net_request/rule_counts.h"
++#include "extensions/browser/api/declarative_net_request/rules_monitor_service.h"
++#include "extensions/browser/unloaded_extension_reason.h"
+ #include "extensions/browser/api/declarative_net_request/test_utils.h"
+ #include "extensions/browser/api/declarative_net_request/utils.h"
+ #include "extensions/browser/extension_file_task_runner.h"
++#include "extensions/browser/extension_prefs.h"
+ #include "extensions/browser/extensions_test.h"
+ #include "extensions/buildflags/buildflags.h"
+ #include "extensions/common/api/declarative_net_request.h"
+ #include "extensions/common/api/declarative_net_request/constants.h"
+ #include "extensions/common/api/declarative_net_request/test_utils.h"
++#include "extensions/common/extension_builder.h"
++#include "extensions/common/file_util.h"
+ #include "testing/gtest/include/gtest/gtest.h"
+ 
+ static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
+@@ -426,4 +441,535 @@
+ }
+ 
+ }  // namespace
++
++#if BUILDFLAG(IS_ANDROID)
++// Keep the production mapper under test, but use ordinary temporary JSON files
++// for index I/O. A DocumentsProvider and picker consent remain device coverage.
++class FileBackedRulesetSourceAndroidSafCacheTest : public FileSequenceHelperTest {
++ protected:
++  void SetUp() override {
++    FileSequenceHelperTest::SetUp();
++    ASSERT_TRUE(directory_.CreateUniqueTempDir());
++  }
++
++  FileBackedRulesetSource Source(std::string_view filename = "rules.json",
++                                int ruleset_id = 1) {
++    return FileBackedRulesetSource(
++        directory_.GetPath().AppendASCII(filename),
++        directory_.GetPath().AppendASCII("cache").AppendASCII(
++            base::NumberToString(ruleset_id)),
++        RulesetID(ruleset_id), GetMaximumRulesPerRuleset(),
++        GenerateDummyExtensionID(), true, true);
++  }
++
++  FileBackedRulesetSource SourceInProfileCache(std::string_view filename,
++                                             int ruleset_id) {
++    return FileBackedRulesetSource(
++        directory_.GetPath().AppendASCII(filename),
++        FileBackedRulesetSource::GetSafStaticRulesCacheDirectory(
++            directory_.GetPath(), GenerateDummyExtensionID())
++            .AppendASCII("test-source")
++            .AppendASCII(base::NumberToString(ruleset_id)),
++        RulesetID(ruleset_id), GetMaximumRulesPerRuleset(),
++        GenerateDummyExtensionID(), true, true);
++  }
++
++  void WriteRules(const FileBackedRulesetSource& source,
++                  std::string_view filter) {
++    const std::string json = base::StrCat(
++        {R"([{"id":1,"priority":1,"action":{"type":"block"},"condition":{"urlFilter":")",
++         filter, R"(","resourceTypes":["xmlhttprequest"]}}])"});
++    ASSERT_TRUE(base::WriteFile(source.json_path(), json));
++  }
++
++  IndexAndPersistJSONRulesetResult Index(
++      const FileBackedRulesetSource& source) {
++    return source.IndexAndPersistJSONRuleset(
++        RulesetSource::kRaiseErrorOnInvalidRules);
++  }
++
++  std::string Read(const base::FilePath& path) {
++    std::string data;
++    EXPECT_TRUE(base::ReadFileToString(path, &data));
++    return data;
++  }
++
++  void CheckMonitorCancellation(bool prefs_only) {
++    auto monitor = RulesMonitorService::CreateInstanceForTesting(browser_context());
++    const ExtensionId id = GenerateDummyExtensionID();
++    const auto root = FileBackedRulesetSource::GetSafStaticRulesCacheDirectory(
++        browser_context()->GetPath(), id);
++    auto make_source = [&](const char* name, int rule_id) {
++      return FileBackedRulesetSource(
++          directory_.GetPath().AppendASCII(name),
++          root.AppendASCII("test-source").AppendASCII(base::NumberToString(rule_id)),
++          RulesetID(rule_id), GetMaximumRulesPerRuleset(), id, true, true);
++    };
++    auto first = make_source("monitor-first.json", 1);
++    auto second = make_source("monitor-second.json", 2);
++    WriteRules(first, "first.example");
++    WriteRules(second, "second.example");
++    auto initial_first = Index(first);
++    auto initial_second = Index(second);
++    ASSERT_EQ(IndexAndPersistJSONRulesetResult::Status::kSuccess, initial_first.status);
++    ASSERT_EQ(IndexAndPersistJSONRulesetResult::Status::kSuccess, initial_second.status);
++    ASSERT_TRUE(base::DeletePathRecursively(root));
++    auto extension = ExtensionBuilder("pending SAF cache")
++                         .SetID(id)
++                         .SetManifestKey("permissions", base::ListValue().Append(
++                                                            "declarativeNetRequest"))
++                         .Build();
++    ASSERT_TRUE(extension);
++    auto make_data = [&] {
++      LoadRequestData data(id, base::Version("1.0"),
++                           LoadRulesetRequestSource::kOnExtensionLoad);
++      data.rulesets.emplace_back(first.Clone());
++      data.rulesets.back().set_expected_checksum(initial_first.ruleset_checksum);
++      data.rulesets.emplace_back(second.Clone());
++      data.rulesets.back().set_expected_checksum(initial_second.ruleset_checksum);
++      return data;
++    };
++    base::RunLoop done;
++    auto callbacks = base::BarrierClosure(2, done.QuitClosure());
++    auto slice = FileSequenceHelper::SetIndexingTimeSliceForTesting(base::TimeDelta());
++    base::WaitableEvent release_file_tasks;
++    GetExtensionFileTaskRunner()->PostTask(FROM_HERE, base::BindOnce(
++        [](base::WaitableEvent* release) {
++          base::ScopedAllowBaseSyncPrimitivesForTesting allow_wait;
++          release->Wait();
++        }, &release_file_tasks));
++    // The real bridge creates the flag. Do not manually populate it here.
++    monitor->LoadRulesetsForTesting(make_data(), base::BindOnce(
++        [](base::RepeatingClosure callbacks, LoadRequestData data) {
++          EXPECT_TRUE(data.load_request_id.is_zero());
++          EXPECT_TRUE(data.saf_cache_cancelled);
++          if (data.saf_cache_cancelled) {
++            EXPECT_TRUE(data.saf_cache_cancelled->data.IsSet());
++          }
++          EXPECT_FALSE(data.rulesets[0].did_load_successfully());
++          EXPECT_FALSE(data.rulesets[1].did_load_successfully());
++          callbacks.Run();
++        }, callbacks));
++    if (prefs_only) {
++      monitor->OnExtensionPrefsDeleted(id);
++    } else {
++      monitor->OnExtensionUnloaded(browser_context(), extension.get(),
++                                   UnloadedExtensionReason::DISABLE);
++    }
++    // Same ID, new request: the old flag/token cannot invalidate this load.
++    monitor->LoadRulesetsForTesting(make_data(), base::BindOnce(
++        [](base::RepeatingClosure callbacks, int first_checksum,
++           int second_checksum, LoadRequestData data) {
++          EXPECT_FALSE(data.load_request_id.is_zero());
++          EXPECT_TRUE(data.saf_cache_cancelled);
++          if (data.saf_cache_cancelled) {
++            EXPECT_FALSE(data.saf_cache_cancelled->data.IsSet());
++          }
++          EXPECT_TRUE(data.rulesets[0].did_load_successfully());
++          EXPECT_TRUE(data.rulesets[1].did_load_successfully());
++          EXPECT_EQ(first_checksum, data.rulesets[0].expected_checksum());
++          EXPECT_EQ(second_checksum, data.rulesets[1].expected_checksum());
++          EXPECT_FALSE(data.rulesets[0].new_checksum().has_value());
++          EXPECT_FALSE(data.rulesets[1].new_checksum().has_value());
++          callbacks.Run();
++        }, callbacks, initial_first.ruleset_checksum, initial_second.ruleset_checksum));
++    release_file_tasks.Signal();
++    // Bridge callbacks still settle with zeroed stale tokens; neither is dropped.
++    // Every asynchronous path above uses EXPECT and unconditionally runs its barrier.
++    done.Run();
++    EXPECT_TRUE(base::PathExists(first.IndexedPathForChecksum(initial_first.ruleset_checksum)));
++    EXPECT_TRUE(base::PathExists(second.IndexedPathForChecksum(initial_second.ruleset_checksum)));
++    EXPECT_TRUE(base::PathExists(first.json_path()));
++    EXPECT_TRUE(base::PathExists(second.json_path()));
++  }
++
++  base::ScopedTempDir directory_;
++};
++
++TEST_F(FileBackedRulesetSourceAndroidSafCacheTest,
++       MonitorUnloadCancelsOldSafRequestWithoutCancellingReinstall) {
++  CheckMonitorCancellation(false);
++}
++
++TEST_F(FileBackedRulesetSourceAndroidSafCacheTest,
++       MonitorPrefsDeletionCancelsOldSafRequestWithoutCancellingReinstall) {
++  CheckMonitorCancellation(true);
++}
++
++TEST_F(FileBackedRulesetSourceAndroidSafCacheTest,
++       CleanupBeforePendingInstallLoadReindexesExpectedGeneration) {
++  auto source = SourceInProfileCache("pending.json", 1);
++  WriteRules(source, "pending.example");
++  auto result = Index(source);
++  ASSERT_EQ(IndexAndPersistJSONRulesetResult::Status::kSuccess, result.status);
++  const std::string json = Read(source.json_path());
++  const auto root = FileBackedRulesetSource::GetSafStaticRulesCacheDirectory(
++      directory_.GetPath(), GenerateDummyExtensionID());
++  ASSERT_TRUE(base::DeletePathRecursively(root));
++  std::vector<TestCase> cases;
++  cases.emplace_back(source.Clone());
++  cases.back().checksum = result.ruleset_checksum;
++  cases.back().expected_result = {false, LoadRulesetResult::kSuccess};
++  TestLoadRulesets(cases);
++  EXPECT_TRUE(base::PathExists(
++      source.IndexedPathForChecksum(result.ruleset_checksum)));
++  EXPECT_EQ(json, Read(source.json_path()));
++}
++
++TEST_F(FileBackedRulesetSourceAndroidSafCacheTest,
++       CancelledSliceCannotRecreateCacheAndNewRequestStillLoads) {
++  auto first = SourceInProfileCache("first.json", 1);
++  auto second = SourceInProfileCache("second.json", 2);
++  WriteRules(first, "first.example");
++  WriteRules(second, "second.example");
++  const auto root = FileBackedRulesetSource::GetSafStaticRulesCacheDirectory(
++      directory_.GetPath(), GenerateDummyExtensionID());
++  auto cancelled =
++      base::MakeRefCounted<base::RefCountedData<base::AtomicFlag>>();
++  auto current =
++      base::MakeRefCounted<base::RefCountedData<base::AtomicFlag>>();
++  auto helper = std::make_unique<FileSequenceHelper>();
++  auto time_slice =
++      FileSequenceHelper::SetIndexingTimeSliceForTesting(base::TimeDelta());
++  base::RunLoop done;
++  auto callbacks = base::BarrierClosure(2, done.QuitClosure());
++  LoadRequestData old_data(GenerateDummyExtensionID(), base::Version("1.0"),
++                           LoadRulesetRequestSource::kOnExtensionLoad);
++  old_data.saf_cache_cancelled = cancelled;
++  old_data.rulesets.emplace_back(first.Clone());
++  old_data.rulesets.emplace_back(second.Clone());
++  LoadRequestData new_data(GenerateDummyExtensionID(), base::Version("1.0"),
++                           LoadRulesetRequestSource::kOnExtensionLoad);
++  new_data.saf_cache_cancelled = current;
++  new_data.rulesets.emplace_back(first.Clone());
++  new_data.rulesets.emplace_back(second.Clone());
++  auto runner = GetExtensionFileTaskRunner();
++  // One outer task queues cleanup before starting the old request. Its first
++  // zero-budget slice must queue the continuation behind that cleanup.
++  runner->PostTask(FROM_HERE, base::BindOnce(
++      [](FileSequenceHelper* helper, base::FilePath root,
++         scoped_refptr<base::RefCountedData<base::AtomicFlag>> cancelled,
++         scoped_refptr<base::RefCountedData<base::AtomicFlag>> current,
++         base::RepeatingClosure callbacks, LoadRequestData old_data,
++         LoadRequestData new_data) {
++        GetExtensionFileTaskRunner()->PostTask(FROM_HERE, base::BindOnce(
++            [](FileSequenceHelper* helper, base::FilePath root,
++               scoped_refptr<base::RefCountedData<base::AtomicFlag>> cancelled,
++               scoped_refptr<base::RefCountedData<base::AtomicFlag>> current,
++               base::RepeatingClosure callbacks, LoadRequestData new_data) {
++              base::WaitableEvent flag_set;
++              content::GetUIThreadTaskRunner({base::TaskPriority::USER_BLOCKING})
++                  ->PostTask(FROM_HERE, base::BindOnce(
++                      [](scoped_refptr<base::RefCountedData<base::AtomicFlag>> flag,
++                         base::WaitableEvent* ready) {
++                        flag->data.Set();
++                        ready->Signal();
++                      }, cancelled, &flag_set));
++              { base::ScopedAllowBaseSyncPrimitivesForTesting allow_wait;
++                flag_set.Wait(); }
++              EXPECT_TRUE(base::PathExists(root));
++              EXPECT_TRUE(base::DeletePathRecursively(root));
++              EXPECT_FALSE(base::PathExists(root));
++              EXPECT_FALSE(current->data.IsSet());
++              helper->LoadRulesets(std::move(new_data), base::BindOnce(
++                  [](base::RepeatingClosure callbacks, LoadRequestData data) {
++                    EXPECT_TRUE(data.rulesets[0].did_load_successfully());
++                    EXPECT_TRUE(data.rulesets[1].did_load_successfully());
++                    EXPECT_FALSE(data.saf_cache_cancelled->data.IsSet());
++                    callbacks.Run();
++                  }, callbacks));
++            }, helper, root, cancelled, current, callbacks, std::move(new_data)));
++        helper->LoadRulesets(std::move(old_data), base::BindOnce(
++            [](base::RepeatingClosure callbacks, LoadRequestData data) {
++              EXPECT_TRUE(data.rulesets[0].did_load_successfully());
++              EXPECT_FALSE(data.rulesets[1].load_ruleset_result().has_value());
++              EXPECT_TRUE(data.saf_cache_cancelled->data.IsSet());
++              callbacks.Run();
++            }, callbacks));
++      }, base::Unretained(helper.get()), root, cancelled, current, callbacks,
++      std::move(old_data), std::move(new_data)));
++  done.Run();
++  EXPECT_TRUE(base::PathExists(root));
++  EXPECT_TRUE(base::PathExists(first.json_path()));
++  EXPECT_TRUE(base::PathExists(second.json_path()));
++  runner->DeleteSoon(FROM_HERE, std::move(helper));
++}
++
++TEST_F(FileBackedRulesetSourceAndroidSafCacheTest,
++       MapperKeepsOriginalSourceAndSeparatesProfilesAndTrees) {
++  auto extension = ExtensionBuilder("SAF cache")
++                       .SetPath(base::FilePath("/SAF/provider/tree/first"))
++                       .SetLocation(mojom::ManifestLocation::kUnpacked)
++                       .Build();
++  DNRManifestData::RulesetInfo info;
++  info.id = RulesetID(1);
++  info.relative_path = base::FilePath("rules.json");
++  info.enabled = true;
++  const auto original_path = extension->path();
++  const auto original_id = extension->id();
++  const auto profile = directory_.GetPath().AppendASCII("profile");
++  auto source = FileBackedRulesetSource::CreateStatic(*extension, info, profile);
++  auto other_profile = FileBackedRulesetSource::CreateStatic(
++      *extension, info, directory_.GetPath().AppendASCII("other"));
++  auto other_extension = ExtensionBuilder("SAF cache")
++                             .SetPath(base::FilePath("/SAF/provider/tree/second"))
++                             .SetLocation(mojom::ManifestLocation::kUnpacked)
++                             .Build();
++  auto other_tree =
++      FileBackedRulesetSource::CreateStatic(*other_extension, info, profile);
++  EXPECT_EQ(original_path.Append(info.relative_path), source.json_path());
++  EXPECT_EQ(original_id, source.extension_id());
++  EXPECT_EQ(original_path, extension->path());
++  EXPECT_TRUE(profile.IsParent(source.IndexedPathForChecksum(17)));
++  EXPECT_NE(source.IndexedPathForChecksum(17),
++            other_profile.IndexedPathForChecksum(17));
++  EXPECT_NE(source.IndexedPathForChecksum(17),
++            other_tree.IndexedPathForChecksum(17));
++  EXPECT_NE(source.IndexedPathForChecksum(17), source.IndexedPathForChecksum(18));
++  EXPECT_EQ(source.IndexedPathForChecksum(17),
++            source.Clone().IndexedPathForChecksum(17));
++}
++
++TEST_F(FileBackedRulesetSourceAndroidSafCacheTest,
++       LocalAndPackedStaticPathsRemainUnchanged) {
++  DNRManifestData::RulesetInfo info;
++  info.id = RulesetID(1);
++  info.relative_path = base::FilePath("rules.json");
++  for (const auto& path : {base::FilePath("/ordinary/extension"),
++                           base::FilePath("/SAF/provider/tree/packed")}) {
++    const auto location = path.IsVirtualDocumentPath()
++                              ? mojom::ManifestLocation::kInternal
++                              : mojom::ManifestLocation::kUnpacked;
++    auto extension = ExtensionBuilder("normal cache")
++                         .SetPath(path).SetLocation(location).Build();
++    auto source = FileBackedRulesetSource::CreateStatic(*extension, info);
++    EXPECT_EQ(path.Append(file_util::GetIndexedRulesetRelativePath(1)),
++              source.indexed_path());
++    EXPECT_EQ(source.indexed_path(), source.IndexedPathForChecksum(17));
++  }
++}
++
++TEST_F(FileBackedRulesetSourceAndroidSafCacheTest,
++       FailedLaterRulesetKeepsPreviouslyInstalledIndexAndPrefs) {
++  auto source = Source();
++  WriteRules(source, "previous");
++  auto old_result = Index(source);
++  ASSERT_EQ(IndexAndPersistJSONRulesetResult::Status::kSuccess,
++            old_result.status);
++  const int old_checksum = old_result.ruleset_checksum;
++  const auto old_path = source.IndexedPathForChecksum(old_checksum);
++  const auto old_bytes = Read(old_path);
++  PrefsHelper prefs(*ExtensionPrefs::Get(browser_context()));
++  prefs.SetStaticRulesetChecksum(source.extension_id(), source.id(), old_checksum);
++
++  WriteRules(source, "candidate");
++  auto candidate = Index(source);
++  ASSERT_EQ(IndexAndPersistJSONRulesetResult::Status::kSuccess, candidate.status);
++  ASSERT_NE(old_checksum, candidate.ruleset_checksum);
++  auto later = Source("later.json", 2);
++  ASSERT_TRUE(base::WriteFile(later.json_path(), "{invalid"));
++  EXPECT_EQ(IndexAndPersistJSONRulesetResult::Status::kError, Index(later).status);
++
++  // Install prefs are committed only by the installer after every ruleset and
++  // policy check succeeds. Indexing a rejected candidate must not change them.
++  int stored_checksum = -1;
++  ASSERT_TRUE(prefs.GetStaticRulesetChecksum(source.extension_id(), source.id(),
++                                           stored_checksum));
++  EXPECT_EQ(old_checksum, stored_checksum);
++  EXPECT_EQ(old_bytes, Read(old_path));
++  std::unique_ptr<RulesetMatcher> matcher;
++  EXPECT_EQ(LoadRulesetResult::kSuccess,
++            source.CreateVerifiedMatcher(old_checksum, &matcher));
++  WriteRules(later, "corrected");
++  EXPECT_EQ(IndexAndPersistJSONRulesetResult::Status::kSuccess, Index(later).status);
++  EXPECT_EQ(old_bytes, Read(old_path));
++}
++
++TEST_F(FileBackedRulesetSourceAndroidSafCacheTest,
++       SameChecksumDifferentCurrentPayloadCannotReplaceInstalledIndex) {
++  OverrideGetChecksumForTest(12345);
++  base::ScopedClosureRunner reset(
++      base::BindOnce(&OverrideGetChecksumForTest, -1));
++  auto source = Source();
++  WriteRules(source, "first");
++  ASSERT_EQ(IndexAndPersistJSONRulesetResult::Status::kSuccess, Index(source).status);
++  const auto path = source.IndexedPathForChecksum(12345);
++  const auto first = Read(path);
++  WriteRules(source, "second");
++  EXPECT_EQ(IndexAndPersistJSONRulesetResult::Status::kError, Index(source).status);
++  EXPECT_EQ(first, Read(path));
++}
++
++TEST_F(FileBackedRulesetSourceAndroidSafCacheTest,
++       IdenticalCurrentPayloadIsReusedAndCloneLoadsIt) {
++  auto source = Source();
++  WriteRules(source, "same");
++  auto result = Index(source);
++  ASSERT_EQ(IndexAndPersistJSONRulesetResult::Status::kSuccess, result.status);
++  const auto path = source.IndexedPathForChecksum(result.ruleset_checksum);
++  const auto before = Read(path);
++  auto again = Index(source);
++  ASSERT_EQ(IndexAndPersistJSONRulesetResult::Status::kSuccess, again.status);
++  EXPECT_EQ(result.ruleset_checksum, again.ruleset_checksum);
++  EXPECT_EQ(before, Read(path));
++  std::unique_ptr<RulesetMatcher> matcher;
++  EXPECT_EQ(LoadRulesetResult::kSuccess,
++            source.Clone().CreateVerifiedMatcher(result.ruleset_checksum, &matcher));
++}
++
++TEST_F(FileBackedRulesetSourceAndroidSafCacheTest,
++       GenuineVersionMismatchReindexesThroughExistingLoadFlow) {
++  auto source = Source();
++  WriteRules(source, "old-format");
++  auto result = Index(source);
++  ASSERT_EQ(IndexAndPersistJSONRulesetResult::Status::kSuccess, result.status);
++  auto scoped_version = CreateScopedIncrementRulesetVersionForTesting();
++  std::unique_ptr<RulesetMatcher> matcher;
++  EXPECT_EQ(LoadRulesetResult::kErrorVersionMismatch,
++            source.CreateVerifiedMatcher(result.ruleset_checksum, &matcher));
++  std::vector<TestCase> cases;
++  cases.emplace_back(source.Clone());
++  cases.back().checksum = result.ruleset_checksum;
++  cases.back().expected_result.has_new_checksum = true;
++  cases.back().expected_result.load_result = LoadRulesetResult::kSuccess;
++  TestLoadRulesets(cases);
++}
++
++TEST_F(FileBackedRulesetSourceAndroidSafCacheTest,
++       TrueCacheMissReindexesWithoutChangingExpectedChecksum) {
++  auto source = Source();
++  WriteRules(source, "unchanged");
++  auto result = Index(source);
++  ASSERT_EQ(IndexAndPersistJSONRulesetResult::Status::kSuccess, result.status);
++  ASSERT_TRUE(base::DeleteFile(source.IndexedPathForChecksum(result.ruleset_checksum)));
++  std::vector<TestCase> cases;
++  cases.emplace_back(source.Clone());
++  cases.back().checksum = result.ruleset_checksum;
++  cases.back().expected_result.has_new_checksum = false;
++  cases.back().expected_result.load_result = LoadRulesetResult::kSuccess;
++  TestLoadRulesets(cases);
++  EXPECT_TRUE(base::PathExists(source.IndexedPathForChecksum(result.ruleset_checksum)));
++}
++
++TEST_F(FileBackedRulesetSourceAndroidSafCacheTest,
++       MissingCacheWithChangedJsonDoesNotSilentlyChangeExpectedChecksum) {
++  auto source = Source();
++  WriteRules(source, "installed");
++  auto result = Index(source);
++  ASSERT_EQ(IndexAndPersistJSONRulesetResult::Status::kSuccess, result.status);
++  ASSERT_TRUE(base::DeleteFile(source.IndexedPathForChecksum(result.ruleset_checksum)));
++  WriteRules(source, "externally-changed");
++  std::vector<TestCase> cases;
++  cases.emplace_back(source.Clone());
++  cases.back().checksum = result.ruleset_checksum;
++  cases.back().expected_result.has_new_checksum = false;
++  cases.back().expected_result.load_result = LoadRulesetResult::kErrorInvalidPath;
++  TestLoadRulesets(cases);
++}
++
++TEST_F(FileBackedRulesetSourceAndroidSafCacheTest,
++       MalformedGeneratedCacheReindexesThroughExistingLoadFlow) {
++  auto source = Source();
++  WriteRules(source, "valid");
++  auto result = Index(source);
++  ASSERT_EQ(IndexAndPersistJSONRulesetResult::Status::kSuccess, result.status);
++  const auto path = source.IndexedPathForChecksum(result.ruleset_checksum);
++  ASSERT_TRUE(base::WriteFile(path, "not-a-version-header"));
++  std::vector<TestCase> cases;
++  cases.emplace_back(source.Clone());
++  cases.back().checksum = result.ruleset_checksum;
++  cases.back().expected_result.has_new_checksum = true;
++  cases.back().expected_result.load_result = LoadRulesetResult::kSuccess;
++  TestLoadRulesets(cases);
++  EXPECT_NE("not-a-version-header", Read(path));
++}
++
++TEST_F(FileBackedRulesetSourceAndroidSafCacheTest,
++       CorruptCurrentChecksumReindexesThroughExistingLoadFlow) {
++  auto source = Source();
++  WriteRules(source, "valid");
++  auto result = Index(source);
++  ASSERT_EQ(IndexAndPersistJSONRulesetResult::Status::kSuccess, result.status);
++  const auto path = source.IndexedPathForChecksum(result.ruleset_checksum);
++  auto corrupted = Read(path);
++  corrupted.back() ^= 1;
++  ASSERT_TRUE(base::WriteFile(path, corrupted));
++  std::vector<TestCase> cases;
++  cases.emplace_back(source.Clone());
++  cases.back().checksum = result.ruleset_checksum;
++  cases.back().expected_result.has_new_checksum = true;
++  cases.back().expected_result.load_result = LoadRulesetResult::kSuccess;
++  TestLoadRulesets(cases);
++  EXPECT_NE(corrupted, Read(path));
++}
++
++TEST_F(FileBackedRulesetSourceAndroidSafCacheTest,
++       UnreadableCachePathDoesNotPermitReplacingIt) {
++  auto source = Source();
++  WriteRules(source, "valid");
++  auto result = Index(source);
++  ASSERT_EQ(IndexAndPersistJSONRulesetResult::Status::kSuccess, result.status);
++  const auto path = source.IndexedPathForChecksum(result.ruleset_checksum);
++  ASSERT_TRUE(base::DeleteFile(path));
++  ASSERT_TRUE(base::CreateDirectory(path));
++  EXPECT_EQ(IndexAndPersistJSONRulesetResult::Status::kError, Index(source).status);
++  EXPECT_TRUE(base::DirectoryExists(path));
++}
++
++
++TEST_F(FileBackedRulesetSourceAndroidSafCacheTest,
++       MatchingChecksumInvalidFlatBufferStillRepairs) {
++  OverrideGetChecksumForTest(12345);
++  base::ScopedClosureRunner reset(
++      base::BindOnce(&OverrideGetChecksumForTest, -1));
++  auto source = Source();
++  WriteRules(source, "valid");
++  auto result = Index(source);
++  ASSERT_EQ(IndexAndPersistJSONRulesetResult::Status::kSuccess, result.status);
++  const auto path = source.IndexedPathForChecksum(result.ruleset_checksum);
++  const std::string invalid =
++      GetIndexedRulesetData(base::as_byte_span(std::string_view("invalid")));
++  ASSERT_TRUE(base::WriteFile(path, invalid));
++  std::unique_ptr<RulesetMatcher> matcher;
++  EXPECT_EQ(LoadRulesetResult::kErrorChecksumMismatch,
++            source.CreateVerifiedMatcher(result.ruleset_checksum, &matcher));
++  std::vector<TestCase> cases;
++  cases.emplace_back(source.Clone());
++  cases.back().checksum = result.ruleset_checksum;
++  cases.back().expected_result.has_new_checksum = true;
++  cases.back().expected_result.load_result = LoadRulesetResult::kSuccess;
++  TestLoadRulesets(cases);
++  EXPECT_NE(invalid, Read(path));
++}
++
++
++TEST_F(FileBackedRulesetSourceAndroidSafCacheTest,
++       OversizedGeneratedIndexReindexesWithinExistingSmallLimit) {
++  constexpr size_t kLimit = 12 * 1024;
++  auto source = Source();
++  WriteRules(source, "valid");
++  auto result = Index(source);
++  ASSERT_EQ(IndexAndPersistJSONRulesetResult::Status::kSuccess, result.status);
++  const auto path = source.IndexedPathForChecksum(result.ruleset_checksum);
++  const auto original = Read(path);
++  const auto source_json = Read(source.json_path());
++  ASSERT_LT(original.size(), kLimit);
++  ASSERT_LT(source_json.size(), kLimit);
++  auto limit = CreateScopedMaxRulesetSizeOverrideForTesting(kLimit);
++  ASSERT_TRUE(base::WriteFile(path, std::string(kLimit + 1, 'x')));
++  std::unique_ptr<RulesetMatcher> matcher;
++  EXPECT_EQ(LoadRulesetResult::kErrorRulesetFileSizeLimitExceeded,
++            source.CreateVerifiedMatcher(result.ruleset_checksum, &matcher));
++  std::vector<TestCase> cases;
++  cases.emplace_back(source.Clone());
++  cases.back().checksum = result.ruleset_checksum;
++  cases.back().expected_result.has_new_checksum = false;
++  cases.back().expected_result.load_result = LoadRulesetResult::kSuccess;
++  TestLoadRulesets(cases);
++  EXPECT_EQ(original, Read(path));
++  EXPECT_EQ(source_json, Read(source.json_path()));
++}
++
++#endif  // BUILDFLAG(IS_ANDROID)
++
+ }  // namespace extensions::declarative_net_request

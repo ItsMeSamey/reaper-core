@@ -1,0 +1,163 @@
+diff --git a/components/update_client/protocol_serializer_json_unittest.cc b/components/update_client/protocol_serializer_json_unittest.cc
+index b55e8a45aeb01e8558d3f24749a1423e7c92c995..241c6fc5f5ea8b3d5be890bb3614dd410087c24b 100644
+--- a/components/update_client/protocol_serializer_json_unittest.cc
++++ b/components/update_client/protocol_serializer_json_unittest.cc
+@@ -2,6 +2,8 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
++#include "build/build_config.h"
++#include "base/json/json_reader.h"
+ #include "components/update_client/protocol_serializer_json.h"
+ 
+ #include <map>
+@@ -53,7 +55,12 @@
+         "cn1", "test", {0, 1}, /*cached_hashes=*/{},
+         MakeProtocolUpdateCheck(true, "33.12", true, false),
+         {{"install", "foobar_install_data_index", ""}},
+-        MakeProtocolPing("id1", metadata.get(), {}), std::move(events)));
++#if BUILDFLAG(IS_ANDROID)
++        std::nullopt,
++#else
++        MakeProtocolPing("id1", metadata.get(), {}),
++#endif
++        std::move(events)));
+ 
+     const auto request = std::make_unique<ProtocolSerializerJSON>()->Serialize(
+         MakeProtocolRequest(false, "{15160585-8ADE-4D3C-839B-1281A6035D1F}",
+@@ -67,20 +74,28 @@
+         R"("brand":"BRND","cohort":"c1","cohorthint":"ch1","cohortname":"cn1",)"
+         R"("data":\[{"index":"foobar_install_data_index","name":"install"}],)"
+         R"("disabled":\[{"reason":0},{"reason":1}],"enabled":false,)"
++#if !BUILDFLAG(IS_ANDROID)
+         R"("events":\[{"a":1,"b":"2"},{"error":0}],)"
+         R"("iid":"ins_id",)"
+         R"("installdate":-1,)"
++#endif  // !BUILDFLAG(IS_ANDROID)
+         R"("installedby":"location1","installsource":"source1",)"
++#if !BUILDFLAG(IS_ANDROID)
+         R"("lang":"lang",)"
+         R"("ping":{"ping_freshness":"{[-\w]{36}}","rd":1234},)"
++#endif  // !BUILDFLAG(IS_ANDROID)
+         R"("release_channel":"test",)"
+         R"("updatecheck":{"rollback_allowed":true,)"
+         R"("targetversionprefix":"33.12",)"
+         R"("updatedisabled":true},"version":"1.0"}],"arch":"\w+","dedup":"cr",)"
++#if BUILDFLAG(IS_ANDROID)
++        R"("dlpref":"cacheable","extra":"params","hw":{},)"
++#else
+         R"("dlpref":"cacheable","extra":"params","hw":{"avx":(true|false),)"
+         R"("physmemory":\d+,"sse":(true|false),"sse2":(true|false),)"
+         R"("sse3":(true|false),"sse41":(true|false),"sse42":(true|false),)"
+         R"("ssse3":(true|false)},)"
++#endif
+         R"("ismachine":false,)"
+         R"("os":{"arch":"[_,-.\w]+","platform":"OS",)"
+         R"(("sp":"[\s\w]+",)?"version":"[+-.\w]+"},"prodchannel":"channel",)"
+@@ -111,6 +126,91 @@
+                                                    << regex;
+   }
+ }
++
++#if BUILDFLAG(IS_ANDROID)
++TEST(SerializeRequestJSON, AndroidOmitsOptionalTelemetryKeepsUpdateData) {
++  // Exercise construction and the wire boundary independently. A passive DTO
++  // filled by another caller must not reintroduce optional reporting fields.
++  auto app = MakeProtocolApp(
++      "id1", base::Version("1.0"), "", "", "install-id", "en-US", 1234,
++      "ondemand", "internal", {{"attr", "value"}}, "", "", "", "", {},
++      /*cached_hashes=*/{}, MakeProtocolUpdateCheck(false, "2", false, true),
++      {{"install", "needed-data", ""}}, protocol_request::Ping(),
++      std::vector<base::DictValue>());
++  EXPECT_TRUE(app.lang.empty());
++  EXPECT_TRUE(app.install_id.empty());
++  EXPECT_EQ(kDateUnknown, app.install_date);
++  EXPECT_FALSE(app.ping);
++  EXPECT_FALSE(app.events);
++  app.lang = "en-US";
++  app.install_id = "install-id";
++  app.install_date = 1234;
++  app.ping = protocol_request::Ping();
++  app.ping->date_last_active = 1234;
++  app.ping->date_last_roll_call = 1234;
++  app.events.emplace();
++  app.events->emplace_back().Set("eventtype", 3);
++  std::vector<protocol_request::App> apps;
++  apps.push_back(std::move(app));
++  auto request = MakeProtocolRequest(
++      false, "{15160585-8ADE-4D3C-839B-1281A6035D1F}", "prod_id", "1.0",
++      "channel", "OS", "", std::nullopt, {}, {}, std::move(apps));
++  EXPECT_EQ(0u, request.hw.physmemory);
++  request.hw.physmemory = 16;
++  request.hw.avx = true;
++  auto root = base::JSONReader::Read(
++      ProtocolSerializerJSON().Serialize(request), base::JSON_PARSE_RFC);
++  ASSERT_TRUE(root);
++  ASSERT_TRUE(root->is_dict());
++  const auto* wire_request = root->GetDict().FindDict("request");
++  ASSERT_TRUE(wire_request);
++  const auto* hw = wire_request->FindDict("hw");
++  ASSERT_TRUE(hw);
++  EXPECT_TRUE(hw->empty());
++  for (const char* key : {"@updater", "prodversion", "@os", "arch"}) {
++    ASSERT_TRUE(wire_request->FindString(key)) << key;
++    EXPECT_FALSE(wire_request->FindString(key)->empty()) << key;
++  }
++  EXPECT_EQ("prod_id", *wire_request->FindString("@updater"));
++  EXPECT_EQ("1.0", *wire_request->FindString("prodversion"));
++  const auto* os = wire_request->FindDict("os");
++  ASSERT_TRUE(os);
++  for (const char* key : {"platform", "arch", "version"}) {
++    ASSERT_TRUE(os->FindString(key)) << key;
++    EXPECT_FALSE(os->FindString(key)->empty()) << key;
++  }
++  EXPECT_EQ("OS", *os->FindString("platform"));
++  const auto* wire_apps = wire_request->FindList("apps");
++  ASSERT_TRUE(wire_apps);
++  ASSERT_EQ(1u, wire_apps->size());
++  ASSERT_TRUE(wire_apps->front().is_dict());
++  const auto& wire_app = wire_apps->front().GetDict();
++  for (const char* key : {"lang", "iid", "installdate", "ping", "events"}) {
++    EXPECT_FALSE(wire_app.contains(key)) << key;
++  }
++  for (const char* key :
++       {"appid", "version", "attr", "installsource", "installedby"}) {
++    ASSERT_TRUE(wire_app.FindString(key)) << key;
++    EXPECT_FALSE(wire_app.FindString(key)->empty()) << key;
++  }
++  EXPECT_EQ("id1", *wire_app.FindString("appid"));
++  EXPECT_EQ("1.0", *wire_app.FindString("version"));
++  EXPECT_EQ("value", *wire_app.FindString("attr"));
++  EXPECT_EQ("ondemand", *wire_app.FindString("installsource"));
++  EXPECT_EQ("internal", *wire_app.FindString("installedby"));
++  const auto* update_check = wire_app.FindDict("updatecheck");
++  ASSERT_TRUE(update_check);
++  ASSERT_TRUE(update_check->FindString("targetversionprefix"));
++  EXPECT_EQ("2", *update_check->FindString("targetversionprefix"));
++  const auto* install_data = wire_app.FindList("data");
++  ASSERT_TRUE(install_data);
++  ASSERT_EQ(1u, install_data->size());
++  ASSERT_TRUE(install_data->front().is_dict());
++  const auto& install_data_item = install_data->front().GetDict();
++  ASSERT_TRUE(install_data_item.FindString("index"));
++  EXPECT_EQ("needed-data", *install_data_item.FindString("index"));
++}
++#endif  // BUILDFLAG(IS_ANDROID)
+ 
+ TEST(SerializeRequestJSON, DownloadPreference) {
+   base::test::TaskEnvironment env;
+@@ -150,10 +250,14 @@
+       R"("acceptformat":"crx3,download,puff,run,xz,zucc",)"
+       R"("arch":"\w+","dedup":"cr",)"
+       R"("dlpref":"cacheable","domainjoined":true,"extra":"params",)"
++#if BUILDFLAG(IS_ANDROID)
++      R"("hw":{},)"
++#else
+       R"("hw":{"avx":(true|false),)"
+       R"("physmemory":\d+,"sse":(true|false),"sse2":(true|false),)"
+       R"("sse3":(true|false),"sse41":(true|false),"sse42":(true|false),)"
+       R"("ssse3":(true|false)},)"
++#endif
+       R"("ismachine":true,)"
+       R"("os":{"arch":"[,-.\w]+","platform":"OS",("sp":"[\s\w]+",)?)"
+       R"("version":"[+-.\w]+"},"prodchannel":"channel","prodversion":"1.0",)"

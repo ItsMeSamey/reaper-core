@@ -1,0 +1,81 @@
+diff --git a/components/messages/android/message_dispatcher_bridge_unittest.cc b/components/messages/android/message_dispatcher_bridge_unittest.cc
+index 97faf884638bc6a1c6edaf3fb8b8db10c53d5797..303a68e029938777524a7b94adf42665231a5fea 100644
+--- a/components/messages/android/message_dispatcher_bridge_unittest.cc
++++ b/components/messages/android/message_dispatcher_bridge_unittest.cc
+@@ -3,6 +3,8 @@
+ // found in the LICENSE file.
+ 
+ #include "components/messages/android/message_dispatcher_bridge.h"
++
++#include <vector>
+ 
+ #include "base/functional/bind.h"
+ #include "testing/gtest/include/gtest/gtest.h"
+@@ -16,6 +18,13 @@
+ class MessageDispatcherBridgeForTesting : public MessageDispatcherBridge {
+  public:
+   ~MessageDispatcherBridgeForTesting() override = default;
++
++  std::vector<bool> notifications_enabled;
++
++ protected:
++  void SetDispatcherNotificationsEnabled(bool enabled) override {
++    notifications_enabled.push_back(enabled);
++  }
+ };
+ 
+ }  // namespace
+@@ -31,4 +40,53 @@
+   EXPECT_TRUE(message_dispatcher_bridge.IsMessagesEnabledForEmbedder());
+ }
+ 
++TEST(MessageDispatcherBridgeTest,
++     DispatcherObserverLeaseUsesFirstAndLastSubscriber) {
++  MessageDispatcherBridgeForTesting bridge;
++  auto first = bridge.AddDispatcherChangedCallback(base::BindRepeating([] {}));
++  auto second = bridge.AddDispatcherChangedCallback(base::BindRepeating([] {}));
++  EXPECT_EQ(bridge.notifications_enabled, std::vector<bool>({true}));
++  first = {};
++  EXPECT_EQ(bridge.notifications_enabled, std::vector<bool>({true}));
++  second = {};
++  EXPECT_EQ(bridge.notifications_enabled, std::vector<bool>({true, false}));
++}
++
++TEST(MessageDispatcherBridgeTest,
++     DispatcherChangesReachOnlySubscribedCallbacks) {
++  MessageDispatcherBridgeForTesting bridge;
++  int first_count = 0;
++  int second_count = 0;
++  auto first = bridge.AddDispatcherChangedCallback(
++      base::BindRepeating([](int* count) { ++*count; }, &first_count));
++  auto second = bridge.AddDispatcherChangedCallback(
++      base::BindRepeating([](int* count) { ++*count; }, &second_count));
++  EXPECT_EQ(first_count, 0);
++  EXPECT_EQ(second_count, 0);
++  bridge.NotifyDispatcherChanged();
++  EXPECT_EQ(first_count, 1);
++  EXPECT_EQ(second_count, 1);
++  first = {};
++  bridge.NotifyDispatcherChanged();
++  EXPECT_EQ(first_count, 1);
++  EXPECT_EQ(second_count, 2);
++}
++
++TEST(MessageDispatcherBridgeTest,
++     DispatcherSubscriptionCanEndDuringNotification) {
++  MessageDispatcherBridgeForTesting bridge;
++  base::CallbackListSubscription subscription;
++  int count = 0;
++  subscription = bridge.AddDispatcherChangedCallback(base::BindRepeating(
++      [](base::CallbackListSubscription* subscription, int* count) {
++        ++*count;
++        *subscription = {};
++      },
++      &subscription, &count));
++  bridge.NotifyDispatcherChanged();
++  bridge.NotifyDispatcherChanged();
++  EXPECT_EQ(count, 1);
++  EXPECT_EQ(bridge.notifications_enabled, std::vector<bool>({true, false}));
++}
++
+ }  // namespace messages

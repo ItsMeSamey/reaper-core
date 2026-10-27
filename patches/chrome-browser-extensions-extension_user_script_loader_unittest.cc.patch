@@ -1,0 +1,445 @@
+--- a/chrome/browser/extensions/extension_user_script_loader_unittest.cc
++++ b/chrome/browser/extensions/extension_user_script_loader_unittest.cc
+@@ -36,6 +36,19 @@
+ #include "extensions/common/extension_builder.h"
+ #include "extensions/grit/extensions_browser_resources.h"
+ #include "testing/gtest/include/gtest/gtest.h"
++#if BUILDFLAG(IS_ANDROID)
++#include <vector>
++
++#include "base/memory/scoped_refptr.h"
++#include "components/keyed_service/content/browser_context_dependency_manager.h"
++#include "components/keyed_service/core/keyed_service_base_factory.h"
++#include "extensions/browser/core_browser_context_keyed_service_factories.h"
++#include "extensions/browser/extension_config_map_factory.h"
++#include "components/value_store/value_store_factory_impl.h"
++#include "extensions/browser/extension_registry.h"
++#include "extensions/browser/scripting_constants.h"
++#include "extensions/browser/state_store.h"
++#endif
+ 
+ static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
+ 
+@@ -71,6 +84,422 @@
+  private:
+   content::BrowserTaskEnvironment task_environment_;
+ };
++
++#if BUILDFLAG(IS_ANDROID)
++namespace {
++
++UserScriptList MakeOwnedScripts(const base::FilePath& extension_root,
++                                const std::string& extension_id,
++                                const std::string& id,
++                                const std::string& contents) {
++  auto script = std::make_unique<UserScript>();
++  script->set_id(id);
++  script->add_url_pattern(
++      URLPattern(URLPattern::SCHEME_ALL, "https://example.test/*"));
++  auto js = UserScript::Content::CreateFile(
++      extension_root, base::FilePath(FILE_PATH_LITERAL("owned.js")),
++      GURL("chrome-extension://" + extension_id + "/owned.js"));
++  js->set_content(contents);
++  script->js_scripts().push_back(std::move(js));
++  UserScriptList scripts;
++  scripts.push_back(std::move(script));
++  return scripts;
++}
++
++// Control only the existing asynchronous load reply. Invalid results do not
++// require resource exhaustion or execute any registered JavaScript.
++class ControlledExtensionScriptLoader : public ExtensionUserScriptLoader {
++ public:
++  ControlledExtensionScriptLoader(TestingProfile* profile,
++                                  const Extension& extension,
++                                  StateStore* state_store = nullptr)
++      : ExtensionUserScriptLoader(profile, extension, state_store,
++                                  /*content_verifier=*/nullptr),
++        extension_root_(extension.path()),
++        file_loader_(profile, extension, /*state_store=*/nullptr,
++                     /*content_verifier=*/nullptr) {
++    SetReady(true);
++  }
++
++  bool has_pending_load() const { return !pending_callback_.is_null(); }
++
++  void Register(const std::string& id,
++                const std::string& contents,
++                DynamicScriptsModifiedCallback callback) {
++    ASSERT_TRUE(base::WriteFile(extension_root_.AppendASCII("owned.js"), contents));
++    auto operation = BeginDynamicScriptOperation({id});
++    AddOwnedDynamicScripts(
++        operation, MakeOwnedScripts(extension_root_, host_id().id, id, contents),
++        {id}, std::move(callback));
++  }
++
++  void CompleteLoad(bool valid) {
++    ASSERT_TRUE(has_pending_load());
++    auto callback = std::move(pending_callback_);
++    // Complete from the test body after any StateStore callback has unwound.
++    // The ordinary file loader waits using a non-nestable RunLoop.
++    auto scripts = file_loader_.LoadScriptsForTest(std::move(pending_scripts_));
++    auto region = valid ? Serialize(scripts) : base::ReadOnlySharedMemoryRegion();
++    ASSERT_EQ(valid, region.IsValid());
++    std::move(callback).Run(std::move(scripts), std::move(region));
++    // A terminal may have destroyed this loader. Do not access members here.
++  }
++
++ private:
++  void LoadScripts(UserScriptList scripts,
++                   const std::set<std::string>& added_script_ids,
++                   LoadScriptsCallback callback) override {
++    ASSERT_FALSE(has_pending_load());
++    // StateStore may enter here from a UI task. Capture without blocking;
++    // CompleteLoad populates the real file bytes from the test body.
++    pending_scripts_ = std::move(scripts);
++    pending_callback_ = std::move(callback);
++  }
++
++  base::FilePath extension_root_;
++  ExtensionUserScriptLoader file_loader_;
++  UserScriptList pending_scripts_;
++  LoadScriptsCallback pending_callback_;
++};
++
++void FlushStore(StateStore& store) {
++  base::RunLoop loop;
++  store.FlushForTesting(loop.QuitClosure());
++  loop.Run();
++}
++
++std::set<std::string> ReadStoredScriptIds(StateStore& store,
++                                        const ExtensionId& extension_id) {
++  std::set<std::string> ids;
++  base::RunLoop loop;
++  store.GetExtensionValue(
++      extension_id, scripting::kRegisteredScriptsStorageKey,
++      base::BindLambdaForTesting([&](std::optional<base::Value> value) {
++        EXPECT_TRUE(value && value->is_list());
++        if (value && value->is_list()) {
++          for (const auto& entry : value->GetList()) {
++            EXPECT_TRUE(entry.is_dict());
++            if (!entry.is_dict()) {
++              continue;
++            }
++            const std::string* id = entry.GetDict().FindString("id");
++            EXPECT_NE(nullptr, id);
++            if (id) {
++              ids.insert(*id);
++            }
++          }
++        }
++        loop.Quit();
++      }));
++  loop.Run();
++  return ids;
++}
++
++}  // namespace
++
++TEST_F(ExtensionUserScriptLoaderTest,
++       AndroidCoreConfigMapFactoryRegisteredBeforeUse) {
++  EnsureCoreBrowserContextKeyedServiceFactoriesBuilt();
++  // Inspect by name before invoking any config-map getter: a lazy GetInstance()
++  // here would hide the missing early registration that aborts ordinary loads.
++  std::vector<raw_ptr<DependencyNode, VectorExperimental>> factories;
++  ASSERT_TRUE(BrowserContextDependencyManager::GetInstance()
++                  ->GetDependencyGraphForTesting()
++                  .GetConstructionOrder(&factories));
++  bool config_map_registered = false;
++  for (const auto& node : factories) {
++    auto* factory = static_cast<KeyedServiceBaseFactory*>(node.get());
++    if (std::string(factory->name()) == "ExtensionConfigMap") {
++      config_map_registered = true;
++    }
++  }
++  ASSERT_TRUE(config_map_registered);
++
++  // Registering the singleton must not opt a profile into a config provider.
++  TestingProfile profile;
++  EXPECT_EQ(nullptr,
++            ExtensionConfigMapFactory::GetForBrowserContext(&profile));
++}
++
++TEST_F(ExtensionUserScriptLoaderTest,
++       AndroidFailedUnregisterRestoresRegistrationForRetry) {
++  TestingProfile profile;
++  auto extension =
++      ExtensionBuilder("Test").SetPath(temp_dir_.GetPath()).Build();
++  ControlledExtensionScriptLoader loader(&profile, *extension);
++  const std::string id = "_dc_retry";
++  int registered = 0;
++  loader.Register(id, "/* published */",
++                  base::BindLambdaForTesting(
++                      [&](const std::optional<std::string>& error) {
++                        EXPECT_FALSE(error);
++                        ++registered;
++                      }));
++  loader.CompleteLoad(true);
++  ASSERT_EQ(1, registered);
++  ASSERT_TRUE(loader.IsDynamicScriptRegistrationCurrent(id));
++  ASSERT_TRUE(loader.GetPersistentDynamicScriptIDs().contains(id));
++
++  int errors = 0;
++  loader.RemoveDynamicScripts(
++      {id}, base::BindLambdaForTesting(
++                [&](const std::optional<std::string>& error) {
++                  EXPECT_TRUE(error);
++                  ++errors;
++                }));
++  EXPECT_TRUE(loader.GetPersistentDynamicScriptIDs().contains(id));
++  loader.CompleteLoad(false);
++  ASSERT_EQ(1, errors);
++  EXPECT_TRUE(loader.IsDynamicScriptRegistrationCurrent(id));
++  EXPECT_TRUE(loader.GetPersistentDynamicScriptIDs().contains(id));
++  // This is the exact ID set used by explicit-unregister API validation.
++  EXPECT_TRUE(loader.GetDynamicScriptIDs(
++                        UserScript::Source::kDynamicContentScript)
++                  .contains(id));
++  ASSERT_EQ(1u, loader.GetLoadedDynamicScripts().size());
++  ASSERT_EQ(1u, loader.GetLoadedDynamicScripts()[0]->js_scripts().size());
++  EXPECT_EQ("/* published */",
++            loader.GetLoadedDynamicScripts()[0]->js_scripts()[0]->GetContent());
++
++  int removed = 0;
++  loader.RemoveDynamicScripts(
++      {id}, base::BindLambdaForTesting(
++                [&](const std::optional<std::string>& error) {
++                  EXPECT_FALSE(error);
++                  ++removed;
++                }));
++  loader.CompleteLoad(true);
++  EXPECT_EQ(1, removed);
++  EXPECT_FALSE(loader.IsDynamicScriptRegistrationCurrent(id));
++  EXPECT_FALSE(loader.GetPersistentDynamicScriptIDs().contains(id));
++  EXPECT_TRUE(loader.GetDynamicScriptIDs(
++                        UserScript::Source::kDynamicContentScript)
++                  .empty());
++  EXPECT_TRUE(loader.GetLoadedDynamicScripts().empty());
++}
++
++TEST_F(ExtensionUserScriptLoaderTest,
++       AndroidFailedRemovalAndReplacementPreservePublishedRegistration) {
++  TestingProfile profile;
++  auto extension =
++      ExtensionBuilder("Test").SetPath(temp_dir_.GetPath()).Build();
++  ControlledExtensionScriptLoader loader(&profile, *extension);
++  const std::string id = "_dc_replace";
++  loader.Register(id, "/* old bytes */",
++                  base::BindLambdaForTesting(
++                      [](const std::optional<std::string>& error) {
++                        EXPECT_FALSE(error);
++                      }));
++  loader.CompleteLoad(true);
++  ASSERT_TRUE(loader.IsDynamicScriptRegistrationCurrent(id));
++  // Establish real file bytes in the published base state before rollback.
++  ASSERT_TRUE(loader.GetLoadedScriptsForTesting());
++  ASSERT_EQ(1u, loader.GetLoadedScriptsForTesting()->size());
++  ASSERT_EQ(1u, loader.GetLoadedScriptsForTesting()->front()->js_scripts().size());
++  ASSERT_EQ("/* old bytes */",
++            loader.GetLoadedScriptsForTesting()
++                ->front()
++                ->js_scripts()[0]
++                ->GetContent());
++
++  int errors = 0;
++  auto failed = [&errors](const std::optional<std::string>& error) {
++    EXPECT_TRUE(error);
++    ++errors;
++  };
++  loader.RemoveDynamicScripts({id}, base::BindLambdaForTesting(failed));
++  loader.Register(id, "/* failed replacement */",
++                  base::BindLambdaForTesting(failed));
++  loader.CompleteLoad(false);
++  EXPECT_EQ(0, errors);
++  ASSERT_TRUE(loader.has_pending_load());
++  loader.CompleteLoad(false);
++  EXPECT_EQ(2, errors);
++  EXPECT_TRUE(loader.GetPendingDynamicScriptIDsForTesting().empty());
++  EXPECT_TRUE(loader.IsDynamicScriptRegistrationCurrent(id));
++  EXPECT_TRUE(loader.GetPersistentDynamicScriptIDs().contains(id));
++  EXPECT_TRUE(loader.GetDynamicScriptIDs(
++                        UserScript::Source::kDynamicContentScript)
++                  .contains(id));
++  ASSERT_EQ(1u, loader.GetLoadedDynamicScripts().size());
++  ASSERT_EQ(1u, loader.GetLoadedDynamicScripts()[0]->js_scripts().size());
++  EXPECT_EQ("/* old bytes */",
++            loader.GetLoadedDynamicScripts()[0]->js_scripts()[0]->GetContent());
++  ASSERT_TRUE(loader.GetLoadedScriptsForTesting());
++  ASSERT_EQ(1u, loader.GetLoadedScriptsForTesting()->size());
++  ASSERT_EQ(1u, loader.GetLoadedScriptsForTesting()->front()->js_scripts().size());
++  EXPECT_EQ("/* old bytes */",
++            loader.GetLoadedScriptsForTesting()
++                ->front()
++                ->js_scripts()[0]
++                ->GetContent());
++
++  int removed = 0;
++  loader.RemoveDynamicScripts(
++      {id}, base::BindLambdaForTesting(
++                [&](const std::optional<std::string>& error) {
++                  EXPECT_FALSE(error);
++                  ++removed;
++                }));
++  loader.CompleteLoad(true);
++  EXPECT_EQ(1, removed);
++  EXPECT_TRUE(loader.GetLoadedDynamicScripts().empty());
++  EXPECT_FALSE(loader.GetPersistentDynamicScriptIDs().contains(id));
++}
++
++TEST_F(ExtensionUserScriptLoaderTest,
++       AndroidOldFailureDoesNotUndoNewerRetirement) {
++  TestingProfile profile;
++  auto extension =
++      ExtensionBuilder("Test").SetPath(temp_dir_.GetPath()).Build();
++  ControlledExtensionScriptLoader loader(&profile, *extension);
++  const std::string id = "_dc_retirement";
++  loader.Register(id, "/* old bytes */",
++                  base::BindLambdaForTesting(
++                      [](const std::optional<std::string>& error) {
++                        EXPECT_FALSE(error);
++                      }));
++  loader.CompleteLoad(true);
++  int errors = 0;
++  int removed = 0;
++  // Exercise native loader receipts directly, including overlapping requests;
++  // this does not claim concurrent JavaScript API admission for duplicate IDs.
++  loader.RemoveDynamicScripts(
++      {id}, base::BindLambdaForTesting(
++                [&](const std::optional<std::string>& error) {
++                  EXPECT_TRUE(error);
++                  ++errors;
++                  loader.RemoveDynamicScripts(
++                      {id}, base::BindLambdaForTesting(
++                                [&](const std::optional<std::string>& later) {
++                                  EXPECT_FALSE(later);
++                                  ++removed;
++                                }));
++                }));
++  loader.RemoveDynamicScripts(
++      {id}, base::BindLambdaForTesting(
++                [&](const std::optional<std::string>& error) {
++                  EXPECT_TRUE(error);
++                  ++errors;
++                }));
++  loader.CompleteLoad(true);
++  ASSERT_TRUE(loader.has_pending_load());
++  loader.CompleteLoad(false);
++  EXPECT_EQ(2, errors);
++  EXPECT_EQ(0, removed);
++  EXPECT_FALSE(loader.IsDynamicScriptRegistrationCurrent(id));
++  EXPECT_TRUE(loader.GetDynamicScriptIDs(
++                        UserScript::Source::kDynamicContentScript)
++                  .empty());
++  EXPECT_TRUE(loader.GetPersistentDynamicScriptIDs().contains(id));
++  ASSERT_TRUE(loader.has_pending_load());
++  loader.CompleteLoad(true);
++  EXPECT_EQ(1, removed);
++  EXPECT_TRUE(loader.GetLoadedDynamicScripts().empty());
++  EXPECT_FALSE(loader.GetPersistentDynamicScriptIDs().contains(id));
++}
++
++TEST_F(ExtensionUserScriptLoaderTest,
++       AndroidUnregisterTerminalSurvivesLoaderDestruction) {
++  TestingProfile profile;
++  auto extension =
++      ExtensionBuilder("Test").SetPath(temp_dir_.GetPath()).Build();
++  auto loader =
++      std::make_unique<ControlledExtensionScriptLoader>(&profile, *extension);
++  const std::string id = "_dc_destroy";
++  loader->Register(id, "/* old bytes */",
++                   base::BindLambdaForTesting(
++                       [](const std::optional<std::string>& error) {
++                         EXPECT_FALSE(error);
++                       }));
++  loader->CompleteLoad(true);
++  int errors = 0;
++  loader->RemoveDynamicScripts(
++      {id}, base::BindLambdaForTesting(
++                [&](const std::optional<std::string>& error) {
++                  EXPECT_TRUE(error);
++                  ++errors;
++                }));
++  ASSERT_TRUE(loader->has_pending_load());
++  loader.reset();
++  EXPECT_EQ(1, errors);
++}
++
++TEST_F(ExtensionUserScriptLoaderTest,
++       AndroidInitialFailurePreservesStoredScriptsAcrossLaterWrite) {
++  TestingProfile profile;
++  ASSERT_TRUE(base::WriteFile(
++      temp_dir_.GetPath().AppendASCII("owned.js"), "/* previously accepted */"));
++  auto extension = ExtensionBuilder("Test")
++                       .SetPath(temp_dir_.GetPath())
++                       .SetManifestVersion(3)
++                       .AddAPIPermission("scripting")
++                       .AddHostPermission("https://example.test/*")
++                       .Build();
++  ExtensionRegistry::Get(&profile)->AddEnabled(extension);
++  auto factory =
++      base::MakeRefCounted<value_store::ValueStoreFactoryImpl>(temp_dir_.GetPath());
++  StateStore store(&profile, factory, StateStore::BackendType::SCRIPTS,
++                   /*deferred_load=*/false);
++  const std::string stored_id = "_dc_stored";
++  const std::string later_id = "_dc_later";
++  {
++    ControlledExtensionScriptLoader seed(&profile, *extension, &store);
++    seed.Register(stored_id, "/* previously accepted */",
++                  base::BindLambdaForTesting(
++                      [](const std::optional<std::string>& error) {
++                        EXPECT_FALSE(error);
++                      }));
++    seed.CompleteLoad(true);
++    ASSERT_TRUE(seed.GetPersistentDynamicScriptIDs().contains(stored_id));
++    FlushStore(store);
++  }
++  EXPECT_EQ(std::set<std::string>({stored_id}),
++            ReadStoredScriptIds(store, extension->id()));
++
++  ControlledExtensionScriptLoader loader(&profile, *extension, &store);
++  int initial_errors = 0;
++  ASSERT_TRUE(loader.AddScriptsForExtensionLoad(
++      *extension,
++      base::BindLambdaForTesting(
++          [&](UserScriptLoader* completed_loader,
++              const std::optional<std::string>& error) {
++            EXPECT_EQ(&loader, completed_loader);
++            EXPECT_TRUE(error);
++            ++initial_errors;
++          })));
++  FlushStore(store);
++  ASSERT_TRUE(loader.has_pending_load());
++  loader.CompleteLoad(false);
++  EXPECT_EQ(1, initial_errors);
++  EXPECT_FALSE(loader.initial_load_complete());
++  EXPECT_TRUE(loader.GetPendingDynamicScriptIDsForTesting().empty());
++  EXPECT_TRUE(loader.IsDynamicScriptRegistrationCurrent(stored_id));
++  EXPECT_TRUE(loader.GetPersistentDynamicScriptIDs().contains(stored_id));
++  ASSERT_TRUE(loader.GetLoadedScriptsForTesting());
++  EXPECT_TRUE(loader.GetLoadedScriptsForTesting()->empty());
++  EXPECT_EQ(std::set<std::string>({stored_id}),
++            ReadStoredScriptIds(store, extension->id()));
++
++  int later_successes = 0;
++  loader.Register(later_id, "/* later accepted */",
++                  base::BindLambdaForTesting(
++                      [&](const std::optional<std::string>& error) {
++                        EXPECT_FALSE(error);
++                        ++later_successes;
++                      }));
++  loader.CompleteLoad(true);
++  FlushStore(store);
++  EXPECT_EQ(1, initial_errors);
++  EXPECT_EQ(1, later_successes);
++  EXPECT_EQ(std::set<std::string>({stored_id, later_id}),
++            ReadStoredScriptIds(store, extension->id()));
++  // Persisting the prior registration does not claim automatic native retry.
++  ASSERT_TRUE(loader.GetLoadedScriptsForTesting());
++  ASSERT_EQ(1u, loader.GetLoadedScriptsForTesting()->size());
++  EXPECT_EQ(later_id, loader.GetLoadedScriptsForTesting()->front()->id());
++}
++#endif  // BUILDFLAG(IS_ANDROID)
+ 
+ // Test that a callback passed in will get called once scripts are loaded.
+ TEST_F(ExtensionUserScriptLoaderTest, NoScriptsWithCallbackAfterLoad) {

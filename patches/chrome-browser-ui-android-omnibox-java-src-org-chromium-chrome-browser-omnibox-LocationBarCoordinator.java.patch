@@ -1,0 +1,404 @@
+diff --git a/chrome/browser/ui/android/omnibox/java/src/org/chromium/chrome/browser/omnibox/LocationBarCoordinator.java b/chrome/browser/ui/android/omnibox/java/src/org/chromium/chrome/browser/omnibox/LocationBarCoordinator.java
+index dcdaaf8b4a65f149b27670897ff9e4b00cb0ceb6..ee12460e3ccb47ec15950d897877fb9c018d7426 100644
+--- a/chrome/browser/ui/android/omnibox/java/src/org/chromium/chrome/browser/omnibox/LocationBarCoordinator.java
++++ b/chrome/browser/ui/android/omnibox/java/src/org/chromium/chrome/browser/omnibox/LocationBarCoordinator.java
+@@ -13,12 +13,6 @@
+ import android.content.Context;
+ import android.content.res.Configuration;
+ import android.graphics.Bitmap;
+-import android.transition.ChangeBounds;
+-import android.transition.Fade;
+-import android.transition.Transition;
+-import android.transition.TransitionListenerAdapter;
+-import android.transition.TransitionManager;
+-import android.transition.TransitionSet;
+ import android.view.ActionMode;
+ import android.view.View;
+ import android.view.View.OnClickListener;
+@@ -49,17 +43,11 @@
+ import org.chromium.chrome.browser.browser_controls.BrowserControlsStateProvider.ControlsPosition;
+ import org.chromium.chrome.browser.browser_controls.BrowserStateBrowserControlsVisibilityDelegate;
+ import org.chromium.chrome.browser.feature_engagement.TrackerFactory;
+-import org.chromium.chrome.browser.flags.ChromeFeatureList;
+ import org.chromium.chrome.browser.layouts.toolbar.ToolbarWidthConsumer;
+-import org.chromium.chrome.browser.lens.LensController;
+ import org.chromium.chrome.browser.lifecycle.ActivityLifecycleDispatcher;
+ import org.chromium.chrome.browser.lifecycle.NativeInitObserver;
+ import org.chromium.chrome.browser.locale.LocaleManager;
+ import org.chromium.chrome.browser.omnibox.LocationBarMediator.OmniboxUma;
+-import org.chromium.chrome.browser.omnibox.fusebox.FuseboxCoordinator;
+-import org.chromium.chrome.browser.omnibox.fusebox.FuseboxCoordinator.FuseboxLayoutMode;
+-import org.chromium.chrome.browser.omnibox.fusebox.FuseboxCoordinator.FuseboxState;
+-import org.chromium.chrome.browser.omnibox.fusebox.FuseboxCoordinator.PopupState;
+ import org.chromium.chrome.browser.omnibox.geo.GeolocationHeader;
+ import org.chromium.chrome.browser.omnibox.status.StatusCoordinator;
+ import org.chromium.chrome.browser.omnibox.status.StatusCoordinator.PageInfoAction;
+@@ -91,15 +79,12 @@
+ import org.chromium.components.feature_engagement.Tracker;
+ import org.chromium.components.metrics.OmniboxEventProtosIntDef.PageClassification;
+ import org.chromium.components.omnibox.AutocompleteInput;
+-import org.chromium.components.omnibox.AutocompleteInput.AutocompleteState;
+ import org.chromium.components.omnibox.AutocompleteMatch;
+-import org.chromium.components.omnibox.OmniboxFocusReason;
+ import org.chromium.components.omnibox.TextSelection;
+ import org.chromium.components.search_engines.TemplateUrlService;
+ import org.chromium.ui.KeyboardVisibilityDelegate;
+ import org.chromium.ui.base.DeviceFormFactor;
+ import org.chromium.ui.base.WindowAndroid;
+-import org.chromium.ui.interpolators.Interpolators;
+ import org.chromium.ui.modaldialog.ModalDialogManager;
+ import org.chromium.ui.widget.ViewRectProvider;
+ 
+@@ -126,13 +111,10 @@
+ public class LocationBarCoordinator
+         implements LocationBar, NativeInitObserver, AutocompleteDelegate {
+ 
+-    private static final int COMPACT_MODE_FADE_START_DELAY_MS = 100;
+-    private static final int COMPACT_MODE_ANIMATION_DURATION_MS = 150;
+     private final DeferredIMEWindowInsetApplicationCallback
+             mDeferredIMEWindowInsetApplicationCallback;
+ 
+     private OmniboxSuggestionsDropdownEmbedderImpl mOmniboxDropdownEmbedderImpl;
+-    private int mCurrentFuseboxState = FuseboxState.DISABLED;
+ 
+     /** Identifies coordinators with methods specific to a device type. */
+     public interface SubCoordinator {
+@@ -152,12 +134,8 @@
+     private UrlBarCoordinator mUrlCoordinator;
+     private AutocompleteCoordinator mAutocompleteCoordinator;
+     private StatusCoordinator mStatusCoordinator;
+-    private FuseboxCoordinator mFuseboxCoordinator;
+     private final WindowAndroid mWindowAndroid;
+     private final Callback<Boolean> mTextWrappingListener;
+-    private final Callback<@FuseboxState Integer> mOnFuseboxStateChange =
+-            this::onFuseboxStateChange;
+-    private final Callback<@PopupState Integer> mOnPopupStateChange = this::onPopupStateChange;
+     private final SettableMonotonicObservableSupplier<Tracker> mTrackerSupplier =
+             ObservableSuppliers.createMonotonic();
+     private final @Nullable UserEducationHelper mUserEducationHelper;
+@@ -167,7 +145,6 @@
+     private View mZoomButton;
+     private @Nullable View mDeleteButton;
+     private @Nullable View mBackButton;
+-    private @Nullable View mNavigateButton;
+     private @Nullable View mMicButton;
+     private @Nullable View mLensButton;
+     private @Nullable View mBookmarksButton;
+@@ -265,11 +242,12 @@
+             BookmarkState bookmarkState,
+             BooleanSupplier isToolbarMicEnabledSupplier,
+             OmniboxActionDelegateImpl omniboxActionDelegate,
+-            @Nullable BrowserStateBrowserControlsVisibilityDelegate
+-                    browserControlsVisibilityDelegate,
++            @Nullable
++                    BrowserStateBrowserControlsVisibilityDelegate browserControlsVisibilityDelegate,
+             BackPressManager backPressManager,
+-            @Nullable OmniboxSuggestionsDropdownScrollListener
+-                    omniboxSuggestionsDropdownScrollListener,
++            @Nullable
++                    OmniboxSuggestionsDropdownScrollListener
++                            omniboxSuggestionsDropdownScrollListener,
+             MonotonicObservableSupplier<TabModelSelector> tabModelSelectorSupplier,
+             TopInsetProvider topInsetProvider,
+             LocationBarEmbedder locationBarEmbedder,
+@@ -317,36 +295,9 @@
+                 incognitoStateProvider != null && incognitoStateProvider.isIncognitoSelected();
+         OmniboxResourceProvider.setTabFaviconFactory(tabFaviconFunction);
+         mWindowFocusSupplier = new WindowFocusSupplier(activityLifecycleDispatcher, windowAndroid);
+-        mFuseboxCoordinator =
+-                new FuseboxCoordinator(
+-                        context,
+-                        windowAndroid,
+-                        mLocationBarLayout,
+-                        mResourceProvider,
+-                        tabModelSelectorSupplier,
+-                        templateUrlServiceSupplier,
+-                        snackbarManager,
+-                        () ->
+-                                mAutocompleteCoordinator != null
+-                                        ? mAutocompleteCoordinator.getSuggestionsDropdown()
+-                                        : null,
+-                        backPressManager,
+-                        uiOverrides.isForcedPhoneStyleOmnibox());
+-        NonNullObservableSupplier<Integer> fuseboxStateSupplier =
+-                mFuseboxCoordinator.getFuseboxStateSupplier();
+-        fuseboxStateSupplier.addSyncObserverAndPostIfNonNull(mOnFuseboxStateChange);
+-        mFuseboxCoordinator
+-                .getPopupStateSupplier()
+-                .addSyncObserverAndPostIfNonNull(mOnPopupStateChange);
+-        NonNullObservableSupplier<Integer> fuseboxLayoutModeSupplier =
+-                mFuseboxCoordinator.getFuseboxLayoutModeSupplier();
+-
+         if (mLocationBarLayout instanceof LocationBarTablet tabletLayout) {
+             mLocationBarHolder = (ViewGroup) tabletLayout.getParent();
+-            tabletLayout.setHolderAndContainer(
+-                    mLocationBarHolder, mLocationBarEmbedder.getContainerView());
+-            tabletLayout.setIsFullWidthExpansionAllowedSupplier(
+-                    uiOverrides::isFullWidthExpansionAllowed);
++            tabletLayout.setHolder(mLocationBarHolder);
+         }
+ 
+         View alignmentView = mLocationBarLayout.getAlignmentView();
+@@ -366,10 +317,7 @@
+                                         : mBrowserControlsStateProvider.getControlsPosition(),
+                         mDeferredIMEWindowInsetApplicationCallback::getCurrentKeyboardHeight,
+                         bottomWindowPaddingSupplier,
+-                        fuseboxStateSupplier,
+-                        fuseboxLayoutModeSupplier,
+-                        topInsetProvider,
+-                        uiOverrides::isFullWidthExpansionAllowed);
++                        topInsetProvider);
+ 
+         mPageZoomIndicatorCoordinator =
+                 pageZoomManager != null
+@@ -395,7 +343,6 @@
+                         backKeyBehavior,
+                         windowAndroid,
+                         isTabletWindow() && isTabletLayout(),
+-                        LensController.getInstance(),
+                         omniboxUma,
+                         isToolbarMicEnabledSupplier,
+                         mOmniboxDropdownEmbedderImpl,
+@@ -403,7 +350,6 @@
+                         browserControlsStateProvider,
+                         modalDialogManagerSupplier,
+                         mPageZoomIndicatorCoordinator,
+-                        mFuseboxCoordinator,
+                         locationBarEmbedder,
+                         omniboxChipManager,
+                         scrimHandler,
+@@ -431,7 +377,7 @@
+ 
+         initializeBoundsEllipsis(locationBarDataProvider);
+ 
+-        // Set up text wrapping listener for FuseboxCoordinator
++        // Track text wrapping for ordinary toolbar button layout.
+         mTextWrappingListener = this::onTextWrappingChanged;
+         mUrlCoordinator.addTextWrappingChangeListener(mTextWrappingListener);
+ 
+@@ -455,8 +401,7 @@
+                         mActivityLifecycleDispatcher,
+                         uiOverrides,
+                         windowAndroid,
+-                        mDeferredIMEWindowInsetApplicationCallback,
+-                        mFuseboxCoordinator);
++                        mDeferredIMEWindowInsetApplicationCallback);
+         StatusView statusView = mLocationBarLayout.findViewById(R.id.location_bar_status);
+         mStatusCoordinator =
+                 new StatusCoordinator(
+@@ -468,10 +413,7 @@
+                         profileObservableSupplier,
+                         windowAndroid,
+                         pageInfoAction,
+-                        browserControlsVisibilityDelegate,
+-                        fuseboxStateSupplier,
+-                        fuseboxLayoutModeSupplier,
+-                        this::onPlusButtonClicked);
++                        browserControlsVisibilityDelegate);
+         mLocationBarMediator.setCoordinators(
+                 mUrlCoordinator, mAutocompleteCoordinator, mStatusCoordinator);
+ 
+@@ -482,11 +424,6 @@
+ 
+         mDeleteButton = mLocationBarLayout.findViewById(R.id.delete_button);
+         mDeleteButton.setOnClickListener(mLocationBarMediator::deleteButtonClicked);
+-
+-        mNavigateButton = mLocationBarLayout.findViewById(R.id.navigate_button);
+-        if (mNavigateButton != null) {
+-            mNavigateButton.setOnClickListener(mLocationBarMediator::navigateButtonClicked);
+-        }
+ 
+         mMicButton = mLocationBarLayout.findViewById(R.id.mic_button);
+         mMicButton.setOnClickListener(mLocationBarMediator::micButtonClicked);
+@@ -601,11 +538,6 @@
+         mLensButton.setOnClickListener(null);
+         mLensButton = null;
+ 
+-        if (mNavigateButton != null) {
+-            mNavigateButton.setOnClickListener(null);
+-            mNavigateButton = null;
+-        }
+-
+         mZoomButton.setOnClickListener(null);
+         mZoomButton = null;
+ 
+@@ -652,13 +584,6 @@
+ 
+         mOmniboxDropdownEmbedderImpl.destroy();
+         mOmniboxDropdownEmbedderImpl = null;
+-
+-        if (mFuseboxCoordinator != null) {
+-            mFuseboxCoordinator.getFuseboxStateSupplier().removeObserver(mOnFuseboxStateChange);
+-            mFuseboxCoordinator.getPopupStateSupplier().removeObserver(mOnPopupStateChange);
+-            mFuseboxCoordinator.destroy();
+-            mFuseboxCoordinator = null;
+-        }
+ 
+         mLocationBarLayout.destroy();
+         mLocationBarLayout = null;
+@@ -714,18 +639,6 @@
+     public void updateVisualsForState() {
+         mLocationBarMediator.updateVisualsForState();
+         updateOptionalButtonState();
+-    }
+-
+-    private void onPlusButtonClicked() {
+-        if (mLocationBarMediator == null) return;
+-
+-        if (mLocationBarMediator.isUrlBarFocused()) {
+-            mFuseboxCoordinator.plusButtonClicked();
+-        } else {
+-            mLocationBarMediator.beginInput(
+-                    new AutocompleteInput(OmniboxFocusReason.FAKE_BOX_PLUS_BUTTON_TAP)
+-                            .setAutocompleteState(AutocompleteState.STANDBY_NO_FOCUS));
+-        }
+     }
+ 
+     public void setBookmarkClickListener(OnClickListener listener) {
+@@ -1009,82 +922,8 @@
+     }
+ 
+     /* package */ void onTextWrappingChanged(boolean isWrapping) {
+-        if (mFuseboxCoordinator != null) {
+-            mFuseboxCoordinator.onFuseboxTextWrappingChanged(isWrapping);
+-        }
+         mLocationBarMediator.setIsTextWrapping(isWrapping);
+         mLocationBarMediator.updateButtonVisibility();
+-    }
+-
+-    /* package */ void onFuseboxStateChange(@FuseboxState int newState) {
+-        if (mUrlCoordinator == null || !mUrlCoordinator.hasFocus()) return;
+-        View plusButton = mLocationBarLayout.findViewById(R.id.fusebox_plus_button);
+-        if (plusButton == null) return;
+-
+-        // The Fade and and ChangeBounds anims below are only intended for animating between compact
+-        // <--> expanded; they don't look good otherwise.
+-        boolean transitioningFromOrToDisabledState =
+-                mCurrentFuseboxState == FuseboxState.DISABLED || newState == FuseboxState.DISABLED;
+-        // The popover UI doesn't look good when animating bounds changes.
+-        boolean isPopover =
+-                getFuseboxLayoutModeSupplier().get() == FuseboxLayoutMode.SUGGESTIONS_POPOVER;
+-
+-        mCurrentFuseboxState = newState;
+-
+-        if (transitioningFromOrToDisabledState || isPopover) return;
+-
+-        ChangeBounds changeBounds = new ChangeBounds();
+-        changeBounds
+-                .setDuration(COMPACT_MODE_ANIMATION_DURATION_MS)
+-                .setInterpolator(Interpolators.STANDARD_INTERPOLATOR)
+-                .addTarget(mLocationBarLayout)
+-                .addTarget(plusButton);
+-        Transition transition;
+-        if (newState == FuseboxState.COMPACT) {
+-            // Only fade when entering expanded mode.
+-            transition = changeBounds;
+-            mLocationBarEmbedder.setRequestFixedHeight(true);
+-            changeBounds.addListener(
+-                    new TransitionListenerAdapter() {
+-                        @Override
+-                        public void onTransitionCancel(Transition transition) {
+-                            onTransitionEnd(transition);
+-                        }
+-
+-                        @Override
+-                        public void onTransitionEnd(Transition transition) {
+-                            mLocationBarEmbedder.setRequestFixedHeight(false);
+-                        }
+-                    });
+-        } else {
+-            Fade fade = new Fade();
+-            fade.addTarget(mLocationBarLayout.findViewById(R.id.fusebox_request_type));
+-            fade.setStartDelay(COMPACT_MODE_FADE_START_DELAY_MS);
+-            // Delaying the fade prevents the chip from becoming visible before the fusebox expands
+-            // to include it.
+-            fade.setDuration(COMPACT_MODE_ANIMATION_DURATION_MS);
+-            fade.setInterpolator(Interpolators.LINEAR_INTERPOLATOR);
+-            transition = new TransitionSet().addTransition(changeBounds).addTransition(fade);
+-        }
+-        // If the refactored animations are enabled, the ChangeBounds transition will instead be
+-        // kicked off with the other transitions in ToolbarPhone.
+-        if (ChromeFeatureList.sToolbarPhoneAnimationRefactor.isEnabled()) {
+-            changeBounds.setResizeClip(true);
+-            mLocationBarEmbedder.beginEmbeddedDelayedTransition(mLocationBarLayout, transition);
+-        } else {
+-            TransitionManager.beginDelayedTransition(mLocationBarLayout, transition);
+-        }
+-    }
+-
+-    @VisibleForTesting
+-    NonNullObservableSupplier<Integer> getFuseboxLayoutModeSupplier() {
+-        return mFuseboxCoordinator.getFuseboxLayoutModeSupplier();
+-    }
+-
+-    /* package */ void onPopupStateChange(@PopupState int popupState) {
+-        if (popupState != PopupState.HIDDEN) {
+-            mUrlCoordinator.clearTextSelection();
+-        }
+     }
+ 
+     /**
+@@ -1247,16 +1086,6 @@
+      */
+     public void updateButtonBackground(@DrawableRes int backgroundResId) {
+         mLocationBarMediator.updateButtonBackground(backgroundResId);
+-    }
+-
+-    public void setOnSpecializedFuseboxModeActivatedListener(
+-            @Nullable Callback<Boolean> onSpecializedFuseboxModeActivatedCallback) {
+-        mLocationBarMediator.setOnSpecializedFuseboxModeActivatedListener(
+-                onSpecializedFuseboxModeActivatedCallback);
+-    }
+-
+-    public NonNullObservableSupplier<@FuseboxState Integer> getFuseboxStateSupplier() {
+-        return mFuseboxCoordinator.getFuseboxStateSupplier();
+     }
+ 
+     /** Callback invoked by PageZoomIndicatorCoordinator when the zoom level changes. */
+@@ -1355,7 +1184,7 @@
+      * Set the omnibox to have focus or not.
+      *
+      * <p>Updates passed AutocompleteInput instance so it correctly reflects the current page URL,
+-     * title, classification, and focus time, bringing the Fusebox to focus with the supplied data.
++     * title, classification, and focus time, bringing the omnibox to focus with the supplied data.
+      * When null instance is passed the focus is cleared.
+      *
+      * @param input The AutocompleteInput object with all the details for the focus operation. If
+@@ -1521,9 +1350,7 @@
+         mLocationBarMediator.onUrlChanged(false);
+     }
+ 
+-    public void setLensControllerForTesting(LensController lensController) {
+-        mLocationBarMediator.setLensControllerForTesting(lensController);
+-    }
++
+ 
+     /* package */ LocationBarMediator getMediatorForTesting() {
+         return mLocationBarMediator;
+@@ -1536,10 +1363,6 @@
+     /** Set an instance of UrlBarCoordinator for testing. */
+     void setUrlCoordinatorForTesting(UrlBarCoordinator urlCoordinator) {
+         mUrlCoordinator = urlCoordinator;
+-    }
+-
+-    void setFuseboxCoordinatorForTesting(FuseboxCoordinator fuseboxCoordinator) {
+-        mFuseboxCoordinator = fuseboxCoordinator;
+     }
+ 
+     /** Set an instance of UrlBar for testing. */
+@@ -1567,15 +1390,4 @@
+     void setLocationBarMediatorForTesting(LocationBarMediator mediator) {
+         mLocationBarMediator = mediator;
+     }
+-
+-    /** Set the value of mCurrentFuseboxState for testing. */
+-    void setCurrentFuseboxStateForTesting(@FuseboxState int state) {
+-        mCurrentFuseboxState = state;
+-    }
+-
+-    /** Returns the value of mCurrentFuseboxState for testing. */
+-    @FuseboxState
+-    int getCurrentFuseboxStateForTesting() {
+-        return mCurrentFuseboxState;
+-    }
+ }

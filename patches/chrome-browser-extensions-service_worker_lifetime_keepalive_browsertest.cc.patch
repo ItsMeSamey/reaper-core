@@ -1,0 +1,432 @@
+diff --git a/chrome/browser/extensions/service_worker_lifetime_keepalive_browsertest.cc b/chrome/browser/extensions/service_worker_lifetime_keepalive_browsertest.cc
+--- a/chrome/browser/extensions/service_worker_lifetime_keepalive_browsertest.cc
++++ b/chrome/browser/extensions/service_worker_lifetime_keepalive_browsertest.cc
+@@ -4,6 +4,8 @@
+ 
+ #include <stddef.h>
+ 
++#include "base/auto_reset.h"
++#include "base/functional/callback_helpers.h"
+ #include "base/run_loop.h"
+ #include "base/scoped_observation.h"
+ #include "base/strings/stringprintf.h"
+@@ -11,6 +13,8 @@
+ #include "base/test/simple_test_tick_clock.h"
+ #include "base/test/task_environment.h"
+ #include "base/test/test_future.h"
++#include "build/build_config.h"
++#include "chrome/browser/extensions/api/identity/identity_get_auth_token_function.h"
+ #include "chrome/browser/extensions/extension_apitest.h"
+ #include "chrome/browser/extensions/extension_management_test_util.h"
+ #include "chrome/browser/extensions/extension_service.h"
+@@ -27,6 +31,7 @@
+ #include "extensions/browser/api/test/test_api.h"
+ #include "extensions/browser/background_script_executor.h"
+ #include "extensions/browser/browsertest_util.h"
++#include "extensions/browser/extension_function_registry.h"
+ #include "extensions/browser/extension_prefs.h"
+ #include "extensions/browser/extensions_browser_client.h"
+ #include "extensions/browser/service_worker/service_worker_keepalive.h"
+@@ -46,6 +51,15 @@
+ #include "chrome/browser/web_applications/test/os_integration_test_override_impl.h"
+ #endif
+ 
++#if BUILDFLAG(IS_ANDROID)
++#include <optional>
++#include <utility>
++
++#include "chrome/browser/profiles/profile.h"
++#include "content/public/test/browser_test_utils.h"
++#include "extensions/browser/process_manager.h"
++#endif
++
+ static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
+ 
+ namespace extensions {
+@@ -67,6 +81,32 @@
+ constexpr char kPersistentPortConnectedMessage[] = "Persistent port connected";
+ constexpr char kPersistentPortDisconnectedMessage[] =
+     "Persistent port disconnected";
++
++#if BUILDFLAG(IS_ANDROID)
++class PendingGetAuthTokenFunction;
++using PendingOAuthCallback =
++    base::OnceCallback<void(scoped_refptr<PendingGetAuthTokenFunction>)>;
++PendingOAuthCallback* g_pending_oauth_callback = nullptr;
++
++// Substitutes a pending API body without contacting an OAuth provider.
++// Dispatch, API arguments, worker identity and the inherited production
++// keepalive policy remain real.
++class PendingGetAuthTokenFunction : public IdentityGetAuthTokenFunction {
++ public:
++  void CompleteForTest() { Respond(Error("Test consent completed")); }
++
++ private:
++  ~PendingGetAuthTokenFunction() override = default;
++
++  ResponseAction Run() override {
++    CHECK(is_from_service_worker());
++    CHECK(g_pending_oauth_callback);
++    CHECK(*g_pending_oauth_callback);
++    std::move(*g_pending_oauth_callback).Run(base::WrapRefCounted(this));
++    return RespondLater();
++  }
++};
++#endif
+ 
+ // Gets a keepalive matcher that enforces the extra data field.
+ testing::Matcher<ProcessManager::ServiceWorkerKeepaliveData>
+@@ -153,12 +193,116 @@
+         content::TriggerTimeoutAndCheckRunningState(context, version_id));
+   }
+ 
++#if BUILDFLAG(IS_ANDROID)
++  void CheckOAuthRequestKeepalive(bool interactive) {
++    TestExtensionDir test_dir;
++    test_dir.WriteManifest(R"({
++      "name": "Pending OAuth worker request",
++      "manifest_version": 3,
++      "version": "1.0",
++      "permissions": ["identity"],
++      "oauth2": {"client_id": "test.apps.googleusercontent.com",
++                 "scopes": ["email"]},
++      "background": {"service_worker": "background.js"}
++    })");
++    test_dir.WriteFile(FILE_PATH_LITERAL("background.js"), "// blank");
++    TestServiceWorkerContextObserver registration_observer(profile());
++    const Extension* extension = LoadExtension(test_dir.UnpackedPath());
++    ASSERT_TRUE(extension);
++    const int64_t version_id = registration_observer.WaitForWorkerActivated();
++
++    auto& registry = ExtensionFunctionRegistry::GetInstance();
++    const auto original =
++        registry.GetFactoriesForTesting().at("identity.getAuthToken");
++    ASSERT_TRUE(registry.OverrideFunctionForTesting(
++        "identity.getAuthToken",
++        &NewExtensionFunction<PendingGetAuthTokenFunction>));
++    base::ScopedClosureRunner restore_factory(base::BindOnce(
++        [](ExtensionFunctionRegistry::FactoryEntry entry) {
++          ExtensionFunctionRegistry::GetInstance().Register(entry);
++        },
++        original));
++    base::test::TestFuture<scoped_refptr<PendingGetAuthTokenFunction>> pending;
++    auto callback = pending.GetCallback();
++    base::AutoReset<PendingOAuthCallback*> reset_callback(
++        &g_pending_oauth_callback, &callback);
++    const std::string script =
++        base::StringPrintf(R"(
++      chrome.test.runWithUserGesture(() => {
++        chrome.identity.getAuthToken({interactive: %s}).then(
++          () => chrome.test.sendMessage('unexpected success'),
++          error => {
++            chrome.test.assertEq('Test consent completed', error.message);
++            chrome.test.sendMessage('consent completed');
++          });
++        chrome.test.sendScriptResult('started');
++      });)",
++                           interactive ? "true" : "false");
++    EXPECT_EQ("started",
++              BackgroundScriptExecutor::ExecuteScript(
++                  profile(), extension->id(), script,
++                  BackgroundScriptExecutor::ResultCapture::kSendScriptResult));
++    ASSERT_TRUE(pending.Wait());
++    auto function = pending.Take();
++    base::ScopedClosureRunner resolve_on_failure(base::BindOnce(
++        [](scoped_refptr<PendingGetAuthTokenFunction> request) {
++          if (!request->did_respond()) {
++            request->CompleteForTest();
++          }
++        },
++        function));
++    base::RunLoop().RunUntilIdle();
++    content::ServiceWorkerContext* context = GetServiceWorkerContext();
++    TestServiceWorkerContextObserver stopped(context, extension->id());
++    stopped.SetRunningId(version_id);
++    content::AdvanceClockAfterRequestTimeout(context, version_id,
++                                             &tick_clock_opener_);
++    if (interactive) {
++      ASSERT_TRUE(
++          content::TriggerTimeoutAndCheckRunningState(context, version_id));
++      ExtensionTestMessageListener completed("consent completed");
++      function->CompleteForTest();
++      ASSERT_TRUE(completed.WaitUntilSatisfied());
++      resolve_on_failure.RunAndReset();
++      function.reset();
++      base::RunLoop().RunUntilIdle();
++      // Finishing the actual API response releases the request keepalive.
++      content::AdvanceClockAfterRequestTimeout(context, version_id,
++                                               &tick_clock_opener_);
++      ASSERT_FALSE(
++          content::TriggerTimeoutAndCheckRunningState(context, version_id));
++      stopped.WaitForWorkerStopped();
++    } else {
++      ASSERT_FALSE(
++          content::TriggerTimeoutAndCheckRunningState(context, version_id));
++      stopped.WaitForWorkerStopped();
++      // An ordinary timed-out request must still tolerate its late response.
++      function->CompleteForTest();
++      resolve_on_failure.RunAndReset();
++      function.reset();
++      base::RunLoop().RunUntilIdle();
++    }
++  }
++#endif
++
+   base::SimpleTestTickClock tick_clock_opener_;
+   base::SimpleTestTickClock tick_clock_receiver_;
+ 
+  private:
+   base::test::ScopedFeatureList feature_list_;
+ };
++
++#if BUILDFLAG(IS_ANDROID)
++IN_PROC_BROWSER_TEST_F(ServiceWorkerLifetimeKeepaliveBrowsertest,
++                       InteractiveGetAuthTokenKeepsWorkerAliveUntilResponse) {
++  CheckOAuthRequestKeepalive(true);
++}
++
++IN_PROC_BROWSER_TEST_F(ServiceWorkerLifetimeKeepaliveBrowsertest,
++                       SilentGetAuthTokenRetainsWorkerTimeout) {
++  CheckOAuthRequestKeepalive(false);
++}
++#endif
+ 
+ // Loads two extensions that open a persistent port connection between each
+ // other and tests that their service worker will stop after kRequestTimeout (5
+@@ -655,6 +799,236 @@
+                     ->GetServiceWorkerKeepaliveDataForRecords(extension->id())
+                     .size());
+ }
++
++#if BUILDFLAG(IS_ANDROID)
++IN_PROC_BROWSER_TEST_F(ServiceWorkerLifetimeKeepaliveBrowsertest,
++                       KeepaliveMetadataRetiresOnStopAndPreservesRestart) {
++  TestExtensionDir test_dir;
++  test_dir.WriteManifest(R"({
++    "name": "Worker accounting",
++    "manifest_version": 3,
++    "version": "1.0",
++    "background": {"service_worker": "background.js"}
++  })");
++  test_dir.WriteFile(FILE_PATH_LITERAL("background.js"), "// blank");
++  const Extension* extension = LoadExtension(test_dir.UnpackedPath());
++  ASSERT_TRUE(extension);
++  EXPECT_EQ("running", BackgroundScriptExecutor::ExecuteScript(
++                           profile(), extension->id(),
++                           "chrome.test.sendScriptResult('running');",
++                           BackgroundScriptExecutor::ResultCapture::
++                               kSendScriptResult));
++  base::RunLoop().RunUntilIdle();
++  ProcessManager* pm = ProcessManager::Get(profile());
++  auto workers = pm->GetServiceWorkersForExtension(extension->id());
++  ASSERT_EQ(1u, workers.size());
++  const WorkerId original_worker = workers[0];
++  ASSERT_TRUE(original_worker.start_token);
++  WorkerId tokenless_worker = original_worker;
++  tokenless_worker.start_token.reset();
++  std::optional<ServiceWorkerKeepalive> old_owner;
++  {
++    ServiceWorkerKeepalive original(
++        profile(), tokenless_worker,
++        content::ServiceWorkerExternalRequestTimeoutType::kDefault,
++        Activity::API_FUNCTION, "ordinary accounting");
++    EXPECT_TRUE(original.worker_id().start_token ==
++                original_worker.start_token);
++    old_owner.emplace(std::move(original));
++  }
++  EXPECT_EQ(1u, pm->GetServiceWorkerKeepaliveDataForRecords(extension->id())
++                    .size());
++
++  TestExtensionDir other_dir;
++  other_dir.WriteManifest(R"({
++    "name": "Unrelated worker accounting",
++    "manifest_version": 3,
++    "version": "1.0",
++    "background": {"service_worker": "background.js"}
++  })");
++  other_dir.WriteFile(FILE_PATH_LITERAL("background.js"), "// blank");
++  const Extension* other = LoadExtension(other_dir.UnpackedPath());
++  ASSERT_TRUE(other);
++  EXPECT_EQ("running", BackgroundScriptExecutor::ExecuteScript(
++                           profile(), other->id(),
++                           "chrome.test.sendScriptResult('running');",
++                           BackgroundScriptExecutor::ResultCapture::
++                               kSendScriptResult));
++  base::RunLoop().RunUntilIdle();
++  auto other_workers = pm->GetServiceWorkersForExtension(other->id());
++  ASSERT_EQ(1u, other_workers.size());
++  ServiceWorkerKeepalive other_owner(
++      profile(), other_workers[0],
++      content::ServiceWorkerExternalRequestTimeoutType::kDefault,
++      Activity::EVENT, "other extension");
++
++  browsertest_util::StopServiceWorkerForExtensionGlobalScope(profile(),
++                                                            extension->id());
++  EXPECT_TRUE(
++      pm->GetServiceWorkerKeepaliveDataForRecords(extension->id()).empty());
++  EXPECT_EQ(1u,
++            pm->GetServiceWorkerKeepaliveDataForRecords(other->id()).size());
++  EXPECT_FALSE(pm->GetServiceWorkerRunningInstance(original_worker));
++
++  EXPECT_EQ("restarted", BackgroundScriptExecutor::ExecuteScript(
++                             profile(), extension->id(),
++                             "chrome.test.sendScriptResult('restarted');",
++                             BackgroundScriptExecutor::ResultCapture::
++                                 kSendScriptResult));
++  base::RunLoop().RunUntilIdle();
++  workers = pm->GetServiceWorkersForExtension(extension->id());
++  ASSERT_EQ(1u, workers.size());
++  ASSERT_TRUE(workers[0].start_token);
++  EXPECT_TRUE(workers[0].start_token != original_worker.start_token);
++  ServiceWorkerKeepalive new_owner(
++      profile(), workers[0],
++      content::ServiceWorkerExternalRequestTimeoutType::kDefault,
++      Activity::EVENT, "new incarnation");
++  old_owner.reset();
++  const auto records =
++      pm->GetServiceWorkerKeepaliveDataForRecords(extension->id());
++  ASSERT_EQ(1u, records.size());
++  EXPECT_EQ("new incarnation", records[0].extra_data);
++  EXPECT_TRUE(records[0].worker_id.start_token == workers[0].start_token);
++  EXPECT_EQ(1u,
++            pm->GetServiceWorkerKeepaliveDataForRecords(other->id()).size());
++}
++
++IN_PROC_BROWSER_TEST_F(ServiceWorkerLifetimeKeepaliveBrowsertest,
++                       MovedKeepaliveUsesOwningProfileShutdown) {
++  TestExtensionDir test_dir;
++  test_dir.WriteManifest(R"({
++    "name": "Moved profile accounting",
++    "manifest_version": 3,
++    "version": "1.0",
++    "incognito": "split",
++    "background": {"service_worker": "background.js"}
++  })");
++  test_dir.WriteFile(FILE_PATH_LITERAL("background.js"), "// blank");
++  const Extension* extension =
++      LoadExtension(test_dir.UnpackedPath(), {.allow_in_incognito = true});
++  ASSERT_TRUE(extension);
++  Profile* otr = profile()->GetPrimaryOTRProfile(/*create_if_needed=*/true);
++  content::WebContents* otr_contents =
++      PlatformOpenURLOffTheRecord(profile(), GURL("about:blank"));
++  ASSERT_TRUE(otr_contents);
++  EXPECT_EQ("regular", BackgroundScriptExecutor::ExecuteScript(
++                           profile(), extension->id(),
++                           "chrome.test.sendScriptResult('regular');",
++                           BackgroundScriptExecutor::ResultCapture::
++                               kSendScriptResult));
++  EXPECT_EQ("otr", BackgroundScriptExecutor::ExecuteScript(
++                       otr, extension->id(),
++                       "chrome.test.sendScriptResult('otr');",
++                       BackgroundScriptExecutor::ResultCapture::
++                           kSendScriptResult));
++  base::RunLoop().RunUntilIdle();
++  ProcessManager* regular_pm = ProcessManager::Get(profile());
++  const auto regular_workers =
++      regular_pm->GetServiceWorkersForExtension(extension->id());
++  const auto otr_workers =
++      ProcessManager::Get(otr)->GetServiceWorkersForExtension(extension->id());
++  ASSERT_EQ(1u, regular_workers.size());
++  ASSERT_EQ(1u, otr_workers.size());
++  ServiceWorkerKeepalive regular_owner(
++      profile(), regular_workers[0],
++      content::ServiceWorkerExternalRequestTimeoutType::kDefault,
++      Activity::EVENT, "regular profile");
++  std::optional<ServiceWorkerKeepalive> moved_owner;
++  {
++    ServiceWorkerKeepalive original(
++        otr, otr_workers[0],
++        content::ServiceWorkerExternalRequestTimeoutType::kDefault,
++        Activity::EVENT, "off the record profile");
++    moved_owner.emplace(std::move(original));
++  }
++  EXPECT_EQ(1u, ProcessManager::Get(otr)
++                    ->GetServiceWorkerKeepaliveDataForRecords(extension->id())
++                    .size());
++  ProfileDestructionWaiter waiter(otr);
++  CloseTabForWebContents(otr_contents);
++  waiter.Wait();
++  base::RunLoop().RunUntilIdle();
++  // The moved destination's shutdown subscription must have nulled its context.
++  moved_owner.reset();
++  const auto records =
++      regular_pm->GetServiceWorkerKeepaliveDataForRecords(extension->id());
++  ASSERT_EQ(1u, records.size());
++  EXPECT_EQ("regular profile", records[0].extra_data);
++  EXPECT_TRUE(records[0].worker_id.start_token ==
++              regular_workers[0].start_token);
++}
++
++IN_PROC_BROWSER_TEST_F(ServiceWorkerLifetimeKeepaliveBrowsertest,
++                       DebuggerMetadataRetiresBeforeLateDetach) {
++  TestExtensionDir test_dir;
++  test_dir.WriteManifest(R"({
++    "name": "Debugger accounting",
++    "manifest_version": 3,
++    "version": "1.0",
++    "permissions": ["debugger", "tabs"],
++    "background": {"service_worker": "background.js"}
++  })");
++  test_dir.WriteFile(FILE_PATH_LITERAL("background.js"), R"(
++    async function attach() {
++      const [tab] =
++          await chrome.tabs.query({active: true, currentWindow: true});
++      await chrome.debugger.attach({tabId: tab.id}, '1.3');
++      chrome.test.sendScriptResult('attached');
++    }
++    async function detach() {
++      const [tab] =
++          await chrome.tabs.query({active: true, currentWindow: true});
++      await chrome.debugger.detach({tabId: tab.id});
++      chrome.test.sendScriptResult('detached');
++    }
++  )");
++  const Extension* extension = LoadExtension(test_dir.UnpackedPath());
++  ASSERT_TRUE(extension);
++  ASSERT_TRUE(NavigateToURL(GetActiveWebContents(), GURL("about:blank")));
++  EXPECT_EQ("attached", BackgroundScriptExecutor::ExecuteScript(
++                            profile(), extension->id(), "attach();",
++                            BackgroundScriptExecutor::ResultCapture::
++                                kSendScriptResult));
++  base::RunLoop().RunUntilIdle();
++  ProcessManager* pm = ProcessManager::Get(profile());
++  const auto original_workers =
++      pm->GetServiceWorkersForExtension(extension->id());
++  ASSERT_EQ(1u, original_workers.size());
++  auto records = pm->GetServiceWorkerKeepaliveDataForRecords(extension->id());
++  ASSERT_EQ(1u, records.size());
++  EXPECT_EQ(Activity::DEBUGGER, records[0].activity_type);
++  EXPECT_TRUE(records[0].worker_id.start_token ==
++              original_workers[0].start_token);
++
++  browsertest_util::StopServiceWorkerForExtensionGlobalScope(profile(),
++                                                            extension->id());
++  EXPECT_TRUE(
++      pm->GetServiceWorkerKeepaliveDataForRecords(extension->id()).empty());
++  EXPECT_EQ("restarted", BackgroundScriptExecutor::ExecuteScript(
++                             profile(), extension->id(),
++                             "chrome.test.sendScriptResult('restarted');",
++                             BackgroundScriptExecutor::ResultCapture::
++                                 kSendScriptResult));
++  base::RunLoop().RunUntilIdle();
++  const auto new_workers = pm->GetServiceWorkersForExtension(extension->id());
++  ASSERT_EQ(1u, new_workers.size());
++  EXPECT_TRUE(new_workers[0].start_token != original_workers[0].start_token);
++  ServiceWorkerKeepalive new_owner(
++      profile(), new_workers[0],
++      content::ServiceWorkerExternalRequestTimeoutType::kDefault,
++      Activity::EVENT, "new debugger incarnation");
++  EXPECT_EQ("detached", BackgroundScriptExecutor::ExecuteScript(
++                            profile(), extension->id(), "detach();",
++                            BackgroundScriptExecutor::ResultCapture::
++                                kSendScriptResult));
++  base::RunLoop().RunUntilIdle();
++  records = pm->GetServiceWorkerKeepaliveDataForRecords(extension->id());
++  ASSERT_EQ(1u, records.size());
++  EXPECT_EQ("new debugger incarnation", records[0].extra_data);
++  EXPECT_TRUE(records[0].worker_id.start_token == new_workers[0].start_token);
++}
++#endif
+ 
+ // Tests that the browser ignores stale idle termination requests from the
+ // renderer that were sent before the browser started an external request. See

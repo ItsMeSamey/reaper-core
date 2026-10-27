@@ -1,0 +1,133 @@
+diff --git a/build/android/pylib/local/device/local_device_environment_test.py b/build/android/pylib/local/device/local_device_environment_test.py
+new file mode 100755
+--- /dev/null
++++ b/build/android/pylib/local/device/local_device_environment_test.py
+@@ -0,0 +1,128 @@
++#!/usr/bin/env vpython3
++# Copyright 2026 The Chromium Authors
++# Use of this source code is governed by a BSD-style license that can be
++# found in the LICENSE file.
++
++import os
++import sys
++import types
++import unittest
++from unittest import mock
++
++sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..')))
++
++from devil.android import crash_handler
++from devil.android import device_errors
++from pylib.local.device import local_device_environment
++
++
++class DiscoveryRecoveryTest(unittest.TestCase):
++    def environment(self, disabled=True, serials=None):
++        return types.SimpleNamespace(
++            _device_serials=['owned-serial'] if serials is None else serials,
++            _disable_device_recovery=disabled, _denylist=None,
++            _enable_device_cache=False, _max_tries=1, _preferred_abis=None,
++            _use_persistent_shell=False, _logcat_output_file=None,
++            _force_main_user=False, parallel_devices=mock.Mock(),
++            DenylistDevice=mock.Mock(),
++        )
++
++    def testNoDeviceRecoveryNeverRepeatsAnUncertainOperation(self):
++        env = types.SimpleNamespace(disable_device_recovery=True)
++        device = mock.Mock()
++        operation = mock.Mock(side_effect=device_errors.DeviceUnreachableError('disconnected'))
++        with self.assertRaises(device_errors.DeviceUnreachableError):
++            crash_handler.RetryOnSystemCrash(
++                operation, device,
++                **local_device_environment.GetSystemCrashRetryOptions(env))
++        operation.assert_called_once_with(device)
++        device.ClearCache.assert_not_called()
++        device.WaitUntilFullyBooted.assert_not_called()
++
++    def testDefaultSystemCrashRetryBehaviorIsUnchanged(self):
++        env = types.SimpleNamespace(disable_device_recovery=False)
++        self.assertEqual({}, local_device_environment.GetSystemCrashRetryOptions(env))
++        device = mock.Mock()
++        operation = mock.Mock(side_effect=[
++            device_errors.DeviceUnreachableError('disconnected'), 'complete'])
++        self.assertEqual('complete', crash_handler.RetryOnSystemCrash(
++            operation, device,
++            **local_device_environment.GetSystemCrashRetryOptions(env)))
++        self.assertEqual(2, operation.call_count)
++        device.ClearCache.assert_called_once()
++        device.WaitUntilFullyBooted.assert_called_once()
++
++    def testRealDiscoveryFailureCannotRestartServerOrResetUsb(self):
++        utils = local_device_environment.device_utils
++        denylist = mock.Mock()
++        denylist.Read.return_value = ['owned-serial']
++        with (mock.patch.object(utils.adb_wrapper, 'RestartServer') as restart,
++              mock.patch.object(utils, 'reset_usb') as reset_usb,
++              mock.patch.object(utils.time, 'sleep') as sleep,
++              mock.patch.object(utils.DeviceUtils, '__init__',
++                                side_effect=AssertionError('No device may be constructed'))):
++            with self.assertRaises(device_errors.NoDevicesError):
++                utils.DeviceUtils.HealthyDevices(
++                    denylist=denylist, device_arg=['owned-serial'],
++                    retries=0, enable_usb_resets=False)
++            restart.assert_not_called()
++            reset_usb.reset_android_usb.assert_not_called()
++            reset_usb.reset_all_android_devices.assert_not_called()
++            sleep.assert_not_called()
++
++    @mock.patch.object(local_device_environment.device_utils.DeviceUtils, 'HealthyDevices')
++    def testDefaultDiscoveryPolicyUnchanged(self, healthy):
++        env = self.environment(disabled=False)
++        healthy.return_value = []
++        local_device_environment.LocalDeviceEnvironment._InitDevices(env)
++        self.assertEqual(5, healthy.call_args.kwargs['retries'])
++        self.assertTrue(healthy.call_args.kwargs['enable_usb_resets'])
++
++    @mock.patch.object(local_device_environment.device_utils.DeviceUtils, 'HealthyDevices')
++    def testExplicitOnlineDeviceDisablesBothRecoveryPaths(self, healthy):
++        env = self.environment()
++        device = mock.MagicMock()
++        device.__str__.return_value = 'owned-serial'
++        device.IsOnline.return_value = True
++        healthy.return_value = [device]
++        local_device_environment.LocalDeviceEnvironment._InitDevices(env)
++        self.assertEqual(0, healthy.call_args.kwargs['retries'])
++        self.assertFalse(healthy.call_args.kwargs['enable_usb_resets'])
++        self.assertEqual(['owned-serial'], healthy.call_args.kwargs['device_arg'])
++        device.IsOnline.assert_called_once_with(retries=0)
++        env.parallel_devices.pMap.assert_called_once()
++
++    @mock.patch.object(local_device_environment.device_utils.DeviceUtils, 'HealthyDevices')
++    def testMissingOrMultipleSerialsNeverDiscover(self, healthy):
++        for serials in ([], ['a', 'b'], ['']):
++            with self.subTest(serials=serials):
++                with self.assertRaises(ValueError):
++                    local_device_environment.LocalDeviceEnvironment._InitDevices(
++                        self.environment(serials=serials))
++        healthy.assert_not_called()
++
++    @mock.patch.object(local_device_environment.device_utils.DeviceUtils, 'HealthyDevices')
++    def testOfflineExplicitDeviceNeverEntersSetup(self, healthy):
++        env = self.environment()
++        device = mock.MagicMock()
++        device.__str__.return_value = 'owned-serial'
++        device.IsOnline.return_value = False
++        healthy.return_value = [device]
++        with self.assertRaises(device_errors.DeviceUnreachableError):
++            local_device_environment.LocalDeviceEnvironment._InitDevices(env)
++        env.parallel_devices.pMap.assert_not_called()
++        self.assertIsNone(env._devices)
++
++    @mock.patch.object(local_device_environment.device_utils.DeviceUtils, 'HealthyDevices')
++    def testDiscoveryFailurePropagatesWithoutSetup(self, healthy):
++        env = self.environment()
++        healthy.side_effect = device_errors.NoDevicesError()
++        with self.assertRaises(device_errors.NoDevicesError):
++            local_device_environment.LocalDeviceEnvironment._InitDevices(env)
++        env.parallel_devices.pMap.assert_not_called()
++        self.assertEqual(0, healthy.call_args.kwargs['retries'])
++        self.assertFalse(healthy.call_args.kwargs['enable_usb_resets'])
++
++
++if __name__ == '__main__':
++    unittest.main(verbosity=2)

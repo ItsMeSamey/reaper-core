@@ -3,10 +3,14 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at https://mozilla.org/MPL/2.0/.
 
+#include "build/build_config.h"
+
 #include "brave/components/brave_shields/core/browser/brave_shields_settings_service.h"
 
 #include "base/hash/hash.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_shields/core/browser/brave_shields_p3a.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_shields/core/browser/brave_shields_utils.h"
 #include "brave/components/brave_shields/core/common/brave_shield_utils.h"
 #include "brave/components/brave_shields/core/common/features.h"
@@ -266,8 +270,12 @@ void BraveShieldsSettingsService::SetForgetFirstPartyStorageEnabled(
       ContentSettingsType::BRAVE_REMEMBER_1P_STORAGE,
       is_enabled ? CONTENT_SETTING_BLOCK : CONTENT_SETTING_ALLOW);
 
+#if !BUILDFLAG(IS_ANDROID)
   MaybeRecordShieldsUsageP3A(kChangedPerSiteShields, local_state_);
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
   RecordForgetFirstPartySetting(&*host_content_settings_map_);
+#endif  // !BUILDFLAG(IS_ANDROID)
 }
 #endif
 
@@ -298,7 +306,9 @@ void BraveShieldsSettingsService::SetAutoShredMode(mojom::AutoShredMode mode,
       primary_pattern, ContentSettingsPattern::Wildcard(),
       AutoShredSetting::kContentSettingsType, AutoShredSetting::ToValue(mode));
 
+#if !BUILDFLAG(IS_ANDROID)
   ReportAutoShredSettingsP3A(*host_content_settings_map_);
+#endif  // !BUILDFLAG(IS_ANDROID)
 }
 
 mojom::AutoShredMode BraveShieldsSettingsService::GetAutoShredMode(

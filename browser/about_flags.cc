@@ -5,7 +5,11 @@
 
 // This file is included into //chrome/browser/about_flags.cc.
 
+#include "build/build_config.h"
+
 #include <initializer_list>
+
+#include "brave/components/ntp_background_images/buildflags/buildflags.h"
 
 #include "brave/browser/brave_browser_features.h"
 #include "brave/browser/net/features.h"
@@ -16,9 +20,13 @@
 #include "brave/components/brave_component_updater/browser/features.h"
 #include "brave/components/brave_education/buildflags.h"
 #include "brave/components/brave_news/common/buildflags/buildflags.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_origin/features.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_rewards/core/buildflags/buildflags.h"
+#if BUILDFLAG(ENABLE_BRAVE_REWARDS)
 #include "brave/components/brave_rewards/core/features.h"
+#endif  // BUILDFLAG(ENABLE_BRAVE_REWARDS)
 #include "brave/components/brave_shields/core/common/features.h"
 #include "brave/components/brave_sync/features.h"
 #include "brave/components/brave_vpn/common/buildflags/buildflags.h"
@@ -32,23 +40,28 @@
 #include "brave/components/google_sign_in_permission/features.h"
 #include "brave/components/image_metadata_stripper/common/features.h"
 #include "brave/components/local_ai/buildflags/buildflags.h"
+#if BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
 #include "brave/components/ntp_background_images/browser/features.h"
+#endif  // BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
 #include "brave/components/playlist/core/common/buildflags/buildflags.h"
 #include "brave/components/psst/buildflags/buildflags.h"
 #include "brave/components/request_otr/common/buildflags/buildflags.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/skus/common/features.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/speedreader/common/buildflags/buildflags.h"
 #include "brave/components/traffic_control/buildflags/buildflags.h"
 #include "brave/components/v8/buildflags/buildflags.h"
 #include "brave/components/webcompat/core/common/features.h"
 #include "brave/ui/webui/custom_profile_image/buildflags/buildflags.h"
-#include "build/build_config.h"
 #include "chrome/browser/buildflags.h"
 #include "chrome/browser/ui/tabs/features.h"
 #include "chrome/browser/ui/ui_features.h"
 #include "components/content_settings/core/common/features.h"
 #include "components/history/core/browser/features.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "components/history_embeddings/core/history_embeddings_features.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "components/omnibox/common/omnibox_features.h"
 #include "components/sync/base/command_line_switches.h"
 #include "components/translate/core/browser/translate_prefs.h"
@@ -1090,8 +1103,89 @@ constexpr flags_ui::FeatureEntry::Choice kVerticalTabMigrationChoices[] = {
 #define BRAVE_SIDEBAR_WEB_PANEL_FEATURE_ENTRY
 #endif
 
+#if BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
+#define BRAVE_NTP_SPONSORED_FEATURE_ENTRIES \
+  EXPAND_FEATURE_ENTRIES( \
+      {                                                                        \
+          "center-ntt-cta-button",                                             \
+          "Center image NTT CTA button",                                       \
+          "Centers image NTT CTA button above the widget area",                \
+          kOsDesktop,                                                          \
+          FEATURE_VALUE_TYPE(                                                  \
+              ntp_background_images::features::kCenterNttCtaButton),           \
+      })
+#else
+#define BRAVE_NTP_SPONSORED_FEATURE_ENTRIES
+#endif
+
 // Keep the last item empty.
 #define LAST_BRAVE_FEATURE_ENTRIES_ITEM
+
+#if BUILDFLAG(IS_ANDROID)
+#define BRAVE_ORIGIN_FEATURE_ENTRY
+#else
+#define BRAVE_ORIGIN_FEATURE_ENTRY \
+  EXPAND_FEATURE_ENTRIES({                                                     \
+      "brave-origin",                                                          \
+      "Enable Brave Origin",                                                   \
+      "Enables Brave Origin features and settings.",                           \
+      kOsDesktop | kOsAndroid,                                                 \
+      FEATURE_VALUE_TYPE(brave_origin::features::kBraveOrigin),                \
+  })
+#endif
+
+#if BUILDFLAG(ENABLE_BRAVE_REWARDS)
+#define BRAVE_REWARDS_FEATURE_ENTRIES \
+  EXPAND_FEATURE_ENTRIES( \
+      { \
+          "brave-rewards-verbose-logging", \
+          "Enable Brave Rewards verbose logging", \
+          "Enables detailed logging of Brave Rewards system events to a log " \
+          "file stored on your device. Please note that this log file could " \
+          "include information such as browsing history and credentials such " \
+          "as passwords and access tokens depending on your activity. Please " \
+          "do not share it unless asked to by Brave staff.", \
+          kOsDesktop | kOsAndroid, \
+          FEATURE_VALUE_TYPE(brave_rewards::features::kVerboseLoggingFeature), \
+      }, \
+      { \
+          "brave-rewards-allow-unsupported-wallet-providers", \
+          "Always show Brave Rewards custodial connection options", \
+ \
+          "Allows all custodial options to be selected in Brave Rewards, " \
+          "including those not supported for your Rewards country.", \
+          kOsDesktop | kOsAndroid, \
+          FEATURE_VALUE_TYPE(brave_rewards::features:: \
+                                 kAllowUnsupportedWalletProvidersFeature), \
+      }, \
+      { \
+          "brave-rewards-allow-self-custody-providers", \
+          "Enable Brave Rewards self-custody connection options", \
+          "Enables self-custody options to be selected in Brave Rewards.", \
+          kOsDesktop | kOsAndroid, \
+          FEATURE_VALUE_TYPE( \
+              brave_rewards::features::kAllowSelfCustodyProvidersFeature), \
+      }, \
+      { \
+          "brave-rewards-animated-background", \
+          "Show an animated background on the Rewards UI", \
+          "Shows an animated background on the Rewards panel and page.", \
+          kOsDesktop | kOsAndroid, \
+          FEATURE_VALUE_TYPE( \
+              brave_rewards::features::kAnimatedBackgroundFeature), \
+      }, \
+      { \
+          "brave-rewards-platform-creator-detection", \
+          "Detect Brave Creators on media platform sites", \
+          "Enables detection of Brave Creator pages on media platform sites.", \
+          kOsDesktop | kOsAndroid, \
+          FEATURE_VALUE_TYPE( \
+              brave_rewards::features::kPlatformCreatorDetectionFeature), \
+      } \
+  )
+#else
+#define BRAVE_REWARDS_FEATURE_ENTRIES
+#endif
 
 #define BRAVE_ABOUT_FLAGS_FEATURE_ENTRIES                                      \
   EXPAND_FEATURE_ENTRIES(                                                      \
@@ -1118,14 +1212,6 @@ constexpr flags_ui::FeatureEntry::Choice kVerticalTabMigrationChoices[] = {
           "Enables searching directly from the New Tab Page",                  \
           kOsDesktop,                                                          \
           FEATURE_VALUE_TYPE(features::kBraveNtpSearchWidget),                 \
-      },                                                                       \
-      {                                                                        \
-          "center-ntt-cta-button",                                             \
-          "Center image NTT CTA button",                                       \
-          "Centers image NTT CTA button above the widget area",                \
-          kOsDesktop,                                                          \
-          FEATURE_VALUE_TYPE(                                                  \
-              ntp_background_images::features::kCenterNttCtaButton),           \
       },                                                                       \
       {                                                                        \
           "brave-filled-bookmark-folder-icon",                                 \
@@ -1389,51 +1475,7 @@ constexpr flags_ui::FeatureEntry::Choice kVerticalTabMigrationChoices[] = {
           kOsAll,                                                              \
           FEATURE_VALUE_TYPE(net::features::kBraveForgetFirstPartyStorage),    \
       },                                                                       \
-      {                                                                        \
-          "brave-rewards-verbose-logging",                                     \
-          "Enable Brave Rewards verbose logging",                              \
-          "Enables detailed logging of Brave Rewards system events to a log "  \
-          "file stored on your device. Please note that this log file could "  \
-          "include information such as browsing history and credentials such " \
-          "as passwords and access tokens depending on your activity. Please " \
-          "do not share it unless asked to by Brave staff.",                   \
-          kOsDesktop | kOsAndroid,                                             \
-          FEATURE_VALUE_TYPE(brave_rewards::features::kVerboseLoggingFeature), \
-      },                                                                       \
-      {                                                                        \
-          "brave-rewards-allow-unsupported-wallet-providers",                  \
-          "Always show Brave Rewards custodial connection options",            \
-                                                                               \
-          "Allows all custodial options to be selected in Brave Rewards, "     \
-          "including those not supported for your Rewards country.",           \
-          kOsDesktop | kOsAndroid,                                             \
-          FEATURE_VALUE_TYPE(brave_rewards::features::                         \
-                                 kAllowUnsupportedWalletProvidersFeature),     \
-      },                                                                       \
-      {                                                                        \
-          "brave-rewards-allow-self-custody-providers",                        \
-          "Enable Brave Rewards self-custody connection options",              \
-          "Enables self-custody options to be selected in Brave Rewards.",     \
-          kOsDesktop | kOsAndroid,                                             \
-          FEATURE_VALUE_TYPE(                                                  \
-              brave_rewards::features::kAllowSelfCustodyProvidersFeature),     \
-      },                                                                       \
-      {                                                                        \
-          "brave-rewards-animated-background",                                 \
-          "Show an animated background on the Rewards UI",                     \
-          "Shows an animated background on the Rewards panel and page.",       \
-          kOsDesktop | kOsAndroid,                                             \
-          FEATURE_VALUE_TYPE(                                                  \
-              brave_rewards::features::kAnimatedBackgroundFeature),            \
-      },                                                                       \
-      {                                                                        \
-          "brave-rewards-platform-creator-detection",                          \
-          "Detect Brave Creators on media platform sites",                     \
-          "Enables detection of Brave Creator pages on media platform sites.", \
-          kOsDesktop | kOsAndroid,                                             \
-          FEATURE_VALUE_TYPE(                                                  \
-              brave_rewards::features::kPlatformCreatorDetectionFeature),      \
-      },                                                                       \
+      BRAVE_REWARDS_FEATURE_ENTRIES \
       {                                                                        \
           "file-system-access-api",                                            \
           "File System Access API",                                            \
@@ -1662,6 +1704,7 @@ constexpr flags_ui::FeatureEntry::Choice kVerticalTabMigrationChoices[] = {
           kOsAll,                                                              \
           FEATURE_VALUE_TYPE(features::kBraveRequestInfoUniquePtr),            \
       })                                                                       \
+  BRAVE_NTP_SPONSORED_FEATURE_ENTRIES \
   BRAVE_NATIVE_WALLET_FEATURE_ENTRIES                                          \
   BRAVE_NEWS_FEATURE_ENTRIES                                                   \
   SPEEDREADER_FEATURE_ENTRIES                                                  \
@@ -1703,13 +1746,7 @@ constexpr flags_ui::FeatureEntry::Choice kVerticalTabMigrationChoices[] = {
   BRAVE_FORCE_POPUP_TO_BE_OPENED_IN_NEW_TAB_FEATURE_ENTRY                      \
   EMAIL_ALIASES_FEATURE_ENTRIES                                                \
   BRAVE_WORKSPACE_FEATURE_ENTRY                                                \
-  EXPAND_FEATURE_ENTRIES({                                                     \
-      "brave-origin",                                                          \
-      "Enable Brave Origin",                                                   \
-      "Enables Brave Origin features and settings.",                           \
-      kOsDesktop | kOsAndroid,                                                 \
-      FEATURE_VALUE_TYPE(brave_origin::features::kBraveOrigin),                \
-  })                                                                           \
+  BRAVE_ORIGIN_FEATURE_ENTRY                                                  \
   BRAVE_SCREENSHOT_FEATURE_ENTRY                                               \
   BRAVE_SIDEBAR_WEB_PANEL_FEATURE_ENTRY                                        \
   LAST_BRAVE_FEATURE_ENTRIES_ITEM  // Keep it as the last item.

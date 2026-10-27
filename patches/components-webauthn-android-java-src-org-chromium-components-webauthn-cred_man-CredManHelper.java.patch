@@ -1,0 +1,109 @@
+diff --git a/components/webauthn/android/java/src/org/chromium/components/webauthn/cred_man/CredManHelper.java b/components/webauthn/android/java/src/org/chromium/components/webauthn/cred_man/CredManHelper.java
+--- a/components/webauthn/android/java/src/org/chromium/components/webauthn/cred_man/CredManHelper.java
++++ b/components/webauthn/android/java/src/org/chromium/components/webauthn/cred_man/CredManHelper.java
+@@ -86,6 +86,7 @@
+     private boolean mRequestPasswords;
+     private final AuthenticationContextProvider mAuthenticationContextProvider;
+     private final WebauthnBrowserBridge.Provider mBridgeProvider;
++    private @Nullable WebauthnBrowserBridge mRequestBridge;
+     private byte @Nullable [] mClientDataJson;
+     private @CancellableUiState int mCancellableUiState = CancellableUiState.NONE;
+     private final @Nullable CredManRequestDecorator mCredManRequestDecorator;
+@@ -113,6 +114,9 @@
+             byte @Nullable [] clientDataJson,
+             byte @Nullable [] clientDataHash) {
+         log(TAG, "startMakeRequest");
++        if (mAuthenticationContextProvider.shouldBlockUserInteraction()) {
++            return AuthenticatorStatus.NOT_FOCUSED;
++        }
+         mClientDataJson = clientDataJson;
+         final String requestAsJson =
+                 Fido2CredentialRequestJni.get().createOptionsToJson(options.serialize());
+@@ -125,6 +129,7 @@
+                 new OutcomeReceiver<>() {
+                     @Override
+                     public void onError(CreateCredentialException exception) {
++                        if (mAuthenticationContextProvider.getRequestCallback() == null) return;
+                         String errorType = exception.getType();
+                         logError(
+                                 TAG,
+@@ -187,6 +192,7 @@
+ 
+                     @Override
+                     public void onResult(CreateCredentialResponse createCredentialResponse) {
++                        if (mAuthenticationContextProvider.getRequestCallback() == null) return;
+                         log(TAG, "startMakeRequest.onResult");
+                         Bundle data = createCredentialResponse.getData();
+                         MakeCredentialAuthenticatorResponse response =
+@@ -260,12 +266,14 @@
+         mBarrier = barrier; // Store this for any cancellation requests.
+         final Barrier localBarrier = barrier;
+         final WebauthnBrowserBridge localBridge = assumeNonNull(mBridgeProvider.getBridge());
++        mRequestBridge = localBridge;
+ 
+         RenderFrameHost frameHost = mAuthenticationContextProvider.getRenderFrameHost();
+         OutcomeReceiver<PrepareGetCredentialResponse, GetCredentialException> receiver =
+                 new OutcomeReceiver<>() {
+                     @Override
+                     public void onError(GetCredentialException e) {
++                        if (mAuthenticationContextProvider.getRequestCallback() == null) return;
+                         assert mCancellableUiState != CancellableUiState.WAITING_FOR_SELECTION;
+                         // prepareGetCredential uses getCredentialException, but it cannot be user
+                         // cancelled so all errors map to UNKNOWN_ERROR.
+@@ -285,6 +293,7 @@
+                     @Override
+                     public void onResult(
+                             PrepareGetCredentialResponse prepareGetCredentialResponse) {
++                        if (mAuthenticationContextProvider.getRequestCallback() == null) return;
+                         log(TAG, "startPrefetchRequest.onResult");
+                         if (mCancellableUiState == CancellableUiState.CANCEL_PENDING) {
+                             // The request was completed synchronously when the cancellation was
+@@ -380,6 +389,8 @@
+                         } else {
+                             barrierCallback =
+                                     () -> {
++                                        if (mAuthenticationContextProvider.getRequestCallback()
++                                                == null) return;
+                                         localBridge.onCredManConditionalRequestPending(
+                                                 frameHost,
+                                                 hasPublicKeyCredentials || hasAuthenticationResults,
+@@ -445,9 +456,13 @@
+             byte @Nullable [] clientDataHash,
+             boolean ignoreGpm) {
+         log(TAG, "startGetRequest");
++        if (mAuthenticationContextProvider.shouldBlockUserInteraction()) {
++            return AuthenticatorStatus.NOT_FOCUSED;
++        }
+         mClientDataJson = clientDataJson;
+         RenderFrameHost frameHost = mAuthenticationContextProvider.getRenderFrameHost();
+         final WebauthnBrowserBridge localBridge = assumeNonNull(mBridgeProvider.getBridge());
++        mRequestBridge = localBridge;
+         WebauthnRequestCallback callback = mAuthenticationContextProvider.getRequestCallback();
+         if (callback != null) {
+             callback.addCompletionCallback(this::cleanupRequest);
+@@ -459,6 +474,7 @@
+                 new OutcomeReceiver<>() {
+                     @Override
+                     public void onError(GetCredentialException getCredentialException) {
++                        if (mAuthenticationContextProvider.getRequestCallback() == null) return;
+                         String errorType = getCredentialException.getType();
+                         logError(
+                                 TAG,
+@@ -545,6 +561,7 @@
+ 
+                     @Override
+                     public void onResult(GetCredentialResponse getCredentialResponse) {
++                        if (mAuthenticationContextProvider.getRequestCallback() == null) return;
+                         log(TAG, "startGetRequest.onResult");
+                         if (mCancellableUiState == CancellableUiState.CANCEL_PENDING) {
+                             notifyBrowserOnCredManClosed(false);
+@@ -856,7 +873,8 @@
+     }
+ 
+     private void cleanupRequest() {
+-        WebauthnBrowserBridge bridge = mBridgeProvider.getBridge();
++        WebauthnBrowserBridge bridge = mRequestBridge;
++        mRequestBridge = null;
+         if (bridge != null && bridge.isInitialized()) {
+             bridge.cleanupRequest(mAuthenticationContextProvider.getRenderFrameHost());
+         }

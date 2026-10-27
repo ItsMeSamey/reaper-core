@@ -3,6 +3,8 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at https://mozilla.org/MPL/2.0/.
 
+#include "build/build_config.h"
+
 #include "brave/components/brave_shields/content/browser/ad_block_subscription_service_manager.h"
 
 #include <memory>
@@ -25,7 +27,9 @@
 #include "brave/components/brave_shields/content/browser/ad_block_subscription_filters_provider.h"
 #include "brave/components/brave_shields/content/browser/ad_block_subscription_service_manager_observer.h"
 #include "brave/components/brave_shields/core/browser/ad_block_filters_provider_manager.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_shields/core/browser/ad_block_list_p3a.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_shields/core/common/adblock/rs/src/lib.rs.h"
 #include "brave/components/brave_shields/core/common/brave_shield_constants.h"
 #include "brave/components/brave_shields/core/common/pref_names.h"
@@ -139,8 +143,11 @@ AdBlockSubscriptionServiceManager::AdBlockSubscriptionServiceManager(
       filters_provider_manager_(filters_provider_manager),
       subscription_path_(profile_dir.Append(kSubscriptionsDir)),
       subscription_update_timer_(
-          std::make_unique<component_updater::TimerUpdateScheduler>()),
-      list_p3a_(list_p3a) {
+          std::make_unique<component_updater::TimerUpdateScheduler>())
+#if !BUILDFLAG(IS_ANDROID)
+      , list_p3a_(list_p3a)
+#endif  // !BUILDFLAG(IS_ANDROID)
+{
   std::move(download_manager_getter)
       .Run(base::BindOnce(
           &AdBlockSubscriptionServiceManager::OnGetDownloadManager,
@@ -483,7 +490,9 @@ void AdBlockSubscriptionServiceManager::UpdateSubscriptionPrefs(
     // TODO(bridiver) - change to pref registrar
     subscriptions_ = subscriptions.Clone();
   }
+#if !BUILDFLAG(IS_ANDROID)
   list_p3a_->ReportFilterListUsage();
+#endif  // !BUILDFLAG(IS_ANDROID)
 }
 
 // Updates preferences to remove all state for the specified filter list

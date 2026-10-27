@@ -1,0 +1,278 @@
+substitutions:
+- description: Only resolve SAF content URIs, and register the original path before any early populated resolution error.
+  regex:
+    pattern: "#if BUILDFLAG(IS_ANDROID)\n  // SelectFileDialog returns a content URI so on Android we need to further\n  //\
+      \ resolve it to a virtual document path\n  std::optional<base::FilePath> vp =\n      base::ResolveToVirtualDocumentPath(file_path);\n\
+      \  if (!vp) {\n    OnLoadComplete(nullptr, file_path, u\"Failed to resolve (removed?)\");\n    return;\n  }\n  file_path\
+      \ = *vp;\n#endif  // BUILDFLAG(IS_ANDROID)\n"
+    replace: "#if BUILDFLAG(IS_ANDROID)\n  // Resolve SAF tree URIs; local selections and already-virtual retry paths\n  //\
+      \ can go directly through the installer's existing file validation.\n  if (file_path.IsContentUri()) {\n    std::optional<base::FilePath>\
+      \ vp =\n        base::ResolveToVirtualDocumentPath(file_path);\n    if (!vp) {\n      // A populated load error must\
+      \ identify the original selection for retry.\n      retry_guid_ = DeveloperPrivateAPI::Get(browser_context())\n    \
+      \                    ->AddUnpackedPath(GetSenderWebContents(), file_path);\n      OnLoadComplete(nullptr, file_path,\
+      \ u\"Failed to resolve (removed?)\");\n      return;\n    }\n    file_path = *vp;\n  }\n#endif  // BUILDFLAG(IS_ANDROID)\n"
+  count: 1
+- description: "SAF557: preserve picker location separately from registered paths (1)."
+  count: 1
+  regex:
+    pattern: "#if BUILDFLAG(IS_ANDROID)\n  // Resolve SAF tree URIs; local selections and already-virtual retry paths\n"
+    replace: "#if BUILDFLAG(IS_ANDROID)\n  const base::FilePath picker_directory =\n      file_path.IsContentUri() ? file_path : base::FilePath();\n  // Resolve SAF tree URIs; local selections and already-virtual retry paths\n"
+- description: "SAF557: preserve picker location separately from registered paths (2)."
+  count: 1
+  regex:
+    pattern: "  retry_guid_ = DeveloperPrivateAPI::Get(browser_context())\n                    ->AddUnpackedPath(GetSenderWebContents(), file_path);\n}"
+    replace: "#if BUILDFLAG(IS_ANDROID)\n  retry_guid_ =\n      DeveloperPrivateAPI::Get(browser_context())\n          ->AddUnpackedPath(GetSenderWebContents(), file_path, picker_directory);\n#else\n  retry_guid_ = DeveloperPrivateAPI::Get(browser_context())\n                    ->AddUnpackedPath(GetSenderWebContents(), file_path);\n#endif\n}"
+- description: Android explicit local CRX picker and ordinary result handling
+  regex:
+    pattern: '#include <vector>
+
+
+      #include "base/barrier_closure.h"
+
+      #include "base/debug/crash_logging.h"
+
+      #include "base/files/file_util.h"
+
+      #include "base/memory/ref_counted.h"
+
+      '
+    replace: '#include <vector>
+
+
+      #include "base/barrier_closure.h"
+
+      #include "base/check_is_test.h"
+
+      #include "base/debug/crash_logging.h"
+
+      #include "base/files/file_util.h"
+
+      #include "base/memory/ref_counted.h"
+
+      '
+  count: 1
+- description: Android explicit local CRX picker and ordinary result handling
+  regex:
+    pattern: '#include "components/prefs/pref_service.h"
+
+      #include "components/signin/public/base/signin_switches.h"
+
+      #include "components/sync/base/features.h"
+
+      #include "content/public/common/drop_data.h"
+
+      #include "extensions/browser/crx_installer.h"
+
+      #include "extensions/browser/disable_reason.h"
+
+      '
+    replace: '#include "components/prefs/pref_service.h"
+
+      #include "components/signin/public/base/signin_switches.h"
+
+      #include "components/sync/base/features.h"
+
+      #include "content/public/browser/navigation_handle.h"
+
+      #include "content/public/browser/render_frame_host.h"
+
+      #include "content/public/common/drop_data.h"
+
+      #include "extensions/browser/crx_installer.h"
+
+      #include "extensions/browser/disable_reason.h"
+
+      '
+  count: 1
+- description: Android explicit local CRX picker and ordinary result handling
+  regex:
+    pattern: "      entry.second.num_extensions++;\n    }\n  }\n}\n\n// Sets the dropped path to DeveloperPrivateAPI.\n"
+    replace: "      entry.second.num_extensions++;\n    }\n  }\n}\n\n// Both explicit local-file selection and a real settings-page drop use the\n// existing local install policy, verifier and confirmation/update lifecycle.\nscoped_refptr<CrxInstaller> CreateSettingsCrxInstaller(\n    content::WebContents* web_contents,\n    content::BrowserContext* browser_context) {\n  auto prompt = std::make_unique<ExtensionInstallPrompt>(\n      web_contents, std::make_unique<extensions::InstallPromptData>(\n                        extensions::InstallPromptData::UNSET_PROMPT_TYPE));\n  auto installer = CrxInstaller::Create(browser_context, std::move(prompt));\n  installer->set_error_on_unsupported_requirements(true);\n  installer->set_off_store_install_allow_reason(\n      CrxInstaller::OffStoreInstallAllowedFromSettingsPage);\n  installer->set_install_immediately(true);\n  return installer;\n}\n\n// Sets the dropped path to DeveloperPrivateAPI.\n"
+  count: 1
+- description: Android explicit local CRX picker and ordinary result handling
+  regex:
+    pattern: "  Release();  // Balanced in Run().\n}\n\nDeveloperPrivateInstallDroppedFileFunction::\n    DeveloperPrivateInstallDroppedFileFunction() = default;\nDeveloperPrivateInstallDroppedFileFunction::\n"
+    replace: "  Release();  // Balanced in Run().\n}\n\nDeveloperPrivateInstallFromFileFunction::\n    DeveloperPrivateInstallFromFileFunction() = default;\n\nDeveloperPrivateInstallFromFileFunction::\n    ~DeveloperPrivateInstallFromFileFunction() {\n  if (select_file_dialog_) {\n    select_file_dialog_->ListenerDestroyed();\n  }\n}\n\nstd::string DeveloperPrivateInstallFromFileFunction::EligibilityError() {\n  auto* contents = GetSenderWebContents();\n  if (!browser_context() || !contents || contents->IsBeingDestroyed() ||\n      contents->GetBrowserContext() != browser_context() ||\n      !render_frame_host() ||\n      render_frame_host() != contents->GetPrimaryMainFrame() ||\n      !render_frame_host()->IsActive()) {\n    return kCouldNotFindWebContentsError;\n  }\n  auto* profile = Profile::FromBrowserContext(browser_context());\n  if (profile->IsOffTheRecord() ||\n      supervised_user::AreExtensionsPermissionsEnabled(profile)) {\n    return \"This profile cannot install local extension packages.\";\n  }\n  if (!profile->GetPrefs()->GetBoolean(prefs::kExtensionsUIDeveloperMode)) {\n    return \"Must be in developer mode to install a local extension package.\";\n  }\n  // Signed packages can be specifically allowlisted even when installation\n  // is blocked by default. CrxInstaller checks the verified package policy.\n  return {};\n}\n\nExtensionFunction::ResponseAction\nDeveloperPrivateInstallFromFileFunction::Run() {\n#if !BUILDFLAG(IS_ANDROID)\n  return RespondNow(\n      Error(\"Local package picker is only available on Android.\"));\n#else\n  if (!user_gesture()) {\n    return RespondNow(Error(kRequiresUserGestureError));\n  }\n  std::string error = EligibilityError();\n  if (!error.empty()) {\n    return RespondNow(Error(error));\n  }\n  auto* contents = GetSenderWebContents();\n  if (!accept_dialog_for_testing_.has_value() &&\n      !contents->GetTopLevelNativeWindow()) {\n    return RespondNow(Error(kCouldNotShowSelectFileDialogError));\n  }\n  Observe(contents);\n  pending_ = true;\n  AddRef();  // Balanced in Finish(), including synchronous picker callbacks.\n  if (accept_dialog_for_testing_.has_value()) {\n    CHECK_IS_TEST();\n    if (*accept_dialog_for_testing_) {\n      CHECK(selected_file_for_testing_.has_value());\n      FileSelected(*selected_file_for_testing_, 0);\n    } else {\n      FileSelectionCanceled();\n    }\n  } else {\n    select_file_dialog_ = ui::SelectFileDialog::Create(\n        this, std::make_unique<ChromeSelectFilePolicy>(contents));\n    select_file_dialog_->SetAcceptTypes({u\".crx\"});\n    // Use the ordinary read-only GET_CONTENT file picker. No writable or\n    // persistent document access is needed to copy and verify a CRX package.\n    select_file_dialog_->SelectFile(\n        ui::SelectFileDialog::SELECT_OPEN_FILE,\n        l10n_util::GetStringUTF16(IDS_EXTENSIONS_INSTALL_CRX), base::FilePath(),\n        nullptr, 0, base::FilePath::StringType(),\n        contents->GetTopLevelNativeWindow());\n  }\n  return did_respond() ? AlreadyResponded() : RespondLater();\n#endif\n}\n\nvoid DeveloperPrivateInstallFromFileFunction::FileSelected(\n    const ui::SelectedFileInfo& file,\n    int index) {\n  if (!pending_) {\n    return;\n  }\n  if (select_file_dialog_) {\n    select_file_dialog_->ListenerDestroyed();\n    select_file_dialog_.reset();\n  }\n  std::string error = EligibilityError();\n  if (!error.empty()) {\n    Finish(Error(error));\n    return;\n  }\n  const base::FilePath name = file.display_name.empty()\n                                  ? file.path()\n                                  : base::FilePath(file.display_name);\n  if (!name.MatchesExtension(FILE_PATH_LITERAL(\".crx\"))) {\n#if BUILDFLAG(IS_ANDROID)\n    Finish(\n        Error(l10n_util::GetStringUTF8(IDS_EXTENSIONS_INSTALL_CRX_FILE_ERROR)));\n#else\n    Finish(Error(kInvalidPathError));\n#endif\n    return;\n  }\n  auto installer =\n      CreateSettingsCrxInstaller(GetSenderWebContents(), browser_context());\n  installer->AddInstallerCallback(\n      base::BindOnce(&DeveloperPrivateInstallFromFileFunction::OnInstalled,\n                     weak_factory_.GetWeakPtr()));\n  // SandboxedUnpacker copies and verifies these exact selected bytes. Never\n  // mark this as a web download or reinterpret an automatic download as local.\n  installer->InstallCrx(file.path());\n}\n\nvoid DeveloperPrivateInstallFromFileFunction::OnInstalled(\n    const std::optional<CrxInstallError>& error) {\n  if (error) {\n    if (error->type() == CrxInstallErrorType::OTHER &&\n        error->detail() == CrxInstallErrorDetail::USER_CANCELED) {\n      Finish(WithArguments(false));\n    } else {\n#if BUILDFLAG(IS_ANDROID)\n      Finish(\n          Error(error->message().empty()\n                    ? l10n_util::GetStringUTF8(IDS_EXTENSIONS_INSTALL_CRX_ERROR)\n                    : base::UTF16ToUTF8(error->message())));\n#else\n      Finish(Error(base::UTF16ToUTF8(error->message())));\n#endif\n    }\n    return;\n  }\n  // Installation completion is not a claim of enablement: an update may still\n  // need the existing permission-escalation re-enable prompt.\n  Finish(WithArguments(true));\n}\n\nvoid DeveloperPrivateInstallFromFileFunction::FileSelectionCanceled() {\n  Finish(WithArguments(false));\n}\n\nvoid DeveloperPrivateInstallFromFileFunction::WebContentsDestroyed() {\n  Finish(WithArguments(false));\n}\n\nvoid DeveloperPrivateInstallFromFileFunction::DidFinishNavigation(\n    content::NavigationHandle* navigation) {\n  if (navigation->HasCommitted() && navigation->IsInPrimaryMainFrame() &&\n      !navigation->IsSameDocument()) {\n    Finish(WithArguments(false));\n  }\n}\n\nvoid DeveloperPrivateInstallFromFileFunction::OnBrowserContextShutdown() {\n  Finish(WithArguments(false));\n}\n\nvoid DeveloperPrivateInstallFromFileFunction::Finish(ResponseValue result) {\n  if (!pending_) {\n    return;\n  }\n  pending_ = false;\n  weak_factory_.InvalidateWeakPtrs();\n  Observe(nullptr);\n  if (select_file_dialog_) {\n    select_file_dialog_->ListenerDestroyed();\n    select_file_dialog_.reset();\n  }\n  Respond(std::move(result));\n  Release();\n}\n\nDeveloperPrivateInstallDroppedFileFunction::\n    DeveloperPrivateInstallDroppedFileFunction() = default;\nDeveloperPrivateInstallDroppedFileFunction::\n"
+  count: 1
+- description: Android explicit local CRX picker and ordinary result handling
+  regex:
+    pattern: "        ->InstallZipFileToUnpackedExtensionsDir(\n            file.path, registrar->unpacked_install_directory());\n  } else {\n    auto prompt = std::make_unique<ExtensionInstallPrompt>(\n        web_contents, std::make_unique<extensions::InstallPromptData>(\n                          extensions::InstallPromptData::UNSET_PROMPT_TYPE));\n    scoped_refptr<CrxInstaller> crx_installer =\n        CrxInstaller::Create(browser_context(), std::move(prompt));\n    crx_installer->set_error_on_unsupported_requirements(true);\n    crx_installer->set_off_store_install_allow_reason(\n        CrxInstaller::OffStoreInstallAllowedFromSettingsPage);\n    crx_installer->set_install_immediately(true);\n\n    if (MatchesExtension(file, FILE_PATH_LITERAL(\".crx\"))) {\n      crx_installer->InstallCrx(file.path);\n"
+    replace: "        ->InstallZipFileToUnpackedExtensionsDir(\n            file.path, registrar->unpacked_install_directory());\n  } else {\n    auto crx_installer =\n        CreateSettingsCrxInstaller(web_contents, browser_context());\n\n    if (MatchesExtension(file, FILE_PATH_LITERAL(\".crx\"))) {\n      crx_installer->InstallCrx(file.path);\n"
+  count: 1
+- description: Durable Android unpacked import lifecycle integration and recovery regression
+  regex:
+    pattern: "  content::WebContents* web_contents = GetSenderWebContents();\n  if (!web_contents) {\n    return RespondNow(Error(kCouldNotFindWebContentsError));\n  }\n\n  Profile* profile = Profile::FromBrowserContext(browser_context());\n  if (profile && supervised_user::AreExtensionsPermissionsEnabled(profile)) {\n    return RespondNow(\n        Error(\"Child account users cannot load unpacked extensions.\"));\n  }\n  PrefService* prefs = profile->GetPrefs();\n  if (!prefs->GetBoolean(prefs::kExtensionsUIDeveloperMode)) {\n"
+    replace: "  content::WebContents* web_contents = GetSenderWebContents();\n  if (!web_contents) {\n    return RespondNow(Error(kCouldNotFindWebContentsError));\n  }\n\n  Profile* profile = Profile::FromBrowserContext(browser_context());\n#if BUILDFLAG(IS_ANDROID)\n  const std::string policy_error =\n      ExtensionDeveloperPrivateBridge::UnpackedImportPolicyError(profile);\n  if (!policy_error.empty())\n    return RespondNow(Error(policy_error));\n#else\n  if (profile && supervised_user::AreExtensionsPermissionsEnabled(profile)) {\n    return RespondNow(\n        Error(\"Child account users cannot load unpacked extensions.\"));\n  }\n  PrefService* prefs = profile->GetPrefs();\n  if (!prefs->GetBoolean(prefs::kExtensionsUIDeveloperMode)) {\n"
+  count: 1
+- description: Durable Android unpacked import lifecycle integration and recovery regression
+  regex:
+    pattern: "        Error(\"Must be in developer mode to load unpacked extensions.\"));\n  }\n  if (ExtensionManagementFactory::GetForBrowserContext(browser_context())\n          ->BlocklistedByDefault()) {\n    return RespondNow(Error(\"Extension installation is blocked by policy.\"));\n  }\n\n  fail_quietly_ = params->options && params->options->fail_quietly &&\n                  *params->options->fail_quietly;\n\n  populate_error_ = params->options && params->options->populate_error &&\n                    *params->options->populate_error;\n"
+    replace: "        Error(\"Must be in developer mode to load unpacked extensions.\"));\n  }\n  if (ExtensionManagementFactory::GetForBrowserContext(browser_context())\n          ->BlocklistedByDefault()) {\n    return RespondNow(Error(\"Extension installation is blocked by policy.\"));\n  }\n\n#endif\n\n  fail_quietly_ = params->options && params->options->fail_quietly &&\n                  *params->options->fail_quietly;\n\n  populate_error_ = params->options && params->options->populate_error &&\n                    *params->options->populate_error;\n"
+  count: 1
+- description: Durable Android unpacked import lifecycle integration and recovery regression
+  regex:
+    pattern: "\n    AddRef();  // Balanced in Finish.\n    StartFileLoad(file.path);\n    return RespondLater();\n  }\n\n  ShowSelectFileDialog();\n  AddRef();  // Balanced in Finish.\n  return RespondLater();\n}\n\nvoid DeveloperPrivateLoadUnpackedFunction::ShowSelectFileDialog() {\n  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);\n\n  // Start or cancel the file load without showing the select file dialog for\n"
+    replace: "\n    AddRef();  // Balanced in Finish.\n    StartFileLoad(file.path);\n    return RespondLater();\n  }\n\n#if BUILDFLAG(IS_ANDROID)\n  // A failed launch can finish synchronously, so hold the request first.\n  AddRef();  // Balanced in Finish.\n  ShowSelectFileDialog();\n  return did_respond() ? AlreadyResponded() : RespondLater();\n#else\n  ShowSelectFileDialog();\n  AddRef();  // Balanced in Finish.\n  return RespondLater();\n#endif\n}\n\nvoid DeveloperPrivateLoadUnpackedFunction::ShowSelectFileDialog() {\n  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);\n\n  // Start or cancel the file load without showing the select file dialog for\n"
+  count: 1
+- description: Durable Android unpacked import lifecycle integration and recovery regression
+  regex:
+    pattern: "    }\n    return;\n  }\n\n  content::WebContents* web_contents = GetSenderWebContents();\n  CHECK(web_contents);\n  select_file_dialog_ = ui::SelectFileDialog::Create(\n      this, std::make_unique<ChromeSelectFilePolicy>(web_contents));\n\n  ui::SelectFileDialog::Type file_type =\n      ui::SelectFileDialog::SELECT_EXISTING_FOLDER;\n  std::u16string title =\n"
+    replace: "    }\n    return;\n  }\n\n  content::WebContents* web_contents = GetSenderWebContents();\n  CHECK(web_contents);\n#if BUILDFLAG(IS_ANDROID)\n  if (!ExtensionDeveloperPrivateBridge::StartUnpackedImport(\n          web_contents,\n          base::BindOnce(\n              &DeveloperPrivateLoadUnpackedFunction::OnAndroidImportSelection,\n              base::Unretained(this)),\n          &android_import_request_id_)) {\n    Finish(Error(kCouldNotShowSelectFileDialogError));\n  }\n  return;\n#else\n  select_file_dialog_ = ui::SelectFileDialog::Create(\n      this, std::make_unique<ChromeSelectFilePolicy>(web_contents));\n\n  ui::SelectFileDialog::Type file_type =\n      ui::SelectFileDialog::SELECT_EXISTING_FOLDER;\n  std::u16string title =\n"
+  count: 1
+- description: Durable Android unpacked import lifecycle integration and recovery regression
+  regex:
+    pattern: "  gfx::NativeWindow owning_window =\n      platform_util::GetTopLevel(web_contents->GetNativeView());\n\n  select_file_dialog_->SelectFile(file_type, title, last_directory,\n                                  &file_type_info, file_type_index,\n                                  base::FilePath::StringType(), owning_window);\n}\n\nvoid DeveloperPrivateLoadUnpackedFunction::FileSelected(\n    const ui::SelectedFileInfo& file,\n    int index) {\n  select_file_dialog_.reset();\n  StartFileLoad(file.path());\n"
+    replace: "  gfx::NativeWindow owning_window =\n      platform_util::GetTopLevel(web_contents->GetNativeView());\n\n  select_file_dialog_->SelectFile(file_type, title, last_directory,\n                                  &file_type_info, file_type_index,\n                                  base::FilePath::StringType(), owning_window);\n#endif\n}\n\n#if BUILDFLAG(IS_ANDROID)\nvoid DeveloperPrivateLoadUnpackedFunction::OnAndroidImportSelection(\n    base::FilePath path,\n    std::string error) {\n  if (did_respond())\n    return;\n  auto* contents = GetSenderWebContents();\n  if (!browser_context() || !contents || contents->IsBeingDestroyed() ||\n      contents->GetBrowserContext() != browser_context() ||\n      !render_frame_host() ||\n      render_frame_host() != contents->GetPrimaryMainFrame() ||\n      !render_frame_host()->IsActive() ||\n      !render_frame_host()->IsRenderFrameLive()) {\n    ExtensionDeveloperPrivateBridge::CompleteUnpackedImport(\n        android_import_request_id_, \"reaper.import.source_changed\");\n    android_import_request_id_.clear();\n    Finish(Error(kCouldNotFindWebContentsError));\n    return;\n  }\n  if (!error.empty() || path.empty()) {\n    Finish(Error(error.empty() ? kCouldNotFindWebContentsError : error));\n    return;\n  }\n  const std::string policy_error =\n      ExtensionDeveloperPrivateBridge::UnpackedImportPolicyError(\n          Profile::FromBrowserContext(browser_context()));\n  if (!policy_error.empty()) {\n    Finish(Error(policy_error));\n    return;\n  }\n  StartFileLoad(path);\n}\n\nvoid DeveloperPrivateLoadUnpackedFunction::OnBrowserContextShutdown() {\n  if (android_import_request_id_.empty() || did_respond())\n    return;\n  ExtensionDeveloperPrivateBridge::ForgetUnpackedImport(\n      android_import_request_id_);\n  Finish(Error(kCouldNotFindWebContentsError));\n}\n#endif\n\nvoid DeveloperPrivateLoadUnpackedFunction::FileSelected(\n    const ui::SelectedFileInfo& file,\n    int index) {\n  select_file_dialog_.reset();\n  StartFileLoad(file.path());\n"
+  count: 1
+- description: Durable Android unpacked import lifecycle integration and recovery regression
+  regex:
+    pattern: "}\n\nvoid DeveloperPrivateLoadUnpackedFunction::OnLoadComplete(\n    const Extension* extension,\n    const base::FilePath& file_path,\n    const std::u16string& error) {\n  if (extension) {\n    Finish(NoArguments());\n    return;\n  }\n\n  if (!populate_error_) {\n"
+    replace: "}\n\nvoid DeveloperPrivateLoadUnpackedFunction::OnLoadComplete(\n    const Extension* extension,\n    const base::FilePath& file_path,\n    const std::u16string& error) {\n#if BUILDFLAG(IS_ANDROID)\n  if (did_respond())\n    return;\n#endif\n  if (extension) {\n    Finish(NoArguments());\n    return;\n  }\n\n  if (!populate_error_) {\n"
+  count: 1
+- description: Durable Android unpacked import lifecycle integration and recovery regression
+  regex:
+    pattern: "\nvoid DeveloperPrivateLoadUnpackedFunction::OnGotManifestError(\n    const base::FilePath& file_path,\n    const std::u16string& error,\n    size_t line_number,\n    const std::string& manifest) {\n  DCHECK(!retry_guid_.empty());\n  Finish(WithArguments(\n      CreateLoadError(file_path, error, line_number, manifest, retry_guid_)\n          .ToValue()));\n}\n\nvoid DeveloperPrivateLoadUnpackedFunction::Finish(\n    ResponseValue response_value) {\n  Respond(std::move(response_value));\n  Release();  // Balanced in Run().\n}\n\nDeveloperPrivateInstallFromFileFunction::\n    DeveloperPrivateInstallFromFileFunction() = default;\n"
+    replace: "\nvoid DeveloperPrivateLoadUnpackedFunction::OnGotManifestError(\n    const base::FilePath& file_path,\n    const std::u16string& error,\n    size_t line_number,\n    const std::string& manifest) {\n#if BUILDFLAG(IS_ANDROID)\n  if (did_respond())\n    return;\n#endif\n  DCHECK(!retry_guid_.empty());\n  Finish(WithArguments(\n      CreateLoadError(file_path, error, line_number, manifest, retry_guid_)\n          .ToValue()));\n}\n\nvoid DeveloperPrivateLoadUnpackedFunction::Finish(\n    ResponseValue response_value) {\n#if BUILDFLAG(IS_ANDROID)\n  if (!android_import_request_id_.empty()) {\n    ExtensionDeveloperPrivateBridge::CompleteUnpackedImport(\n        android_import_request_id_);\n    android_import_request_id_.clear();\n  }\n#endif\n  Respond(std::move(response_value));\n  Release();  // Balanced in Run().\n}\n\nDeveloperPrivateInstallFromFileFunction::\n    DeveloperPrivateInstallFromFileFunction() = default;\n"
+  count: 1
+- description: Reject stale original Android import sender before retry registration
+  regex:
+    pattern: "    const std::u16string& error,\n    size_t line_number,\n    const std::string& manifest) {\n  DeveloperPrivateAPI::UnpackedRetryId retry_guid =\n      DeveloperPrivateAPI::Get(browser_context())\n          ->AddUnpackedPath(GetSenderWebContents(), reloading_extension_path_);\n  // Respond to the caller with the load error, which allows the caller to retry\n  // reloading through developerPrivate.loadUnpacked().\n  // TODO(devlin): This is weird. Really, we should allow retrying through this\n"
+    replace: "    const std::u16string& error,\n    size_t line_number,\n    const std::string& manifest) {\n#if BUILDFLAG(IS_ANDROID)\n  // The manifest was read asynchronously; its original page may have closed\n  // or navigated while the file task was pending. Never register a retry for\n  // a different page or pass a missing sender to DeveloperPrivateAPI.\n  if (did_respond())\n    return;\n  auto* contents = GetSenderWebContents();\n  if (!browser_context() || !contents || contents->IsBeingDestroyed() ||\n      contents->GetBrowserContext() != browser_context() ||\n      !render_frame_host() ||\n      render_frame_host() != contents->GetPrimaryMainFrame() ||\n      !render_frame_host()->IsActive()) {\n    Respond(Error(kCouldNotFindWebContentsError));\n    return;\n  }\n  DeveloperPrivateAPI::UnpackedRetryId retry_guid =\n      DeveloperPrivateAPI::Get(browser_context())\n          ->AddUnpackedPath(contents, reloading_extension_path_);\n#else\n  DeveloperPrivateAPI::UnpackedRetryId retry_guid =\n      DeveloperPrivateAPI::Get(browser_context())\n          ->AddUnpackedPath(GetSenderWebContents(), reloading_extension_path_);\n#endif\n  // Respond to the caller with the load error, which allows the caller to retry\n  // reloading through developerPrivate.loadUnpacked().\n  // TODO(devlin): This is weird. Really, we should allow retrying through this\n"
+  count: 1
+- description: Reject stale original Android import sender before retry registration
+  regex:
+    pattern: "void DeveloperPrivateLoadUnpackedFunction::StartFileLoad(\n    base::FilePath file_path) {\n#if BUILDFLAG(IS_ANDROID)\n  const base::FilePath picker_directory =\n      file_path.IsContentUri() ? file_path : base::FilePath();\n  // Resolve SAF tree URIs; local selections and already-virtual retry paths\n"
+    replace: "void DeveloperPrivateLoadUnpackedFunction::StartFileLoad(\n    base::FilePath file_path) {\n#if BUILDFLAG(IS_ANDROID)\n  // A selection callback can outlive the original page. Check at this shared\n  // boundary before resolving its path, creating an installer or storing retry\n  // metadata; the current foreground tab is not a replacement caller.\n  if (did_respond())\n    return;\n  auto* contents = GetSenderWebContents();\n  if (!browser_context() || !contents || contents->IsBeingDestroyed() ||\n      contents->GetBrowserContext() != browser_context() ||\n      !render_frame_host() ||\n      render_frame_host() != contents->GetPrimaryMainFrame() ||\n      !render_frame_host()->IsActive()) {\n    Finish(Error(kCouldNotFindWebContentsError));\n    return;\n  }\n  const base::FilePath picker_directory =\n      file_path.IsContentUri() ? file_path : base::FilePath();\n  // Resolve SAF tree URIs; local selections and already-virtual retry paths\n"
+  count: 1
+- description: Reject stale original Android import sender before retry registration
+  regex:
+    pattern: "    if (!vp) {\n      // A populated load error must identify the original selection for retry.\n      retry_guid_ = DeveloperPrivateAPI::Get(browser_context())\n                        ->AddUnpackedPath(GetSenderWebContents(), file_path);\n      OnLoadComplete(nullptr, file_path, u\"Failed to resolve (removed?)\");\n      return;\n    }\n"
+    replace: "    if (!vp) {\n      // A populated load error must identify the original selection for retry.\n      retry_guid_ = DeveloperPrivateAPI::Get(browser_context())\n                        ->AddUnpackedPath(contents, file_path);\n      OnLoadComplete(nullptr, file_path, u\"Failed to resolve (removed?)\");\n      return;\n    }\n"
+  count: 1
+- description: Reject stale original Android import sender before retry registration
+  regex:
+    pattern: "#if BUILDFLAG(IS_ANDROID)\n  retry_guid_ =\n      DeveloperPrivateAPI::Get(browser_context())\n          ->AddUnpackedPath(GetSenderWebContents(), file_path, picker_directory);\n#else\n  retry_guid_ = DeveloperPrivateAPI::Get(browser_context())\n                    ->AddUnpackedPath(GetSenderWebContents(), file_path);\n"
+    replace: "#if BUILDFLAG(IS_ANDROID)\n  retry_guid_ =\n      DeveloperPrivateAPI::Get(browser_context())\n          ->AddUnpackedPath(contents, file_path, picker_directory);\n#else\n  retry_guid_ = DeveloperPrivateAPI::Get(browser_context())\n                    ->AddUnpackedPath(GetSenderWebContents(), file_path);\n"
+  count: 1
+- description: Android manual import prompt follows originating document
+  regex:
+    pattern: "  auto installer = CrxInstaller::Create(browser_context, std::move(prompt));"
+    replace: "#if BUILDFLAG(IS_ANDROID)\n  // A delayed manual-import prompt belongs to the initiating document, even\n  // when unpacking or icon loading finishes after that document navigates.\n  prompt->CancelOnNavigation(web_contents);\n#endif\n  auto installer = CrxInstaller::Create(browser_context, std::move(prompt));"
+  count: 1
+- description: Android manual import prompt follows originating document
+  regex:
+    pattern: "void DeveloperPrivateInstallFromFileFunction::DidFinishNavigation(\n    content::NavigationHandle* navigation) {\n  if (navigation->HasCommitted() && navigation->IsInPrimaryMainFrame() &&"
+    replace: "void DeveloperPrivateInstallFromFileFunction::DidStartNavigation(\n    content::NavigationHandle* navigation) {\n  if (navigation->IsInPrimaryMainFrame() &&"
+  count: 1
+- description: Publish current Android userScripts preference after state update; exercise one fresh event per explicit request.
+  count: 1
+  regex:
+    pattern: "        ->user_script_manager()\n        ->SetUserScriptPrefEnabled(update.extension_id,\n                                   *update.user_scripts_access);\n  }\n  if (update.error_collection) {\n    ErrorConsole::Get(browser_context())\n"
+    replace: "        ->user_script_manager()\n        ->SetUserScriptPrefEnabled(update.extension_id,\n                                   *update.user_scripts_access);\n#if BUILDFLAG(IS_ANDROID)\n    // Publish after both the stored preference and current allowed state change.\n    // An explicit repeated request also reconciles already-open settings pages.\n    if (auto* event_router = DeveloperPrivateAPI::Get(browser_context())\n                                 ->developer_private_event_router()) {\n      event_router->OnUserScriptsAccessChanged(update.extension_id);\n    }\n#endif\n  }\n  if (update.error_collection) {\n    ErrorConsole::Get(browser_context())\n"
+
+- description: Report interrupted Android local import without resuming an invalid sender
+  regex:
+    re_pattern: '\#include\ "base/strings/strcat\.h"\
+
+      \#include\ "base/strings/stringprintf\.h"\
+
+      \#include\ "base/strings/utf_string_conversions\.h"\
+
+      \#include\ "base/task/thread_pool\.h"\
+
+      \#include\ "chrome/browser/devtools/devtools_window\.h"\
+
+      \#include\ "chrome/browser/extensions/api/developer_private/developer_private_api\.h"\
+
+      '
+    replace: '#include "base/strings/strcat.h"
+
+      #include "base/strings/stringprintf.h"
+
+      #include "base/strings/utf_string_conversions.h"
+
+      #include "base/supports_user_data.h"
+
+      #include "base/task/thread_pool.h"
+
+      #include "chrome/browser/devtools/devtools_window.h"
+
+      #include "chrome/browser/extensions/api/developer_private/developer_private_api.h"
+
+      '
+  count: 1
+- description: Report interrupted Android local import without resuming an invalid sender
+  regex:
+    re_pattern: 'namespace\ developer\ =\ api::developer_private;\
+
+      \
+
+      namespace\ \{\
+
+      \#if\ !BUILDFLAG\(IS_ANDROID\)\
+
+      constexpr\ char\ kUnpackedAppsFolder\[\]\ =\ "apps_target";\
+
+      \#endif\ \ //\ !BUILDFLAG\(IS_ANDROID\)\
+
+      '
+    replace: 'namespace developer = api::developer_private;
+
+
+      namespace {
+
+
+      #if BUILDFLAG(IS_ANDROID)
+
+      // A tab-scoped notice survives renderer replacement without retaining a file,
+
+      // permission, sender frame, or an operation that could resume installation.
+
+      const char kInterruptedLocalImportKey = 0;
+
+      struct InterruptedLocalImport : base::SupportsUserData::Data {};
+
+      #endif
+
+      #if !BUILDFLAG(IS_ANDROID)
+
+      constexpr char kUnpackedAppsFolder[] = "apps_target";
+
+      #endif  // !BUILDFLAG(IS_ANDROID)
+
+      '
+  count: 1
+- description: Report interrupted Android local import without resuming an invalid sender
+  regex:
+    re_pattern: 'DeveloperPrivateGetProfileConfigurationFunction::Run\(\)\ \{\
+
+      \ \ developer::ProfileInfo\ info\ =\
+
+      \ \ \ \ \ \ CreateProfileInfo\(Profile::FromBrowserContext\(browser_context\(\)\)\);\
+
+      \
+
+      \ \ //\ If\ this\ is\ called\ from\ the\ chrome://extensions\ page,\ we\ use\ this\ as\ a\
+
+      \ \ //\ heuristic\ that\ it''s\ a\ good\ time\ to\ verify\ installs\.\ We\ do\ this\ on\ startup,\
+
+      '
+    replace: "DeveloperPrivateGetProfileConfigurationFunction::Run() {\n  developer::ProfileInfo info =\n      CreateProfileInfo(Profile::FromBrowserContext(browser_context()));\n#if BUILDFLAG(IS_ANDROID)\n  auto* contents = GetSenderWebContents();\n  if (source_context_type() == mojom::ContextType::kWebUi && contents &&\n      render_frame_host() == contents->GetPrimaryMainFrame() &&\n      render_frame_host()->IsActive() &&\n      contents->GetUserData(&kInterruptedLocalImportKey)) {\n    info.interrupted_local_import = true;\n    contents->RemoveUserData(&kInterruptedLocalImportKey);\n  }\n#endif\n\n  // If this is called from the chrome://extensions page, we use this as a\n  // heuristic that it's a good time to verify installs. We do this on startup,\n"
+  count: 1
+- description: Report interrupted Android local import without resuming an invalid sender
+  regex:
+    re_pattern: 'void\ DeveloperPrivateInstallFromFileFunction::WebContentsDestroyed\(\)\ \{\
+
+      \ \ Finish\(WithArguments\(false\)\);\
+
+      \}\
+
+      \
+
+      void\ DeveloperPrivateInstallFromFileFunction::DidStartNavigation\(\
+
+      \ \ \ \ content::NavigationHandle\*\ navigation\)\ \{\
+
+      '
+    replace: "void DeveloperPrivateInstallFromFileFunction::WebContentsDestroyed() {\n  Finish(WithArguments(false));\n}\n\n#if BUILDFLAG(IS_ANDROID)\nvoid DeveloperPrivateInstallFromFileFunction::PrimaryMainFrameRenderProcessGone(\n    base::TerminationStatus status) {\n  if (pending_ && web_contents()) {\n    web_contents()->SetUserData(&kInterruptedLocalImportKey,\n                               std::make_unique<InterruptedLocalImport>());\n  }\n  Finish(WithArguments(false));\n}\n#endif\n\nvoid DeveloperPrivateInstallFromFileFunction::DidStartNavigation(\n    content::NavigationHandle* navigation) {\n"
+  count: 1

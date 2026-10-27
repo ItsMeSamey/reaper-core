@@ -38,6 +38,7 @@
 #include "brave/components/commander/browser/commander_frontend_delegate.h"
 #endif  // BUILDFLAG(ENABLE_COMMANDER)
 
+#if !BUILDFLAG(IS_ANDROID)
 // Must precede the macro below, which would otherwise rewrite these
 // declarations.
 #include "chrome/browser/history_embeddings/history_embeddings_service_factory.h"
@@ -49,6 +50,7 @@
 #define IsHistoryEmbeddingsEnabledForProfile(profile)                    \
   IsHistoryEmbeddingsEnabledForProfile(profile) &&                       \
       HistoryEmbeddingsServiceFactory::GetForProfile(profile) != nullptr
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 #include <chrome/browser/autocomplete/chrome_autocomplete_provider_client.cc>
 

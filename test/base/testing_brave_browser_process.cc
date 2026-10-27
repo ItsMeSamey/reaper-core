@@ -5,6 +5,8 @@
 
 #include "brave/test/base/testing_brave_browser_process.h"
 
+#include "build/build_config.h"
+
 #include <utility>
 
 #include "base/check.h"
@@ -13,7 +15,9 @@
 #include "base/memory/scoped_refptr.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/task/thread_pool.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_origin/brave_origin_policy_manager.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_shields/content/browser/ad_block_service.h"
 #include "brave/components/brave_vpn/common/buildflags/buildflags.h"
 #include "brave/components/tor/buildflags/buildflags.h"
@@ -51,8 +55,10 @@ void TestingBraveBrowserProcess::DeleteInstance() {
 
 // static
 void TestingBraveBrowserProcess::StartTearDown() {
+#if !BUILDFLAG(IS_ANDROID)
   // Reset BraveOriginPolicyManager to prevent dangling pointer to local_state_.
   brave_origin::BraveOriginPolicyManager::GetInstance()->Shutdown();
+#endif  // !BUILDFLAG(IS_ANDROID)
 #if BUILDFLAG(ENABLE_TOR)
   // TorProfileManager is a base::NoDestructor singleton whose
   // TorBrowserCollectionObserver observes GlobalBrowserCollection for the
@@ -129,14 +135,18 @@ TestingBraveBrowserProcess::tor_pluggable_transport_updater() {
 }
 #endif
 
+#if !BUILDFLAG(IS_ANDROID)
 p3a::P3AService* TestingBraveBrowserProcess::p3a_service() {
   return nullptr;
 }
+#endif  // !BUILDFLAG(IS_ANDROID)
 
+#if !BUILDFLAG(IS_ANDROID)
 brave::BraveReferralsService*
 TestingBraveBrowserProcess::brave_referrals_service() {
   return nullptr;
 }
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 #if BUILDFLAG(ENABLE_BRAVE_STATS_UPDATER)
 brave_stats::BraveStatsUpdater*
@@ -156,10 +166,12 @@ brave_ads::ResourceComponent* TestingBraveBrowserProcess::resource_component() {
 }
 #endif  // BUILDFLAG(ENABLE_BRAVE_ADS)
 
+#if BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
 ntp_background_images::NTPBackgroundImagesService*
 TestingBraveBrowserProcess::ntp_background_images_service() {
   return nullptr;
 }
+#endif  // BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
 
 #if BUILDFLAG(ENABLE_SPEEDREADER)
 speedreader::SpeedreaderRewriterService*
@@ -179,10 +191,12 @@ void TestingBraveBrowserProcess::SetBraveVPNConnectionManagerForTesting(
 }
 #endif
 
+#if !BUILDFLAG(IS_ANDROID)
 misc_metrics::ProcessMiscMetrics*
 TestingBraveBrowserProcess::process_misc_metrics() {
   return nullptr;
 }
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 void TestingBraveBrowserProcess::SetAdBlockService(
     std::unique_ptr<brave_shields::AdBlockService> service) {

@@ -3,6 +3,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+#include "build/build_config.h"
+
 #include "brave/components/request_otr/browser/request_otr_blocking_page.h"
 
 #include <ostream>
@@ -13,7 +15,9 @@
 #include "base/strings/string_number_conversions.h"
 #include "base/values.h"
 #include "brave/components/request_otr/browser/request_otr_controller_client.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/request_otr/browser/request_otr_p3a.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "components/grit/brave_components_resources.h"
 #include "components/grit/brave_components_strings.h"
 #include "components/security_interstitials/content/security_interstitial_controller_client.h"
@@ -38,17 +42,24 @@ RequestOTRBlockingPage::RequestOTRBlockingPage(
         controller)
     : security_interstitials::SecurityInterstitialPage(web_contents,
                                                        request_url,
-                                                       std::move(controller)),
-      start_time_(base::Time::Now()),
+                                                       std::move(controller))
+#if !BUILDFLAG(IS_ANDROID)
+      , start_time_(base::Time::Now()),
       profile_prefs_(
-          user_prefs::UserPrefs::Get(web_contents->GetBrowserContext())) {
+          user_prefs::UserPrefs::Get(web_contents->GetBrowserContext()))
+#endif  // !BUILDFLAG(IS_ANDROID)
+{
+#if !BUILDFLAG(IS_ANDROID)
   p3a::RecordInterstitialShown(profile_prefs_, true);
+#endif  // !BUILDFLAG(IS_ANDROID)
 }
 
 RequestOTRBlockingPage::~RequestOTRBlockingPage() = default;
 
 void RequestOTRBlockingPage::OnInterstitialClosing() {
+#if !BUILDFLAG(IS_ANDROID)
   p3a::RecordInterstitialEnd(profile_prefs_, start_time_);
+#endif  // !BUILDFLAG(IS_ANDROID)
 }
 
 void RequestOTRBlockingPage::CommandReceived(const std::string& command) {
@@ -66,11 +77,15 @@ void RequestOTRBlockingPage::CommandReceived(const std::string& command) {
 
   switch (cmd) {
     case security_interstitials::CMD_DONT_PROCEED:
+#if !BUILDFLAG(IS_ANDROID)
       p3a::RecordInterstitialEnd(profile_prefs_, start_time_);
+#endif  // !BUILDFLAG(IS_ANDROID)
       request_otr_controller->Proceed();
       return;
     case security_interstitials::CMD_PROCEED:
+#if !BUILDFLAG(IS_ANDROID)
       p3a::RecordInterstitialEnd(profile_prefs_, start_time_);
+#endif  // !BUILDFLAG(IS_ANDROID)
       request_otr_controller->ProceedOTR();
       return;
     case security_interstitials::CMD_DO_REPORT:

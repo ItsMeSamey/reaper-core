@@ -1,0 +1,319 @@
+diff --git a/chrome/browser/tab/tab_state_storage_service_unittest.cc b/chrome/browser/tab/tab_state_storage_service_unittest.cc
+index 877b517e24299bfcb3fa2c1f644443bef49d80cd..ad748e3531caeb5e79e02550df9955a43026481f 100644
+--- a/chrome/browser/tab/tab_state_storage_service_unittest.cc
++++ b/chrome/browser/tab/tab_state_storage_service_unittest.cc
+@@ -4,8 +4,12 @@
+ 
+ #include "chrome/browser/tab/tab_state_storage_service.h"
+ 
++#include <algorithm>
+ #include <memory>
++#include <optional>
+ #include <string>
++#include <string_view>
++#include <utility>
+ #include <vector>
+ 
+ #include "base/files/scoped_temp_dir.h"
+@@ -14,6 +18,15 @@
+ #include "base/run_loop.h"
+ #include "base/test/task_environment.h"
+ #include "chrome/browser/tab/restore_entity_tracker.h"
++#if BUILDFLAG(IS_ANDROID)
++#include "base/task/sequenced_task_runner.h"
++#include "chrome/browser/tab/payload_util.h"
++#include "chrome/browser/tab/protocol/tab_state.pb.h"
++#include "chrome/browser/tab/storage_update_unit.h"
++#include "chrome/browser/tab/tab_state_storage_backend.h"
++#include "chrome/browser/tab/tab_state_storage_updater.h"
++#include "chrome/browser/tab/tab_storage_type.h"
++#endif
+ #include "chrome/browser/tab/storage_id.h"
+ #include "chrome/browser/tab/tab_storage_packager.h"
+ #include "components/tabs/public/tab_collection.h"
+@@ -252,4 +265,285 @@
+ }
+ 
+ }  // namespace
++#if BUILDFLAG(IS_ANDROID)
++TEST_F(TabStateStorageServiceTest, ContainerInventoryEmptyIsCompleteAfterDbInitialization) {
++  FlushOperations();
++  base::RunLoop loop;
++  service()->GetPersistedContainerIds(base::BindOnce(
++      [](base::OnceClosure done, std::optional<std::vector<std::string>> ids) {
++        EXPECT_TRUE(ids);
++        if (ids) EXPECT_TRUE(ids->empty());
++        std::move(done).Run();
++      }, loop.QuitClosure()));
++  loop.Run();
++}
++
++TEST_F(TabStateStorageServiceTest, ContainerInventoryWaitsWithoutDestroyingActiveScopedBatch) {
++  FlushOperations();
++  bool queried = false;
++  bool batch_callback = false;
++  TabStripCollection collection;
++  auto batch = service()->CreateScopedBatch();
++  service()->GetPersistedContainerIds(base::BindOnce(
++      [](bool* queried, std::optional<std::vector<std::string>> ids) {
++        EXPECT_TRUE(ids);
++        if (ids) EXPECT_TRUE(ids->empty());
++        *queried = true;
++      }, &queried));
++  EXPECT_FALSE(queried);
++  service()->Save(&collection); // Builder remains alive and usable after query.
++  batch.AddCallback(base::BindOnce([](bool* called) { *called = true; }, &batch_callback));
++  batch = TabStateStorageService::ScopedBatch();
++  FlushOperations();
++  task_environment_.RunUntilIdle();
++  EXPECT_TRUE(batch_callback);
++  EXPECT_TRUE(queried);
++}
++
++TEST_F(TabStateStorageServiceTest,
++       ContainerInventoryDeferredReplyCompletesOnceOnOriginSequence) {
++  FlushOperations();
++  int replies = 0;
++  auto origin = base::SequencedTaskRunner::GetCurrentDefault();
++  {
++    auto batch = service()->CreateScopedBatch();
++    service()->GetPersistedContainerIds(base::BindOnce(
++        [](scoped_refptr<base::SequencedTaskRunner> origin, int* replies,
++           std::optional<std::vector<std::string>> ids) {
++          EXPECT_TRUE(origin->RunsTasksInCurrentSequence());
++          ASSERT_TRUE(ids);
++          EXPECT_TRUE(ids->empty());
++          ++*replies;
++        },
++        origin, &replies));
++    EXPECT_EQ(replies, 0);
++  }
++  FlushOperations();
++  task_environment_.RunUntilIdle();
++  EXPECT_EQ(replies, 1);
++}
++
++TEST_F(TabStateStorageServiceTest,
++       ContainerInventoryCancelledDeferredReplyIsUnavailableOnOriginSequence) {
++  FlushOperations();
++  int replies = 0;
++  auto origin = base::SequencedTaskRunner::GetCurrentDefault();
++  {
++    auto batch = service()->CreateScopedBatch();
++    service()->GetPersistedContainerIds(base::BindOnce(
++        [](scoped_refptr<base::SequencedTaskRunner> origin, int* replies,
++           std::optional<std::vector<std::string>> ids) {
++          EXPECT_TRUE(origin->RunsTasksInCurrentSequence());
++          EXPECT_FALSE(ids);
++          ++*replies;
++        },
++        origin, &replies));
++    EXPECT_EQ(replies, 0);
++  }
++  // Retire the service before the deferred reply can run on this sequence.
++  // The batch has already closed, so no ScopedBatch holds a retired builder.
++  service_.reset();
++  task_environment_.RunUntilIdle();
++  EXPECT_EQ(replies, 1);
++}
++
++namespace {
++
++constexpr char kInventoryNamedId[] = "4a4d13b6-c971-4c61-ae11-e7a864f58165";
++constexpr char kInventoryTemporaryId[] =
++    "t-22a6d27a-e4ef-46ec-8f8f-11a93d558b33";
++constexpr char kInventoryOtrId[] = "cc963f17-77df-4ce7-9750-a9b217a37820";
++
++// Seed through the real updater/transaction/backend path. This is deliberately
++// not a fake database or a mock inventory provider.
++class InventorySaveNodeUnit : public StorageUpdateUnit {
++ public:
++  InventorySaveNodeUnit(std::string window_tag,
++                        bool is_off_the_record,
++                        TabStorageType type,
++                        std::vector<uint8_t> payload)
++      : window_tag_(std::move(window_tag)),
++        is_off_the_record_(is_off_the_record),
++        type_(type),
++        payload_(std::move(payload)) {}
++
++  bool Execute(TabStateStorageDatabase* db,
++               TabStateStorageDatabase::OpenTransaction* transaction) override {
++    return db->SaveNode(transaction, StorageId::Create(), window_tag_,
++                        is_off_the_record_, type_, std::move(payload_), {});
++  }
++
++ private:
++  const std::string window_tag_;
++  const bool is_off_the_record_;
++  const TabStorageType type_;
++  std::vector<uint8_t> payload_;
++};
++
++class ContainerInventoryBackendTest : public ::testing::Test {
++ protected:
++  void SetUp() override {
++    ASSERT_TRUE(temp_dir_.CreateUniqueTempDir());
++    backend_ = std::make_unique<TabStateStorageBackend>(
++        temp_dir_.GetPath(), /*support_off_the_record_data=*/true);
++    backend_->Initialize();
++    base::RunLoop loop;
++    backend_->WaitForAllPendingOperations(loop.QuitClosure());
++    loop.Run();
++  }
++
++  void TearDown() override {
++    backend_.reset();
++    task_environment_.RunUntilIdle();
++  }
++
++  std::vector<uint8_t> TabPayload(std::string_view id) {
++    tabs_pb::TabState state;
++    state.set_tab_id(42);
++    state.set_url("https://example.test/persisted");
++    state.set_container_id(std::string(id));
++    std::string bytes = state.SerializeAsString();
++    return {bytes.begin(), bytes.end()};
++  }
++
++  void Save(std::string window_tag,
++            bool is_off_the_record,
++            std::vector<uint8_t> payload,
++            TabStorageType type = TabStorageType::kTab) {
++    std::vector<std::unique_ptr<StorageUpdateUnit>> updates;
++    updates.push_back(std::make_unique<InventorySaveNodeUnit>(
++        std::move(window_tag), is_off_the_record, type, std::move(payload)));
++    base::RunLoop loop;
++    bool committed = false;
++    std::vector<base::OnceClosure> callbacks;
++    callbacks.push_back(base::BindOnce(
++        [](bool* committed, base::OnceClosure done) {
++          *committed = true;
++          std::move(done).Run();
++        },
++        &committed, loop.QuitClosure()));
++    backend_->Update(std::make_unique<TabStateStorageUpdater>(
++        std::move(updates), std::move(callbacks)));
++    loop.Run();
++    ASSERT_TRUE(committed);
++  }
++
++  std::optional<std::vector<std::string>> Inventory() {
++    base::RunLoop loop;
++    std::optional<std::vector<std::string>> result;
++    backend_->GetPersistedContainerIds(base::BindOnce(
++        [](std::optional<std::vector<std::string>>* result,
++           base::OnceClosure done,
++           std::optional<std::vector<std::string>> ids) {
++          *result = std::move(ids);
++          std::move(done).Run();
++        },
++        &result, loop.QuitClosure()));
++    loop.Run();
++    return result;
++  }
++
++  base::test::TaskEnvironment task_environment_{
++      base::test::TaskEnvironment::MainThreadType::UI};
++  base::ScopedTempDir temp_dir_;
++  std::unique_ptr<TabStateStorageBackend> backend_;
++};
++
++TEST_F(ContainerInventoryBackendTest,
++       IncludesPopulatedNamedAndTemporaryRowsAcrossWindowsAndArchive) {
++  Save("window-a", false, TabPayload(kInventoryNamedId));
++  Save("archived-window-b", false, TabPayload(kInventoryTemporaryId));
++  Save("window-c", false,
++       TabPayload(""));  // Default is a valid legacy identity.
++  Save("collection-window", false, {0xff}, TabStorageType::kTabStrip);
++  auto ids = Inventory();
++  ASSERT_TRUE(ids);
++  std::sort(ids->begin(), ids->end());
++  EXPECT_EQ(*ids, (std::vector<std::string>{kInventoryNamedId,
++                                            kInventoryTemporaryId}));
++}
++
++TEST_F(ContainerInventoryBackendTest,
++       ExcludesRealSealedOtrRecordsIncludingCorruptOtrPayloads) {
++  Save("regular", false, TabPayload(kInventoryNamedId));
++  backend_->SetKey("otr", GenerateKeyForOtrPayloads());
++  Save("otr", true, TabPayload(kInventoryOtrId));
++  Save("otr", true, {0xff});
++  base::RunLoop loop;
++  backend_->CountTabsForWindow(
++      "otr", true,
++      base::BindOnce(
++          [](base::OnceClosure done, int count) {
++            EXPECT_EQ(count, 2);  // Prove both encrypted records really exist.
++            std::move(done).Run();
++          },
++          loop.QuitClosure()));
++  loop.Run();
++  auto ids = Inventory();
++  ASSERT_TRUE(ids);
++  EXPECT_EQ(*ids, (std::vector<std::string>{kInventoryNamedId}));
++}
++
++TEST_F(ContainerInventoryBackendTest,
++       CorruptRegularPayloadBlocksCompleteInventory) {
++  Save("regular", false, TabPayload(kInventoryNamedId));
++  Save("archived-corrupt", false, {0xff});
++  EXPECT_FALSE(Inventory());  // Never publish a partial list containing only
++                              // the first jar.
++}
++
++TEST_F(ContainerInventoryBackendTest,
++       MalformedRegularIdentityBlocksCompleteInventory) {
++  Save("regular", false, TabPayload(kInventoryNamedId));
++  Save("archived-malformed", false,
++       TabPayload("t-22A6D27A-E4EF-46EC-8F8F-11A93D558B33"));
++  EXPECT_FALSE(Inventory());
++}
++
++TEST_F(ContainerInventoryBackendTest,
++       PopulatedInventorySurvivesRestartAndScopedBatch) {
++  Save("archived-window-a", false, TabPayload(kInventoryNamedId));
++  Save("window-b", false, TabPayload(kInventoryTemporaryId));
++  backend_.reset();
++  task_environment_.RunUntilIdle();
++  RestoreEntityTrackerFactory tracker_factory = base::BindRepeating(
++      [](OnTabAssociation,
++         OnCollectionAssociation) -> std::unique_ptr<RestoreEntityTracker> {
++        return nullptr;
++      });
++  TabStateStorageService service(
++      temp_dir_.GetPath(), /*support_off_the_record_data=*/true,
++      std::make_unique<TestTabStoragePackager>(), tracker_factory);
++  base::RunLoop initialized;
++  service.WaitForAllPendingOperations(initialized.QuitClosure());
++  initialized.Run();
++  bool queried = false;
++  bool committed = false;
++  auto batch = service.CreateScopedBatch();
++  service.GetPersistedContainerIds(base::BindOnce(
++      [](bool* queried, std::optional<std::vector<std::string>> ids) {
++        ASSERT_TRUE(ids);
++        std::sort(ids->begin(), ids->end());
++        EXPECT_EQ(*ids, (std::vector<std::string>{kInventoryNamedId,
++                                                  kInventoryTemporaryId}));
++        *queried = true;
++      },
++      &queried));
++  task_environment_.RunUntilIdle();
++  EXPECT_FALSE(queried);
++  batch.AddCallback(
++      base::BindOnce([](bool* committed) { *committed = true; }, &committed));
++  batch = TabStateStorageService::ScopedBatch();
++  base::RunLoop flushed;
++  service.WaitForAllPendingOperations(flushed.QuitClosure());
++  flushed.Run();
++  task_environment_.RunUntilIdle();
++  EXPECT_TRUE(committed);
++  EXPECT_TRUE(queried);
++}
++
++}  // namespace
++
++#endif
++
+ }  // namespace tabs

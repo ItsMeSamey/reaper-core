@@ -1,0 +1,616 @@
+substitutions:
+- description: 'Reaper Android: remove optional AI hooks and preserve ordinary input behavior.'
+  regex:
+    re_pattern: 'uild\.annotations\.NullMarked;\
+
+      import\ org\.chromium\.build\.annotations\.Nullable;\
+
+      import\ org\.chromium\.chrome\.browser\.omnibox\.FuseboxSessionState;\
+
+      import\ org\.chromium\.chrome\.browser\.omnibox\.LocationBarDataProvider;\
+
+      import\ org\.chromium\.chrome\.browser\.omnibox\.OmniboxStub;\
+
+      import\ org\.chromium\.chrome\.browser\.omnibox\.suggestions\.AutocompleteCoordinator;\
+
+      import\ org\.chromium\.chrome\.browser\.omnibox\.voice\.VoiceRecognitionIntentHandler\.VoiceInteractionSource;\
+
+      import\ org\.chromium\.chrome\.browser\.omnibox\.voice\.VoiceRecognitionIntentHandler\.VoiceResult;\
+
+      import\ org\.chromium\.chrome\.browser\.profiles\.Profile;\
+
+      import\ org\.chromium\.chrome\.browser\.search_engines\.TemplateUrlServiceFactory;\
+
+      import\ org\.chromium\.chrome\.browser\.tab\.Tab;\
+
+      import\ org\.chromium\.components\.omnibox\.AutocompleteInput;\
+
+      import\ org\.chromium\.components\.omnibox\.AutocompleteMatch;\
+
+      import\ org\.chromium\.components\.omnibox\.AutocompleteRequestType;\
+
+      import\ org\.chromium\.components\.omnibox\.OmniboxFocusReason;\
+
+      import\ org\.chromium\.components\.omnibox\.TextSelection;\
+
+      import\ org\.chromium\.content_public\.browser\.NavigationHandle;\
+
+      import\ org\.chromium\.content_public\.browser\.RenderFrameHost;\
+
+      import\ org\.chromium\.content_public\.browser\.WebContents;\
+
+      import\ org\.chromium\.content_public\.browser\.WebContentsObserver;\
+
+      import\ org\.chromium\.ui\.base\.WindowAndroid;\
+
+      import\ org\.chromium\.url\.GURL;\
+
+      \
+
+      import\ java\.util\.ArrayList;\
+
+      import\ java\.util\.List;\
+
+      \
+
+      /\*\*\ Class\ containing\ functionality\ related\ to\ voice\ search\.\ \*/\
+
+      @NullMarked\
+
+      public\ class\ VoiceRecognitionHandler\ \{\
+
+      \ \ \ \ private\ static\ final\ String\ TAG\ =\ "VoiceRecognition";\
+
+      \
+
+      \ \ \ \ /\*\*\
+
+      \ \ \ \ \ \*\ The\ minimum\ confidence\ threshold\ that\ will\ result\ in\ navigating\ directly\
+      to\ a\ voice\ search\
+
+      \ \ \ \ \ \*\ response\ \(as\ opposed\ to\ treating\ it\ like\ a\ typed\ string\ in\ the\ Omnibox\)\.\
+
+      \ \ \ \ \ \*/\
+
+      \ \ \ \ @VisibleForTesting\ public\ static\ final\ float\ VOICE_SEARCH_CONFIDENCE_NAVIGATE_THRESHOLD\
+      =\ 0\.9f;\
+
+      \
+
+      \ \ \ \ private\ final\ OmniboxStub\ mOmniboxStub;\
+
+      \ \ \ \ private\ final\ LocationBarDataProvider\ mLocationBarDataProvider;\
+
+      \ \ \ \ private\ final\ AutocompleteCoordinator\ mAutocompleteCoordinator;\
+
+      \ \ \ \ private\ final\ ObserverList<Observer>\ mObservers\ =\ new\ ObserverList<>\(\);\
+
+      \ \ \ \ private\ @Nullable\ WebContentsObserver\ mVoiceSearchWebContentsObserver;\
+
+      \ \ \ \ private\ CallbackController\ mCallbackController\ =\ new\ CallbackController\(\);\
+
+      \ \ \ \ private\ final\ MonotonicObservableSupplier<Profile>\ mProfileSupplier;\
+
+      \ \ \ \ private\ final\ VoiceRecognitionIntentHandler\ mIntentHandler;\
+
+      \
+
+      \ \ \ \ /\*\*\
+
+      \ \ \ \ \ \*\ AssistantActionPerformed\ defined\ in\ tools/metrics/histograms/enums\.xml\.\
+
+      \ \ \ \ \ \*\
+
+      \ \ \ \ \ \*\ <p>Do\ not\ reorder\ or\ remove\ items,\ only\ add\ new\ items\ before\ NUM_ENTRIES\.\
+
+      \ \ \ \ \ \*/\
+
+      \ \ \ \ @IntDef\(\{\
+
+      \ \ \ \ \ \ \ \ AssistantActionPerformed\.UNKNOWN,\
+
+      \ \ \ \ \ \ \ \ AssistantActionPerformed\.TRANSCRIPTION,\
+
+      \ \ \ \ \ \ \ \ AssistantActionPerformed\.TRANSLATE,\
+
+      \ \ \ \ \ \ \ \ AssistantActionPerformed\.READOUT\
+
+      \ \ \ \ \}\)\
+
+      \ \ \ \ public\ @interface\ AssistantActionPerformed\ \{\
+
+      \ \ \ \ \ \ \ \ int\ UNKNOWN\ =\ 0;\
+
+      \ \ \ \ \ \ \ \ int\ TRANSCRIPTION\ =\ 1;\
+
+      \ \ \ \ \ \ \ \ int\ TRANSLATE\ =\ 2;\
+
+      \ \ \ \ \ \ \ \ int\ READOUT\ =\ 3;\
+
+      \
+
+      \ \ \ \ \ \ \ \ //\ Be\ sure\ to\ also\ update\ enums\.xml\ when\ updating\ these\ values\.\
+
+      \ \ \ \ \ \ \ \ int\ NUM_ENTRIES\ =\ 4;\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ /\*\*\ Interface\ for\ observers\ interested\ in\ updates\ to\ the\ voice\ state\.\ \*/\
+
+      \ \ \ \ public\ interface\ Observer\ \{\
+
+      \ \ \ \ \ \ \ \ /\*\*\
+
+      \ \ \ \ \ \ \ \ \ \*\ Triggers\ when\ an\ event\ occurs\ that\ impacts\ availability\ of\ the\ voice\
+      recognition,\ for\
+
+      \ \ \ \ \ \ \ \ \ \*\ example\ audio\ permissions\ or\ policy\ values\ change\.\
+
+      \ \ \ \ \ \ \ \ \ \*/\
+
+      \ \ \ \ \ \ \ \ void\ onVoiceAvailabilityImpacted\(\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ public\ VoiceRecognitionHandler\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ OmniboxStub\ omniboxStub,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ LocationBarDataProvider\ locationBarDataProvider,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ AutocompleteCoordinator\ autocompleteCoordinator,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ WindowAndroid\ windowAndroid,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ MonotonicObservableSupplier<Profile>\ profileSupplier\)\ \{\
+
+      \ \ \ \ \ \ \ \ this\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ omniboxStub,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ locationBarDataProvider,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ autocompleteCoordinator,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ windowAndroid,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ profileSupplier,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ new\ VoiceRecognitionIntentHandler\(windowAndroid\)\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ VoiceRecognitionHandler\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ OmniboxStub\ omniboxStub,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ LocationBarDataProvider\ locationBarDataProvider,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ AutocompleteCoordinator\ autocompleteCoordinator,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ WindowAndroid\ windowAndroid,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ MonotonicObservableSupplier<Profile>\ profileSupplier,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ VoiceRecognitionIntentHandler\ intentHandler\)\ \{\
+
+      \ \ \ \ \ \ \ \ mOmniboxStub\ =\ omniboxStub;\
+
+      \ \ \ \ \ \ \ \ mLocationBarDataProvider\ =\ locationBarDataProvider;\
+
+      \ \ \ \ \ \ \ \ mAutocompleteCoordinator\ =\ autocompleteCoordinator;\
+
+      \ \ \ \ \ \ \ \ mProfileSupplier\ =\ profileSupplier;\
+
+      \ \ \ \ \ \ \ \ mIntentHandler\ =\ intentHandler;\
+
+      \ \ \ \ \ \ \ \ mProfileSupplier\.addSyncObserverAndPostIfNonNull\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mCallbackController\.makeCancelable\(profile\ \->\ notifyVoiceAvailabilityImpacted\(\)\)\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ public\ void\ addObserver\(Observer\ observer\)\ \{\
+
+      \ \ \ \ \ \ \ \ mObservers\.addObserver\(observer\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ public\ void\ removeObserver\(Observer\ observer\)\ \{\
+
+      \ \ \ \ \ \ \ \ mObservers\.removeObserver\(observer\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ @SuppressWarnings\("NullAway"\)\
+
+      \ \ \ \ public\ void\ destroy\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ if\ \(mCallbackController\ !=\ null\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mCallbackController\.destroy\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mCallbackController\ =\ null;\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ mIntentHandler\.destroy\(\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ private\ void\ notifyVoiceAvailabilityImpacted\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ for\ \(Observer\ o\ :\ mObservers\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ o\.onVoiceAvailabilityImpacted\(\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ /\*\*\
+
+      \ \ \ \ \ \*\ Instantiated\ when\ a\ voice\ search\ is\ performed\ to\ monitor\ the\ web\ contents\
+      for\ a\ navigation\ to\
+
+      \ \ \ \ \ \*\ be\ started\ so\ we\ can\ notify\ the\ render\ frame\ that\ a\ user\ gesture\ has\
+      been\ performed\.\ This\
+
+      \ \ \ \ \ \*\ allows\ autoplay\ of\ the\ voice\ response\ for\ search\ results\.\
+
+      \ \ \ \ \ \*/\
+
+      \ \ \ \ private\ final\ class\ VoiceSearchWebContentsObserver\ extends\ WebContentsObserver\ \{\
+
+      \ \ \ \ \ \ \ \ public\ VoiceSearchWebContentsObserver\(WebContents\ webContents\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ super\(webContents\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ /\*\*\
+
+      \ \ \ \ \ \ \ \ \ \*\ Forces\ the\ user\ gesture\ flag\ to\ be\ set\ on\ a\ render\ frame\ if\ the\
+      URL\ being\ navigated\ to\ is\
+
+      \ \ \ \ \ \ \ \ \ \*\ a\ SRP\.\
+
+      \ \ \ \ \ \ \ \ \ \*\
+
+      \ \ \ \ \ \ \ \ \ \*\ @param\ url\ The\ URL\ for\ the\ navigation\ that\ started,\ so\ we\ can\
+      ensure\ that\ what\ we''re\
+
+      \ \ \ \ \ \ \ \ \ \*\ \ \ \ \ navigating\ to\ is\ actually\ a\ SRP\.\
+
+      \ \ \ \ \ \ \ \ \ \*/\
+
+      \ \ \ \ \ \ \ \ private\ void\ setReceivedUserGesture\(GURL\ url\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ WebContents\ webContents\ =\ getWebContents\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(webContents\ ==\ null\)\ return;\
+
+      \
+
+      \ \ \ \ \ \ \ \ \ \ \ \ RenderFrameHost\ renderFrameHost\ =\ webContents\.getMainFrame\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(renderFrameHost\ ==\ null\)\ return;\
+
+      \
+
+      \ \ \ \ \ \ \ \ \ \ \ \ Profile\ profile\ =\ mProfileSupplier\.get\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(profile\ ==\ null\)\ return;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(TemplateUrlServiceFactory\.getForProfile\(profile\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \.isSearchResultsPageFromDefaultSearchProvider\(url\)\)\
+      \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ renderFrameHost\.notifyUserActivation\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ @Override\
+
+      \ \ \ \ \ \ \ \ public\ void\ didFinishNavigationInPrimaryMainFrame\(NavigationHandle\ navigation\)\
+      \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(navigation\.hasCommitted\(\)\ \&\&\ !navigation\.isErrorPage\(\)\)\
+      \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ setReceivedUserGesture\(navigation\.getUrl\(\)\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ observe\(null\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ void\ handleTranscriptionResult\(List<VoiceResult>\ voiceResults\)\ \{\
+
+      \ \ \ \ \ \ \ \ assert\ mAutocompleteCoordinator\ !=\ null;\
+
+      \
+
+      \ \ \ \ \ \ \ \ List<VoiceResult>\ classifiedResults\ =\ new\ ArrayList<>\(\);\
+
+      \ \ \ \ \ \ \ \ Profile\ profile\ =\ mProfileSupplier\.get\(\);\
+
+      \ \ \ \ \ \ \ \ if\ \(profile\ !=\ null\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ for\ \(VoiceResult\ result\ :\ voiceResults\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ String\ matchText\ =\ result\.getMatch\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ //\ Remove\ any\ spaces\ in\ the\ voice\ search\ match\ when\ determining\
+      whether\ it\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ //\ appears\ to\ be\ a\ URL\.\ This\ is\ to\ prevent\ cases\ like\
+      \(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ //\ "tech\ crunch\.com"\ and\ "www\.\ engadget\ \.com"\ from\ not\
+      appearing\ like\ URLs\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ //\ from\ not\ navigating\ to\ the\ URL\.\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ //\ If\ the\ string\ appears\ to\ be\ a\ URL,\ then\ use\ it\ instead\
+      of\ the\ string\ returned\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ //\ from\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ //\ the\ voice\ engine\.\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ String\ culledString\ =\ matchText\.replaceAll\("\ ",\ ""\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ AutocompleteMatch\ match\ =\ AutocompleteCoordinator\.classify\(profile,\
+      culledString\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ String\ urlOrSearchQuery;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ if\ \(match\ ==\ null\ \|\|\ match\.isSearchSuggestion\(\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ urlOrSearchQuery\ =\ matchText;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\ else\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ urlOrSearchQuery\ =\ culledString;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ classifiedResults\.add\(new\ VoiceResult\(urlOrSearchQuery,\ result\.getConfidence\(\)\)\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \}\ else\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ classifiedResults\.addAll\(voiceResults\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ mAutocompleteCoordinator\.onVoiceResults\(classifiedResults\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ //\ Since\ the\ intent\ handler\ already\ validated\ results,\ we\ can\ assume\
+      it\ is\ non\-empty\
+
+      \ \ \ \ \ \ \ \ VoiceResult\ topResult\ =\ classifiedResults\.get\(0\);\
+
+      \ \ \ \ \ \ \ \ String\ topResultQuery\ =\ topResult\.getMatch\(\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ FuseboxSessionState\ sessionState\ =\ mLocationBarDataProvider\.getFuseboxSessionState\(\);\
+
+      \ \ \ \ \ \ \ \ @AutocompleteRequestType\
+
+      \ \ \ \ \ \ \ \ int\ requestType\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ sessionState\ !=\ null\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \?\ sessionState\.getAutocompleteInput\(\)\.getRequestType\(\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ :\ AutocompleteRequestType\.SEARCH;\
+
+      \
+
+      \ \ \ \ \ \ \ \ if\ \(topResult\.getConfidence\(\)\ <\ VOICE_SEARCH_CONFIDENCE_NAVIGATE_THRESHOLD\)\
+      \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ beginInputWithVerbatimText\(topResultQuery,\ requestType\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ return;\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ //\ Since\ voice\ was\ used,\ we\ need\ to\ let\ the\ frame\ know\ that\ there\
+      was\ a\ user\ gesture\.\
+
+      \ \ \ \ \ \ \ \ Tab\ currentTab\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mLocationBarDataProvider\ !=\ null\ \?\ mLocationBarDataProvider\.getTab\(\)\
+      :\ null;\
+
+      \ \ \ \ \ \ \ \ if\ \(currentTab\ !=\ null\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(mVoiceSearchWebContentsObserver\ !=\ null\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mVoiceSearchWebContentsObserver\.observe\(null\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mVoiceSearchWebContentsObserver\ =\ null;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(currentTab\.getWebContents\(\)\ !=\ null\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mVoiceSearchWebContentsObserver\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ new\ VoiceSearchWebContentsObserver\(currentTab\.getWebContents\(\)\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ mOmniboxStub\.loadUrlFromVoice\(topResultQuery\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ private\ void\ beginInputWithVerbatimText\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ String\ query,\ @AutocompleteRequestType\ int\ requestType\)\ \{\
+
+      \ \ \ \ \ \ \ \ AutocompleteInput\ input\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ new\ AutocompleteInput\(OmniboxFocusReason\.SEARCH_QUERY\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \.setUserText\(query\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \.setSelection\(TextSelection\.SELECT_ALL\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \.setRequestType\(requestType\);\
+
+      \ \ \ \ \ \ \ \ mOmniboxStub\.beginInput\(input\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ /\*\*\
+
+      \ \ \ \ \ \*\ Triggers\ a\ voice\ recognition\ intent\ to\ allow\ the\ user\ t'
+    replace: "uild.annotations.NullMarked;\nimport org.chromium.build.annotations.Nullable;\nimport org.chromium.chrome.browser.omnibox.LocationBarDataProvider;\n\
+      import org.chromium.chrome.browser.omnibox.OmniboxStub;\nimport org.chromium.chrome.browser.omnibox.suggestions.AutocompleteCoordinator;\n\
+      import org.chromium.chrome.browser.omnibox.voice.VoiceRecognitionIntentHandler.VoiceInteractionSource;\n\
+      import org.chromium.chrome.browser.omnibox.voice.VoiceRecognitionIntentHandler.VoiceResult;\nimport\
+      \ org.chromium.chrome.browser.profiles.Profile;\nimport org.chromium.chrome.browser.search_engines.TemplateUrlServiceFactory;\n\
+      import org.chromium.chrome.browser.tab.Tab;\nimport org.chromium.components.omnibox.AutocompleteInput;\n\
+      import org.chromium.components.omnibox.AutocompleteMatch;\nimport org.chromium.components.omnibox.AutocompleteRequestType;\n\
+      import org.chromium.components.omnibox.OmniboxFocusReason;\nimport org.chromium.components.omnibox.TextSelection;\n\
+      import org.chromium.content_public.browser.NavigationHandle;\nimport org.chromium.content_public.browser.RenderFrameHost;\n\
+      import org.chromium.content_public.browser.WebContents;\nimport org.chromium.content_public.browser.WebContentsObserver;\n\
+      import org.chromium.ui.base.WindowAndroid;\nimport org.chromium.url.GURL;\n\nimport java.util.ArrayList;\n\
+      import java.util.List;\n\n/** Class containing functionality related to voice search. */\n@NullMarked\n\
+      public class VoiceRecognitionHandler {\n    private static final String TAG = \"VoiceRecognition\"\
+      ;\n\n    /**\n     * The minimum confidence threshold that will result in navigating directly to\
+      \ a voice search\n     * response (as opposed to treating it like a typed string in the Omnibox).\n\
+      \     */\n    @VisibleForTesting public static final float VOICE_SEARCH_CONFIDENCE_NAVIGATE_THRESHOLD\
+      \ = 0.9f;\n\n    private final OmniboxStub mOmniboxStub;\n    private final LocationBarDataProvider\
+      \ mLocationBarDataProvider;\n    private final AutocompleteCoordinator mAutocompleteCoordinator;\n\
+      \    private final ObserverList<Observer> mObservers = new ObserverList<>();\n    private @Nullable\
+      \ WebContentsObserver mVoiceSearchWebContentsObserver;\n    private CallbackController mCallbackController\
+      \ = new CallbackController();\n    private final MonotonicObservableSupplier<Profile> mProfileSupplier;\n\
+      \    private final VoiceRecognitionIntentHandler mIntentHandler;\n\n    /**\n     * AssistantActionPerformed\
+      \ defined in tools/metrics/histograms/enums.xml.\n     *\n     * <p>Do not reorder or remove items,\
+      \ only add new items before NUM_ENTRIES.\n     */\n    @IntDef({\n        AssistantActionPerformed.UNKNOWN,\n\
+      \        AssistantActionPerformed.TRANSCRIPTION,\n        AssistantActionPerformed.TRANSLATE,\n\
+      \        AssistantActionPerformed.READOUT\n    })\n    public @interface AssistantActionPerformed\
+      \ {\n        int UNKNOWN = 0;\n        int TRANSCRIPTION = 1;\n        int TRANSLATE = 2;\n    \
+      \    int READOUT = 3;\n\n        // Be sure to also update enums.xml when updating these values.\n\
+      \        int NUM_ENTRIES = 4;\n    }\n\n    /** Interface for observers interested in updates to\
+      \ the voice state. */\n    public interface Observer {\n        /**\n         * Triggers when an\
+      \ event occurs that impacts availability of the voice recognition, for\n         * example audio\
+      \ permissions or policy values change.\n         */\n        void onVoiceAvailabilityImpacted();\n\
+      \    }\n\n    public VoiceRecognitionHandler(\n            OmniboxStub omniboxStub,\n          \
+      \  LocationBarDataProvider locationBarDataProvider,\n            AutocompleteCoordinator autocompleteCoordinator,\n\
+      \            WindowAndroid windowAndroid,\n            MonotonicObservableSupplier<Profile> profileSupplier)\
+      \ {\n        this(\n                omniboxStub,\n                locationBarDataProvider,\n   \
+      \             autocompleteCoordinator,\n                windowAndroid,\n                profileSupplier,\n\
+      \                new VoiceRecognitionIntentHandler(windowAndroid));\n    }\n\n    VoiceRecognitionHandler(\n\
+      \            OmniboxStub omniboxStub,\n            LocationBarDataProvider locationBarDataProvider,\n\
+      \            AutocompleteCoordinator autocompleteCoordinator,\n            WindowAndroid windowAndroid,\n\
+      \            MonotonicObservableSupplier<Profile> profileSupplier,\n            VoiceRecognitionIntentHandler\
+      \ intentHandler) {\n        mOmniboxStub = omniboxStub;\n        mLocationBarDataProvider = locationBarDataProvider;\n\
+      \        mAutocompleteCoordinator = autocompleteCoordinator;\n        mProfileSupplier = profileSupplier;\n\
+      \        mIntentHandler = intentHandler;\n        mProfileSupplier.addSyncObserverAndPostIfNonNull(\n\
+      \                mCallbackController.makeCancelable(profile -> notifyVoiceAvailabilityImpacted()));\n\
+      \    }\n\n    public void addObserver(Observer observer) {\n        mObservers.addObserver(observer);\n\
+      \    }\n\n    public void removeObserver(Observer observer) {\n        mObservers.removeObserver(observer);\n\
+      \    }\n\n    @SuppressWarnings(\"NullAway\")\n    public void destroy() {\n        if (mCallbackController\
+      \ != null) {\n            mCallbackController.destroy();\n            mCallbackController = null;\n\
+      \        }\n        mIntentHandler.destroy();\n    }\n\n    private void notifyVoiceAvailabilityImpacted()\
+      \ {\n        for (Observer o : mObservers) {\n            o.onVoiceAvailabilityImpacted();\n   \
+      \     }\n    }\n\n    /**\n     * Instantiated when a voice search is performed to monitor the web\
+      \ contents for a navigation to\n     * be started so we can notify the render frame that a user\
+      \ gesture has been performed. This\n     * allows autoplay of the voice response for search results.\n\
+      \     */\n    private final class VoiceSearchWebContentsObserver extends WebContentsObserver {\n\
+      \        public VoiceSearchWebContentsObserver(WebContents webContents) {\n            super(webContents);\n\
+      \        }\n\n        /**\n         * Forces the user gesture flag to be set on a render frame if\
+      \ the URL being navigated to is\n         * a SRP.\n         *\n         * @param url The URL for\
+      \ the navigation that started, so we can ensure that what we're\n         *     navigating to is\
+      \ actually a SRP.\n         */\n        private void setReceivedUserGesture(GURL url) {\n      \
+      \      WebContents webContents = getWebContents();\n            if (webContents == null) return;\n\
+      \n            RenderFrameHost renderFrameHost = webContents.getMainFrame();\n            if (renderFrameHost\
+      \ == null) return;\n\n            Profile profile = mProfileSupplier.get();\n            if (profile\
+      \ == null) return;\n            if (TemplateUrlServiceFactory.getForProfile(profile)\n         \
+      \           .isSearchResultsPageFromDefaultSearchProvider(url)) {\n                renderFrameHost.notifyUserActivation();\n\
+      \            }\n        }\n\n        @Override\n        public void didFinishNavigationInPrimaryMainFrame(NavigationHandle\
+      \ navigation) {\n            if (navigation.hasCommitted() && !navigation.isErrorPage()) {\n   \
+      \             setReceivedUserGesture(navigation.getUrl());\n            }\n            observe(null);\n\
+      \        }\n    }\n\n    void handleTranscriptionResult(List<VoiceResult> voiceResults) {\n    \
+      \    assert mAutocompleteCoordinator != null;\n\n        List<VoiceResult> classifiedResults = new\
+      \ ArrayList<>();\n        Profile profile = mProfileSupplier.get();\n        if (profile != null)\
+      \ {\n            for (VoiceResult result : voiceResults) {\n                String matchText = result.getMatch();\n\
+      \                // Remove any spaces in the voice search match when determining whether it\n  \
+      \              // appears to be a URL. This is to prevent cases like (\n                // \"tech\
+      \ crunch.com\" and \"www. engadget .com\" from not appearing like URLs)\n                // from\
+      \ not navigating to the URL.\n                // If the string appears to be a URL, then use it\
+      \ instead of the string returned\n                // from\n                // the voice engine.\n\
+      \                String culledString = matchText.replaceAll(\" \", \"\");\n                AutocompleteMatch\
+      \ match = AutocompleteCoordinator.classify(profile, culledString);\n\n                String urlOrSearchQuery;\n\
+      \                if (match == null || match.isSearchSuggestion()) {\n                    urlOrSearchQuery\
+      \ = matchText;\n                } else {\n                    urlOrSearchQuery = culledString;\n\
+      \                }\n                classifiedResults.add(new VoiceResult(urlOrSearchQuery, result.getConfidence()));\n\
+      \            }\n        } else {\n            classifiedResults.addAll(voiceResults);\n        }\n\
+      \n        mAutocompleteCoordinator.onVoiceResults(classifiedResults);\n\n        // Since the intent\
+      \ handler already validated results, we can assume it is non-empty\n        VoiceResult topResult\
+      \ = classifiedResults.get(0);\n        String topResultQuery = topResult.getMatch();\n\n       \
+      \ if (topResult.getConfidence() < VOICE_SEARCH_CONFIDENCE_NAVIGATE_THRESHOLD) {\n            beginInputWithVerbatimText(topResultQuery);\n\
+      \            return;\n        }\n\n        // Since voice was used, we need to let the frame know\
+      \ that there was a user gesture.\n        Tab currentTab =\n                mLocationBarDataProvider\
+      \ != null ? mLocationBarDataProvider.getTab() : null;\n        if (currentTab != null) {\n     \
+      \       if (mVoiceSearchWebContentsObserver != null) {\n                mVoiceSearchWebContentsObserver.observe(null);\n\
+      \                mVoiceSearchWebContentsObserver = null;\n            }\n            if (currentTab.getWebContents()\
+      \ != null) {\n                mVoiceSearchWebContentsObserver =\n                        new VoiceSearchWebContentsObserver(currentTab.getWebContents());\n\
+      \            }\n        }\n\n        mOmniboxStub.loadUrlFromVoice(topResultQuery);\n    }\n\n \
+      \   private void beginInputWithVerbatimText(String query) {\n        AutocompleteInput input =\n\
+      \                new AutocompleteInput(OmniboxFocusReason.SEARCH_QUERY)\n                      \
+      \  .setUserText(query)\n                        .setSelection(TextSelection.SELECT_ALL)\n      \
+      \                  .setRequestType(AutocompleteRequestType.SEARCH);\n        mOmniboxStub.beginInput(input);\n\
+      \    }\n\n    /**\n     * Triggers a voice recognition intent to allow the user t"

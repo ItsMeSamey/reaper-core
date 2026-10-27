@@ -1,0 +1,44 @@
+# Copyright 2026 The Reaper Authors.
+# SPDX-License-Identifier: MPL-2.0
+
+substitutions:
+
+  - description: "Access the optional Android embedder power backend."
+    regex:
+      pattern: "#include \"extensions/browser/api/power/activity_reporter_delegate.h\""
+      replace: "#include \"extensions/browser/api/power/activity_reporter_delegate.h\"\n#include \"extensions/browser/api/extensions_api_client.h\""
+
+  - description: "Expose Android acquisition errors instead of silent API success."
+    regex:
+      pattern: "  PowerAPI::Get(browser_context())->AddRequest(extension_id(), params->level);"
+      replace: "  if (auto error = PowerAPI::Get(browser_context())->AddRequest(\n          extension_id(), params->level)) {\n    return RespondNow(Error(*error));\n  }"
+
+  - description: "Roll back request replacement if the Android platform rejects the lease."
+    regex:
+      pattern: "void PowerAPI::AddRequest(const ExtensionId& extension_id,\n                          api::power::Level level) {\n  extension_levels_[extension_id] = level;\n  UpdateWakeLock();\n}"
+      replace: "std::optional<std::string> PowerAPI::AddRequest(\n    const ExtensionId& extension_id,\n    api::power::Level level) {\n  auto previous = extension_levels_.find(extension_id);\n  std::optional<api::power::Level> previous_level;\n  if (previous != extension_levels_.end()) previous_level = previous->second;\n  extension_levels_[extension_id] = level;\n  if (auto error = UpdateWakeLock(level == api::power::Level::kDisplay, true)) {\n    if (previous_level) {\n      extension_levels_[extension_id] = *previous_level;\n    } else {\n      extension_levels_.erase(extension_id);\n    }\n    return error;\n  }\n  return std::nullopt;\n}"
+
+  - description: "Continue using injected wake-lock callbacks in existing Android unit tests."
+    regex:
+      pattern: "    CancelWakeLockFunction cancel_function) {\n  activate_wake_lock_function_ ="
+      replace: "    CancelWakeLockFunction cancel_function) {\n#if BUILDFLAG(IS_ANDROID)\n  use_custom_wake_lock_functions_for_testing_ =\n      !activate_function.is_null() || !cancel_function.is_null();\n#endif\n  activate_wake_lock_function_ ="
+
+  - description: "Use real Android CPU and foreground-display aggregates while preserving desktop behavior."
+    regex:
+      pattern: "void PowerAPI::UpdateWakeLock() {\n  if (extension_levels_.empty()) {\n    cancel_wake_lock_function_.Run();\n    return;\n  }"
+      replace: "std::optional<std::string> PowerAPI::UpdateWakeLock(\n    [[maybe_unused]] bool require_foreground_display,\n    [[maybe_unused]] bool transactional) {\n#if BUILDFLAG(IS_ANDROID)\n  if (!use_custom_wake_lock_functions_for_testing_) {\n    if (extension_levels_.empty()) {\n      CancelWakeLock();\n      return std::nullopt;\n    }\n    if (!android_delegate_ && ExtensionsAPIClient::Get()) {\n      android_delegate_ =\n          ExtensionsAPIClient::Get()->CreateAndroidPowerDelegate(browser_context_);\n    }\n    if (!android_delegate_) return \"Android power support is unavailable.\";\n    bool system = false;\n    bool display = false;\n    for (const auto& [id, level] : extension_levels_) {\n      system |= level == api::power::Level::kSystem;\n      display |= level == api::power::Level::kDisplay;\n    }\n    if (auto error = android_delegate_->Apply(system, display,\n                                               require_foreground_display,\n                                               transactional)) {\n      return error;\n    }\n    is_wake_lock_active_ = true;\n    current_level_ = display ? api::power::Level::kDisplay\n                             : api::power::Level::kSystem;\n    return std::nullopt;\n  }\n#endif\n  if (extension_levels_.empty()) {\n    cancel_wake_lock_function_.Run();\n    return std::nullopt;\n  }"
+
+  - description: "Complete successful desktop update without an error."
+    regex:
+      pattern: "    current_level_ = new_level;\n  }\n}\n\nvoid PowerAPI::Shutdown()"
+      replace: "    current_level_ = new_level;\n  }\n  return std::nullopt;\n}\n\nvoid PowerAPI::Shutdown()"
+
+  - description: "Destroy Java lifecycle observers during keyed-service shutdown."
+    regex:
+      pattern: "  cancel_wake_lock_function_.Run();\n}\n\nvoid PowerAPI::ActivateWakeLock"
+      replace: "  cancel_wake_lock_function_.Run();\n#if BUILDFLAG(IS_ANDROID)\n  android_delegate_.reset();\n#endif\n}\n\nvoid PowerAPI::ActivateWakeLock"
+
+  - description: "Release both Android leases without going through unsupported device Mojo."
+    regex:
+      pattern: "void PowerAPI::CancelWakeLock() {"
+      replace: "void PowerAPI::CancelWakeLock() {\n#if BUILDFLAG(IS_ANDROID)\n  if (!use_custom_wake_lock_functions_for_testing_) {\n    if (android_delegate_) android_delegate_->Cancel();\n    is_wake_lock_active_ = false;\n    return;\n  }\n#endif"

@@ -1,0 +1,228 @@
+diff --git a/chrome/browser/extensions/api/messaging/android/junit/src/org/chromium/chrome/browser/extensions/api/messaging/NativeMessagingManagerTest.java b/chrome/browser/extensions/api/messaging/android/junit/src/org/chromium/chrome/browser/extensions/api/messaging/NativeMessagingManagerTest.java
+--- a/chrome/browser/extensions/api/messaging/android/junit/src/org/chromium/chrome/browser/extensions/api/messaging/NativeMessagingManagerTest.java
++++ b/chrome/browser/extensions/api/messaging/android/junit/src/org/chromium/chrome/browser/extensions/api/messaging/NativeMessagingManagerTest.java
+@@ -124,6 +124,32 @@
+         }
+     }
+ 
++    private static class DeniedBindingContext extends TestContext {
++        private NativeMessagingConnection mConnection;
++        private Intent mIntent;
++        private int mFlags;
++        private int mBindAttempts;
++        private int mUnbindAttempts;
++
++        DeniedBindingContext(Context base) {
++            super(base);
++        }
++
++        @Override
++        public boolean bindService(Intent service, ServiceConnection conn, int flags) {
++            mConnection = (NativeMessagingConnection) conn;
++            mIntent = service;
++            mFlags = flags;
++            mBindAttempts++;
++            throw new SecurityException("Service bind denied by Android");
++        }
++
++        @Override
++        public void unbindService(ServiceConnection conn) {
++            mUnbindAttempts++;
++        }
++    }
++
+     @Before
+     public void setUp() {
+         NativeMessagingManagerJni.setInstanceForTesting(mNativeMessagingManagerJni);
+@@ -142,12 +168,74 @@
+     }
+ 
+     @Test
++    public void testDeniedBindReturnsUniformErrorAndAllowsRecoveryInBothRoutes() {
++        Mockito.when(mMockPackageManager.hasSigningCertificate(
++                TARGET_PACKAGE, SIGNED_CERT_BYTES, PackageManager.CERT_INPUT_SHA256)).thenReturn(true);
++
++        for (boolean requireAuthorizedCompanion : new boolean[] {false, true}) {
++            NativeMessagingManager manager =
++                    NativeMessagingManager.getForProfile(mProfile, requireAuthorizedCompanion);
++            DeniedBindingContext deniedContext = new DeniedBindingContext(mTestContext);
++            ContextUtils.initApplicationContextForTests(deniedContext);
++            byte[][] certificates = requireAuthorizedCompanion
++                    ? new byte[][] {SIGNED_CERT_BYTES} : NO_CERTIFICATES;
++            NativeMessageAndroidPort port = Mockito.mock(NativeMessageAndroidPort.class);
++            try {
++                Assert.assertEquals("Unable to connect to " + TARGET_PACKAGE + ".",
++                        manager.addPort(TARGET_PACKAGE, EXTENSION_ID, true,
++                                requireAuthorizedCompanion, certificates, port));
++                Assert.assertEquals(1, deniedContext.mBindAttempts);
++                Assert.assertEquals(TARGET_PACKAGE, deniedContext.mIntent.getPackage());
++                Assert.assertEquals(NativeMessagingConnection.ACTION_NATIVE_MESSAGING,
++                        deniedContext.mIntent.getAction());
++                Assert.assertEquals(Context.BIND_AUTO_CREATE, deniedContext.mFlags);
++                Assert.assertNull(manager.getConnectionForTesting(TARGET_PACKAGE));
++
++                NativeMessagingConnection connection = deniedContext.mConnection;
++                Assert.assertNotNull(connection);
++                Assert.assertFalse(connection.isBound());
++                Assert.assertNull(connection.getServiceForTesting());
++                Assert.assertNull(connection.getSessionForTesting(EXTENSION_ID));
++                Assert.assertEquals("Unable to connect to " + TARGET_PACKAGE + ".",
++                        connection.addPort(EXTENSION_ID, true, requireAuthorizedCompanion, port));
++
++                // A late callback on this rejected binding must not consult or authenticate a service.
++                IBinder lateBinder = Mockito.mock(IBinder.class);
++                connection.onServiceConnected(
++                        new ComponentName(TARGET_PACKAGE, "NativeMessageService"), lateBinder);
++                connection.unbind();
++                connection.unbind();
++                Assert.assertFalse(connection.isBound());
++                Assert.assertNull(connection.getServiceForTesting());
++                Assert.assertNull(connection.getSessionForTesting(EXTENSION_ID));
++                Assert.assertEquals(0, deniedContext.mUnbindAttempts);
++                Mockito.verifyNoInteractions(port, lateBinder);
++
++                // The failed constructor must not poison the manager's later normal bind.
++                ContextUtils.initApplicationContextForTests(mTestContext);
++                Assert.assertNull(manager.addPort(TARGET_PACKAGE, EXTENSION_ID, true,
++                        requireAuthorizedCompanion, certificates, new NativeMessageAndroidPort()));
++                NativeMessagingConnection recovered = manager.getConnectionForTesting(TARGET_PACKAGE);
++                Assert.assertNotNull(recovered);
++                Assert.assertNotSame(connection, recovered);
++                Assert.assertTrue(recovered.isBound());
++                Assert.assertNotNull(recovered.getSessionForTesting(EXTENSION_ID));
++            } finally {
++                ContextUtils.initApplicationContextForTests(mTestContext);
++                manager.destroy();
++            }
++        }
++        Mockito.verify(mMockPackageManager, Mockito.times(2)).hasSigningCertificate(
++                TARGET_PACKAGE, SIGNED_CERT_BYTES, PackageManager.CERT_INPUT_SHA256);
++    }
++
++    @Test
+     public void testConnectAndDisconnectService() {
+         String error =
+                 mManager.addPort(
+                         TARGET_PACKAGE,
+                         EXTENSION_ID,
+-                        /* isVerifiedExtension= */ true,
++                        /* isVerifiedExtension= */ true, /* requireAuthorizedCompanion= */ false,
+                         NO_CERTIFICATES,
+                         new NativeMessageAndroidPort());
+         Assert.assertNull(error);
+@@ -159,6 +247,13 @@
+ 
+         IBrowserNativeMessageService fakeService =
+                 new IBrowserNativeMessageService.Stub() {
++                    @Override
++                    public void connectAuthorizedExtension(
++                            String id, android.os.Bundle info, IConnectExtensionCallback callback)
++                            throws RemoteException {
++                        callback.onError("Authenticated entry point unsupported by legacy fixture");
++                    }
++
+                     @Override
+                     public void connectExtension(
+                             String extensionId,
+@@ -187,7 +282,7 @@
+                 mManager.addPort(
+                         TARGET_PACKAGE,
+                         EXTENSION_ID,
+-                        /* isVerifiedExtension= */ true,
++                        /* isVerifiedExtension= */ true, /* requireAuthorizedCompanion= */ false,
+                         NO_CERTIFICATES,
+                         new NativeMessageAndroidPort());
+         Assert.assertNull(error);
+@@ -222,7 +317,7 @@
+                 mManager.addPort(
+                         "com.nonexistent.app",
+                         EXTENSION_ID,
+-                        /* isVerifiedExtension= */ true,
++                        /* isVerifiedExtension= */ true, /* requireAuthorizedCompanion= */ false,
+                         NO_CERTIFICATES,
+                         new NativeMessageAndroidPort());
+         Assert.assertNotNull(error);
+@@ -236,7 +331,7 @@
+                 mManager.addPort(
+                         TARGET_PACKAGE,
+                         EXTENSION_ID,
+-                        /* isVerifiedExtension= */ true,
++                        /* isVerifiedExtension= */ true, /* requireAuthorizedCompanion= */ false,
+                         NO_CERTIFICATES,
+                         new NativeMessageAndroidPort());
+         Assert.assertNull(error);
+@@ -265,7 +360,7 @@
+                 mManager.addPort(
+                         TARGET_PACKAGE,
+                         EXTENSION_ID,
+-                        /* isVerifiedExtension= */ true,
++                        /* isVerifiedExtension= */ true, /* requireAuthorizedCompanion= */ false,
+                         new byte[][] {SIGNED_CERT_BYTES},
+                         new NativeMessageAndroidPort());
+         Assert.assertNull(error);
+@@ -285,7 +380,7 @@
+                 mManager.addPort(
+                         TARGET_PACKAGE,
+                         EXTENSION_ID,
+-                        /* isVerifiedExtension= */ true,
++                        /* isVerifiedExtension= */ true, /* requireAuthorizedCompanion= */ false,
+                         new byte[][] {OTHER_CERT_BYTES},
+                         new NativeMessageAndroidPort());
+         Assert.assertEquals("Unable to connect to " + TARGET_PACKAGE + ".", error);
+@@ -311,10 +406,55 @@
+                 mManager.addPort(
+                         TARGET_PACKAGE,
+                         EXTENSION_ID,
+-                        /* isVerifiedExtension= */ true,
++                        /* isVerifiedExtension= */ true, /* requireAuthorizedCompanion= */ false,
+                         new byte[][] {OTHER_CERT_BYTES, SIGNED_CERT_BYTES},
+                         new NativeMessageAndroidPort());
+         Assert.assertNull(error);
+         Assert.assertNotNull(mManager.getConnectionForTesting(TARGET_PACKAGE));
+     }
++    @Test
++    public void testAuthorizedCompanionRequiresDeclaredCertificateBeforeBinding() {
++        String error = mManager.addPort(
++                TARGET_PACKAGE, EXTENSION_ID, true, /* requireAuthorizedCompanion= */ true,
++                NO_CERTIFICATES, new NativeMessageAndroidPort());
++        Assert.assertEquals("Unable to connect to " + TARGET_PACKAGE + ".", error);
++        Assert.assertNull(mManager.getConnectionForTesting(TARGET_PACKAGE));
++    }
++
++    @Test
++    public void testAuthorizedCompanionRejectsWrongDeclaredCertificate() {
++        String error = mManager.addPort(
++                TARGET_PACKAGE, EXTENSION_ID, true, /* requireAuthorizedCompanion= */ true,
++                new byte[][] {OTHER_CERT_BYTES}, new NativeMessageAndroidPort());
++        Assert.assertEquals("Unable to connect to " + TARGET_PACKAGE + ".", error);
++        Assert.assertNull(mManager.getConnectionForTesting(TARGET_PACKAGE));
++    }
++
++    @Test
++    public void testAuthorizedCompanionAcceptsMatchingDeclaredCertificate() {
++        Mockito.when(mMockPackageManager.hasSigningCertificate(
++                TARGET_PACKAGE, SIGNED_CERT_BYTES, PackageManager.CERT_INPUT_SHA256)).thenReturn(true);
++        Assert.assertNull(mManager.addPort(
++                TARGET_PACKAGE, EXTENSION_ID, true, /* requireAuthorizedCompanion= */ true,
++                new byte[][] {SIGNED_CERT_BYTES}, new NativeMessageAndroidPort()));
++        Assert.assertNotNull(mManager.getConnectionForTesting(TARGET_PACKAGE));
++    }
++
++    @Test
++    public void testAuthorizedManagersKeepOriginalAndOtrProfilesSeparate() {
++        Profile otr = Mockito.mock(Profile.class);
++        Mockito.when(otr.getOriginalProfile()).thenReturn(mProfile);
++        NativeMessagingManager regular = NativeMessagingManager.getForProfile(mProfile, true);
++        NativeMessagingManager incognito = NativeMessagingManager.getForProfile(otr, true);
++        try {
++            Assert.assertNotSame(regular, incognito);
++            Assert.assertSame(regular, NativeMessagingManager.getForProfile(mProfile, true));
++            Assert.assertSame(incognito, NativeMessagingManager.getForProfile(otr, true));
++            Assert.assertNotSame(mManager, regular);
++        } finally {
++            regular.destroy();
++            incognito.destroy();
++        }
++    }
++
+ }

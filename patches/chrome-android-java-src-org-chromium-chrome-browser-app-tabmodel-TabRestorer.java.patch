@@ -1,0 +1,171 @@
+diff --git a/chrome/android/java/src/org/chromium/chrome/browser/app/tabmodel/TabRestorer.java b/chrome/android/java/src/org/chromium/chrome/browser/app/tabmodel/TabRestorer.java
+--- a/chrome/android/java/src/org/chromium/chrome/browser/app/tabmodel/TabRestorer.java
++++ b/chrome/android/java/src/org/chromium/chrome/browser/app/tabmodel/TabRestorer.java
+@@ -15,7 +15,8 @@
+ import org.chromium.build.annotations.EnsuresNonNullIf;
+ import org.chromium.build.annotations.NullMarked;
+ import org.chromium.build.annotations.Nullable;
+-import org.chromium.chrome.browser.actor.BackgroundTabRestorationHelper;
++import org.chromium.chrome.browser.containers.ContainersBridge;
++import org.chromium.chrome.browser.profiles.Profile;
+ import org.chromium.chrome.browser.tab.ScopedStorageBatch;
+ import org.chromium.chrome.browser.tab.StorageLoadedData;
+ import org.chromium.chrome.browser.tab.StorageLoadedData.LoadedTabState;
+@@ -38,7 +39,6 @@
+ import java.lang.annotation.Retention;
+ import java.lang.annotation.RetentionPolicy;
+ import java.lang.annotation.Target;
+-import java.util.Collections;
+ import java.util.HashSet;
+ import java.util.Set;
+ import java.util.function.Predicate;
+@@ -128,16 +128,12 @@
+                 boolean fromMerge);
+     }
+
+-    private final @TabOrchestratorType int mOrchestratorType;
+     private final boolean mIncognito;
+-    private final boolean mIsAuthoritative;
+     private final TabRestorerDelegate mDelegate;
+     private final TabCreator mTabCreator;
+     private final Supplier<ScopedStorageBatch> mBatchFactory;
+     private final TabModelSelector mTabModelSelector;
+     private final Set<@TabId Integer> mTabIdsToIgnore = new HashSet<>();
+-    private Set<@TabId Integer> mBackgroundTabIds = Collections.emptySet();
+-    private Set<@TabId Integer> mRemainingBackgroundTabIds = Collections.emptySet();
+     private final boolean mIsFromRecreating;
+
+     private @State int mState = State.EMPTY;
+@@ -172,14 +168,12 @@
+             TabModelSelector tabModelSelector,
+             boolean isFromRecreating,
+             boolean isAuthoritative) {
+-        mOrchestratorType = orchestratorType;
+         mIncognito = incognito;
+         mDelegate = delegate;
+         mTabCreator = tabCreator;
+         mBatchFactory = batchFactory;
+         mTabModelSelector = tabModelSelector;
+         mIsFromRecreating = isFromRecreating;
+-        mIsAuthoritative = isAuthoritative;
+     }
+
+     /**
+@@ -229,13 +223,6 @@
+         mData = data;
+         int restoredTabCount = data.getLoadedTabStates().length;
+
+-        mBackgroundTabIds =
+-                BackgroundTabRestorationHelper.fetchBackgroundTabIds(
+-                        mOrchestratorType, mTabModelSelector, mIncognito, mIsAuthoritative);
+-        mRemainingBackgroundTabIds =
+-                BackgroundTabRestorationHelper.claimRemainingBackgroundTabIds(
+-                        mOrchestratorType, mTabModelSelector, mIncognito, mIsAuthoritative);
+-
+         // Special case for when cancellation happened during loading. In this case we cancel as
+         // soon as loading has finished.
+         if (mState == State.CANCELLED) {
+@@ -348,8 +335,6 @@
+     }
+
+     private void cancelInternal() {
+-        mBackgroundTabIds = Collections.emptySet();
+-        mRemainingBackgroundTabIds = Collections.emptySet();
+         if (mData != null) {
+             // Delegate still needs access to the StorageLoadedData before it is cleaned up.
+             mDelegate.onCancelled(mIncognito);
+@@ -369,11 +354,6 @@
+         assert mState == State.FINISHING;
+         mState = State.FINISHED;
+
+-        BackgroundTabRestorationHelper.restoreRemainingBackgroundTabs(
+-                mOrchestratorType, mTabModelSelector, mRemainingBackgroundTabIds, mIsAuthoritative);
+-
+-        mBackgroundTabIds = Collections.emptySet();
+-        mRemainingBackgroundTabIds = Collections.emptySet();
+
+         // Delegate still needs access to the StorageLoadedData before it is cleaned up.
+         mDelegate.onFinished(mIncognito);
+@@ -523,8 +503,8 @@
+     }
+
+     /**
+-     * Restores a tab from the given {@link TabState} or via reparenting. Returns null if the tab
+-     * could not be restored or if the WebContentsState had an empty buffer.
++     * Restores a tab from the given {@link TabState} or via reparenting. Returns null if neither
++     * state restoration nor URL fallback could restore the tab.
+      */
+     private @Nullable Tab maybeRestoreTab(
+             TabState tabState, int tabId, int index, boolean isActiveTab, boolean isRecreating) {
+@@ -558,25 +538,16 @@
+         }
+
+         Tab tab = null;
+-        if (BackgroundTabRestorationHelper.shouldIntercept(
+-                        mOrchestratorType, mIncognito, mIsAuthoritative)
+-                && mBackgroundTabIds.contains(tabId)) {
+-            tab =
+-                    BackgroundTabRestorationHelper.maybeRestoreBackgroundTab(
+-                            mOrchestratorType,
+-                            mTabModelSelector,
+-                            tabId,
+-                            index,
+-                            tabState,
+-                            mIsAuthoritative);
+-        }
+         GURL url = tabState.url;
+-        boolean hasEmptyBuffer =
+-                tabState.contentsState != null && tabState.contentsState.buffer().limit() == 0;
+-        if (tab == null && tabState.contentsState != null && !hasEmptyBuffer) {
++        if (tabState.contentsState != null && tabState.contentsState.buffer().limit() == 0) {
++            // The URL fallback does not take ownership of an unusable contents state.
++            tabState.contentsState.destroy();
++            tabState.contentsState = null;
++        }
++        if (tab == null && tabState.contentsState != null) {
+             tab = createFrozenTab(tabState, tabId, index);
+         } else if (tab == null && url != null) {
+-            tab = createTabWithoutContentsState(url, index);
++            tab = createTabWithoutContentsState(tabState, index);
+         }
+
+         if (isActiveTab && tab != null) {
+@@ -584,21 +555,29 @@
+             TabModelUtils.setIndex(model, model.indexOf(tab));
+             mDelegate.onActiveTabRestored(mIncognito);
+         }
+-        return hasEmptyBuffer ? null : tab;
++        return tab;
+     }
+
+     private @Nullable Tab createTabFromState(TabState tabState, int tabId, int index) {
+         if (tabState.contentsState != null) {
+             return createFrozenTab(tabState, tabId, index);
+         } else {
+-            return createTabWithoutContentsState(assumeNonNull(tabState.url), index);
+-        }
+-    }
+-
+-    /** Creates a Tab from the given URL when tabState.contentsState is null. */
+-    private @Nullable Tab createTabWithoutContentsState(GURL url, int index) {
+-        return mTabCreator.createNewTab(
+-                new LoadUrlParams(url), TabLaunchType.FROM_RESTORE, null, index);
++            return createTabWithoutContentsState(tabState, index);
++        }
++    }
++
++    /** Recreates a URL-only tab in its persisted storage container. */
++    private @Nullable Tab createTabWithoutContentsState(TabState tabState, int index) {
++        LoadUrlParams params = new LoadUrlParams(assumeNonNull(tabState.url));
++        String containerId = tabState.containerId;
++        if (containerId.isEmpty()) {
++            return mTabCreator.createNewTab(params, TabLaunchType.FROM_RESTORE, null, index);
++        }
++        Profile profile = mTabModelSelector.getModel(mIncognito).getProfile();
++        if (mIncognito || profile == null || profile.isOffTheRecord() || profile.shutdownStarted()
++                || !ContainersBridge.restoreContainerIdentity(profile, containerId)) return null;
++        return mTabCreator.createNewTabInContainer(
++                params, TabLaunchType.FROM_RESTORE, containerId, index);
+     }
+
+     /** Creates a frozen Tab from a non-null contentsState. */

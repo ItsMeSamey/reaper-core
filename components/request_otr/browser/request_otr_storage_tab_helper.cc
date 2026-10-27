@@ -3,6 +3,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+#include "build/build_config.h"
+
 #include "brave/components/request_otr/browser/request_otr_storage_tab_helper.h"
 
 #include <utility>
@@ -12,7 +14,9 @@
 #include "base/logging.h"
 #include "base/memory/ptr_util.h"
 #include "base/no_destructor.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/request_otr/browser/request_otr_p3a.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/request_otr/common/features.h"
 #include "components/user_prefs/user_prefs.h"
 #include "content/public/browser/browser_context.h"
@@ -42,18 +46,22 @@ RequestOTRStorageTabHelper* RequestOTRStorageTabHelper::GetOrCreate(
 }
 
 void RequestOTRStorageTabHelper::set_requested_otr(bool otr) {
+#if !BUILDFLAG(IS_ANDROID)
   if (!otr_ && otr) {
     // Session is starting, record P3A
     RecordSessionStats();
   }
+#endif  // !BUILDFLAG(IS_ANDROID)
   otr_ = otr;
 }
 
+#if !BUILDFLAG(IS_ANDROID)
 void RequestOTRStorageTabHelper::RecordSessionStats() {
   PrefService* profile_prefs =
       user_prefs::UserPrefs::Get(GetWebContents().GetBrowserContext());
   p3a::RecordSessionCount(profile_prefs, true);
 }
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 void RequestOTRStorageTabHelper::MaybeEnable1PESForUrl(
     ephemeral_storage::EphemeralStorageService* ephemeral_storage_service,

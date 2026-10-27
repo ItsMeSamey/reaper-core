@@ -11,6 +11,7 @@
 #include <memory>
 
 #include "brave/components/brave_perf_predictor/browser/perf_predictor_page_metrics_observer.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "chrome/browser/profiles/profile.h"
 
 // Forward-declared to avoid adding a compile-time dependency.
@@ -18,6 +19,7 @@
 // Returns a nullptr for non-regular profile.
 std::unique_ptr<page_load_metrics::PageLoadMetricsObserverInterface>
 BraveCreateCaptchaPageLoadMetricsObserver(Profile* profile);
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 namespace {
 
@@ -50,11 +52,13 @@ void BravePageLoadMetricsEmbedder::RegisterObservers(
       std::make_unique<
           brave_perf_predictor::PerfPredictorPageMetricsObserver>());
 
+#if !BUILDFLAG(IS_ANDROID)
   auto* profile =
       Profile::FromBrowserContext(web_contents()->GetBrowserContext());
   if (auto observer = BraveCreateCaptchaPageLoadMetricsObserver(profile)) {
     tracker->AddObserver(std::move(observer));
   }
+#endif  // !BUILDFLAG(IS_ANDROID)
 }
 
 }  // namespace

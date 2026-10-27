@@ -1,0 +1,245 @@
+diff --git a/build/android/pylib/local/device/local_device_instrumentation_test_run.py b/build/android/pylib/local/device/local_device_instrumentation_test_run.py
+--- a/build/android/pylib/local/device/local_device_instrumentation_test_run.py
++++ b/build/android/pylib/local/device/local_device_instrumentation_test_run.py
+@@ -367,6 +367,12 @@
+ 
+     # override
+     def SetUp(self):
++        if (self._test_instance.preserve_shared_device_state
++                and (self._test_instance.webview_flags
++                     or self._test_instance.webview_variations_test_seed_path)):
++            raise ValueError(
++                'Explicit WebView flags or seed conflict with shared-device preservation')
++
+         @local_device_environment.handle_shard_failures_with(
+             self._env.DenylistDevice
+         )
+@@ -444,6 +450,7 @@
+                     try:
+                         d.Install(
+                             apk,
++                            reinstall=self._env.skip_clear_data,
+                             modules=modules,
+                             fake_modules=fake_modules,
+                             permissions=permissions,
+@@ -731,7 +738,8 @@
+                 flags = self._test_instance.flags
+                 webview_flags = self._test_instance.webview_flags
+ 
+-                if '--webview-verbose-logging' not in webview_flags:
++                if (not self._test_instance.preserve_shared_device_state
++                        and '--webview-verbose-logging' not in webview_flags):
+                     webview_flags.append('--webview-verbose-logging')
+ 
+                 def _get_variations_seed_path_arg(seed_path):
+@@ -833,22 +841,23 @@
+                             e,
+                         )
+ 
+-            install_steps += [
+-                push_test_data,
+-                create_flag_changer,
+-                setup_soft_keyboard,
+-            ]
+-            post_install_steps += [
+-                self._SetDefaultBrowserApp,
+-                set_debug_app,
+-                approve_app_links,
+-                disable_system_modals,
+-                set_vega_permissions,
+-                DismissCrashDialogs,
+-            ]
++            install_steps += [push_test_data, create_flag_changer]
++            if not self._test_instance.preserve_shared_device_state:
++                install_steps.append(setup_soft_keyboard)
++                post_install_steps += [
++                    self._SetDefaultBrowserApp,
++                    set_debug_app,
++                    approve_app_links,
++                    disable_system_modals,
++                    set_vega_permissions,
++                    DismissCrashDialogs,
++                ]
+ 
+             def bind_crash_handler(step, dev):
+-                return lambda: crash_handler.RetryOnSystemCrash(step, dev)
++                return lambda: crash_handler.RetryOnSystemCrash(
++                    step, dev,
++                    **local_device_environment.GetSystemCrashRetryOptions(self._env),
++                )
+ 
+             install_steps = [
+                 bind_crash_handler(s, device) for s in install_steps
+@@ -930,13 +939,15 @@
+             if str(dev) in self._flag_changers:
+                 self._flag_changers[str(dev)].Restore()
+ 
+-            if self._webview_flag_changers[str(dev)].GetCurrentFlags():
++            if (not self._test_instance.preserve_shared_device_state
++                    and self._webview_flag_changers[str(dev)].GetCurrentFlags()):
+                 self._webview_flag_changers[str(dev)].Restore()
+ 
+-            self._ClearDefaultBrowserApp(dev)
+-
+-            # Remove package-specific configuration
+-            dev.RunShellCommand(['am', 'clear-debug-app'], check_return=True)
++            if not self._test_instance.preserve_shared_device_state:
++                self._ClearDefaultBrowserApp(dev)
++
++                # Remove package-specific configuration
++                dev.RunShellCommand(['am', 'clear-debug-app'], check_return=True)
+ 
+             # Execute any custom teardown shell commands
+             for cmd in self._test_instance.run_teardown_commands:
+@@ -944,7 +955,8 @@
+                 dev.RunShellCommand(cmd, shell=True, check_return=True)
+ 
+             # If we've force approved app links for a package, undo that now.
+-            self._ToggleAppLinks(dev, 'STATE_NO_RESPONSE')
++            if not self._test_instance.preserve_shared_device_state:
++                self._ToggleAppLinks(dev, 'STATE_NO_RESPONSE')
+ 
+             # Context manager exit handlers are applied in reverse order
+             # of the enter handlers.
+@@ -1048,10 +1060,11 @@
+         dev.RunShellCommand(cmd, check_return=True)
+ 
+     def _CreateFlagChangersIfNeeded(self, device):
+-        self._webview_flag_changers.setdefault(
+-            str(device),
+-            flag_changer.FlagChanger(device, 'webview-command-line'),
+-        )
++        if not self._test_instance.preserve_shared_device_state:
++            self._webview_flag_changers.setdefault(
++                str(device),
++                flag_changer.FlagChanger(device, 'webview-command-line'),
++            )
+ 
+         if str(device) not in self._flag_changers:
+             cmdline_file = 'test-cmdline-file'
+@@ -1248,7 +1261,8 @@
+ 
+     # override
+     def _RunTest(self, device, test):
+-        extras = {}
++        extras = self._test_instance.test_launch_display_extras
++        extras.update(self._test_instance.shared_device_state_extras)
+ 
+         if self._test_instance.GetRunDisabledFlag():
+             extras[_EXTRA_RUN_DISABLED_TEST] = 'true'
+@@ -1696,45 +1710,47 @@
+             for u in test_names.difference(results_names)
+         )
+ 
+-        # Update the result type if we detect a crash.
+-        try:
+-            crashed_packages = DismissCrashDialogs(device)
+-            # Assume test package convention of ".test" suffix
+-            if any(
+-                p in self._test_instance.test_package for p in crashed_packages
+-            ):
+-                for r in results:
+-                    if r.GetType() == base_test_result.ResultType.UNKNOWN:
+-                        r.SetType(base_test_result.ResultType.CRASH)
+-            elif (
+-                crashed_packages
+-                and len(results) == 1
+-                and results[0].GetType() != base_test_result.ResultType.PASS
+-            ):
+-                # Add log message and set failure reason if:
+-                #   1) The app crash was likely not caused by the test.
+-                #   AND
+-                #   2) The app crash possibly caused the test to fail.
+-                # Crashes of the package under test are assumed to be the test's fault.
+-                _AppendToLogForResult(
+-                    results[0],
+-                    'OS displayed error dialogs for {}'.format(
+-                        ', '.join(crashed_packages)
+-                    ),
+-                )
+-                results[0].SetFailureReason(
+-                    '{} Crashed'.format(','.join(crashed_packages))
+-                )
+-        except device_errors.CommandTimeoutError:
+-            logging.warning('timed out when detecting/dismissing error dialogs')
+-            # Attach screenshot to the test to help with debugging the dialog boxes.
+-            self._SaveScreenshot(
+-                device,
+-                screenshot_device_file,
+-                test_display_name,
+-                results,
+-                'dialog_box_screenshot',
+-            )
++        # Preserve parsed failures/crashes without dismissing shared dialogs.
++        if not self._test_instance.preserve_shared_device_state:
++            # Update the result type if we detect a crash.
++            try:
++                crashed_packages = DismissCrashDialogs(device)
++                # Assume test package convention of ".test" suffix
++                if any(
++                    p in self._test_instance.test_package for p in crashed_packages
++                ):
++                    for r in results:
++                        if r.GetType() == base_test_result.ResultType.UNKNOWN:
++                            r.SetType(base_test_result.ResultType.CRASH)
++                elif (
++                    crashed_packages
++                    and len(results) == 1
++                    and results[0].GetType() != base_test_result.ResultType.PASS
++                ):
++                    # Add log message and set failure reason if:
++                    #   1) The app crash was likely not caused by the test.
++                    #   AND
++                    #   2) The app crash possibly caused the test to fail.
++                    # Crashes of the package under test are assumed to be the test's fault.
++                    _AppendToLogForResult(
++                        results[0],
++                        'OS displayed error dialogs for {}'.format(
++                            ', '.join(crashed_packages)
++                        ),
++                    )
++                    results[0].SetFailureReason(
++                        '{} Crashed'.format(','.join(crashed_packages))
++                    )
++            except device_errors.CommandTimeoutError:
++                logging.warning('timed out when detecting/dismissing error dialogs')
++                # Attach screenshot to the test to help with debugging the dialog boxes.
++                self._SaveScreenshot(
++                    device,
++                    screenshot_device_file,
++                    test_display_name,
++                    results,
++                    'dialog_box_screenshot',
++                )
+ 
+         # The crash result can be set above or in
+         # InstrumentationTestRun.GenerateTestResults. If a test crashes,
+@@ -1877,6 +1893,8 @@
+                     # Workaround for https://github.com/mockito/mockito/issues/922
+                     'notPackage': 'net.bytebuddy',
+                 }
++                extras.update(self._test_instance.test_launch_display_extras)
++                extras.update(self._test_instance.shared_device_state_extras)
+                 if self._test_instance.webview_process_mode:
+                     extras[_EXTRA_WEBVIEW_PROCESS_MODE] = (
+                         self._test_instance.webview_process_mode
+@@ -1933,7 +1951,10 @@
+                     test_list_run_output
+                 )
+ 
+-            return crash_handler.RetryOnSystemCrash(_run, d)
++            return crash_handler.RetryOnSystemCrash(
++                _run, d,
++                **local_device_environment.GetSystemCrashRetryOptions(self._env),
++            )
+ 
+         raw_test_lists = self._env.parallel_devices.pMap(list_tests).pGet(None)
+ 
+@@ -1976,6 +1997,7 @@
+                 with symbolizer:
+                     with logcat_monitor.LogcatMonitor(
+                         device.adb,
++                        clear=not self._test_instance.preserve_shared_device_state,
+                         filter_specs=local_device_environment.LOGCAT_FILTERS,
+                         output_file=logcat_file.name,
+                         transform_func=lambda lines: symbolizer.TransformLines(

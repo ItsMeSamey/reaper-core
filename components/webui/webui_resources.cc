@@ -28,6 +28,7 @@ base::span<const webui::ResourcePath> GetWebUIResources(
       base::flat_map<std::string_view, std::vector<webui::ResourcePath>>>
       kResources{{
 #if !BUILDFLAG(IS_ANDROID) && !BUILDFLAG(IS_IOS)
+#if !BUILDFLAG(IS_ANDROID)
           {"newtab",
            {{"img/toolbar/menu_btn.svg", IDR_BRAVE_COMMON_TOOLBAR_IMG},
             // Hash path is the MD5 of the file contents,
@@ -44,6 +45,7 @@ base::span<const webui::ResourcePath> GetWebUIResources(
              IDR_BRAVE_PRIVATE_TAB_IMG}}},
           {"welcome", {{"favicon.ico", IDR_BRAVE_WELCOME_PAGE_FAVICON}}},
 #endif
+#endif  // !BUILDFLAG(IS_ANDROID)
           {"adblock", {}},
       }};
 
@@ -58,6 +60,7 @@ base::span<const webui::LocalizedString> GetWebUILocalizedStrings(
   static const base::NoDestructor<
       base::flat_map<std::string_view, std::vector<webui::LocalizedString>>>
       kLocalizedStrings{{
+#if !BUILDFLAG(IS_ANDROID)
           {"newtab",
            {
                {"adsTrackersBlocked",
@@ -686,6 +689,7 @@ base::span<const webui::LocalizedString> GetWebUILocalizedStrings(
 
                {"loading", IDS_BRAVE_REWARDS_LOADING_LABEL},
            }},
+#endif  // !BUILDFLAG(IS_ANDROID)
           {"adblock",
            {
                {"additionalFiltersTitle", IDS_ADBLOCK_ADDITIONAL_FILTERS_TITLE},
@@ -721,6 +725,7 @@ base::span<const webui::LocalizedString> GetWebUILocalizedStrings(
                {"customListSubscriptionsUnsubscribe",
                 IDS_ADBLOCK_CUSTOM_LIST_SUBSCRIPTIONS_UNSUBSCRIBE},
            }},
+#if !BUILDFLAG(IS_ANDROID)
           {"rewards-internals",
            {
                {"adsNotInitialized",
@@ -832,6 +837,7 @@ base::span<const webui::LocalizedString> GetWebUILocalizedStrings(
 
                {"loading", IDS_BRAVE_REWARDS_LOADING_LABEL},
            }},
+#endif  // !BUILDFLAG(IS_ANDROID)
           {
 #if BUILDFLAG(ENABLE_TOR)
               "tor-internals",

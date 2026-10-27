@@ -1,0 +1,85 @@
+diff --git a/chrome/browser/extensions/extension_commands_global_registry.cc b/chrome/browser/extensions/extension_commands_global_registry.cc
+--- a/chrome/browser/extensions/extension_commands_global_registry.cc
++++ b/chrome/browser/extensions/extension_commands_global_registry.cc
+@@ -3,6 +3,8 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/extensions/extension_commands_global_registry.h"
++
++#include <vector>
+ 
+ #include "base/functional/bind.h"
+ #include "base/lazy_instance.h"
+@@ -19,6 +21,11 @@
+ #include "ui/base/accelerators/command.h"
+ #include "ui/base/accelerators/global_accelerator_listener/global_accelerator_listener.h"
+ 
++#if BUILDFLAG(IS_ANDROID)
++#include "extensions/browser/extension_registry.h"
++#include "ui/base/accelerators/global_accelerator_listener/global_accelerator_listener_android.h"
++#endif
++
+ #if defined(USE_AURA) && !BUILDFLAG(IS_ANDROID)
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/ui/browser_window.h"
+@@ -71,10 +78,21 @@
+                                   ExtensionKeybindingRegistry::ALL_EXTENSIONS),
+       browser_context_(context),
+       registry_for_active_window_(nullptr) {
++#if BUILDFLAG(IS_ANDROID)
++  android_backend_subscription_ =
++      static_cast<ui::GlobalAcceleratorListenerAndroid*>(
++          ui::GlobalAcceleratorListener::GetInstance())
++          ->AddBackendObserver(base::BindRepeating(
++              &ExtensionCommandsGlobalRegistry::RefreshAndroidRegistrations,
++              weak_ptr_factory_.GetWeakPtr()));
++#endif
+   Init();
+ }
+ 
+ ExtensionCommandsGlobalRegistry::~ExtensionCommandsGlobalRegistry() {
++#if BUILDFLAG(IS_ANDROID)
++  android_backend_subscription_ = {};
++#endif
+   ui::GlobalAcceleratorListener* global_shortcut_listener =
+       GetGlobalAcceleratorListener();
+   if (!global_shortcut_listener) {
+@@ -217,7 +235,37 @@
+   if (registry_for_active_window()) {
+     registry_for_active_window()->SetShortcutHandlingSuspended(suspended);
+   }
+-}
++#if BUILDFLAG(IS_ANDROID)
++  if (!suspended) {
++    static_cast<ui::GlobalAcceleratorListenerAndroid*>(
++        ui::GlobalAcceleratorListener::GetInstance())
++        ->RefreshBackendRegistrations();
++  }
++#endif
++}
++
++#if BUILDFLAG(IS_ANDROID)
++void ExtensionCommandsGlobalRegistry::RefreshAndroidRegistrations() {
++  // Base Shutdown clears this context before profile services are destroyed.
++  auto* context = ExtensionKeybindingRegistry::browser_context();
++  if (!context)
++    return;
++  auto* registry = ExtensionRegistry::Get(context);
++  if (!registry)
++    return;
++  std::vector<scoped_refptr<const Extension>> enabled(
++      registry->enabled_extensions().begin(),
++      registry->enabled_extensions().end());
++  // Remove before adding: repeated connection notifications must not duplicate
++  // targets or preserve a formerly accepted registration after OS revocation.
++  for (const auto& extension : enabled)
++    RemoveExtensionKeybinding(extension.get(), std::string());
++  auto* listener = static_cast<ui::GlobalAcceleratorListenerAndroid*>(
++      ui::GlobalAcceleratorListener::GetInstance());
++  if (listener->HasBackend() && !listener->IsShortcutHandlingSuspended())
++    Init();
++}
++#endif
+ 
+ void ExtensionCommandsGlobalRegistry::OnKeyPressed(
+     const ui::Accelerator& accelerator) {

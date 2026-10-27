@@ -1,0 +1,740 @@
+diff --git a/content/public/android/java/src/org/chromium/content_public/browser/media/capture/ScreenCapture.java b/content/public/android/java/src/org/chromium/content_public/browser/media/capture/ScreenCapture.java
+--- a/content/public/android/java/src/org/chromium/content_public/browser/media/capture/ScreenCapture.java
++++ b/content/public/android/java/src/org/chromium/content_public/browser/media/capture/ScreenCapture.java
+@@ -6,6 +6,7 @@
+ 
+ import static org.chromium.build.NullUtil.assumeNonNull;
+ 
++import android.app.Activity;
+ import android.content.ComponentCallbacks;
+ import android.content.Context;
+ import android.content.res.Configuration;
+@@ -20,23 +21,29 @@
+ import android.os.ConditionVariable;
+ import android.os.Handler;
+ import android.os.Looper;
++import android.os.SystemClock;
++import android.util.SparseArray;
+ import android.view.WindowManager;
+ 
+ import androidx.activity.result.ActivityResult;
+-import androidx.annotation.RequiresApi;
+ import androidx.annotation.VisibleForTesting;
+ 
+ import org.jni_zero.CalledByNative;
+ import org.jni_zero.JNINamespace;
++import org.jni_zero.JniType;
+ import org.jni_zero.NativeMethods;
+ 
+ import org.chromium.base.ThreadUtils;
+ import org.chromium.build.annotations.NullMarked;
+ import org.chromium.build.annotations.Nullable;
++import org.chromium.content_public.browser.NavigationHandle;
++import org.chromium.content_public.browser.Page;
++import org.chromium.content_public.browser.RenderFrameHost;
+ import org.chromium.content_public.browser.WebContents;
+ import org.chromium.content_public.browser.WebContentsObserver;
+ import org.chromium.ui.base.WindowAndroid;
+ 
++import java.lang.ref.WeakReference;
+ import java.nio.ByteBuffer;
+ import java.util.ArrayList;
+ import java.util.Objects;
+@@ -50,13 +57,94 @@
+ public class ScreenCapture implements ImageHandler.Delegate {
+     private static final String TAG = "ScreenCapture";
+ 
++    // Registry and observer operations are confined to the UI thread. A token is
++    // consumed only by its selected native source ID, never by the next capturer.
++    private static final long PICK_EXPIRY_MS = 10_000;
++    private static final long FOREGROUND_WAIT_MS = 5_000;
++    private static final SparseArray<PickState> sPicks = new SparseArray<>();
++
+     private static class PickState {
++        final int mSourceId;
+         final WebContents mWebContents;
+         final ActivityResult mActivityResult;
+-
+-        PickState(WebContents webContents, ActivityResult activityResult) {
++        final long mExpiresAt = SystemClock.elapsedRealtime() + PICK_EXPIRY_MS;
++        final Handler mUiHandler = new Handler(Looper.getMainLooper());
++        final Runnable mExpiry;
++        final WebContentsObserver mObserver;
++        final WeakReference<WindowAndroid> mParentWindow;
++        final WindowAndroid.ActivityStateObserver mActivityObserver;
++        @Nullable Runnable mOnFinished;
++        @Nullable ScreenCapture mCapture;
++        boolean mConsumed;
++        volatile boolean mCancelled;
++        boolean mFinished;
++
++        PickState(
++                WebContents webContents,
++                WindowAndroid parentWindow,
++                ActivityResult activityResult,
++                int sourceId,
++                Runnable onFinished) {
++            mSourceId = sourceId;
+             mWebContents = webContents;
+             mActivityResult = activityResult;
++            mOnFinished = onFinished;
++            mExpiry = () -> cancelPick(sourceId);
++            mParentWindow = new WeakReference<>(parentWindow);
++            mActivityObserver =
++                    new WindowAndroid.ActivityStateObserver() {
++                        @Override
++                        public void onActivityDestroyed() {
++                            cancelPick(sourceId);
++                        }
++                    };
++            parentWindow.addActivityStateObserver(mActivityObserver);
++            mObserver =
++                    new WebContentsObserver(webContents) {
++                        @Override
++                        public void didStartNavigationInPrimaryMainFrame(
++                                NavigationHandle navigation) {
++                            if (!navigation.isSameDocument()) cancelPick(sourceId);
++                        }
++
++                        @Override
++                        public void primaryPageChanged(Page page) {
++                            // Also covers page activation/swaps without an ordinary load.
++                            cancelPick(sourceId);
++                        }
++
++                        @Override
++                        public void webContentsDestroyed() {
++                            cancelPick(sourceId);
++                        }
++
++                        @Override
++                        public void primaryMainFrameRenderProcessGone(int terminationStatus) {
++                            cancelPick(sourceId);
++                        }
++
++                        @Override
++                        public void onTopLevelNativeWindowChanged(@Nullable WindowAndroid window) {
++                            if (mCapture != null && !mCancelled) mCapture.updateContext();
++                        }
++                    };
++        }
++
++        void finish() {
++            ThreadUtils.assertOnUiThread();
++            if (mFinished) return;
++            mFinished = true;
++            mCancelled = true;
++            if (sPicks.get(mSourceId) == this) sPicks.remove(mSourceId);
++            mUiHandler.removeCallbacks(mExpiry);
++            mObserver.observe(null);
++            WindowAndroid parent = mParentWindow.get();
++            if (parent != null) parent.removeActivityStateObserver(mActivityObserver);
++            ScreenCaptureJni.get().releaseDocumentObserver(mSourceId);
++            mCapture = null;
++            Runnable callback = mOnFinished;
++            mOnFinished = null;
++            if (callback != null) callback.run();
+         }
+     }
+ 
+@@ -98,18 +186,13 @@
+                 CaptureState captureState, ImageHandler.Delegate delegate, Handler handler);
+     }
+ 
+-    // Starting a MediaProjection session involves plumbing the results from the content picker,
+-    // which is done via ActivityResult. This class does not handle how that is achieved, but
+-    // requires this state to begin the session.
+-    private static final AtomicReference<@Nullable PickState> sNextPickState =
+-            new AtomicReference<>();
+-
+     // Starting a MediaProjection session requires a foreground service to be running. This class
+     // does not handle how that is achieved, but `sLatch` provides a way for this class to wait
+     // until that foreground service is running.
+     private static final ConditionVariable sLatch = new ConditionVariable(false);
+ 
+     // Holds the pointer to the C++ side object. The C++ side has the ownership of the Java side.
++    private final Object mNativeLock = new Object();
+     private volatile long mNativeDesktopCapturerAndroid;
+ 
+     private final Handler mHandler;
+@@ -125,7 +208,9 @@
+     private final ArrayList<ImageHandler> mImageHandlerQueue = new ArrayList<>();
+ 
+     private @Nullable WebContents mWebContents;
+-    private volatile @Nullable WebContentsObserver mWebContentsObserver;
++    private volatile @Nullable PickState mPickState;
++    private boolean mStarted;
++    private volatile boolean mStopped;
+     private volatile @Nullable Context mContext;
+     private volatile @Nullable ComponentCallbacks mComponentCallbacks;
+ 
+@@ -148,28 +233,77 @@
+         }
+     }
+ 
+-    /** Blocks until the foreground service is running. */
+-    public static void waitForegroundServiceRunning() {
+-        sLatch.block();
+-    }
+-
+-    /**
+-     * Called before attempting to start a ScreenCapture session.
+-     *
+-     * <p>The {@link ActivityResult} is consumed by a subsequent call to {@link #startCapture()}.
+-     *
+-     * @param webContents The {@link WebContents} initiating the capture.
+-     * @param activityResult The {@link ActivityResult} from the MediaProjection API.
+-     */
+-    public static void onPick(WebContents webContents, ActivityResult activityResult) {
+-        final PickState oldPickState =
+-                sNextPickState.getAndSet(new PickState(webContents, activityResult));
+-        assert oldPickState == null;
++    /** Waits a bounded time for Android's required foreground service. */
++    public static boolean waitForegroundServiceRunning() {
++        return sLatch.block(FOREGROUND_WAIT_MS);
++    }
++
++    /** Registers one successful OS consent for one native-selected source ID. */
++    public static boolean onPick(
++            WebContents webContents,
++            RenderFrameHost requestingFrame,
++            @Nullable WindowAndroid parentWindow,
++            ActivityResult activityResult,
++            int sourceId,
++            Runnable onFinished) {
++        ThreadUtils.assertOnUiThread();
++        if (sourceId <= 0
++                || sPicks.get(sourceId) != null
++                || webContents.isDestroyed()
++                || activityResult.getResultCode() != Activity.RESULT_OK
++                || activityResult.getData() == null) return false;
++        WindowAndroid parent =
++                parentWindow != null ? parentWindow : webContents.getTopLevelNativeWindow();
++        if (getWindowContext(parent) == null) return false;
++        if (!ScreenCaptureJni.get()
++                .registerDocumentObserver(webContents, requestingFrame, sourceId)) {
++            return false;
++        }
++        PickState pick =
++                new PickState(
++                        webContents, assumeNonNull(parent), activityResult, sourceId, onFinished);
++        sPicks.put(sourceId, pick);
++        pick.mUiHandler.postDelayed(pick.mExpiry, PICK_EXPIRY_MS);
++        return true;
++    }
++
++    /** Revokes pending consent or stops the active projection selected by this ID. */
++    @CalledByNative
++    public static void cancelPick(int sourceId) {
++        ThreadUtils.assertOnUiThread();
++        PickState pick = sPicks.get(sourceId);
++        if (pick == null || pick.mCancelled) return;
++        pick.mCancelled = true;
++        if (pick.mCapture == null) {
++            pick.finish();
++        } else {
++            pick.mCapture.stopFromOwner();
++        }
++    }
++
++    private static @Nullable PickState consumePick(int sourceId, ScreenCapture capture) {
++        ThreadUtils.assertOnUiThread();
++        PickState pick = sPicks.get(sourceId);
++        if (pick == null || pick.mConsumed || pick.mCancelled) return null;
++        if (pick.mWebContents.isDestroyed() || SystemClock.elapsedRealtime() >= pick.mExpiresAt) {
++            cancelPick(sourceId);
++            return null;
++        }
++        pick.mConsumed = true;
++        pick.mCapture = capture;
++        pick.mUiHandler.removeCallbacks(pick.mExpiry);
++        return pick;
+     }
+ 
+     public static void resetStaticStateForTesting() {
++        ThreadUtils.assertOnUiThread();
+         sLatch.close();
+-        sNextPickState.set(null);
++        ArrayList<PickState> picks = new ArrayList<>();
++        for (int i = 0; i < sPicks.size(); ++i) picks.add(sPicks.valueAt(i));
++        for (PickState pick : picks) {
++            if (pick.mCapture != null) pick.mCapture.destroy();
++            pick.finish();
++        }
+     }
+ 
+     /**
+@@ -177,12 +311,20 @@
+      *
+      * <p>Must be called on the UI thread.
+      */
+-    private static @Nullable Context maybeGetContext(@Nullable WebContents webContents) {
++    private static @Nullable Context getWindowContext(@Nullable WindowAndroid window) {
++        if (window == null || window.isDestroyed()) return null;
++        Activity activity = window.getActivity().get();
++        if (activity == null || activity.isFinishing() || activity.isDestroyed()) return null;
++        return window.getContext().get();
++    }
++
++    private static @Nullable Context maybeGetContext(
++            @Nullable WebContents webContents, @Nullable PickState pick) {
+         ThreadUtils.assertOnUiThread();
+         if (webContents == null || webContents.isDestroyed()) return null;
+-        final WindowAndroid window = webContents.getTopLevelNativeWindow();
+-        if (window == null) return null;
+-        return window.getContext().get();
++        Context context = getWindowContext(webContents.getTopLevelNativeWindow());
++        if (context == null && pick != null) context = getWindowContext(pick.mParentWindow.get());
++        return context;
+     }
+ 
+     @CalledByNative
+@@ -206,111 +348,154 @@
+      *
+      * @return true if the capture session was started successfully, false otherwise.
+      */
+-    @RequiresApi(Build.VERSION_CODES.R)
+     @CalledByNative
+-    boolean startCapture() {
+-        final PickState pickState = sNextPickState.getAndSet(null);
+-        assert pickState != null;
+-
+-        final ActivityResult activityResult = pickState.mActivityResult;
+-        assert activityResult.getData() != null;
+-
+-        // We need to wait for the foreground service to start before trying to use the
+-        // MediaProjection API. It's okay to block here since we are on the desktop capturer thread.
+-        sLatch.block();
+-        if (mNativeDesktopCapturerAndroid == 0) return false;
+-
+-        final WebContents webContents = pickState.mWebContents;
+-        // Store a local reference to context. This avoids issues such as context becoming null
+-        // if destroy() is called concurrently. This is safe because the reference is only used
+-        // on the capture thread.
++    boolean startCapture(int sourceId) {
++        if (mStarted || mStopped || sourceId <= 0 || mNativeDesktopCapturerAndroid == 0) {
++            return false;
++        }
++        mStarted = true;
++        final PickState pick = ThreadUtils.runOnUiThreadBlocking(() -> consumePick(sourceId, this));
++        if (pick == null) return false;
++        mPickState = pick;
++        if (!waitForegroundServiceRunning()
++                || pick.mCancelled
++                || mNativeDesktopCapturerAndroid == 0) return failStart();
++
+         final var resolvedContextRef = new AtomicReference<Context>();
+         if (!ThreadUtils.runOnUiThreadBlocking(
+                 () -> {
+-                    if (mNativeDesktopCapturerAndroid == 0) {
+-                        return false;
+-                    }
+-                    Context context = maybeGetContext(webContents);
+-                    if (context == null) {
+-                        return false;
+-                    }
+-                    mWebContents = webContents;
++                    if (pick.mCancelled || mNativeDesktopCapturerAndroid == 0) return false;
++                    Context context = maybeGetContext(pick.mWebContents, pick);
++                    if (context == null) return false;
++                    mWebContents = pick.mWebContents;
+                     mContext = context;
+                     resolvedContextRef.set(context);
+-                    mWebContentsObserver =
+-                            new WebContentsObserver(mWebContents) {
+-                                @Override
+-                                public void onTopLevelNativeWindowChanged(
+-                                        @Nullable WindowAndroid windowAndroid) {
+-                                    updateContext();
+-                                }
+-                            };
+-                    if (mNativeDesktopCapturerAndroid == 0) {
+-                        return false;
+-                    }
+                     registerComponentCallbacks();
+                     return true;
+-                })) {
+-            return false;
+-        }
+-        if (mNativeDesktopCapturerAndroid == 0) return false;
+-
+-        Context localContext = resolvedContextRef.get();
+-        final var manager =
+-                (MediaProjectionManager)
+-                        localContext.getSystemService(Context.MEDIA_PROJECTION_SERVICE);
+-        if (manager == null) {
++                })) return failStart();
++        if (pick.mCancelled || mNativeDesktopCapturerAndroid == 0) return failStart();
++
++        try {
++            Context context = assumeNonNull(resolvedContextRef.get());
++            final var manager =
++                    (MediaProjectionManager)
++                            context.getSystemService(Context.MEDIA_PROJECTION_SERVICE);
++            if (manager == null) return failStart();
++            final var projectionData = pick.mActivityResult.getData();
++            if (projectionData == null) return failStart();
++            mMediaProjection =
++                    manager.getMediaProjection(
++                            pick.mActivityResult.getResultCode(), projectionData);
++            if (mMediaProjection == null) return failStart();
++            mMediaProjection.registerCallback(new MediaProjectionCallback(), mHandler);
++            final var windowManager =
++                    (WindowManager) context.getSystemService(Context.WINDOW_SERVICE);
++            if (windowManager == null) return failStart();
++            final Rect bounds;
++            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
++                bounds = windowManager.getMaximumWindowMetrics().getBounds();
++            } else {
++                final var metrics = context.getResources().getDisplayMetrics();
++                bounds = new Rect(0, 0, metrics.widthPixels, metrics.heightPixels);
++            }
++            if (bounds.isEmpty()) return failStart();
++            createListener(
++                    new CaptureState(
++                            bounds.width(),
++                            bounds.height(),
++                            context.getResources().getConfiguration().densityDpi,
++                            PixelFormat.RGBA_8888));
++            if (mVirtualDisplay == null || pick.mCancelled || mNativeDesktopCapturerAndroid == 0) {
++                return failStart();
++            }
++            return true;
++        } catch (SecurityException
++                | IllegalStateException
++                | IllegalArgumentException
++                | UnsupportedOperationException error) {
++            // Revoked/used consent and foreground-service rejection are normal failures.
++            return failStart();
++        }
++    }
++
++    private boolean isCaptureStopped() {
++        PickState pick = mPickState;
++        return mNativeDesktopCapturerAndroid == 0 || mStopped || (pick != null && pick.mCancelled);
++    }
++
++    private boolean failStart() {
++        mStopped = true;
++        cleanupResources();
++        return false;
++    }
++
++    private void stopFromOwner() {
++        if (mNativeDesktopCapturerAndroid == 0) {
+             cleanupJavaResources();
+-            return false;
+-        }
+-
+-        mMediaProjection =
+-                manager.getMediaProjection(
+-                        activityResult.getResultCode(), activityResult.getData());
+-        if (mMediaProjection == null) {
++            return;
++        }
++        // DesktopCaptureDevice destroys native capture before stopping this
++        // handler thread, so the task runner remains alive for active capture.
++        if (!mHandler.post(this::stopCapture)) {
++            // The owner is already shutting down. Release the registry lease
++            // even if its final capture-thread disposal is still in flight.
++            mStopped = true;
+             cleanupJavaResources();
+-            return false;
+-        }
+-
+-        mMediaProjection.registerCallback(new MediaProjectionCallback(), mHandler);
+-
+-        final var windowManager =
+-                (WindowManager) localContext.getSystemService(Context.WINDOW_SERVICE);
+-        final var windowMetrics = windowManager.getMaximumWindowMetrics();
+-        final Rect bounds = windowMetrics.getBounds();
+-
+-        createListener(
+-                new CaptureState(
+-                        bounds.width(),
+-                        bounds.height(),
+-                        localContext.getResources().getConfiguration().densityDpi,
+-                        PixelFormat.RGBA_8888));
+-
+-        // If capture already destroyed, then ensure we clean-up.
+-        if (mNativeDesktopCapturerAndroid == 0) {
+-            cleanupOSResources();
+-            cleanupJavaResources();
+-            return false;
+-        }
+-
+-        return true;
++        }
++    }
++
++    private void stopCapture() {
++        if (mStopped) return;
++        mStopped = true;
++        cleanupResources();
++        synchronized (mNativeLock) {
++            long pointer = mNativeDesktopCapturerAndroid;
++            if (pointer != 0) ScreenCaptureJni.get().onStop(pointer);
++        }
+     }
+ 
+     @CalledByNative
+     void destroy() {
+-        mNativeDesktopCapturerAndroid = 0;
+-        cleanupOSResources();
+-        cleanupJavaResources();
++        // The native destructor cannot release its fields until any in-flight
++        // callback has returned, and no later callback may use its pointer.
++        synchronized (mNativeLock) {
++            mNativeDesktopCapturerAndroid = 0;
++            mStopped = true;
++        }
++        Runnable cleanup =
++                () -> {
++                    cleanupResources();
++                };
++        if (mHandler.getLooper().isCurrentThread()) cleanup.run();
++        else if (!mHandler.post(cleanup)) cleanup.run();
++    }
++
++    private void cleanupResources() {
++        try {
++            cleanupOSResources();
++        } finally {
++            cleanupJavaResources();
++        }
+     }
+ 
+     private void cleanupOSResources() {
+-        if (mVirtualDisplay != null) {
+-            mVirtualDisplay.release();
+-            mVirtualDisplay = null;
++        VirtualDisplay display = mVirtualDisplay;
++        mVirtualDisplay = null;
++        if (display != null) {
++            try {
++                display.release();
++            } catch (RuntimeException error) {
++                // Revocation/OS teardown must not retain the consent lease.
++            }
+         }
+         if (mMediaProjection != null) {
+-            mMediaProjection.stop();
++            MediaProjection projection = mMediaProjection;
+             mMediaProjection = null;
++            try {
++                projection.stop();
++            } catch (RuntimeException error) {
++                // The OS may have revoked or already stopped this projection.
++            }
+         }
+         // Iterate backwards since closeNow() will cause the `ImageHandler` to be removed from
+         // the queue.
+@@ -318,7 +503,13 @@
+             // Note that we can only immediately close the ImageHandler if we are guaranteed the
+             // native side will not try to access Images from it again. We are guaranteed this
+             // here since the native side is being destroyed.
+-            mImageHandlerQueue.get(i).closeNow();
++            ImageHandler imageHandler = mImageHandlerQueue.get(i);
++            try {
++                imageHandler.closeNow();
++            } catch (RuntimeException error) {
++                // Continue disposing other readers if the OS rejected one close.
++                mImageHandlerQueue.remove(imageHandler);
++            }
+         }
+         assert mImageHandlerQueue.isEmpty();
+         mImageHandlerQueue.clear();
+@@ -330,10 +521,9 @@
+                     unregisterComponentCallbacks();
+                     mContext = null;
+                     mWebContents = null;
+-                    if (mWebContentsObserver != null) {
+-                        mWebContentsObserver.observe(null);
+-                        mWebContentsObserver = null;
+-                    }
++                    PickState pick = mPickState;
++                    mPickState = null;
++                    if (pick != null) pick.finish();
+                 });
+     }
+ 
+@@ -341,17 +531,19 @@
+         ThreadUtils.assertOnUiThread();
+         unregisterComponentCallbacks();
+ 
+-        mContext = maybeGetContext(mWebContents);
++        mContext = maybeGetContext(mWebContents, mPickState);
+         if (mContext != null) {
+             registerComponentCallbacks();
+             final Configuration config = mContext.getResources().getConfiguration();
+             mHandler.post(() -> onConfigurationChanged(config));
++        } else if (mPickState != null) {
++            cancelPick(mPickState.mSourceId);
+         }
+     }
+ 
+     private void onConfigurationChanged(Configuration config) {
+         assert mHandler.getLooper().isCurrentThread();
+-        if (mNativeDesktopCapturerAndroid == 0) return;
++        if (isCaptureStopped()) return;
+         if (mImageHandlerQueue.isEmpty()) return;
+ 
+         final CaptureState captureState =
+@@ -392,7 +584,7 @@
+     private class MediaProjectionCallback extends MediaProjection.Callback {
+         @Override
+         public void onCapturedContentResize(int width, int height) {
+-            if (mNativeDesktopCapturerAndroid == 0) return;
++            if (isCaptureStopped()) return;
+             if (mContext == null) return;
+ 
+             final int format =
+@@ -412,9 +604,8 @@
+ 
+         @Override
+         public void onStop() {
+-            if (mNativeDesktopCapturerAndroid == 0) return;
+             mMediaProjection = null;
+-            ScreenCaptureJni.get().onStop(mNativeDesktopCapturerAndroid);
++            stopCapture();
+         }
+     }
+ 
+@@ -475,26 +666,31 @@
+             long timestampNs,
+             Plane plane,
+             Rect cropRect) {
+-        // If the native side was destroyed, then exit without calling JNI methods.
+-        if (mNativeDesktopCapturerAndroid == 0) return;
+-
+-        // Don't close old `ImageHandler`s until we have a Image written to the new
+-        // Image handler. This is to make sure that if the OS is still trying to write
+-        // to an older Surface from `ImageReader` it can.
+-        closeImageHandlersBefore(imageHandler);
+-
+-        ScreenCaptureJni.get()
+-                .onRgbaFrameAvailable(
+-                        mNativeDesktopCapturerAndroid,
+-                        releaseCb,
+-                        timestampNs,
+-                        plane.getBuffer(),
+-                        plane.getPixelStride(),
+-                        plane.getRowStride(),
+-                        cropRect.left,
+-                        cropRect.top,
+-                        cropRect.right,
+-                        cropRect.bottom);
++        synchronized (mNativeLock) {
++            // If the native side was destroyed, then exit without calling JNI methods.
++            if (isCaptureStopped()) {
++                releaseCb.run();
++                return;
++            }
++
++            // Don't close old `ImageHandler`s until we have a Image written to the new
++            // Image handler. This is to make sure that if the OS is still trying to write
++            // to an older Surface from `ImageReader` it can.
++            closeImageHandlersBefore(imageHandler);
++
++            ScreenCaptureJni.get()
++                    .onRgbaFrameAvailable(
++                            mNativeDesktopCapturerAndroid,
++                            releaseCb,
++                            timestampNs,
++                            plane.getBuffer(),
++                            plane.getPixelStride(),
++                            plane.getRowStride(),
++                            cropRect.left,
++                            cropRect.top,
++                            cropRect.right,
++                            cropRect.bottom);
++        }
+     }
+ 
+     @Override
+@@ -504,32 +700,37 @@
+             long timestampNs,
+             Plane[] planes,
+             Rect cropRect) {
+-        // If the native side was destroyed, then exit without calling JNI methods.
+-        if (mNativeDesktopCapturerAndroid == 0) return;
+-
+-        // Don't close old `ImageHandler`s until we have a Image written to the new
+-        // Image handler. This is to make sure that if the OS is still trying to write
+-        // to an older Surface from `ImageReader` it can.
+-        closeImageHandlersBefore(imageHandler);
+-
+-        ScreenCaptureJni.get()
+-                .onI420FrameAvailable(
+-                        mNativeDesktopCapturerAndroid,
+-                        releaseCb,
+-                        timestampNs,
+-                        planes[0].getBuffer(),
+-                        planes[0].getPixelStride(),
+-                        planes[0].getRowStride(),
+-                        planes[1].getBuffer(),
+-                        planes[1].getPixelStride(),
+-                        planes[1].getRowStride(),
+-                        planes[2].getBuffer(),
+-                        planes[2].getPixelStride(),
+-                        planes[2].getRowStride(),
+-                        cropRect.left,
+-                        cropRect.top,
+-                        cropRect.right,
+-                        cropRect.bottom);
++        synchronized (mNativeLock) {
++            // If the native side was destroyed, then exit without calling JNI methods.
++            if (isCaptureStopped()) {
++                releaseCb.run();
++                return;
++            }
++
++            // Don't close old `ImageHandler`s until we have a Image written to the new
++            // Image handler. This is to make sure that if the OS is still trying to write
++            // to an older Surface from `ImageReader` it can.
++            closeImageHandlersBefore(imageHandler);
++
++            ScreenCaptureJni.get()
++                    .onI420FrameAvailable(
++                            mNativeDesktopCapturerAndroid,
++                            releaseCb,
++                            timestampNs,
++                            planes[0].getBuffer(),
++                            planes[0].getPixelStride(),
++                            planes[0].getRowStride(),
++                            planes[1].getBuffer(),
++                            planes[1].getPixelStride(),
++                            planes[1].getRowStride(),
++                            planes[2].getBuffer(),
++                            planes[2].getPixelStride(),
++                            planes[2].getRowStride(),
++                            cropRect.left,
++                            cropRect.top,
++                            cropRect.right,
++                            cropRect.bottom);
++        }
+     }
+ 
+     @Override
+@@ -541,13 +742,20 @@
+     @Override
+     public void recreateImageHandler(CaptureState captureState) {
+         // If the native side was destroyed, then don't bother recreating the ImageHandler.
+-        if (mNativeDesktopCapturerAndroid == 0) return;
++        if (isCaptureStopped()) return;
+ 
+         recreateListener(captureState);
+     }
+ 
+     @NativeMethods
+     interface Natives {
++        boolean registerDocumentObserver(
++                @JniType("content::WebContents*") WebContents owner,
++                @JniType("content::RenderFrameHost*") RenderFrameHost frame,
++                int sourceId);
++
++        void releaseDocumentObserver(int sourceId);
++
+         void onRgbaFrameAvailable(
+                 long nativeDesktopCapturerAndroid,
+                 Runnable releaseCb,

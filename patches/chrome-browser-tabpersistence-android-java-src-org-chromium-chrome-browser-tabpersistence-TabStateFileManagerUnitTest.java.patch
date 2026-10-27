@@ -1,0 +1,160 @@
+diff --git a/chrome/browser/tabpersistence/android/java/src/org/chromium/chrome/browser/tabpersistence/TabStateFileManagerUnitTest.java b/chrome/browser/tabpersistence/android/java/src/org/chromium/chrome/browser/tabpersistence/TabStateFileManagerUnitTest.java
+index 887d0df19f4db12ea7fcc4e55681e5d5c004496c..53236c62f6222928a351e9c90cdc952a119ae1ab 100644
+--- a/chrome/browser/tabpersistence/android/java/src/org/chromium/chrome/browser/tabpersistence/TabStateFileManagerUnitTest.java
++++ b/chrome/browser/tabpersistence/android/java/src/org/chromium/chrome/browser/tabpersistence/TabStateFileManagerUnitTest.java
+@@ -10,6 +10,8 @@
+ import static org.chromium.chrome.browser.url_constants.UrlConstantResolver.getOriginalNativeNtpUrl;
+ 
+ import androidx.annotation.Nullable;
++
++import com.google.flatbuffers.FlatBufferBuilder;
+ 
+ import org.junit.Assert;
+ import org.junit.Before;
+@@ -28,7 +30,9 @@
+ import org.chromium.chrome.browser.tab.TabState;
+ import org.chromium.chrome.browser.tab.TabUserAgent;
+ import org.chromium.chrome.browser.tab.WebContentsState;
++import org.chromium.chrome.browser.tab.flatbuffer.TabGroupIdToken;
+ import org.chromium.chrome.browser.tab.flatbuffer.TabLaunchTypeAtCreation;
++import org.chromium.chrome.browser.tab.flatbuffer.TabStateFlatBufferV1;
+ import org.chromium.chrome.browser.tab.flatbuffer.UserAgentType;
+ import org.chromium.chrome.browser.tabpersistence.FlatBufferTabStateSerializer.TabStateFlatBufferDeserializeResult;
+ import org.chromium.chrome.test.util.ByteBufferTestUtils;
+@@ -118,8 +122,13 @@
+     public void testLargeContentsState() throws IOException {
+         File file = createTestTabStateFile();
+         ByteBuffer buffer = ByteBuffer.allocateDirect(LARGE_BYTE_BUFFER_SIZE);
+-        for (int i = 0; i < LARGE_BYTE_BUFFER_SIZE; i++) {
+-            buffer.put((byte) (i % Byte.MAX_VALUE));
++        // Repeat the same byte pattern in bulk without reducing the full-size round-trip.
++        byte[] pattern = new byte[Byte.MAX_VALUE * 1024];
++        for (int i = 0; i < pattern.length; i++) {
++            pattern[i] = (byte) (i % Byte.MAX_VALUE);
++        }
++        while (buffer.hasRemaining()) {
++            buffer.put(pattern, 0, Math.min(pattern.length, buffer.remaining()));
+         }
+         WebContentsState contentsState =
+                 new WebContentsState(buffer, WebContentsState.CONTENTS_STATE_CURRENT_VERSION);
+@@ -148,6 +157,75 @@
+         FlatBufferTabStateSerializer serializer = new FlatBufferTabStateSerializer(false);
+         Assert.assertNull(serializer.deserialize(ByteBuffer.wrap(bytes)));
+         histograms.assertExpected();
++    }
++
++    @Test
++    public void testSplitFlatBufferRoundTripPreservesVisualsAndGroup() {
++        for (boolean encrypted : new boolean[] {false, true}) {
++            for (int position = 0; position < 2; position++) {
++                TabState state =
++                        createTabState(new WebContentsState(ByteBuffer.allocateDirect(0), VERSION));
++                state.splitTabId = new Token(73, 91);
++                state.splitLayout = position;
++                state.splitRatio = 0.37;
++                state.splitPosition = position;
++                FlatBufferTabStateSerializer serializer =
++                        new FlatBufferTabStateSerializer(encrypted);
++                TabState restored = serializer.deserialize(serializer.serialize(state));
++                Assert.assertNotNull(restored);
++                assertEquals(state.splitTabId, restored.splitTabId);
++                assertEquals(state.splitLayout, restored.splitLayout);
++                assertEquals(0.37, restored.splitRatio, 0);
++                assertEquals(position, restored.splitPosition);
++                assertEquals(TAB_GROUP_ID, restored.tabGroupId);
++                assertEquals(IS_PINNED, restored.isPinned);
++                assertEquals(encrypted, restored.isIncognito);
++            }
++        }
++    }
++
++    @Test
++    public void testSplitFieldsAbsentInOldFormatsRestoreUnsplit() throws IOException {
++        File legacy = createTestTabStateFile();
++        TabState oldState = createTabStateWithMappedByteBuffer(legacy, TAB_GROUP_ID);
++        TabStateFileManager.saveStateInternal(legacy, oldState, false, mCipherFactory);
++        TabState restoredLegacy =
++                TabStateFileManager.restoreTabStateInternal(legacy, false, mCipherFactory);
++        Assert.assertNotNull(restoredLegacy);
++        assertNull(restoredLegacy.splitTabId);
++        assertEquals(-1, restoredLegacy.splitPosition);
++        FlatBufferTabStateSerializer serializer = new FlatBufferTabStateSerializer(false);
++        TabState restoredFlat = serializer.deserialize(serializer.serialize(oldState));
++        Assert.assertNotNull(restoredFlat);
++        assertNull(restoredFlat.splitTabId);
++        assertEquals(0, restoredFlat.splitLayout);
++        assertEquals(0.5, restoredFlat.splitRatio, 0);
++        assertEquals(-1, restoredFlat.splitPosition);
++    }
++
++    @Test
++    public void testInvalidSplitFieldsOnDiskRestoreUnsplit() {
++        double[][] invalid = {
++            {2, 0.5, 0}, {0, Double.NaN, 0}, {0, 0, 0}, {0, 1, 0}, {0, 0.5, -1}, {0, 0.5, 2}
++        };
++        for (double[] values : invalid) {
++            FlatBufferBuilder builder = new FlatBufferBuilder();
++            int url = builder.createString(URL.getSpec());
++            TabStateFlatBufferV1.startTabStateFlatBufferV1(builder);
++            TabStateFlatBufferV1.addSplitTabId(
++                    builder, TabGroupIdToken.createTabGroupIdToken(builder, 73, 91));
++            TabStateFlatBufferV1.addSplitLayout(builder, (int) values[0]);
++            TabStateFlatBufferV1.addSplitRatio(builder, values[1]);
++            TabStateFlatBufferV1.addSplitPosition(builder, (int) values[2]);
++            TabStateFlatBufferV1.addUrl(builder, url);
++            builder.finish(TabStateFlatBufferV1.endTabStateFlatBufferV1(builder));
++            TabState restored =
++                    new FlatBufferTabStateSerializer(false).deserialize(builder.dataBuffer());
++            Assert.assertNotNull(restored);
++            assertNull(restored.splitTabId);
++            assertEquals(-1, restored.splitPosition);
++            assertEquals(0.5, restored.splitRatio, 0);
++        }
+     }
+ 
+     @Test
+@@ -776,4 +854,44 @@
+         Assert.assertNotNull("restored TabState should not be null", restored);
+         Assert.assertTrue(restored.isIncognito);
+     }
++    @Test
++    public void testContainerIdentityRoundTripsThroughLegacyAndFlatBuffer() throws IOException {
++        String named = "4a4d13b6-c971-4c61-ae11-e7a864f58165";
++        for (String id : new String[] {"", named, "t-" + named}) {
++            TabState state = createTabState(new WebContentsState(
++                    ByteBuffer.allocateDirect(0), VERSION));
++            state.containerId = id;
++            File file = temporaryFolder.newFile("tabContainer" + id);
++            TabStateFileManager.saveStateInternal(file, state, false, mCipherFactory);
++            TabState restored = TabStateFileManager.restoreTabStateInternal(file, false, null);
++            Assert.assertNotNull(restored);
++            assertEquals(id, restored.containerId);
++            FlatBufferTabStateSerializer serializer = new FlatBufferTabStateSerializer(false);
++            TabState flat = serializer.deserialize(serializer.serialize(state));
++            Assert.assertNotNull(flat);
++            assertEquals(id, flat.containerId);
++        }
++    }
++
++    @Test
++    public void testTruncatedNewLegacyContainerFieldDoesNotBecomeDefault() throws IOException {
++        File file = temporaryFolder.newFile("tabContainerTruncated");
++        TabState state = createTabState(new WebContentsState(
++                ByteBuffer.allocateDirect(0), VERSION));
++        state.containerId = "4a4d13b6-c971-4c61-ae11-e7a864f58165";
++        TabStateFileManager.saveStateInternal(file, state, false, mCipherFactory);
++        try (java.io.RandomAccessFile bytes = new java.io.RandomAccessFile(file, "rw")) {
++            bytes.setLength(bytes.length() - 1);
++        }
++        assertNull(TabStateFileManager.restoreTabStateInternal(file, false, null));
++    }
++
++    @Test(expected = IllegalArgumentException.class)
++    public void testFlatBufferRefusesMalformedContainerIdentity() {
++        TabState state = createTabState(new WebContentsState(
++                ByteBuffer.allocateDirect(0), VERSION));
++        state.containerId = "not-a-container";
++        new FlatBufferTabStateSerializer(false).serialize(state);
++    }
++
+ }

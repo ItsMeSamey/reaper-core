@@ -1,0 +1,193 @@
+diff --git a/chrome/android/junit/src/org/chromium/chrome/browser/settings/search/RecentSearchQueueTest.java b/chrome/android/junit/src/org/chromium/chrome/browser/settings/search/RecentSearchQueueTest.java
+--- a/chrome/android/junit/src/org/chromium/chrome/browser/settings/search/RecentSearchQueueTest.java
++++ b/chrome/android/junit/src/org/chromium/chrome/browser/settings/search/RecentSearchQueueTest.java
+@@ -6,7 +6,14 @@
+ 
+ import static org.junit.Assert.assertEquals;
+ import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertNull;
++import static org.junit.Assert.assertSame;
+ import static org.junit.Assert.assertTrue;
++
++import static org.chromium.build.NullUtil.assumeNonNull;
++
++import android.os.Bundle;
++import android.os.Parcel;
+ 
+ import org.json.JSONArray;
+ import org.json.JSONException;
+@@ -18,9 +25,13 @@
+ import org.chromium.base.shared_preferences.SharedPreferencesManager;
+ import org.chromium.base.test.BaseRobolectricTestRunner;
+ import org.chromium.build.annotations.NullMarked;
++import org.chromium.build.annotations.Nullable;
+ import org.chromium.chrome.browser.preferences.ChromePreferenceKeys;
+ import org.chromium.chrome.browser.preferences.ChromeSharedPreferences;
++import org.chromium.components.browser_ui.settings.search.PreferenceParser;
+ import org.chromium.components.browser_ui.settings.search.SettingsIndexData;
++
++import java.util.Arrays;
+ 
+ /** Unit tests for {@link RecentSearchQueue}. */
+ @RunWith(BaseRobolectricTestRunner.class)
+@@ -116,6 +127,160 @@
+         assertTrue(mQueue.containsKey("final"));
+     }
+ 
++    @Test
++    public void testDisplayRefreshesRestoredLabelsWithoutRewritingHistory() {
++        var old = displayEntry("about", "About Brave", "Brave information", "Brave privacy");
++        mQueue.add(old);
++        mQueue.flushIfDirty();
++        String persisted = mPreferences.readString(PREF_KEY, "");
++        mQueue.persistToDiskAndReset();
++        mQueue = RecentSearchQueue.getInstance();
++        mQueue.restoreFromDisk();
++
++        var index = new SettingsIndexData();
++        var current = displayEntry("about", "About Reaper", "Reaper information", "Reaper privacy");
++        index.addEntry(current.id, current);
++        var displayed = mQueue.getEntriesForDisplay(index);
++
++        assertEquals(1, displayed.size());
++        assertEquals("About Reaper", displayed.get(0).title);
++        assertEquals("Reaper information", displayed.get(0).summary);
++        assertEquals("Reaper privacy", displayed.get(0).header);
++        assertEquals("About Brave", assumeNonNull(mQueue.get("about")).title);
++        assertEquals(persisted, mPreferences.readString(PREF_KEY, ""));
++        mQueue.flushIfDirty();
++        assertEquals(persisted, mPreferences.readString(PREF_KEY, ""));
++    }
++
++    @Test
++    public void testDisplayRefreshPreservesOrderAndSelectionArguments() {
++        Bundle arguments = new Bundle();
++        arguments.putString("user_selection", "retain exactly");
++        var first =
++                new SettingsIndexData.Entry.Builder(displayEntry("one", "Old one", null, null))
++                        .setArguments(arguments)
++                        .setFragment("OriginalTarget")
++                        .setHighlightKey("original_highlight")
++                        .setSubViewPos(7)
++                        .build();
++        var second = displayEntry("two", "Old two", null, null);
++        mQueue.add(first);
++        mQueue.add(second);
++        var index = new SettingsIndexData();
++        var freshSecond = displayEntry("two", "New two", null, null);
++        var freshFirst =
++                new SettingsIndexData.Entry.Builder(displayEntry("one", "New one", null, null))
++                        .setFragment("UnrelatedCurrentArguments")
++                        .build();
++        index.addEntry(freshSecond.id, freshSecond);
++        index.addEntry(freshFirst.id, freshFirst);
++
++        var displayed = mQueue.getEntriesForDisplay(index);
++
++        assertEquals("one", displayed.get(0).key);
++        assertEquals("two", displayed.get(1).key);
++        assertEquals(first.id, displayed.get(0).id);
++        assertEquals(first.parentFragment, displayed.get(0).parentFragment);
++        assertEquals("OriginalTarget", displayed.get(0).fragment);
++        assertEquals("original_highlight", displayed.get(0).highlightKey);
++        assertEquals(7, displayed.get(0).subViewPos);
++        assertSame(arguments, displayed.get(0).extras);
++        assertSame(first, mQueue.get("one"));
++    }
++
++    @Test
++    public void testDisplayFiltersUnavailableEntriesWithoutDeletingHistory() {
++        var missing = displayEntry("missing", "Missing", null, null);
++        var hidden = displayEntry("hidden", "Hidden", null, null);
++        var visible = displayEntry("visible", "Visible", null, null);
++        mQueue.add(missing);
++        mQueue.add(hidden);
++        mQueue.add(visible);
++        mQueue.flushIfDirty();
++        String persisted = mPreferences.readString(PREF_KEY, "");
++        var index = new SettingsIndexData();
++        index.addEntry(
++                hidden.id,
++                new SettingsIndexData.Entry.Builder(hidden).setIsSearchable(false).build());
++        index.addEntry(visible.id, visible);
++
++        var displayed = mQueue.getEntriesForDisplay(index);
++
++        assertEquals(1, displayed.size());
++        assertEquals("visible", displayed.get(0).key);
++        assertEquals(3, mQueue.size());
++        mQueue.flushIfDirty();
++        assertEquals(persisted, mPreferences.readString(PREF_KEY, ""));
++    }
++
++    @Test
++    public void testDisplayUsesCurrentLabelsAgainAfterIndexRebuild() {
++        var stored = displayEntry("about", "About Brave", "Old summary", "Old group");
++        mQueue.add(stored);
++        var index = new SettingsIndexData();
++        var first = displayEntry("about", "About Reaper", "New summary", "New group");
++        index.addEntry(first.id, first);
++        assertEquals("About Reaper", mQueue.getEntriesForDisplay(index).get(0).title);
++        index.clear();
++        var next = displayEntry("about", "Reaper info", null, "Current group");
++        index.addEntry(next.id, next);
++
++        var displayed = mQueue.getEntriesForDisplay(index).get(0);
++
++        assertEquals("Reaper info", displayed.title);
++        assertNull(displayed.summary);
++        assertEquals("Current group", displayed.header);
++        assertSame(stored, mQueue.get("about"));
++    }
++
++    @Test
++    public void testDisplayRefreshesParcelableResultHeaderAndLabels() {
++        var old = displayEntry("about", "About Brave", "Brave information", "Brave privacy");
++        Parcel parcel = Parcel.obtain();
++        try {
++            old.writeToParcel(parcel, 0);
++            parcel.setDataPosition(0);
++            var restored = SettingsIndexData.Entry.CREATOR.createFromParcel(parcel);
++            var index = new SettingsIndexData();
++            var current = displayEntry("about", "About Reaper", "Reaper information", "Reaper privacy");
++            index.addEntry(current.id, current);
++
++            var displayed = RecentSearchQueue.resolveEntriesForDisplay(Arrays.asList(restored), index);
++
++            assertEquals("About Reaper", displayed.get(0).title);
++            assertEquals("Reaper information", displayed.get(0).summary);
++            assertEquals("Reaper privacy", displayed.get(0).header);
++            assertEquals("About Brave", restored.title);
++            assertEquals("Brave privacy", restored.header);
++        } finally {
++            parcel.recycle();
++        }
++    }
++
++    @Test
++    public void testDisplayDoesNotReplaceLegalOrUserTextByBrandToken() {
++        var stored = displayEntry("legal", "Brave licenses", "User text: Brave", "Legal");
++        mQueue.add(stored);
++        var index = new SettingsIndexData();
++        index.addEntry(stored.id, stored);
++
++        var displayed = mQueue.getEntriesForDisplay(index).get(0);
++
++        assertEquals("Brave licenses", displayed.title);
++        assertEquals("User text: Brave", displayed.summary);
++        assertEquals("Legal", displayed.header);
++    }
++
++    private static SettingsIndexData.Entry displayEntry(
++            String key, String title, @Nullable String summary,
++            @Nullable String header) {
++        return new SettingsIndexData.Entry.Builder(
++                        PreferenceParser.createUniqueId("Parent", key), key, title, "Parent")
++                .setSummary(summary)
++                .setHeader(header)
++                .build();
++    }
++
+     private static SettingsIndexData.Entry createEntry(String key) {
+         return new SettingsIndexData.Entry.Builder("id_" + key, key, "Title " + key, "Parent")
+                 .build();

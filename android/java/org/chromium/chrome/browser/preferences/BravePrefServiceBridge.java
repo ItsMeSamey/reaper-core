@@ -72,10 +72,6 @@ public class BravePrefServiceBridge {
         return BravePrefServiceBridgeJni.get().getDataSaved(profile);
     }
 
-    public void resetPromotionLastFetchStamp() {
-        BravePrefServiceBridgeJni.get().resetPromotionLastFetchStamp();
-    }
-
     public void setOldTrackersBlockedCount(Profile profile, long count) {
         BravePrefServiceBridgeJni.get().setOldTrackersBlockedCount(profile, count);
     }
@@ -98,22 +94,6 @@ public class BravePrefServiceBridge {
 
     public int getWebrtcPolicy() {
         return BravePrefServiceBridgeJni.get().getWebrtcPolicy();
-    }
-
-    public void setNewsOptIn(boolean value) {
-        BravePrefServiceBridgeJni.get().setNewsOptIn(value);
-    }
-
-    public boolean getNewsOptIn() {
-        return BravePrefServiceBridgeJni.get().getNewsOptIn();
-    }
-
-    public void setShowNews(boolean value) {
-        BravePrefServiceBridgeJni.get().setShowNews(value);
-    }
-
-    public boolean getShowNews() {
-        return BravePrefServiceBridgeJni.get().getShowNews();
     }
 
     @NativeMethods
@@ -143,20 +123,11 @@ public class BravePrefServiceBridge {
 
         void setOldHttpsUpgradesCount(Profile profile, long count);
 
-        void resetPromotionLastFetchStamp();
-
         boolean getBooleanForContentSetting(int contentType);
 
         void setWebrtcPolicy(int policy);
 
         int getWebrtcPolicy();
 
-        void setNewsOptIn(boolean value);
-
-        boolean getNewsOptIn();
-
-        void setShowNews(boolean value);
-
-        boolean getShowNews();
     }
 }

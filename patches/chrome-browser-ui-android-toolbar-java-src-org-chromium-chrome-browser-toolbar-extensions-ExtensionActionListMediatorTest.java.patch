@@ -1,0 +1,1518 @@
+diff --git a/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/extensions/ExtensionActionListMediatorTest.java b/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/extensions/ExtensionActionListMediatorTest.java
+index 33c3bdf4ae7f4d923cc046d97d2c0c10150c8b70..97c6778411b72756fb9a77288e1e3bc390caf607 100644
+--- a/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/extensions/ExtensionActionListMediatorTest.java
++++ b/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/extensions/ExtensionActionListMediatorTest.java
+@@ -7,18 +7,25 @@
+ import static org.junit.Assert.assertEquals;
+ import static org.junit.Assert.assertFalse;
+ import static org.junit.Assert.assertNotNull;
++import static org.junit.Assert.assertNull;
+ import static org.junit.Assert.assertSame;
+ import static org.junit.Assert.assertTrue;
+ import static org.mockito.ArgumentMatchers.any;
+ import static org.mockito.ArgumentMatchers.anyInt;
+ import static org.mockito.ArgumentMatchers.anyLong;
+ import static org.mockito.ArgumentMatchers.anyString;
++import static org.mockito.Mockito.CALLS_REAL_METHODS;
++import static org.mockito.Mockito.clearInvocations;
++import static org.mockito.Mockito.doAnswer;
+ import static org.mockito.Mockito.doReturn;
+ import static org.mockito.Mockito.eq;
+ import static org.mockito.Mockito.mock;
+ import static org.mockito.Mockito.never;
++import static org.mockito.Mockito.spy;
++import static org.mockito.Mockito.times;
+ import static org.mockito.Mockito.verify;
+ import static org.mockito.Mockito.when;
++import static org.mockito.Mockito.withSettings;
+ import static org.robolectric.Shadows.shadowOf;
+ 
+ import android.app.Activity;
+@@ -28,10 +35,16 @@
+ import android.graphics.Color;
+ import android.graphics.Paint;
+ import android.os.Looper;
++import android.transition.TransitionManager;
+ import android.view.MotionEvent;
+ import android.view.View;
++import android.view.ViewGroup;
+ import android.view.ViewConfiguration;
+-
++import android.view.WindowManager;
++import android.widget.FrameLayout;
++
++import androidx.recyclerview.widget.DefaultItemAnimator;
++import androidx.recyclerview.widget.RecyclerView;
+ import androidx.test.core.app.ApplicationProvider;
+ 
+ import org.junit.After;
+@@ -45,6 +58,10 @@
+ import org.mockito.junit.MockitoJUnit;
+ import org.mockito.junit.MockitoRule;
+ import org.robolectric.Robolectric;
++import org.robolectric.android.controller.ActivityController;
++import org.robolectric.annotation.Config;
++import org.robolectric.shadows.ShadowChoreographer;
++import org.robolectric.util.ReflectionHelpers;
+ 
+ import org.chromium.base.supplier.ObservableSuppliers;
+ import org.chromium.base.supplier.SettableNullableObservableSupplier;
+@@ -63,7 +80,14 @@
+ import org.chromium.chrome.browser.ui.extensions.ExtensionsToolbarBridge;
+ import org.chromium.chrome.browser.ui.toolbar.AdminPolicy;
+ import org.chromium.chrome.browser.ui.toolbar.SiteAccess;
++import org.chromium.components.embedder_support.view.ContentView;
++import org.chromium.components.thinwebview.ThinWebView;
++import org.chromium.components.thinwebview.ThinWebViewFactory;
++import org.chromium.content_public.browser.ViewEventSink;
+ import org.chromium.content_public.browser.WebContents;
++import org.chromium.ui.base.ActivityWindowAndroid;
++import org.chromium.ui.base.IntentRequestTracker;
++import org.chromium.ui.base.ViewUtils;
+ import org.chromium.ui.base.WindowAndroid;
+ import org.chromium.ui.listmenu.ListMenuButton;
+ import org.chromium.ui.listmenu.ListMenuHost;
+@@ -71,11 +95,14 @@
+ import org.chromium.ui.modaldialog.ModalDialogManager;
+ import org.chromium.ui.modelutil.MVCListAdapter.ListItem;
+ import org.chromium.ui.modelutil.MVCListAdapter.ModelList;
++import org.chromium.ui.widget.ChromePopupWindow;
++import org.chromium.ui.widget.UiWidgetFactory;
+ 
+ import java.lang.ref.WeakReference;
+ import java.util.HashMap;
+ import java.util.Map;
+ import java.util.concurrent.TimeUnit;
++import java.util.function.Consumer;
+ 
+ @RunWith(BaseRobolectricTestRunner.class)
+ public class ExtensionActionListMediatorTest {
+@@ -459,6 +486,50 @@
+     }
+ 
+     @Test
++    public void testPendingPopup_TabSwitchCancelsBeforeLayout() {
++        mBridgeDelegateCaptor
++                .getValue()
++                .triggerPopup(ACTION3_ID, mPopupContentsMock, /* inspectWithDevTools= */ false);
++        ArgumentCaptor<Runnable> layoutCallback = ArgumentCaptor.forClass(Runnable.class);
++        verify(mRecyclerViewDelegate).addOnAnimationsFinishedRunnable(layoutCallback.capture());
++        assertTrue(mMediator.hasPoppedOutAction());
++
++        MockTab nextTab = new MockTab(TAB_ID + 1, mProfile);
++        nextTab.setWebContentsOverrideForTesting(mWebContents);
++        mCurrentTabSupplier.set(nextTab);
++
++        verify(mPopupContentsMock, times(1)).destroy();
++        assertFalse(mMediator.hasPoppedOutAction());
++        // The old layout callback can still arrive after switching tabs.
++        layoutCallback.getValue().run();
++        verify(mRecyclerViewDelegate, never()).getButtonViewForId(ACTION3_ID);
++        verify(mPopupContentsMock, times(1)).destroy();
++    }
++
++    @Test
++    public void testPendingPopup_LastTabClosureCancelsContents() {
++        mBridgeDelegateCaptor
++                .getValue()
++                .triggerPopup(ACTION1_ID, mPopupContentsMock, /* inspectWithDevTools= */ false);
++
++        mCurrentTabSupplier.set(null);
++
++        verify(mPopupContentsMock, times(1)).destroy();
++        assertFalse(mBridgeDelegateCaptor.getValue().hasActivePopup());
++    }
++
++    @Test
++    public void testPendingPopup_SameTabNotificationDoesNotCancel() {
++        mBridgeDelegateCaptor
++                .getValue()
++                .triggerPopup(ACTION1_ID, mPopupContentsMock, /* inspectWithDevTools= */ false);
++
++        mCurrentTabSupplier.set(mTab);
++
++        verify(mPopupContentsMock, never()).destroy();
++    }
++
++    @Test
+     public void testTriggerPopup_InspectWithDevTools() {
+         // Trigger a popup for inspection.
+         mBridgeDelegateCaptor
+@@ -501,6 +572,14 @@
+ 
+     @Test
+     public void testPopOutAction_HiddenPinned_Popup() {
++        when(mExtensionsToolbarBridge.isActionDraggable(ACTION1_ID)).thenReturn(true);
++        when(mExtensionsToolbarBridge.isActionDraggable(ACTION2_ID)).thenReturn(true);
++        mMediator.updateActionProperties(ACTION1_ID);
++        mMediator.updateActionProperties(ACTION2_ID);
++        ArgumentCaptor<ExtensionsToolbarBridge.Observer> observer =
++                ArgumentCaptor.forClass(ExtensionsToolbarBridge.Observer.class);
++        verify(mExtensionsToolbarBridge).addObserver(observer.capture());
++
+         // Get the button width.
+         int buttonWidth =
+                 ApplicationProvider.getApplicationContext()
+@@ -524,6 +603,66 @@
+         assertEquals("Action 2 should be added to the list", 2, mModels.size());
+         assertItemAt(0, ACTION1_ID, "title of action 1", ICON_RED);
+         assertItemAt(1, ACTION2_ID, "title of action 2", ICON_BLUE);
++        ListItem anchor = mModels.get(1);
++        assertTrue(mModels.get(0).model.get(ExtensionActionButtonProperties.IS_DRAGGABLE));
++        assertFalse(anchor.model.get(ExtensionActionButtonProperties.IS_DRAGGABLE));
++
++        // Native pin state stays true when an overflowed action becomes a temporary anchor.
++        // A badge/title/icon refresh and a page refresh must preserve that anchor's drag exclusion.
++        observer.getValue().onActionUpdated(ACTION2_ID);
++        assertFalse(anchor.model.get(ExtensionActionButtonProperties.IS_DRAGGABLE));
++        observer.getValue().onActiveWebContentsChanged(mWebContents);
++        assertFalse(anchor.model.get(ExtensionActionButtonProperties.IS_DRAGGABLE));
++        assertTrue(mModels.get(0).model.get(ExtensionActionButtonProperties.IS_DRAGGABLE));
++
++        // Cancel the pending popup through the actual tab-change observer, then widen the toolbar.
++        // The same row is now an ordinary pinned action and must become draggable again.
++        mCurrentTabSupplier.set(null);
++        verify(mPopupContentsMock, times(1)).destroy();
++        assertFalse(mMediator.hasPoppedOutAction());
++        mCurrentTabSupplier.set(mTab);
++        mMediator.fitActionsWithinWidth(2 * buttonWidth);
++        assertSame(anchor, mModels.get(1));
++        assertTrue(anchor.model.get(ExtensionActionButtonProperties.IS_DRAGGABLE));
++
++        // Reconciliation must continue to respect the native force-pin/incognito drag restriction.
++        when(mExtensionsToolbarBridge.isActionDraggable(ACTION2_ID)).thenReturn(false);
++        observer.getValue().onPinnedActionsChanged();
++        assertFalse(anchor.model.get(ExtensionActionButtonProperties.IS_DRAGGABLE));
++    }
++
++    @Test
++    public void testPopOutAction_DragStateRestoredAfterRowMoves() {
++        when(mExtensionsToolbarBridge.isActionDraggable(ACTION1_ID)).thenReturn(true);
++        when(mExtensionsToolbarBridge.isActionDraggable(ACTION2_ID)).thenReturn(true);
++        int buttonWidth =
++                ApplicationProvider.getApplicationContext()
++                        .getResources()
++                        .getDimensionPixelSize(R.dimen.toolbar_button_width);
++        mMediator.fitActionsWithinWidth(0);
++        mBridgeDelegateCaptor
++                .getValue()
++                .triggerPopup(ACTION1_ID, mPopupContentsMock, /* inspectWithDevTools= */ false);
++        mMediator.reconcileActionItems();
++        assertEquals(1, mModels.size());
++        ListItem anchor = mModels.get(0);
++        assertFalse(anchor.model.get(ExtensionActionButtonProperties.IS_DRAGGABLE));
++
++        // While popped out, Action 1 remains after the ordinary Action 2 even as width returns.
++        mMediator.fitActionsWithinWidth(buttonWidth);
++        assertItemAt(0, ACTION2_ID, "title of action 2", ICON_BLUE);
++        assertSame(anchor, mModels.get(1));
++        assertFalse(anchor.model.get(ExtensionActionButtonProperties.IS_DRAGGABLE));
++
++        // Closing the popup returns the retained row to the original pinned order.
++        mCurrentTabSupplier.set(null);
++        verify(mPopupContentsMock, times(1)).destroy();
++        mCurrentTabSupplier.set(mTab);
++        mMediator.fitActionsWithinWidth(2 * buttonWidth);
++        assertSame(anchor, mModels.get(0));
++        assertItemAt(1, ACTION2_ID, "title of action 2", ICON_BLUE);
++        assertTrue(anchor.model.get(ExtensionActionButtonProperties.IS_DRAGGABLE));
++        assertTrue(mModels.get(1).model.get(ExtensionActionButtonProperties.IS_DRAGGABLE));
+     }
+ 
+     @Test
+@@ -610,6 +749,960 @@
+         assertFalse(ExtensionActionPopup.handleKeyboardEvent(activity, null));
+     }
+ 
++    private static class ActionPopupFixture {
++        final Activity mActivity;
++        final ExtensionActionPopupContents.Delegate mDelegate;
++        final ContentView mContentView;
++        final FrameLayout mThinView;
++        final ChromePopupWindow mWindow;
++
++        ActionPopupFixture(
++                Activity activity,
++                ExtensionActionPopupContents.Delegate delegate,
++                ContentView contentView,
++                FrameLayout thinView,
++                ChromePopupWindow window) {
++            this.mActivity = activity;
++            this.mDelegate = delegate;
++            this.mContentView = contentView;
++            this.mThinView = thinView;
++            this.mWindow = window;
++        }
++
++        void assertSize(int widthDp, int heightDp) {
++            assertEquals(ViewUtils.dpToPx(mActivity, widthDp), mWindow.getWidth());
++            assertEquals(ViewUtils.dpToPx(mActivity, heightDp), mWindow.getHeight());
++        }
++
++        View showAndGetAttachedRoot() {
++            mDelegate.onLoaded();
++            // WindowManager attachment occurs in the posted real ViewRoot traversal.
++            shadowOf(Looper.getMainLooper()).idle();
++            assertTrue(mWindow.isShowing());
++            View root = mContentView.getRootView();
++            // isShowing alone does not prove that native resize can see window parameters.
++            assertTrue(root.isAttachedToWindow());
++            assertTrue(root.getLayoutParams() instanceof WindowManager.LayoutParams);
++            return root;
++        }
++    }
++
++    private void withActionPopup(Consumer<ActionPopupFixture> check) {
++        ActivityController<Activity> controller = Robolectric.buildActivity(Activity.class).setup();
++        UiWidgetFactory previousFactory = UiWidgetFactory.getInstance();
++        ChromePopupWindow[] window = new ChromePopupWindow[1];
++        ActivityWindowAndroid activityWindow = null;
++        ExtensionActionPopup popup = null;
++        try {
++            UiWidgetFactory.setInstance(
++                    new UiWidgetFactory() {
++                        @Override
++                        public ChromePopupWindow createPopupWindow(Context context) {
++                            // Keep framework self-references on the constructed instance.
++                            window[0] = mock(ChromePopupWindow.class,
++                                    withSettings().useConstructor(context)
++                                            .defaultAnswer(CALLS_REAL_METHODS));
++                            return window[0];
++                        }
++                    });
++            Activity activity = controller.get();
++            FrameLayout content = new FrameLayout(activity);
++            View anchor = new View(activity);
++            content.addView(anchor, new FrameLayout.LayoutParams(48, 48));
++            activity.setContentView(content);
++            View decor = activity.getWindow().getDecorView();
++            decor.measure(
++                    View.MeasureSpec.makeMeasureSpec(800, View.MeasureSpec.EXACTLY),
++                    View.MeasureSpec.makeMeasureSpec(600, View.MeasureSpec.EXACTLY));
++            decor.layout(0, 0, 800, 600);
++            assertTrue(anchor.isAttachedToWindow());
++            assertTrue(anchor.getWidth() > 0);
++            activityWindow =
++                    new ActivityWindowAndroid(
++                            activity,
++                            /* listenToActivityState= */ false,
++                            IntentRequestTracker.createFromActivity(activity),
++                            /* insetObserver= */ null,
++                            /* occlusionTrackingAllowed= */ false);
++
++            WebContents webContents = mock(WebContents.class);
++            ExtensionActionPopupContents contents = mock(ExtensionActionPopupContents.class);
++            when(contents.getWebContents()).thenReturn(webContents);
++            ThinWebView thinWebView = mock(ThinWebView.class);
++            FrameLayout thinView = new FrameLayout(activity);
++            when(thinWebView.getView()).thenReturn(thinView);
++            ContentView[] contentView = new ContentView[1];
++            doAnswer(
++                            invocation -> {
++                                contentView[0] = invocation.getArgument(1);
++                                // Keep the actual ContentView/focus/hierarchy, replacing only the
++                                // native event backend. Its final implementation is not mockable
++                                // by Chromium's JVM subclass MockMaker.
++                                ReflectionHelpers.setField(
++                                        contentView[0], "mViewEventSink", mock(ViewEventSink.class));
++                                thinView.addView(
++                                        contentView[0],
++                                        new FrameLayout.LayoutParams(
++                                                FrameLayout.LayoutParams.MATCH_PARENT,
++                                                FrameLayout.LayoutParams.MATCH_PARENT));
++                                return null;
++                            })
++                    .when(thinWebView)
++                    .attachWebContents(eq(webContents), any(), any());
++            ThinWebViewFactory.setInstanceForTesting(thinWebView);
++            when(mTabModelSelector.getCurrentTabSupplier()).thenReturn(mCurrentTabSupplier);
++            popup =
++                    new ExtensionActionPopup(
++                            activity,
++                            activityWindow,
++                            anchor,
++                            ACTION1_ID,
++                            contents,
++                            /* contextMenuPopulatorFactory= */ null,
++                            /* selectionDropdownMenuDelegate= */ null,
++                            mTabModelSelector,
++                            /* inspectWithDevTools= */ false);
++            ArgumentCaptor<ExtensionActionPopupContents.Delegate> delegate =
++                    ArgumentCaptor.forClass(ExtensionActionPopupContents.Delegate.class);
++            verify(contents).setDelegate(delegate.capture());
++            assertNotNull(contentView[0]);
++            assertNotNull(window[0]);
++            assertFalse(window[0].isShowing());
++            assertFalse(contentView[0].getRootView().isAttachedToWindow());
++            check.accept(
++                    new ActionPopupFixture(
++                            activity, delegate.getValue(), contentView[0], thinView, window[0]));
++        } finally {
++            if (popup != null) popup.destroy();
++            if (window[0] != null) window[0].dismiss();
++            if (activityWindow != null) activityWindow.destroy();
++            // ThinWebViewFactory registers its own resetter for the test runner.
++            UiWidgetFactory.setInstance(previousFactory);
++            controller.pause().stop().destroy();
++        }
++    }
++
++    @Test
++    @Config(sdk = 34, qualifiers = "w800dp-h600dp-mdpi")
++    public void testActionPopup_ResizeBeforeLoadWithNullParamsPreservesSize() {
++        withActionPopup(
++                fixture -> {
++                    assertNull(fixture.mContentView.getRootView().getLayoutParams());
++                    fixture.mDelegate.resizeDueToAutoResize(240, 180);
++                    fixture.assertSize(240, 180);
++                    assertFalse(fixture.mWindow.isShowing());
++                    fixture.showAndGetAttachedRoot();
++                    fixture.assertSize(240, 180);
++                });
++    }
++
++    @Test
++    @Config(sdk = 34, qualifiers = "w800dp-h600dp-mdpi")
++    public void testActionPopup_ResizeBeforeLoadWithViewParamsPreservesLatestSize() {
++        withActionPopup(
++                fixture -> {
++                    fixture.mThinView.setLayoutParams(new FrameLayout.LayoutParams(10, 20));
++                    assertTrue(
++                            fixture.mContentView.getRootView().getLayoutParams()
++                                    instanceof FrameLayout.LayoutParams);
++                    fixture.mDelegate.resizeDueToAutoResize(120, 100);
++                    fixture.mDelegate.resizeDueToAutoResize(280, 200);
++                    fixture.assertSize(280, 200);
++                    assertFalse(fixture.mWindow.isShowing());
++                    fixture.showAndGetAttachedRoot();
++                    fixture.assertSize(280, 200);
++                });
++    }
++
++    @Test
++    @Config(sdk = 34, qualifiers = "w800dp-h600dp-mdpi")
++    public void testActionPopup_AttachedResizeDisablesAnimationAndUpdatesSize() {
++        withActionPopup(
++                fixture -> {
++                    View root = fixture.showAndGetAttachedRoot();
++                    WindowManager.LayoutParams params =
++                            spy((WindowManager.LayoutParams) root.getLayoutParams());
++                    root.setLayoutParams(params);
++                    clearInvocations(fixture.mWindow, params);
++
++                    fixture.mDelegate.resizeDueToAutoResize(320, 220);
++
++                    verify(params).setCanPlayMoveAnimation(false);
++                    fixture.assertSize(320, 220);
++                    verify(fixture.mWindow)
++                            .update(
++                                    anyInt(),
++                                    anyInt(),
++                                    eq(ViewUtils.dpToPx(fixture.mActivity, 320)),
++                                    eq(ViewUtils.dpToPx(fixture.mActivity, 220)));
++                    assertTrue(fixture.mWindow.isShowing());
++                });
++    }
++
++    @Test
++    @Config(sdk = 33, qualifiers = "w800dp-h600dp-mdpi")
++    public void testActionPopup_Api33EarlyResizePreservesSize() {
++        withActionPopup(
++                fixture -> {
++                    assertNull(fixture.mContentView.getRootView().getLayoutParams());
++                    fixture.mDelegate.resizeDueToAutoResize(240, 180);
++                    fixture.assertSize(240, 180);
++                    fixture.showAndGetAttachedRoot();
++                    fixture.assertSize(240, 180);
++                });
++    }
++
++    @Test
++    @Config(sdk = 33, qualifiers = "w800dp-h600dp-mdpi")
++    public void testActionPopup_Api33AttachedResizeUpdatesSize() {
++        withActionPopup(
++                fixture -> {
++                    fixture.showAndGetAttachedRoot();
++                    clearInvocations(fixture.mWindow);
++                    // Do not resolve or call the API34-only animation setter in this control.
++                    fixture.mDelegate.resizeDueToAutoResize(320, 220);
++                    fixture.assertSize(320, 220);
++                    verify(fixture.mWindow)
++                            .update(
++                                    anyInt(),
++                                    anyInt(),
++                                    eq(ViewUtils.dpToPx(fixture.mActivity, 320)),
++                                    eq(ViewUtils.dpToPx(fixture.mActivity, 220)));
++                    assertTrue(fixture.mWindow.isShowing());
++                });
++    }
++
++    private static class ActionPopupLifecycleFixture {
++        final ExtensionActionPopupContents.Delegate mDelegate;
++        final ExtensionActionPopupContents mContents;
++        final ThinWebView mThinWebView;
++        final ChromePopupWindow mWindow;
++        final ListMenuButton mButton;
++
++        ActionPopupLifecycleFixture(
++                ExtensionActionPopupContents.Delegate delegate,
++                ExtensionActionPopupContents contents,
++                ThinWebView thinWebView,
++                ChromePopupWindow window,
++                ListMenuButton button) {
++            mDelegate = delegate;
++            mContents = contents;
++            mThinWebView = thinWebView;
++            mWindow = window;
++            mButton = button;
++        }
++    }
++
++    private void withMediatedActionPopup(
++            boolean closeDuringInitialLoad,
++            boolean inspectWithDevTools,
++            Consumer<ActionPopupLifecycleFixture> check) {
++        ActivityController<Activity> controller = Robolectric.buildActivity(Activity.class).setup();
++        UiWidgetFactory previousFactory = UiWidgetFactory.getInstance();
++        ChromePopupWindow[] window = new ChromePopupWindow[1];
++        ExtensionActionPopupContents.Delegate[] delegate =
++                new ExtensionActionPopupContents.Delegate[1];
++        try {
++            UiWidgetFactory.setInstance(
++                    new UiWidgetFactory() {
++                        @Override
++                        public ChromePopupWindow createPopupWindow(Context context) {
++                            // Keep framework self-references on the constructed instance.
++                            window[0] = mock(ChromePopupWindow.class,
++                                    withSettings().useConstructor(context)
++                                            .defaultAnswer(CALLS_REAL_METHODS));
++                            return window[0];
++                        }
++                    });
++            Activity activity = controller.get();
++            FrameLayout content = new FrameLayout(activity);
++            // A copied View keeps its original Robolectric shadow and constructor callbacks.
++            ListMenuButton button = mock(ListMenuButton.class,
++                    withSettings().useConstructor(activity, null)
++                            .defaultAnswer(CALLS_REAL_METHODS));
++            content.addView(button, new FrameLayout.LayoutParams(48, 48));
++            activity.setContentView(content);
++            View decor = activity.getWindow().getDecorView();
++            decor.measure(
++                    View.MeasureSpec.makeMeasureSpec(800, View.MeasureSpec.EXACTLY),
++                    View.MeasureSpec.makeMeasureSpec(600, View.MeasureSpec.EXACTLY));
++            decor.layout(0, 0, 800, 600);
++            assertTrue(button.isAttachedToWindow());
++            when(mWindowAndroid.getActivity()).thenReturn(new WeakReference<>(activity));
++            // The final getter reads its real backing field even on this mock window.
++            ReflectionHelpers.setField(mWindowAndroid, "mIntentRequestTracker",
++                    IntentRequestTracker.createFromActivity(activity));
++            when(mTabModelSelector.getCurrentTabSupplier()).thenReturn(mCurrentTabSupplier);
++            doReturn(button).when(mRecyclerViewDelegate).getButtonViewForId(ACTION3_ID);
++
++            WebContents webContents = mock(WebContents.class);
++            ExtensionActionPopupContents contents = mock(ExtensionActionPopupContents.class);
++            when(contents.getWebContents()).thenReturn(webContents);
++            doAnswer(
++                            invocation -> {
++                                ExtensionActionPopupContents.Delegate value =
++                                        invocation.getArgument(0);
++                                if (value != null) delegate[0] = value;
++                                return null;
++                            })
++                    .when(contents)
++                    .setDelegate(any());
++            if (closeDuringInitialLoad) {
++                doAnswer(
++                                invocation -> {
++                                    assertNotNull(delegate[0]);
++                                    delegate[0].onClose();
++                                    return null;
++                                })
++                        .when(contents)
++                        .loadInitialPage();
++            }
++            ThinWebView thinWebView = mock(ThinWebView.class);
++            FrameLayout thinView = new FrameLayout(activity);
++            when(thinWebView.getView()).thenReturn(thinView);
++            doAnswer(
++                            invocation -> {
++                                ContentView view = invocation.getArgument(1);
++                                ReflectionHelpers.setField(
++                                        view, "mViewEventSink", mock(ViewEventSink.class));
++                                thinView.addView(
++                                        view,
++                                        new FrameLayout.LayoutParams(
++                                                FrameLayout.LayoutParams.MATCH_PARENT,
++                                                FrameLayout.LayoutParams.MATCH_PARENT));
++                                return null;
++                            })
++                    .when(thinWebView)
++                    .attachWebContents(eq(webContents), any(), any());
++            ThinWebViewFactory.setInstanceForTesting(thinWebView);
++            clearInvocations(mRecyclerViewDelegate);
++            mBridgeDelegateCaptor
++                    .getValue()
++                    .triggerPopup(ACTION3_ID, contents, inspectWithDevTools);
++            ArgumentCaptor<Runnable> layout = ArgumentCaptor.forClass(Runnable.class);
++            verify(mRecyclerViewDelegate).addOnAnimationsFinishedRunnable(layout.capture());
++            assertTrue(mMediator.hasPoppedOutAction());
++            layout.getValue().run();
++            assertNotNull(delegate[0]);
++            assertNotNull(window[0]);
++            verify(contents).loadInitialPage();
++            check.accept(
++                    new ActionPopupLifecycleFixture(
++                            delegate[0], contents, thinWebView, window[0], button));
++        } finally {
++            if (delegate[0] != null) delegate[0].onClose();
++            if (window[0] != null) window[0].dismiss();
++            UiWidgetFactory.setInstance(previousFactory);
++            controller.pause().stop().destroy();
++        }
++    }
++
++    private void assertActionPopupOwnerRetired(ActionPopupLifecycleFixture fixture) {
++        assertFalse(mBridgeDelegateCaptor.getValue().hasActivePopup());
++        assertFalse(mMediator.hasPoppedOutAction());
++        assertFalse(fixture.mWindow.isShowing());
++        verify(fixture.mButton).setIsPressed(false);
++        verify(fixture.mContents).setDelegate(null);
++        verify(fixture.mContents, times(1)).destroy();
++        verify(fixture.mThinWebView, times(1)).destroy();
++    }
++
++    @Test
++    @Config(sdk = 34, qualifiers = "w800dp-h600dp-mdpi")
++    public void testActionPopup_CloseBeforeVisibilityRetiresOwnerAndIgnoresLateCallbacks() {
++        withMediatedActionPopup(
++                false,
++                false,
++                fixture -> {
++                    assertTrue(mBridgeDelegateCaptor.getValue().hasActivePopup());
++                    assertFalse(fixture.mWindow.isShowing());
++                    fixture.mDelegate.onClose();
++                    assertActionPopupOwnerRetired(fixture);
++                    int width = fixture.mWindow.getWidth();
++                    int height = fixture.mWindow.getHeight();
++                    fixture.mDelegate.resizeDueToAutoResize(320, 220);
++                    fixture.mDelegate.onLoaded();
++                    fixture.mDelegate.onClose();
++                    assertEquals(width, fixture.mWindow.getWidth());
++                    assertEquals(height, fixture.mWindow.getHeight());
++                    assertActionPopupOwnerRetired(fixture);
++                });
++    }
++
++    @Test
++    @Config(sdk = 34, qualifiers = "w800dp-h600dp-mdpi")
++    public void testActionPopup_VisibleCloseRetiresOwnerOnceAndAllowsAnotherPopup() {
++        withMediatedActionPopup(
++                false,
++                false,
++                fixture -> {
++                    fixture.mDelegate.onLoaded();
++                    assertTrue(fixture.mWindow.isShowing());
++                    fixture.mDelegate.onClose();
++                    fixture.mDelegate.onClose();
++                    assertActionPopupOwnerRetired(fixture);
++                });
++        // A fresh action operation still displays, including the existing inspection policy.
++        withMediatedActionPopup(
++                false,
++                true,
++                fixture -> {
++                    fixture.mDelegate.onLoaded();
++                    assertTrue(fixture.mWindow.isShowing());
++                    fixture.mWindow.dismiss();
++                    fixture.mDelegate.onLoaded();
++                    assertActionPopupOwnerRetired(fixture);
++                });
++    }
++
++    @Test
++    @Config(sdk = 33, qualifiers = "w800dp-h600dp-mdpi")
++    public void testActionPopup_CloseDuringInitialLoadSeesRegisteredOwner() {
++        withMediatedActionPopup(
++                true,
++                false,
++                fixture -> {
++                    assertActionPopupOwnerRetired(fixture);
++                    fixture.mDelegate.onLoaded();
++                    fixture.mDelegate.resizeDueToAutoResize(240, 180);
++                    fixture.mDelegate.onClose();
++                    assertActionPopupOwnerRetired(fixture);
++                });
++    }
++
++    @Test
++    @Config(sdk = {33, 34})
++    public void testPendingPopup_MissingActivityRetiresPoppedOutAction() {
++        ActivityController<Activity> controller = Robolectric.buildActivity(Activity.class).setup();
++        try {
++            ListMenuButton buttonView = new ListMenuButton(controller.get(), null);
++            // The existing window boundary can have no Activity when its queued layout completes.
++            when(mWindowAndroid.getActivity()).thenReturn(new WeakReference<>(null));
++            doReturn(buttonView).when(mRecyclerViewDelegate).getButtonViewForId(ACTION3_ID);
++            clearInvocations(mRecyclerViewDelegate);
++
++            mBridgeDelegateCaptor
++                    .getValue()
++                    .triggerPopup(ACTION3_ID, mPopupContentsMock, /* inspectWithDevTools= */ false);
++            ArgumentCaptor<Runnable> layoutCallback = ArgumentCaptor.forClass(Runnable.class);
++            verify(mRecyclerViewDelegate).addOnAnimationsFinishedRunnable(layoutCallback.capture());
++            assertTrue(mMediator.hasPoppedOutAction());
++            assertTrue(mMediator.setCanShowPoppedOutAction(1000) > 0);
++            verify(mRecyclerViewDelegate, times(1)).requestLayoutWithViewUtils();
++
++            // Run the actual layout callback registered by the production popup request.
++            layoutCallback.getValue().run();
++            verify(mWindowAndroid, times(1)).getActivity();
++            verify(mPopupContentsMock, times(1)).destroy();
++            verify(mPopupContentsMock, never()).loadInitialPage();
++            assertFalse(mBridgeDelegateCaptor.getValue().hasActivePopup());
++            assertFalse(mMediator.hasPoppedOutAction());
++            assertEquals(0, mMediator.setCanShowPoppedOutAction(1000));
++            verify(mRecyclerViewDelegate, times(2)).requestLayoutWithViewUtils();
++
++            // A copied late callback sees Idle and cannot reacquire or destroy ownership again.
++            layoutCallback.getValue().run();
++            verify(mRecyclerViewDelegate, times(1)).getButtonViewForId(ACTION3_ID);
++            verify(mPopupContentsMock, times(1)).destroy();
++            verify(mRecyclerViewDelegate, times(2)).requestLayoutWithViewUtils();
++        } finally {
++            controller.pause().stop().destroy();
++        }
++    }
++
++    /** A real Recycler/ItemAnimator/platform-transition owner, separate from the mock delegate. */
++    private static final class RecyclerTransitionFixture implements AutoCloseable {
++        private final boolean mWasChoreographerPaused = ShadowChoreographer.isPaused();
++        final ActivityController<Activity> mController =
++                Robolectric.buildActivity(Activity.class).setup();
++        final FrameLayout mRoot = new FrameLayout(mController.get());
++        final ExtensionActionListRecyclerView mRecycler =
++                new ExtensionActionListRecyclerView(mController.get());
++        final RecyclerRowAdapter mAdapter;
++        final DefaultItemAnimator mAnimator;
++        final int mItemWidth;
++
++        RecyclerTransitionFixture() {
++            // Idle posted layout work without automatically advancing every animation frame.
++            ShadowChoreographer.setPaused(true);
++            try {
++                mItemWidth = mRecycler.getResources()
++                        .getDimensionPixelSize(R.dimen.toolbar_button_width);
++                mAdapter = new RecyclerRowAdapter(mItemWidth);
++                mRecycler.setAdapter(mAdapter);
++                mRecycler.setTransitionRoot(mRoot);
++                mRoot.addView(mRecycler, new FrameLayout.LayoutParams(mItemWidth, 64));
++                mController.get().setContentView(mRoot);
++                mController.visible();
++                layout();
++                mRoot.getViewTreeObserver().dispatchOnPreDraw();
++                runFrame();
++                assertTrue(mRoot.isAttachedToWindow());
++                assertTrue(mRoot.isLaidOut());
++                assertNotNull(mRoot.getWindowId());
++                assertEquals(mItemWidth, mRecycler.getWidth());
++                assertTrue(mRecycler.getItemAnimator() instanceof DefaultItemAnimator);
++                mAnimator = (DefaultItemAnimator) mRecycler.getItemAnimator();
++                mAnimator.setAddDuration(1000);
++                mAnimator.setMoveDuration(1000);
++            } catch (RuntimeException | Error e) {
++                ShadowChoreographer.setPaused(mWasChoreographerPaused);
++                throw e;
++            }
++        }
++
++        void runFrame() {
++            // Let the normal traversal release ViewRoot's sync barrier while Choreographer
++            // stays paused. One frame does not complete the 1000ms width transition.
++            shadowOf(Looper.getMainLooper()).idleFor(ShadowChoreographer.getFrameDelay());
++        }
++
++        void layout() {
++            mRoot.measure(View.MeasureSpec.makeMeasureSpec(640, View.MeasureSpec.EXACTLY),
++                    View.MeasureSpec.makeMeasureSpec(80, View.MeasureSpec.EXACTLY));
++            mRoot.layout(0, 0, 640, 80);
++        }
++
++        void beginWidthTransition() {
++            RecyclerView.ViewHolder holder = mRecycler.findViewHolderForAdapterPosition(0);
++            assertNotNull(holder);
++            int startWidth = mItemWidth * mAdapter.getItemCount();
++            mAdapter.addRow();
++            // The real ItemAnimator completion listener owns this ordinary holder reference.
++            holder.setIsRecyclable(false);
++            assertTrue(mAnimator.animateAdd(holder));
++            mAnimator.runPendingAnimations();
++            layout();
++            mRoot.getViewTreeObserver().dispatchOnPreDraw();
++            assertEquals(mItemWidth * mAdapter.getItemCount(),
++                    mRecycler.getLayoutParams().width);
++            // ChangeBounds rewinds the actual laid-out view to its nonzero start bounds.
++            // This must be a running transition, rather than a no-op endTransitions witness.
++            assertEquals(startWidth, mRecycler.getWidth());
++            assertTrue(mRecycler.getLayoutParams().width > mRecycler.getWidth());
++        }
++
++        void layoutWithoutItemAnimation() {
++            mAnimator.endAnimations();
++            assertFalse(mAnimator.isRunning());
++            ViewGroup.LayoutParams params = mRecycler.getLayoutParams();
++            ++params.height;
++            mRecycler.setLayoutParams(params);
++            layout();
++            runFrame();
++        }
++
++        @Override
++        public void close() {
++            try {
++                mRecycler.clearOnAnimationsFinishedRunnables();
++                TransitionManager.endTransitions(mRoot);
++                mAnimator.endAnimations();
++                mController.pause().stop().destroy();
++            } finally {
++                ShadowChoreographer.setPaused(mWasChoreographerPaused);
++            }
++        }
++    }
++
++    private static final class RecyclerRowAdapter
++            extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
++        private final int mItemWidth;
++        private int mRowCount = 1;
++
++        RecyclerRowAdapter(int itemWidth) {
++            mItemWidth = itemWidth;
++        }
++
++        void addRow() {
++            ++mRowCount;
++            // A full adapter refresh avoids introducing a second automatic item-animation owner.
++            notifyDataSetChanged();
++        }
++
++        @Override
++        public RecyclerView.ViewHolder onCreateViewHolder(ViewGroup parent, int viewType) {
++            View item = new View(parent.getContext());
++            item.setLayoutParams(new RecyclerView.LayoutParams(mItemWidth, 64));
++            return new RecyclerView.ViewHolder(item) {};
++        }
++
++        @Override
++        public void onBindViewHolder(RecyclerView.ViewHolder holder, int position) {}
++
++        @Override
++        public int getItemCount() {
++            return mRowCount;
++        }
++    }
++
++    @Test
++    @Config(sdk = {33, 34}, qualifiers = "w800dp-h600dp-mdpi")
++    public void testRecycler_ReplacementWaitsForCurrentWidthTransition() {
++        try (RecyclerTransitionFixture fixture = new RecyclerTransitionFixture()) {
++            fixture.beginWidthTransition();
++            int[] completed = {0};
++            fixture.mRecycler.addOnAnimationsFinishedRunnable(() -> ++completed[0]);
++            // Starting another width animation force-ends the old platform transition.
++            fixture.beginWidthTransition();
++            assertEquals(0, completed[0]);
++            TransitionManager.endTransitions(fixture.mRoot);
++            assertEquals(0, completed[0]);
++            assertTrue(fixture.mAnimator.isRunning());
++            fixture.mAnimator.endAnimations();
++            // The real item-finished listener retries after the animator's listener drain.
++            assertEquals(0, completed[0]);
++            fixture.runFrame();
++            assertEquals(1, completed[0]);
++            assertEquals(fixture.mRecycler.getLayoutParams().width,
++                    fixture.mRecycler.getWidth());
++            TransitionManager.endTransitions(fixture.mRoot);
++            assertEquals(1, completed[0]);
++
++            // With neither owner running, the genuine posted layout path still completes work.
++            fixture.mRecycler.addOnAnimationsFinishedRunnable(() -> ++completed[0]);
++            fixture.layoutWithoutItemAnimation();
++            assertEquals(2, completed[0]);
++        }
++    }
++
++    @Test
++    @Config(sdk = {33, 34}, qualifiers = "w800dp-h600dp-mdpi")
++    public void testRecycler_ReentrantCompletionRetainsNewWidthTransition() {
++        try (RecyclerTransitionFixture fixture = new RecyclerTransitionFixture()) {
++            fixture.beginWidthTransition();
++            int[] completed = {0, 0};
++            fixture.mRecycler.addOnAnimationsFinishedRunnable(() -> {
++                ++completed[0];
++                fixture.beginWidthTransition();
++            });
++            TransitionManager.endTransitions(fixture.mRoot);
++            assertEquals(0, completed[0]);
++            fixture.mAnimator.endAnimations();
++            fixture.runFrame();
++            assertEquals(1, completed[0]);
++            fixture.mRecycler.addOnAnimationsFinishedRunnable(() -> ++completed[1]);
++            // Item animation completion does not retire the new platform width owner.
++            fixture.layoutWithoutItemAnimation();
++            assertEquals(0, completed[1]);
++            TransitionManager.endTransitions(fixture.mRoot);
++            // Finish the final normal layout and posted stable-completion retry.
++            fixture.runFrame();
++            assertEquals(1, completed[1]);
++            TransitionManager.endTransitions(fixture.mRoot);
++            assertEquals(1, completed[0]);
++            assertEquals(1, completed[1]);
++        }
++    }
++
++    @Test
++    @Config(sdk = {33, 34}, qualifiers = "w800dp-h600dp-mdpi")
++    public void testRecycler_CurrentWidthEndWaitsForRequestedUnchangedLayout() {
++        try (RecyclerTransitionFixture fixture = new RecyclerTransitionFixture()) {
++            fixture.beginWidthTransition();
++            int[] completed = {0};
++            fixture.mRecycler.addOnAnimationsFinishedRunnable(() -> ++completed[0]);
++            fixture.mRecycler.requestLayout();
++            assertTrue(fixture.mRecycler.isLayoutRequested());
++            assertTrue(fixture.mAnimator.isRunning());
++            // End the real current width owner before the requested traversal has occurred.
++            TransitionManager.endTransitions(fixture.mRoot);
++            assertEquals(0, completed[0]);
++            fixture.mAnimator.endAnimations();
++            assertFalse(fixture.mAnimator.isRunning());
++            assertEquals(0, completed[0]);
++
++            // A requested measure/layout must retry even when its final bounds do not change.
++            int width = fixture.mRecycler.getWidth();
++            int height = fixture.mRecycler.getHeight();
++            fixture.layout();
++            assertFalse(fixture.mRecycler.isLayoutRequested());
++            assertEquals(width, fixture.mRecycler.getWidth());
++            assertEquals(height, fixture.mRecycler.getHeight());
++            fixture.runFrame();
++            assertEquals(1, completed[0]);
++            fixture.layout();
++            fixture.runFrame();
++            assertEquals(1, completed[0]);
++        }
++    }
++
++    private View createHoverCardAnchor() {
++        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
++        when(mWindowAndroid.getActivity()).thenReturn(new WeakReference<>(activity));
++        View anchor = new View(activity);
++        when(mRecyclerViewDelegate.getButtonViewForId(ACTION1_ID)).thenReturn(anchor);
++        return anchor;
++    }
++
++    private ExtensionAction setHoverCardAction(WebContents webContents) {
++        ExtensionAction action = mock(ExtensionAction.class);
++        when(action.getHoverCardState()).thenReturn(mock(HoverCardState.class));
++        doReturn(action).when(mExtensionsToolbarBridge).getAction(ACTION1_ID, webContents);
++        return action;
++    }
++
++    private void enterHover(View.OnHoverListener listener, View anchor) {
++        MotionEvent event = mock(MotionEvent.class);
++        when(event.getAction()).thenReturn(MotionEvent.ACTION_HOVER_ENTER);
++        listener.onHover(anchor, event);
++    }
++
++    private ExtensionsToolbarBridge.Observer getToolbarObserver() {
++        ArgumentCaptor<ExtensionsToolbarBridge.Observer> observer =
++                ArgumentCaptor.forClass(ExtensionsToolbarBridge.Observer.class);
++        verify(mExtensionsToolbarBridge).addObserver(observer.capture());
++        return observer.getValue();
++    }
++
++    private void assertHoverCardUsesCurrentWebContents(boolean replaceWebContents) {
++        View anchor = createHoverCardAnchor();
++        ListItem item = mModels.get(0);
++        View.OnHoverListener listener =
++                item.model.get(ExtensionActionButtonProperties.ON_HOVER_LISTENER);
++        ExtensionAction oldAction = setHoverCardAction(mWebContents);
++        WebContents nextWebContents = mock(WebContents.class);
++        ExtensionAction nextAction = setHoverCardAction(nextWebContents);
++
++        if (replaceWebContents) {
++            mTab.setWebContentsOverrideForTesting(nextWebContents);
++        } else {
++            MockTab nextTab = new MockTab(TAB_ID + 1, mProfile);
++            nextTab.setWebContentsOverrideForTesting(nextWebContents);
++            mCurrentTabSupplier.set(nextTab);
++        }
++        getToolbarObserver().onActiveWebContentsChanged(nextWebContents);
++        mMediator.reconcileActionItems();
++        assertSame(item.model, mModels.get(0).model);
++        assertSame(
++                listener,
++                item.model.get(ExtensionActionButtonProperties.ON_HOVER_LISTENER));
++        clearInvocations(mExtensionsToolbarBridge, oldAction, nextAction);
++
++        // A retained row and its original listener must query the newly active page.
++        enterHover(listener, anchor);
++        shadowOf(Looper.getMainLooper())
++                .idleFor(ViewConfiguration.getLongPressTimeout(), TimeUnit.MILLISECONDS);
++
++        verify(mExtensionsToolbarBridge).getAction(ACTION1_ID, nextWebContents);
++        verify(mExtensionsToolbarBridge, never()).getAction(ACTION1_ID, mWebContents);
++        verify(nextAction).getHoverCardState();
++        verify(oldAction, never()).getHoverCardState();
++    }
++
++    @Test
++    public void testHoverCard_RetainedRowUsesNewTab() {
++        assertHoverCardUsesCurrentWebContents(/* replaceWebContents= */ false);
++    }
++
++    @Test
++    public void testHoverCard_RetainedRowUsesReplacedWebContents() {
++        assertHoverCardUsesCurrentWebContents(/* replaceWebContents= */ true);
++    }
++
++    @Test
++    public void testHoverCard_TabSwitchCancelsPendingCard() {
++        View anchor = createHoverCardAnchor();
++        ExtensionAction action = setHoverCardAction(mWebContents);
++        enterHover(
++                mModels.get(0).model.get(ExtensionActionButtonProperties.ON_HOVER_LISTENER),
++                anchor);
++
++        MockTab nextTab = new MockTab(TAB_ID + 1, mProfile);
++        nextTab.setWebContentsOverrideForTesting(mock(WebContents.class));
++        mCurrentTabSupplier.set(nextTab);
++        clearInvocations(mExtensionsToolbarBridge, action);
++        shadowOf(Looper.getMainLooper())
++                .idleFor(ViewConfiguration.getLongPressTimeout(), TimeUnit.MILLISECONDS);
++
++        verify(mExtensionsToolbarBridge, never()).getAction(anyString(), any());
++        verify(action, never()).getHoverCardState();
++    }
++
++    @Test
++    public void testHoverCard_NavigationCancelsPendingCard() {
++        View anchor = createHoverCardAnchor();
++        ExtensionAction action = setHoverCardAction(mWebContents);
++        enterHover(
++                mModels.get(0).model.get(ExtensionActionButtonProperties.ON_HOVER_LISTENER),
++                anchor);
++
++        // Navigation preserves Tab and WebContents identity but changes the hovercard's site.
++        getToolbarObserver().onActiveWebContentsChanged(mWebContents);
++        clearInvocations(mExtensionsToolbarBridge, action);
++        shadowOf(Looper.getMainLooper())
++                .idleFor(ViewConfiguration.getLongPressTimeout(), TimeUnit.MILLISECONDS);
++
++        verify(mExtensionsToolbarBridge, never()).getAction(anyString(), any());
++        verify(action, never()).getHoverCardState();
++    }
++
++    @Test
++    public void testHoverCard_LastTabClosureDoesNotQueryStaleWebContents() {
++        View anchor = createHoverCardAnchor();
++        ExtensionAction action = setHoverCardAction(mWebContents);
++        View.OnHoverListener listener =
++                mModels.get(0).model.get(ExtensionActionButtonProperties.ON_HOVER_LISTENER);
++        enterHover(listener, anchor);
++
++        mCurrentTabSupplier.set(null);
++        clearInvocations(mExtensionsToolbarBridge, action);
++        shadowOf(Looper.getMainLooper())
++                .idleFor(ViewConfiguration.getLongPressTimeout(), TimeUnit.MILLISECONDS);
++        verify(mExtensionsToolbarBridge, never()).getAction(anyString(), any());
++        verify(action, never()).getHoverCardState();
++
++        // Even a late event from the retained view cannot query its old WebContents.
++        enterHover(listener, anchor);
++        shadowOf(Looper.getMainLooper())
++                .idleFor(ViewConfiguration.getLongPressTimeout(), TimeUnit.MILLISECONDS);
++        verify(mExtensionsToolbarBridge, never()).getAction(anyString(), any());
++        verify(action, never()).getHoverCardState();
++    }
++
++    private void withVisibleHoverCard(Consumer<ChromePopupWindow> verifyChange) {
++        ActivityController<Activity> controller = Robolectric.buildActivity(Activity.class).setup();
++        UiWidgetFactory previousFactory = UiWidgetFactory.getInstance();
++        ChromePopupWindow[] popup = new ChromePopupWindow[1];
++        try {
++            // Observe the actual popup without replacing its show/dismiss behavior.
++            UiWidgetFactory.setInstance(
++                    new UiWidgetFactory() {
++                        @Override
++                        public ChromePopupWindow createPopupWindow(Context context) {
++                            popup[0] = super.createPopupWindow(context);
++                            return popup[0];
++                        }
++                    });
++            Activity activity = controller.get();
++            when(mWindowAndroid.getActivity()).thenReturn(new WeakReference<>(activity));
++            FrameLayout content = new FrameLayout(activity);
++            View anchor = new View(activity);
++            content.addView(anchor, new FrameLayout.LayoutParams(48, 48));
++            activity.setContentView(content);
++            View decor = activity.getWindow().getDecorView();
++            decor.measure(
++                    View.MeasureSpec.makeMeasureSpec(800, View.MeasureSpec.EXACTLY),
++                    View.MeasureSpec.makeMeasureSpec(600, View.MeasureSpec.EXACTLY));
++            decor.layout(0, 0, 800, 600);
++            assertTrue(anchor.isAttachedToWindow());
++            assertTrue(anchor.getWidth() > 0);
++            when(mRecyclerViewDelegate.getButtonViewForId(ACTION1_ID)).thenReturn(anchor);
++            ExtensionAction action =
++                    new ExtensionAction(
++                            ACTION1_ID,
++                            "Extension title",
++                            "Extension tooltip",
++                            "Extension accessible name",
++                            new HoverCardState(
++                                    SiteAccess.ALL_EXTENSIONS_ALLOWED,
++                                    "Site access",
++                                    "Can access example.com",
++                                    AdminPolicy.NONE,
++                                    ""));
++            doReturn(action).when(mExtensionsToolbarBridge).getAction(ACTION1_ID, mWebContents);
++            enterHover(
++                    mModels.get(0).model.get(ExtensionActionButtonProperties.ON_HOVER_LISTENER),
++                    anchor);
++            shadowOf(Looper.getMainLooper())
++                    .idleFor(ViewConfiguration.getLongPressTimeout(), TimeUnit.MILLISECONDS);
++
++            // This must be a shown popup, not merely a constructed hovercard model.
++            assertNotNull(popup[0]);
++            assertTrue(popup[0].isShowing());
++            verifyChange.accept(popup[0]);
++        } finally {
++            if (popup[0] != null) popup[0].dismiss();
++            UiWidgetFactory.setInstance(previousFactory);
++            controller.pause().stop().destroy();
++        }
++    }
++
++    @Test
++    public void testHoverCard_TabSwitchDismissesVisiblePopup() {
++        withVisibleHoverCard(
++                popup -> {
++                    MockTab nextTab = new MockTab(TAB_ID + 1, mProfile);
++                    nextTab.setWebContentsOverrideForTesting(mock(WebContents.class));
++                    mCurrentTabSupplier.set(nextTab);
++                    assertFalse(popup.isShowing());
++                });
++    }
++
++    @Test
++    public void testHoverCard_NavigationDismissesVisiblePopup() {
++        withVisibleHoverCard(
++                popup -> {
++                    getToolbarObserver().onActiveWebContentsChanged(mWebContents);
++                    assertFalse(popup.isShowing());
++                });
++    }
++
++    private void removeToolbarAction(String actionId) {
++        String remainingPinnedId = ACTION1_ID.equals(actionId) ? ACTION2_ID : ACTION1_ID;
++        // Native removes the action from its lookup before notifying Java observers.
++        mActions.remove(actionId);
++        doReturn(null).when(mExtensionsToolbarBridge).getAction(eq(actionId), any());
++        when(mExtensionsToolbarBridge.getAllActionIds())
++                .thenReturn(new String[] {remainingPinnedId, ACTION3_ID});
++        when(mExtensionsToolbarBridge.getPinnedActionIds())
++                .thenReturn(new String[] {remainingPinnedId});
++        getToolbarObserver().onActionRemoved(actionId);
++        assertEquals(1, mModels.size());
++        assertEquals(
++                remainingPinnedId, mModels.get(0).model.get(ExtensionActionButtonProperties.ID));
++    }
++
++    private void assertPendingHoverCardAfterRemoval(boolean removeHoveredAction) {
++        View anchor = createHoverCardAnchor();
++        ExtensionAction action = setHoverCardAction(mWebContents);
++        enterHover(
++                mModels.get(0).model.get(ExtensionActionButtonProperties.ON_HOVER_LISTENER),
++                anchor);
++
++        removeToolbarAction(removeHoveredAction ? ACTION1_ID : ACTION2_ID);
++        clearInvocations(mExtensionsToolbarBridge, action);
++        shadowOf(Looper.getMainLooper())
++                .idleFor(ViewConfiguration.getLongPressTimeout(), TimeUnit.MILLISECONDS);
++
++        if (removeHoveredAction) {
++            // A nullable result must not hide a stale query from an uncancelled callback.
++            verify(mExtensionsToolbarBridge, never()).getAction(anyString(), any());
++            verify(action, never()).getHoverCardState();
++        } else {
++            verify(mExtensionsToolbarBridge).getAction(ACTION1_ID, mWebContents);
++            verify(action).getHoverCardState();
++        }
++    }
++
++    @Test
++    public void testHoverCard_ActionRemovalCancelsPendingCard() {
++        assertPendingHoverCardAfterRemoval(/* removeHoveredAction= */ true);
++    }
++
++    @Test
++    public void testHoverCard_OtherActionRemovalPreservesPendingCard() {
++        assertPendingHoverCardAfterRemoval(/* removeHoveredAction= */ false);
++    }
++
++    @Test
++    public void testHoverCard_ActionRemovalDismissesVisiblePopup() {
++        withVisibleHoverCard(
++                popup -> {
++                    removeToolbarAction(ACTION1_ID);
++                    assertFalse(popup.isShowing());
++                });
++    }
++
++    @Test
++    public void testHoverCard_OtherActionRemovalPreservesVisiblePopup() {
++        withVisibleHoverCard(
++                popup -> {
++                    removeToolbarAction(ACTION2_ID);
++                    assertTrue(popup.isShowing());
++                });
++    }
++
+     @Test
+     public void testHoverCard_ShowsAfterDelay() {
+         Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+@@ -718,6 +1811,334 @@
+ 
+         // Verify hover card was not shown.
+         verify(action, never()).getHoverCardState();
++    }
++
++    @Test
++    public void testPendingContextMenu_TabSwitchCancelsBeforeLayout() {
++        mMediator.requestShowContextMenu(ACTION3_ID);
++        ArgumentCaptor<Runnable> callback = ArgumentCaptor.forClass(Runnable.class);
++        verify(mRecyclerViewDelegate).addOnAnimationsFinishedRunnable(callback.capture());
++        mMediator.reconcileActionItems();
++        assertTrue(mMediator.hasPoppedOutAction());
++        assertEquals(3, mModels.size());
++
++        MockTab nextTab = new MockTab(TAB_ID + 1, mProfile);
++        nextTab.setWebContentsOverrideForTesting(mWebContents);
++        mCurrentTabSupplier.set(nextTab);
++
++        assertFalse(mMediator.hasPoppedOutAction());
++        mMediator.reconcileActionItems();
++        assertEquals(2, mModels.size());
++        callback.getValue().run();
++        verify(mRecyclerViewDelegate, never()).getButtonViewForId(ACTION3_ID);
++        verify(mActionContextMenuBridgeJniMock, never()).init(anyLong(), any(), any(), anyInt());
++    }
++
++    @Test
++    public void testPendingContextMenu_LastTabClosureCancelsBeforeLayout() {
++        ListItem pinnedRow = mModels.get(0);
++        mMediator.requestShowContextMenu(ACTION3_ID);
++        ArgumentCaptor<Runnable> callback = ArgumentCaptor.forClass(Runnable.class);
++        verify(mRecyclerViewDelegate).addOnAnimationsFinishedRunnable(callback.capture());
++        Runnable oldCallback = callback.getValue();
++        mMediator.reconcileActionItems();
++        assertTrue(mMediator.hasPoppedOutAction());
++        assertEquals(3, mModels.size());
++
++        mCurrentTabSupplier.set(null);
++
++        assertFalse(mMediator.hasPoppedOutAction());
++        assertEquals(2, mModels.size());
++        assertSame(pinnedRow, mModels.get(0));
++        oldCallback.run();
++        verify(mRecyclerViewDelegate, never()).getButtonViewForId(ACTION3_ID);
++        verify(mActionContextMenuBridgeJniMock, never()).init(anyLong(), any(), any(), anyInt());
++
++        MockTab nextTab = new MockTab(TAB_ID + 1, mProfile);
++        nextTab.setWebContentsOverrideForTesting(mWebContents);
++        mCurrentTabSupplier.set(nextTab);
++        mMediator.requestShowContextMenu(ACTION3_ID);
++        mMediator.reconcileActionItems();
++        assertTrue(mMediator.hasPoppedOutAction());
++        assertEquals(3, mModels.size());
++        assertSame(pinnedRow, mModels.get(0));
++        oldCallback.run();
++        assertTrue(mMediator.hasPoppedOutAction());
++        verify(mRecyclerViewDelegate, never()).getButtonViewForId(ACTION3_ID);
++    }
++
++    @Test
++    public void testPendingContextMenu_HiddenPinnedAnchorRetiredOnTabSwitch() {
++        int buttonWidth =
++                ApplicationProvider.getApplicationContext()
++                        .getResources()
++                        .getDimensionPixelSize(R.dimen.toolbar_button_width);
++        mMediator.fitActionsWithinWidth(buttonWidth);
++        ListItem ordinaryPinnedRow = mModels.get(0);
++        mMediator.requestShowContextMenu(ACTION2_ID);
++        ArgumentCaptor<Runnable> callbacks = ArgumentCaptor.forClass(Runnable.class);
++        verify(mRecyclerViewDelegate).addOnAnimationsFinishedRunnable(callbacks.capture());
++        Runnable oldCallback = callbacks.getValue();
++        mMediator.reconcileActionItems();
++        assertEquals(2, mModels.size());
++        assertTrue(mMediator.hasPoppedOutAction());
++
++        MockTab nextTab = new MockTab(TAB_ID + 1, mProfile);
++        nextTab.setWebContentsOverrideForTesting(mWebContents);
++        mCurrentTabSupplier.set(nextTab);
++        assertEquals(1, mModels.size());
++        assertSame(ordinaryPinnedRow, mModels.get(0));
++        assertFalse(mMediator.hasPoppedOutAction());
++        mMediator.requestShowContextMenu(ACTION2_ID);
++        mMediator.reconcileActionItems();
++        assertEquals(2, mModels.size());
++        assertSame(ordinaryPinnedRow, mModels.get(0));
++        assertTrue(mMediator.hasPoppedOutAction());
++
++        oldCallback.run();
++        verify(mRecyclerViewDelegate, never()).getButtonViewForId(ACTION2_ID);
++        assertTrue(mMediator.hasPoppedOutAction());
++        verify(mRecyclerViewDelegate, times(2))
++                .addOnAnimationsFinishedRunnable(callbacks.capture());
++        callbacks.getAllValues().get(callbacks.getAllValues().size() - 1).run();
++        verify(mRecyclerViewDelegate, times(1)).getButtonViewForId(ACTION2_ID);
++        assertFalse(mMediator.hasPoppedOutAction());
++    }
++
++    @Test
++    public void testPendingContextMenu_TabSwitchStaleCallbackPreservesFreshRequest() {
++        mMediator.requestShowContextMenu(ACTION3_ID);
++        mMediator.reconcileActionItems();
++        assertEquals(3, mModels.size());
++        MockTab nextTab = new MockTab(TAB_ID + 1, mProfile);
++        nextTab.setWebContentsOverrideForTesting(mWebContents);
++        mCurrentTabSupplier.set(nextTab);
++        // No layout/reconciliation between tab change and the fresh request.
++        assertEquals(2, mModels.size());
++        mMediator.requestShowContextMenu(ACTION3_ID);
++        ArgumentCaptor<Runnable> callbacks = ArgumentCaptor.forClass(Runnable.class);
++        verify(mRecyclerViewDelegate, times(2))
++                .addOnAnimationsFinishedRunnable(callbacks.capture());
++        mMediator.reconcileActionItems();
++
++        callbacks.getAllValues().get(0).run();
++        assertTrue(mMediator.hasPoppedOutAction());
++        assertEquals(3, mModels.size());
++        verify(mRecyclerViewDelegate, never()).getButtonViewForId(ACTION3_ID);
++
++        // The fresh request still owns its callback and can release a missing anchor.
++        doReturn(null).when(mRecyclerViewDelegate).getButtonViewForId(ACTION3_ID);
++        callbacks.getAllValues().get(1).run();
++        verify(mRecyclerViewDelegate, times(1)).getButtonViewForId(ACTION3_ID);
++        assertFalse(mMediator.hasPoppedOutAction());
++    }
++
++    @Test
++    public void testContextMenu_TabSwitchDismissesActiveAndAllowsFreshRequest() {
++        ActivityController<Activity> controller = Robolectric.buildActivity(Activity.class).setup();
++        try {
++            ListMenuButton button = spy(new ListMenuButton(controller.get(), null));
++            // Exercise menu construction and ownership without creating a platform popup window.
++            doAnswer(invocation -> null).when(button).showMenu();
++            doReturn(button).when(mRecyclerViewDelegate).getButtonViewForId(ACTION1_ID);
++            mMediator.requestShowContextMenu(ACTION1_ID);
++            ArgumentCaptor<Runnable> callbacks = ArgumentCaptor.forClass(Runnable.class);
++            verify(mRecyclerViewDelegate).addOnAnimationsFinishedRunnable(callbacks.capture());
++            callbacks.getValue().run();
++            verify(button).addPopupListener(mPopupListenerCaptor.capture());
++            ListMenuHost.PopupMenuShownListener oldListener = mPopupListenerCaptor.getValue();
++            verify(mActionContextMenuBridgeJniMock)
++                    .init(eq(BROWSER_WINDOW_POINTER), eq(ACTION1_ID), eq(mWebContents), anyInt());
++
++            WebContents nextContents = mock(WebContents.class);
++            MockTab nextTab = new MockTab(TAB_ID + 1, mProfile);
++            nextTab.setWebContentsOverrideForTesting(nextContents);
++            mCurrentTabSupplier.set(nextTab);
++            verify(button).dismiss();
++            oldListener.onPopupMenuDismissed();
++            assertFalse(mMediator.hasPoppedOutAction());
++
++            mMediator.requestShowContextMenu(ACTION1_ID);
++            verify(mRecyclerViewDelegate, times(2))
++                    .addOnAnimationsFinishedRunnable(callbacks.capture());
++            callbacks.getAllValues().get(callbacks.getAllValues().size() - 1).run();
++            verify(mActionContextMenuBridgeJniMock)
++                    .init(eq(BROWSER_WINDOW_POINTER), eq(ACTION1_ID), eq(nextContents), anyInt());
++            verify(button, times(2)).addPopupListener(mPopupListenerCaptor.capture());
++            ListMenuHost.PopupMenuShownListener newListener = mPopupListenerCaptor.getValue();
++            mCurrentTabSupplier.set(null);
++            verify(button, times(2)).dismiss();
++            newListener.onPopupMenuDismissed();
++        } finally {
++            controller.destroy();
++        }
++    }
++
++    @Test
++    public void testPendingContextMenu_NavigationCancelsBeforeLayout() {
++        mMediator.requestShowContextMenu(ACTION3_ID);
++        ArgumentCaptor<Runnable> callback = ArgumentCaptor.forClass(Runnable.class);
++        verify(mRecyclerViewDelegate).addOnAnimationsFinishedRunnable(callback.capture());
++        mMediator.reconcileActionItems();
++        assertEquals(3, mModels.size());
++
++        // A committed navigation notifies native observers without changing the Tab supplier.
++        getToolbarObserver().onActiveWebContentsChanged(mWebContents);
++
++        assertFalse(mMediator.hasPoppedOutAction());
++        assertEquals(2, mModels.size());
++        callback.getValue().run();
++        verify(mRecyclerViewDelegate, never()).getButtonViewForId(ACTION3_ID);
++        verify(mActionContextMenuBridgeJniMock, never()).init(anyLong(), any(), any(), anyInt());
++    }
++
++    @Test
++    public void testPendingContextMenu_WebContentsReplacementCancelsBeforeLayout() {
++        ListItem ordinaryPinnedRow = mModels.get(0);
++        mMediator.requestShowContextMenu(ACTION3_ID);
++        ArgumentCaptor<Runnable> callbacks = ArgumentCaptor.forClass(Runnable.class);
++        verify(mRecyclerViewDelegate).addOnAnimationsFinishedRunnable(callbacks.capture());
++        Runnable oldCallback = callbacks.getValue();
++        mMediator.reconcileActionItems();
++        WebContents nextContents = mock(WebContents.class);
++        mTab.setWebContentsOverrideForTesting(nextContents);
++        getToolbarObserver().onActiveWebContentsChanged(nextContents);
++        assertSame(mTab, mCurrentTabSupplier.get());
++        assertFalse(mMediator.hasPoppedOutAction());
++        assertEquals(2, mModels.size());
++        assertSame(ordinaryPinnedRow, mModels.get(0));
++
++        // A new request in the replacement document owns its own temporary anchor.
++        mMediator.requestShowContextMenu(ACTION3_ID);
++        mMediator.reconcileActionItems();
++        oldCallback.run();
++        assertTrue(mMediator.hasPoppedOutAction());
++        assertEquals(3, mModels.size());
++        verify(mRecyclerViewDelegate, never()).getButtonViewForId(ACTION3_ID);
++        verify(mRecyclerViewDelegate, times(2))
++                .addOnAnimationsFinishedRunnable(callbacks.capture());
++        callbacks.getAllValues().get(callbacks.getAllValues().size() - 1).run();
++        assertFalse(mMediator.hasPoppedOutAction());
++        verify(mRecyclerViewDelegate, times(1)).getButtonViewForId(ACTION3_ID);
++    }
++
++    @Test
++    public void testContextMenu_WebContentsReplacementDismissesActiveAndAllowsFreshRequest() {
++        ActivityController<Activity> controller = Robolectric.buildActivity(Activity.class).setup();
++        try {
++            ListMenuButton button = spy(new ListMenuButton(controller.get(), null));
++            doAnswer(invocation -> null).when(button).showMenu();
++            doReturn(button).when(mRecyclerViewDelegate).getButtonViewForId(ACTION1_ID);
++            mMediator.requestShowContextMenu(ACTION1_ID);
++            ArgumentCaptor<Runnable> callbacks = ArgumentCaptor.forClass(Runnable.class);
++            verify(mRecyclerViewDelegate).addOnAnimationsFinishedRunnable(callbacks.capture());
++            callbacks.getValue().run();
++            verify(button).addPopupListener(mPopupListenerCaptor.capture());
++            ListMenuHost.PopupMenuShownListener oldListener = mPopupListenerCaptor.getValue();
++            verify(mActionContextMenuBridgeJniMock)
++                    .init(eq(BROWSER_WINDOW_POINTER), eq(ACTION1_ID), eq(mWebContents), anyInt());
++
++            WebContents nextContents = mock(WebContents.class);
++            mTab.setWebContentsOverrideForTesting(nextContents);
++            getToolbarObserver().onActiveWebContentsChanged(nextContents);
++            assertSame(mTab, mCurrentTabSupplier.get());
++            verify(button).dismiss();
++            oldListener.onPopupMenuDismissed();
++            mMediator.requestShowContextMenu(ACTION1_ID);
++            verify(mRecyclerViewDelegate, times(2))
++                    .addOnAnimationsFinishedRunnable(callbacks.capture());
++            callbacks.getAllValues().get(callbacks.getAllValues().size() - 1).run();
++            verify(mActionContextMenuBridgeJniMock)
++                    .init(eq(BROWSER_WINDOW_POINTER), eq(ACTION1_ID), eq(nextContents), anyInt());
++            verify(button, times(2)).addPopupListener(mPopupListenerCaptor.capture());
++            ListMenuHost.PopupMenuShownListener newListener = mPopupListenerCaptor.getValue();
++            getToolbarObserver().onActiveWebContentsChanged(nextContents);
++            verify(button, times(2)).dismiss();
++            newListener.onPopupMenuDismissed();
++        } finally {
++            controller.destroy();
++        }
++    }
++
++    @Test
++    public void testStaleContextMenuCallback_PreservesNewUnpinnedPopup() {
++        ListMenuButton oldAnchor = mock(ListMenuButton.class);
++        doReturn(oldAnchor).when(mRecyclerViewDelegate).getButtonViewForId(ACTION1_ID);
++        mMediator.requestShowContextMenu(ACTION1_ID);
++        ArgumentCaptor<Runnable> callback = ArgumentCaptor.forClass(Runnable.class);
++        verify(mRecyclerViewDelegate).addOnAnimationsFinishedRunnable(callback.capture());
++
++        mBridgeDelegateCaptor
++                .getValue()
++                .triggerPopup(ACTION3_ID, mPopupContentsMock, /* inspectWithDevTools= */ false);
++        mMediator.reconcileActionItems();
++        assertTrue(mMediator.hasPoppedOutAction());
++        assertItemAt(2, ACTION3_ID, "title of action 3", ICON_GREEN);
++
++        callback.getValue().run();
++        mMediator.reconcileActionItems();
++
++        assertTrue(mMediator.hasPoppedOutAction());
++        assertEquals(3, mModels.size());
++        assertItemAt(2, ACTION3_ID, "title of action 3", ICON_GREEN);
++        verify(mRecyclerViewDelegate, never()).getButtonViewForId(ACTION1_ID);
++        verify(mPopupContentsMock, never()).destroy();
++    }
++
++    @Test
++    public void testStaleContextMenuCallback_SameActionReplacementKeepsCurrentRequest() {
++        mMediator.requestShowContextMenu(ACTION3_ID);
++        mMediator.requestShowContextMenu(ACTION3_ID);
++        ArgumentCaptor<Runnable> callbacks = ArgumentCaptor.forClass(Runnable.class);
++        verify(mRecyclerViewDelegate, times(2))
++                .addOnAnimationsFinishedRunnable(callbacks.capture());
++        mMediator.reconcileActionItems();
++        assertTrue(mMediator.hasPoppedOutAction());
++
++        callbacks.getAllValues().get(0).run();
++        mMediator.reconcileActionItems();
++
++        assertTrue(mMediator.hasPoppedOutAction());
++        assertItemAt(2, ACTION3_ID, "title of action 3", ICON_GREEN);
++        verify(mRecyclerViewDelegate, never()).getButtonViewForId(ACTION3_ID);
++
++        // The current request still runs and cleans up its own popout if its anchor is gone.
++        doReturn(null).when(mRecyclerViewDelegate).getButtonViewForId(ACTION3_ID);
++        callbacks.getAllValues().get(1).run();
++        assertFalse(mMediator.hasPoppedOutAction());
++        mMediator.reconcileActionItems();
++        assertEquals(2, mModels.size());
++        verify(mRecyclerViewDelegate, times(1)).getButtonViewForId(ACTION3_ID);
++    }
++
++    @Test
++    public void testCurrentContextMenuCallback_MissingAnchorCleansOwnPopout() {
++        mMediator.requestShowContextMenu(ACTION3_ID);
++        ArgumentCaptor<Runnable> callback = ArgumentCaptor.forClass(Runnable.class);
++        verify(mRecyclerViewDelegate).addOnAnimationsFinishedRunnable(callback.capture());
++        mMediator.reconcileActionItems();
++        assertTrue(mMediator.hasPoppedOutAction());
++        doReturn(null).when(mRecyclerViewDelegate).getButtonViewForId(ACTION3_ID);
++
++        callback.getValue().run();
++
++        assertFalse(mMediator.hasPoppedOutAction());
++        mMediator.reconcileActionItems();
++        assertEquals(2, mModels.size());
++        verify(mRecyclerViewDelegate, times(1)).getButtonViewForId(ACTION3_ID);
++    }
++
++    @Test
++    public void testPendingContextMenuCallback_AfterDestroyIsIgnored() {
++        mMediator.requestShowContextMenu(ACTION3_ID);
++        ArgumentCaptor<Runnable> callback = ArgumentCaptor.forClass(Runnable.class);
++        verify(mRecyclerViewDelegate).addOnAnimationsFinishedRunnable(callback.capture());
++
++        mMediator.destroy();
++        // The RecyclerView may already have copied its callback list before it was cleared.
++        callback.getValue().run();
++
++        verify(mRecyclerViewDelegate, never()).getButtonViewForId(ACTION3_ID);
+     }
+ 
+     // Tests that requesting a context menu gracefully aborts without throwing an

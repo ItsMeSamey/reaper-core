@@ -1,0 +1,281 @@
+# Keep Android tab model observer dispatch alive through reentrant removal.
+substitutions:
+- description: Report refused Android discards through the existing extension API error path
+  regex:
+    re_pattern: '\ \ web_contents\->Discard\(base::DoNothing\(\)\);\
+
+      \ \ return\ web_contents;'
+    replace: "  auto weak_contents = web_contents->GetWeakPtr();\n  web_contents->Discard(base::DoNothing());\n  // A speculative pending commit can refuse the discard. Preserve that\n  // failure so callers do not report a successful tabs.discard operation.\n  return weak_contents && weak_contents->WasDiscarded() ? weak_contents.get()\n                                                        : nullptr;"
+- description: Connect Android split collection model, events and transfer semantics
+  regex:
+    re_pattern: '\ \ return\ group_ids;\
+
+      \}\
+
+      \
+
+      std::set<split_tabs::SplitTabId>\ TabModelJniBridge::ListSplits\(\)\ \{\
+
+      \ \ //\ TODO\(https://crbug\.com/480192698\):\ Implement\ this\ once\ split\ tabs\ are\
+
+      \ \ //\ supported\ on\ Desktop\ Android\.\
+
+      \ \ NOTIMPLEMENTED\(\);\
+
+      \ \ return\ \{\};\
+
+      \}\
+
+      \
+
+      std::optional<TabGroupVisualData>\ TabModelJniBridge::GetTabGroupVisualData\(\
+
+      \ \ \ \ tab_groups::TabGroupId\ group_id\)\ \{\
+
+      '
+    replace: "  return group_ids;\n}\n\nstd::set<split_tabs::SplitTabId> TabModelJniBridge::ListSplits() {\n  std::set<split_tabs::SplitTabId> splits;\n  for (tabs::TabInterface* tab : GetAllTabs()) {\n    if (auto split = tab->GetSplit()) {\n      splits.insert(*split);\n    }\n  }\n  return splits;\n}\n\nstd::optional<TabGroupVisualData> TabModelJniBridge::GetTabGroupVisualData(\n    tab_groups::TabGroupId group_id) {\n"
+- description: Connect Android split collection model, events and transfer semantics
+  regex:
+    re_pattern: '\}\
+
+      \
+
+      std::optional<split_tabs::SplitTabId>\ TabModelJniBridge::CreateSplit\(\
+
+      \ \ \ \ const\ std::vector<tabs::TabHandle>\&\ tabs\)\ \{\
+
+      \ \ //\ TODO\(https://crbug\.com/480192698\):\ Implement\ this\ once\ split\ tabs\ are\
+
+      \ \ //\ supported\ on\ Desktop\ Android\.\
+
+      \ \ NOTIMPLEMENTED\(\);\
+
+      \ \ return\ std::nullopt;\
+
+      \}\
+
+      \
+
+      void\ TabModelJniBridge::SetTabGroupVisualData\(\
+
+      \ \ \ \ tab_groups::TabGroupId\ group_id,\
+
+      '
+    replace: "}\n\nstd::optional<split_tabs::SplitTabId> TabModelJniBridge::CreateSplit(\n    const std::vector<tabs::TabHandle>& tabs) {\n  if (tabs.size() != 2 || !tabs[0].Get() || !tabs[1].Get()) {\n    return std::nullopt;\n  }\n  JNIEnv* env = AttachCurrentThread();\n  auto jobj = java_object_.get(env);\n  if (!jobj) {\n    return std::nullopt;\n  }\n  auto token = Java_TabModelJniBridge_createSplit(env, jobj,\n                                                  GetAllTabsFromHandles(tabs));\n  return split_tabs::SplitTabId::FromOptionalToken(token);\n}\n\nvoid TabModelJniBridge::SetTabGroupVisualData(\n    tab_groups::TabGroupId group_id,\n"
+- description: Connect Android split collection model, events and transfer semantics
+  regex:
+    re_pattern: '\ \ Java_TabModelJniBridge_ungroup\(env,\ jobj,\ tabs_to_ungroup\);\
+
+      \}\
+
+      \
+
+      void\ TabModelJniBridge::Unsplit\(split_tabs::SplitTabId\ split_id\)\ \{\
+
+      \ \ //\ TODO\(https://crbug\.com/480192698\):\ Implement\ this\ once\ split\ tabs\ are\
+
+      \ \ //\ supported\ on\ Desktop\ Android\.\
+
+      \ \ NOTIMPLEMENTED\(\);\
+
+      \}\
+
+      \
+
+      void\ TabModelJniBridge::MoveGroupTo\(tab_groups::TabGroupId\ group_id,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ int\ index\)\ \{\
+
+      '
+    replace: "  Java_TabModelJniBridge_ungroup(env, jobj, tabs_to_ungroup);\n}\n\nvoid TabModelJniBridge::Unsplit(split_tabs::SplitTabId split_id) {\n  JNIEnv* env = AttachCurrentThread();\n  auto jobj = java_object_.get(env);\n  if (jobj) {\n    Java_TabModelJniBridge_unsplit(env, jobj, split_id.token());\n  }\n}\n\nvoid TabModelJniBridge::MoveGroupTo(tab_groups::TabGroupId group_id,\n                                    int index) {\n"
+- description: Keep Android tab model observer dispatch alive through reentrant removal
+  regex:
+    re_pattern: '\#include\ "base/check\.h"\
+
+      \#include\ "base/check_op\.h"\
+
+      \#include\ "base/feature\.h"\
+
+      \#include\ "base/feature_list\.h"\
+
+      \#include\ "base/logging\.h"\
+
+      \#include\ "base/metrics/histogram_macros\.h"\
+
+      \#include\ "base/notimplemented\.h"\
+
+      \#include\ "base/time/time\.h"\
+
+      '
+    replace: '#include "base/check.h"
+
+      #include "base/check_op.h"
+
+      #include "base/feature.h"
+
+      #include "base/feature_list.h"
+
+      #include "base/functional/bind.h"
+
+      #include "base/logging.h"
+
+      #include "base/metrics/histogram_macros.h"
+
+      #include "base/notimplemented.h"
+
+      #include "base/time/time.h"
+
+      '
+- description: Keep Android tab model observer dispatch alive through reentrant removal
+  regex:
+    re_pattern: '\ \ \ \ TabListInterfaceObserver\*\ observer\)\ \{\
+
+      \ \ //\ If\ a\ first\ observer\ is\ being\ added\ then\ instantiate\ an\ observer\ bridge\.\
+
+      \ \ if\ \(!observer_bridge_\)\ \{\
+
+      \ \ \ \ JNIEnv\*\ env\ =\ AttachCurrentThread\(\);\
+
+      \ \ \ \ observer_bridge_\ =\ std::make_unique<TabModelObserverJniBridge>\(\
+
+      \ \ \ \ \ \ \ \ env,\ java_object_\.get\(env\),\ \*this\);\
+
+      \ \ \}\
+
+      \ \ observer_bridge_\->AddTabListInterfaceObserver\(observer\);\
+
+      \}\
+
+      \
+
+      void\ TabModelJniBridge::RemoveTabListInterfaceObserver\(\
+
+      \ \ \ \ TabListInterfaceObserver\*\ observer\)\ \{\
+
+      \ \ observer_bridge_\->RemoveTabListInterfaceObserver\(observer\);\
+
+      \
+
+      \ \ //\ Tear\ down\ the\ bridge\ if\ there\ are\ no\ observers\ left\.\
+
+      \ \ if\ \(!observer_bridge_\->has_observers\(\)\)\ \{\
+
+      \ \ \ \ observer_bridge_\.reset\(\);\
+
+      \ \ \}\
+
+      \}\
+
+      \
+
+      int\ TabModelJniBridge::GetTabCount\(\)\ const\ \{\
+
+      \ \ JNIEnv\*\ env\ =\ AttachCurrentThread\(\);\
+
+      '
+    replace: "    TabListInterfaceObserver* observer) {\n  // If a first observer is being added then instantiate an observer bridge.\n  if (!observer_bridge_) {\n    JNIEnv* env = AttachCurrentThread();\n    observer_bridge_ = base::MakeRefCounted<TabModelObserverJniBridge>(\n        env, java_object_.get(env), *this,\n        base::BindRepeating(&TabModelJniBridge::ReleaseEmptyObserverBridge,\n                            base::Unretained(this)));\n  }\n  observer_bridge_->AddTabListInterfaceObserver(observer);\n}\n\nvoid TabModelJniBridge::RemoveTabListInterfaceObserver(\n    TabListInterfaceObserver* observer) {\n  observer_bridge_->RemoveTabListInterfaceObserver(observer);\n}\n\nint TabModelJniBridge::GetTabCount() const {\n  JNIEnv* env = AttachCurrentThread();\n"
+- description: Keep Android tab model observer dispatch alive through reentrant removal
+  regex:
+    re_pattern: 'void\ TabModelJniBridge::AddObserver\(TabModelObserver\*\ observer\)\ \{\
+
+      \ \ //\ If\ a\ first\ observer\ is\ being\ added\ then\ instantiate\ an\ observer\ bridge\.\
+
+      \ \ if\ \(!observer_bridge_\)\ \{\
+
+      \ \ \ \ JNIEnv\*\ env\ =\ AttachCurrentThread\(\);\
+
+      \ \ \ \ observer_bridge_\ =\ std::make_unique<TabModelObserverJniBridge>\(\
+
+      \ \ \ \ \ \ \ \ env,\ java_object_\.get\(env\),\ \*this\);\
+
+      \ \ \}\
+
+      \ \ observer_bridge_\->AddObserver\(observer\);\
+
+      \}\
+
+      \
+
+      void\ TabModelJniBridge::RemoveObserver\(TabModelObserver\*\ observer\)\ \{\
+
+      \ \ observer_bridge_\->RemoveObserver\(observer\);\
+
+      \
+
+      \ \ //\ Tear\ down\ the\ bridge\ if\ there\ are\ no\ observers\ left\.\
+
+      \ \ if\ \(!observer_bridge_\->has_observers\(\)\)\ \{\
+
+      \ \ \ \ observer_bridge_\.reset\(\);\
+
+      \ \ \}\
+
+      \}\
+
+      \
+
+      void\ TabModelJniBridge::BroadcastSessionRestoreComplete\(JNIEnv\*\ env\)\ \{\
+
+      \ \ if\ \(GetTabModelType\(\)\ ==\ TabModelType::kArchived\)\ \{\
+
+      '
+    replace: "void TabModelJniBridge::AddObserver(TabModelObserver* observer) {\n  // If a first observer is being added then instantiate an observer bridge.\n  if (!observer_bridge_) {\n    JNIEnv* env = AttachCurrentThread();\n    observer_bridge_ = base::MakeRefCounted<TabModelObserverJniBridge>(\n        env, java_object_.get(env), *this,\n        base::BindRepeating(&TabModelJniBridge::ReleaseEmptyObserverBridge,\n                            base::Unretained(this)));\n  }\n  observer_bridge_->AddObserver(observer);\n}\n\nvoid TabModelJniBridge::RemoveObserver(TabModelObserver* observer) {\n  observer_bridge_->RemoveObserver(observer);\n}\n\nvoid TabModelJniBridge::ReleaseEmptyObserverBridge() {\n  CHECK(observer_bridge_);\n  CHECK(!observer_bridge_->has_observers());\n  observer_bridge_.reset();\n}\n\nvoid TabModelJniBridge::BroadcastSessionRestoreComplete(JNIEnv* env) {\n  if (GetTabModelType() == TabModelType::kArchived) {\n"
+- description: Keep persisted split restoration in the TabModelJniBridge JNI owner.
+  regex:
+    re_pattern: '//\ static\
+
+      TabModel\*\ TabModelJniBridge::FromJavaObject\('
+    replace: "// static\nbool TabModelJniBridge::RestoreSplit(\n    JNIEnv* env, const JavaRef<jobject>& model, const base::Token& id,\n    const std::vector<int>& tab_ids, int layout, double ratio) {\n  return Java_TabModelJniBridge_restoreSplit(\n      env, model, id, tab_ids, layout, ratio);\n}\n\n// static\nTabModel* TabModelJniBridge::FromJavaObject("
+
+- description: Owned Android window/auth/options/fullscreen and fixture routing final integration (1)
+  regex:
+    re_pattern: '\ \ BrowserWindowInterface\*\ android_browser_window\ =\
+
+      \ \ \ \ \ \ reinterpret_cast<BrowserWindowInterface\*>\(native_android_browser_window\);\
+
+      \ \ CHECK\(android_browser_window\ !=\ nullptr\);\
+
+      \
+
+      \ \ scoped_unowned_user_data_\ =\
+
+      \ \ \ \ \ \ std::make_unique<ui::ScopedUnownedUserData<TabListInterface>>\(\
+
+      \ \ \ \ \ \ \ \ \ \ android_browser_window\->GetUnownedUserDataHost\(\),\ \*this\);\
+
+      \ \ SetSessionId\(android_browser_window\->GetSessionID\(\)\);\
+
+      \}\
+
+      \
+
+      void\ TabModelJniBridge::DissociateWithBrowserWindow\(JNIEnv\*\ env\)\ \{\
+
+      \ \ CHECK\(scoped_unowned_user_data_\ !=\ nullptr\);\
+
+      \ \ scoped_unowned_user_data_\.reset\(\);\
+
+      \ \ SetSessionId\(SessionID::InvalidValue\(\)\);\
+
+      \}\
+
+      \
+
+      void\ TabModelJniBridge::TabAddedToModel\(JNIEnv\*\ env,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ TabAndroid\*\ tab\)\ \{\
+
+      '
+    replace: "  BrowserWindowInterface* android_browser_window =\n      reinterpret_cast<BrowserWindowInterface*>(native_android_browser_window);\n\
+      \  CHECK(android_browser_window != nullptr);\n\n  const SessionID previous_window_id = GetSessionId();\n  scoped_unowned_user_data_\
+      \ =\n      std::make_unique<ui::ScopedUnownedUserData<TabListInterface>>(\n          android_browser_window->GetUnownedUserDataHost(),\
+      \ *this);\n  SetSessionId(android_browser_window->GetSessionID());\n  // Tabs can precede window association. Reparenting\
+      \ can also temporarily leave\n  // a transferred tab listed in its former model; preserve its new window ID.\n  // SetWindowSessionID\
+      \ updates frozen tabs without creating WebContents.\n  for (int i = 0; i < GetTabCount(); ++i) {\n    TabAndroid* tab\
+      \ = GetTabAt(i);\n    if (tab && (tab->GetWindowId() == previous_window_id ||\n                !tab->GetWindowId().is_valid()))\
+      \ {\n      tab->SetWindowSessionID(GetSessionId());\n    }\n  }\n}\n\nvoid TabModelJniBridge::DissociateWithBrowserWindow(JNIEnv*\
+      \ env) {\n  CHECK(scoped_unowned_user_data_ != nullptr);\n  const SessionID previous_window_id = GetSessionId();\n \
+      \ scoped_unowned_user_data_.reset();\n  SetSessionId(SessionID::InvalidValue());\n  for (int i = 0; i < GetTabCount();\
+      \ ++i) {\n    TabAndroid* tab = GetTabAt(i);\n    if (tab && tab->GetWindowId() == previous_window_id) {\n      tab->SetWindowSessionID(GetSessionId());\n\
+      \    }\n  }\n}\n\nvoid TabModelJniBridge::TabAddedToModel(JNIEnv* env,\n                                        TabAndroid*\
+      \ tab) {\n"

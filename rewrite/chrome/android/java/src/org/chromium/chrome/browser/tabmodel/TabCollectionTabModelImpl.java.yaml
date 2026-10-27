@@ -1,0 +1,706 @@
+# Remove retired Feed metrics metadata and preserve split traversal with explicit loops.
+substitutions:
+- description: Notify source-model group removal while its metadata still exists during reparenting.
+  regex:
+    pattern: "            if (tabGroupId != null && !tabGroupShownTabs.containsKey(tabGroupId)) {\n                Tab nextGroupTab = getNextLastShownTabForGroup(tabGroupId, tabsToRemove);"
+    replace: "            if (tabGroupId != null && !tabGroupShownTabs.containsKey(tabGroupId)) {\n                if (detachReason == DetachReason.INSERT_INTO_OTHER_WINDOW\n                        && tabsToRemove.containsAll(getTabsInGroup(tabGroupId))) {\n                    // Extension observers need the source group before the last native detach.\n                    for (TabModelObserver observer : mTabModelObservers) {\n                        observer.onTabGroupRemoving(tabGroupId);\n                    }\n                }\n                Tab nextGroupTab = getNextLastShownTabForGroup(tabGroupId, tabsToRemove);"
+- description: Connect Android split collection model, events and transfer semantics
+  regex:
+    re_pattern: 'import\ org\.chromium\.chrome\.browser\.tab\.TabDestroyStatus;\
+
+      import\ org\.chromium\.chrome\.browser\.tab\.TabId;\
+
+      import\ org\.chromium\.chrome\.browser\.tab\.TabLaunchType;\
+
+      import\ org\.chromium\.chrome\.browser\.tab\.TabSelectionType;\
+
+      import\ org\.chromium\.chrome\.browser\.tab\.TabUtils;\
+
+      import\ org\.chromium\.chrome\.browser\.tab_group_sync\.TabGroupSyncFeatures;\
+
+      import\ org\.chromium\.chrome\.browser\.tab_ui\.TabContentManager;\
+
+      import\ org\.chromium\.chrome\.browser\.tabmodel\.NextTabPolicy\.NextTabPolicySupplier;\
+
+      '
+    replace: 'import org.chromium.chrome.browser.tab.TabDestroyStatus;
+
+      import org.chromium.chrome.browser.tab.TabId;
+
+      import org.chromium.chrome.browser.tab.TabLaunchType;
+
+      import org.chromium.chrome.browser.tab.TabSelectionType;
+
+      import org.chromium.chrome.browser.tab.TabStateAttributes;
+
+      import org.chromium.chrome.browser.tab.TabStateAttributesRegistry;
+
+      import org.chromium.chrome.browser.tab.TabStateStorageFlagHelper;
+
+      import org.chromium.chrome.browser.tab.TabUtils;
+
+      import org.chromium.chrome.browser.tab_group_sync.TabGroupSyncFeatures;
+
+      import org.chromium.chrome.browser.tab_ui.TabContentManager;
+
+      import org.chromium.chrome.browser.tabmodel.NextTabPolicy.NextTabPolicySupplier;
+
+      '
+- description: Connect Android split collection model, events and transfer semantics
+  regex:
+    re_pattern: '\ \*/\
+
+      @NullMarked\
+
+      @JNINamespace\("tabs"\)\
+
+      public\ class\ TabCollectionTabModelImpl\ extends\ TabModelJniBridge\ \{\
+
+      \ \ \ \ /\*\*\ The\ name\ of\ the\ UKM\ event\ used\ for\ tab\ state\ changes\.\ \*/\
+
+      \ \ \ \ private\ static\ final\ String\ UKM_METRICS_TAB_STATE_CHANGED\ =\ "Tab\.StateChange";\
+
+      \
+
+      \ \ \ \ /\*\*\
+
+      '
+    replace: " */\n@NullMarked\n@JNINamespace(\"tabs\")\npublic class TabCollectionTabModelImpl extends TabModelJniBridge {\n    private boolean mSplitViewAvailable;\n    private final boolean mNormalSplitWindow;\n    private int mSplitMutationDepth;\n    private final Set<TabStateAttributes> mSplitAttributeBatches = new LinkedHashSet<>();\n    private Map<Token, SplitInfo> mSplitsBeforeMutation = new ArrayMap<>();\n    private Set<Integer> mSelectionBeforeSplitMutation = new LinkedHashSet<>();\n    private final Set<Token> mExplicitlyUnsplit = new ArraySet<>();\n    private final Map<Token, SplitInfo> mClosedSplitSnapshots = new ArrayMap<>();\n\n    /** The name of the UKM event used for tab state changes. */\n    private static final String UKM_METRICS_TAB_STATE_CHANGED = \"Tab.StateChange\";\n\n    /**\n"
+- description: Connect Android split collection model, events and transfer semantics
+  regex:
+    re_pattern: '\ \ \ \ \ \*/\
+
+      \ \ \ \ private\ class\ PendingTabClosureDelegateImpl\ implements\ PendingTabClosureDelegate\ \{\
+
+      \ \ \ \ \ \ \ \ @Override\
+
+      \ \ \ \ \ \ \ \ public\ void\ insertUndoneTabClosureAt\(Tab\ tab,\ int\ insertIndex\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ try\ \(ScopedStorageBatch\ ignored\ =\ mBatchFactory\.get\(\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ insertUndoneTabClosureAtInternal\(tab,\ insertIndex\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      '
+    replace: "     */\n    private class PendingTabClosureDelegateImpl implements PendingTabClosureDelegate {\n        @Override\n        public void insertUndoneTabClosureAt(Tab tab, int insertIndex) {\n            try (ScopedStorageBatch ignored = mBatchFactory.get();\n                SplitMutation splitMutation = beginSplitMutation()) {\n                insertUndoneTabClosureAtInternal(tab, insertIndex);\n            }\n        }\n\n"
+- description: Connect Android split collection model, events and transfer semantics
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \.next\(\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \.willUndoTabClosure\(Collections\.singletonList\(tab\),\ /\*\ isAllTabs=\ \*/\ false\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ \ \ \ \ Token\ tabGroupId\ =\ tab\.getTabGroupId\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ boolean\ restoredTabGroup\ =\ tabGroupId\ !=\ null\ \&\&\ !tabGroupExists\(tabGroupId\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ int\ finalIndex\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ TabCollectionTabModelImplJni\.get\(\)\
+
+      '
+    replace: "                        .next()\n                        .willUndoTabClosure(Collections.singletonList(tab), /* isAllTabs= */ false);\n            }\n\n            // Undo observers may attach a fresh store to the retained tab.\n            batchSplitAttributes(tab);\n            Token tabGroupId = tab.getTabGroupId();\n            boolean restoredTabGroup = tabGroupId != null && !tabGroupExists(tabGroupId);\n            int finalIndex =\n                    TabCollectionTabModelImplJni.get()\n"
+- description: Connect Android split collection model, events and transfer semantics
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ boolean\ supportUndo\)\ \{\
+
+      \ \ \ \ \ \ \ \ super\(profile\);\
+
+      \ \ \ \ \ \ \ \ assertOnUiThread\(\);\
+
+      \ \ \ \ \ \ \ \ mTabModelType\ =\ tabModelType;\
+
+      \ \ \ \ \ \ \ \ mRegularTabCreator\ =\ regularTabCreator;\
+
+      \ \ \ \ \ \ \ \ mIncognitoTabCreator\ =\ incognitoTabCreator;\
+
+      \ \ \ \ \ \ \ \ mOrderController\ =\ orderController;\
+
+      \ \ \ \ \ \ \ \ mTabContentManager\ =\ tabContentManager;\
+
+      '
+    replace: "            boolean supportUndo) {\n        super(profile);\n        assertOnUiThread();\n        mTabModelType = tabModelType;\n        mNormalSplitWindow = activityType == ActivityType.TABBED\n                && !TabModel.isDormantTabModel(tabModelType);\n        mRegularTabCreator = regularTabCreator;\n        mIncognitoTabCreator = incognitoTabCreator;\n        mOrderController = orderController;\n        mTabContentManager = tabContentManager;\n"
+- description: Connect Android split collection model, events and transfer semantics
+  regex:
+    re_pattern: '\
+
+      \ \ \ \ @Override\
+
+      \ \ \ \ public\ @TabDestroyStatus\ int\ destroy\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ assertOnUiThread\(\);\
+
+      \ \ \ \ \ \ \ \ commitAllTabClosures\(\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ for\ \(TabModelObserver\ obs\ :\ mTabModelObservers\)\ obs\.onDestroy\(\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ //\ Cache\ the\ list\ of\ tabs\ so\ we\ have\ them\ before\ native\ is\ destroyed\.\
+
+      '
+    replace: "\n    @Override\n    public @TabDestroyStatus int destroy() {\n        assertOnUiThread();\n        mSplitViewAvailable = false;\n        commitAllTabClosures();\n        mClosedSplitSnapshots.clear();\n\n        for (TabModelObserver obs : mTabModelObservers) obs.onDestroy();\n\n        // Cache the list of tabs so we have them before native is destroyed.\n"
+- description: Connect Android split collection model, events and transfer semantics
+  regex:
+    re_pattern: '\ \ \ \ public\ void\ commitAllTabClosures\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ if\ \(!supportsPendingClosures\(\)\ \|\|\ !mPendingTabClosureManager\.hasPendingClosures\(\)\)\ return;\
+
+      \
+
+      \ \ \ \ \ \ \ \ mPendingTabClosureManager\.commitAllTabClosures\(\);\
+
+      \ \ \ \ \ \ \ \ for\ \(TabModelObserver\ obs\ :\ mTabModelObservers\)\ obs\.allTabsClosureCommitted\(isIncognito\(\)\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ @Override\
+
+      \ \ \ \ public\ void\ commitTabClosure\(@TabId\ int\ tabId\)\ \{\
+
+      \ \ \ \ \ \ \ \ if\ \(!supportsPendingClosures\(\)\)\ return;\
+
+      \
+
+      \ \ \ \ \ \ \ \ mPendingTabClosureManager\.commitTabClosure\(tabId\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ @Override\
+
+      \ \ \ \ public\ void\ cancelTabClosure\(@TabId\ int\ tabId\)\ \{\
+
+      \ \ \ \ \ \ \ \ if\ \(!supportsPendingClosures\(\)\)\ return;\
+
+      \
+
+      \ \ \ \ \ \ \ \ try\ \(ScopedStorageBatch\ ignored\ =\ mBatchFactory\.get\(\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mPendingTabClosureManager\.cancelTabClosure\(tabId\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \}\
+
+      \
+
+      '
+    replace: "    public void commitAllTabClosures() {\n        if (!supportsPendingClosures() || !mPendingTabClosureManager.hasPendingClosures()) return;\n\n        mPendingTabClosureManager.commitAllTabClosures();\n        pruneClosedSplitSnapshots();\n        for (TabModelObserver obs : mTabModelObservers) obs.allTabsClosureCommitted(isIncognito());\n    }\n\n    @Override\n    public void commitTabClosure(@TabId int tabId) {\n        if (!supportsPendingClosures()) return;\n\n        mPendingTabClosureManager.commitTabClosure(tabId);\n        pruneClosedSplitSnapshots();\n    }\n\n    private void pruneClosedSplitSnapshots() {\n        mClosedSplitSnapshots.values().removeIf(split ->\n                !isClosurePending(split.getFirstTabId())\n                        && !isClosurePending(split.getSecondTabId()));\n    }\n\n    @Override\n    public void cancelTabClosure(@TabId int tabId) {\n        if (!supportsPendingClosures()) return;\n\n        try (ScopedStorageBatch ignored = mBatchFactory.get();\n                SplitMutation splitMutation = beginSplitMutation()) {\n            mPendingTabClosureManager.cancelTabClosure(tabId);\n        }\n    }\n\n"
+- description: Connect Android split collection model, events and transfer semantics
+  regex:
+    re_pattern: '\
+
+      \ \ \ \ @Override\
+
+      \ \ \ \ public\ void\ openMostRecentlyClosedEntry\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ assertOnUiThread\(\);\
+
+      \ \ \ \ \ \ \ \ try\ \(ScopedStorageBatch\ ignored\ =\ mBatchFactory\.get\(\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ openMostRecentlyClosedEntryInternal\(\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \}\
+
+      \
+
+      '
+    replace: "\n    @Override\n    public void openMostRecentlyClosedEntry() {\n        assertOnUiThread();\n        try (ScopedStorageBatch ignored = mBatchFactory.get();\n                SplitMutation splitMutation = beginSplitMutation()) {\n            openMostRecentlyClosedEntryInternal();\n        }\n    }\n\n"
+- description: Connect Android split collection model, events and transfer semantics
+  regex:
+    re_pattern: '\
+
+      \ \ \ \ @Override\
+
+      \ \ \ \ public\ void\ setIndex\(int\ i,\ @TabSelectionType\ int\ type\)\ \{\
+
+      \ \ \ \ \ \ \ \ assertOnUiThread\(\);\
+
+      \ \ \ \ \ \ \ \ try\ \(ScopedStorageBatch\ ignored\ =\ mBatchFactory\.get\(\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ setIndexInternal\(i,\ type\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \}\
+
+      \
+
+      '
+    replace: "\n    @Override\n    public void setIndex(int i, @TabSelectionType int type) {\n        assertOnUiThread();\n        try (ScopedStorageBatch ignored = mBatchFactory.get();\n                SplitMutation splitMutation = beginSplitMutation()) {\n            setIndexInternal(i, type);\n        }\n    }\n\n"
+- description: Connect Android split collection model, events and transfer semantics
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ //\ Clamp\ negative\ values\ here\ to\ ensure\ the\ tab\ moves\ to\ index\ 0\ if\ negative\.\ The\ size_t\
+
+      \ \ \ \ \ \ \ \ //\ cast\ in\ C\+\+\ otherwise\ results\ in\ the\ tab\ going\ to\ the\ end\ of\ the\ list\ which\ is\ not\
+
+      \ \ \ \ \ \ \ \ //\ intended\.\
+
+      \ \ \ \ \ \ \ \ newIndex\ =\ Math\.max\(0,\ newIndex\);\
+
+      \ \ \ \ \ \ \ \ try\ \(ScopedStorageBatch\ ignored\ =\ mBatchFactory\.get\(\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ moveTabInternal\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ tab,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ currentIndex,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ newIndex,\
+
+      '
+    replace: "        // Clamp negative values here to ensure the tab moves to index 0 if negative. The size_t\n        // cast in C++ otherwise results in the tab going to the end of the list which is not\n        // intended.\n        newIndex = Math.max(0, newIndex);\n        try (ScopedStorageBatch ignored = mBatchFactory.get();\n                SplitMutation splitMutation = beginSplitMutation()) {\n            moveTabInternal(\n                    tab,\n                    currentIndex,\n                    newIndex,\n"
+- description: Connect Android split collection model, events and transfer semantics
+  regex:
+    re_pattern: '\ \ \ \ \}\
+
+      \
+
+      \ \ \ \ @Override\
+
+      \ \ \ \ public\ void\ moveTabToWindow\(Tab\ tab,\ Activity\ activity,\ int\ newIndex\)\ \{\
+
+      \ \ \ \ \ \ \ \ try\ \(ScopedStorageBatch\ ignored\ =\ mBatchFactory\.get\(\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mModelDelegate\.moveTabToWindow\(tab,\ activity,\ newIndex\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ @Override\
+
+      \ \ \ \ public\ boolean\ moveTabGroupToWindow\(Token\ tabGroupId,\ Activity\ activity,\ int\ newIndex\)\ \{\
+
+      \ \ \ \ \ \ \ \ try\ \(ScopedStorageBatch\ ignored\ =\ mBatchFactory\.get\(\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ return\ mModelDelegate\.moveTabGroupToWindow\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ tabGroupId,\ activity,\ newIndex,\ isIncognito\(\)\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \}\
+
+      '
+    replace: "    }\n\n    @Override\n    public void moveTabToWindow(Tab tab, Activity activity, int newIndex) {\n        try (ScopedStorageBatch ignored = mBatchFactory.get();\n                SplitMutation splitMutation = beginSplitMutation()) {\n            mModelDelegate.moveTabToWindow(tab, activity, newIndex);\n        }\n    }\n\n    @Override\n    public boolean moveTabGroupToWindow(Token tabGroupId, Activity activity, int newIndex) {\n        try (ScopedStorageBatch ignored = mBatchFactory.get();\n                SplitMutation splitMutation = beginSplitMutation()) {\n            return mModelDelegate.moveTabGroupToWindow(\n                    tabGroupId, activity, newIndex, isIncognito());\n        }\n    }\n"
+- description: Connect Android split collection model, events and transfer semantics
+  regex:
+    re_pattern: '\ \ \ \ public\ void\ addTab\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ Tab\ tab,\ int\ index,\ @TabLaunchType\ int\ type,\ @TabCreationState\ int\ creationState\)\ \{\
+
+      \ \ \ \ \ \ \ \ assertOnUiThread\(\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ try\ \(ScopedStorageBatch\ ignored\ =\ mBatchFactory\.get\(\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ addTabInternal\(tab,\ index,\ type,\ creationState\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ @Override\
+
+      \ \ \ \ public\ void\ setTabsMultiSelected\(Set<Integer>\ tabIds,\ boolean\ isSelected\)\ \{\
+
+      \ \ \ \ \ \ \ \ assertOnUiThread\(\);\
+
+      \ \ \ \ \ \ \ \ TabModelImplUtil\.setTabsMultiSelected\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ tabIds,\ isSelected,\ mMultiSelectedTabs,\ mTabModelObservers\);\
+
+      \ \ \ \ \ \ \ \ assert\ mMultiSelectedTabs\.isEmpty\(\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \|\|\ TabModelUtils\.getCurrentTabId\(this\)\ ==\ Tab\.INVALID_TAB_ID\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \|\|\ mMultiSelectedTabs\.contains\(TabModelUtils\.getCurrentTabId\(this\)\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ :\ "If\ the\ selection\ is\ not\ empty,\ the\ current\ tab\ must\ always\ be\ present\ within\ the"\
+
+      '
+    replace: "    public void addTab(\n            Tab tab, int index, @TabLaunchType int type, @TabCreationState int creationState) {\n        assertOnUiThread();\n\n        try (ScopedStorageBatch ignored = mBatchFactory.get();\n                SplitMutation splitMutation = beginSplitMutation()) {\n            addTabInternal(tab, index, type, creationState);\n        }\n    }\n\n    @Override\n    public void setTabsMultiSelected(Set<Integer> tabIds, boolean isSelected) {\n        assertOnUiThread();\n        Set<Integer> completeTabIds = new LinkedHashSet<>(tabIds);\n        for (int id : tabIds) {\n            SplitInfo split = getSplitInfoForTab(id);\n            if (split != null) {\n                completeTabIds.add(split.getFirstTabId());\n                completeTabIds.add(split.getSecondTabId());\n            }\n        }\n        TabModelImplUtil.setTabsMultiSelected(\n                completeTabIds, isSelected, mMultiSelectedTabs, mTabModelObservers);\n        assert mMultiSelectedTabs.isEmpty()\n                        || TabModelUtils.getCurrentTabId(this) == Tab.INVALID_TAB_ID\n                        || mMultiSelectedTabs.contains(TabModelUtils.getCurrentTabId(this))\n                : \"If the selection is not empty, the current tab must always be present within the\"\n"
+- description: Connect Android split collection model, events and transfer semantics
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ return\ TabCollectionTabModelImplJni\.get\(\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \.getTabStripCollection\(mNativeTabCollectionTabModelImplPtr\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ //\ TabCloser\ overrides\.\
+
+      \
+
+      \ \ \ \ @Override\
+
+      \ \ \ \ public\ boolean\ closeTabs\(TabClosureParams\ params\)\ \{\
+
+      \ \ \ \ \ \ \ \ assertOnUiThread\(\);\
+
+      \ \ \ \ \ \ \ \ try\ \(ScopedStorageBatch\ ignored\ =\ mBatchFactory\.get\(\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ return\ closeTabsInternal\(params\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \}\
+
+      \
+
+      '
+    replace: "        return TabCollectionTabModelImplJni.get()\n                .getTabStripCollection(mNativeTabCollectionTabModelImplPtr);\n    }\n\n    @Override\n    public void setSplitViewAvailable(boolean available) {\n        assertOnUiThread();\n        mSplitViewAvailable = available && mNormalSplitWindow;\n    }\n\n    @Override\n    public @Nullable SplitInfo getSplitInfoForTab(int tabId) {\n        Tab tab = getTabById(tabId);\n        if (tab == null || mNativeTabCollectionTabModelImplPtr == 0) return null;\n        Token token = tab.getSplitTabId();\n        if (token == null) return null;\n        Tab first = null;\n        Tab second = null;\n        for (Tab candidate : getAllTabs()) {\n            if (!token.equals(candidate.getSplitTabId())) continue;\n            if (first == null) first = candidate;\n            else if (second == null) second = candidate;\n            else return null;\n        }\n        if (first == null || second == null || indexOf(second) != indexOf(first) + 1) return null;\n        try {\n            return new SplitInfo(token, first.getId(), second.getId(), first.getSplitLayout(),\n                    first.getSplitRatio());\n        } catch (IllegalArgumentException invalid) {\n            return null;\n        }\n    }\n\n    private Map<Token, SplitInfo> getSplitSnapshots() {\n        Map<Token, SplitInfo> splits = new ArrayMap<>();\n        List<Tab> tabs = getAllTabs();\n        for (int i = 0; i + 1 < tabs.size(); i++) {\n            Tab first = tabs.get(i);\n            Tab second = tabs.get(i + 1);\n            Token token = first.getSplitTabId();\n            if (token == null || !token.equals(second.getSplitTabId())\n                    || first.getSplitPosition() != 0 || second.getSplitPosition() != 1) continue;\n            splits.put(token, new SplitInfo(token, first.getId(), second.getId(),\n                    first.getSplitLayout(), first.getSplitRatio()));\n            i++;\n        }\n        return splits;\n    }\n\n    @Override\n    protected @Nullable Token createSplit(List<Tab> tabs) {\n        assertOnUiThread();\n        if (!mSplitViewAvailable || tabs.size() != 2 || tabs.get(0) == tabs.get(1)\n                || (TabStateStorageFlagHelper.isTabStorageEnabled()\n                        && TabStateStorageFlagHelper.isStorageAuthoritative())) return null;\n        Tab first = tabs.get(0);\n        Tab second = tabs.get(1);\n        if (indexOf(first) > indexOf(second)) {\n            first = tabs.get(1);\n            second = tabs.get(0);\n        }\n        if (!canRestoreSplit(first, second)) return null;\n        Token token = Token.createRandom();\n        try (ScopedStorageBatch ignored = mBatchFactory.get();\n                SplitMutation mutation = beginSplitMutation()) {\n            if (!restoreSplitInternal(new SplitInfo(token, first.getId(), second.getId(),\n                    SplitInfo.SIDE_BY_SIDE, 0.5))) return null;\n        }\n        return token;\n    }\n\n    @Override\n    protected void unsplit(Token token) {\n        assertOnUiThread();\n        if (mNativeTabCollectionTabModelImplPtr == 0) return;\n        try (ScopedStorageBatch ignored = mBatchFactory.get();\n                SplitMutation mutation = beginSplitMutation()) {\n            mExplicitlyUnsplit.add(token);\n            TabCollectionTabModelImplJni.get().unsplit(mNativeTabCollectionTabModelImplPtr, token);\n        }\n    }\n\n    private boolean canRestoreSplit(@Nullable Tab first, @Nullable Tab second) {\n        return mNormalSplitWindow && mNativeTabCollectionTabModelImplPtr != 0\n                && first != null && second != null && first != second\n                && getTabById(first.getId()) == first && getTabById(second.getId()) == second\n                && indexOf(first) >= 0 && indexOf(second) == indexOf(first) + 1\n                && !first.isClosing() && !second.isClosing()\n                && first.getProfile() == getProfile() && second.getProfile() == getProfile()\n                && first.getSplitTabId() == null && second.getSplitTabId() == null\n                && first.getIsPinned() == second.getIsPinned()\n                && Objects.equals(first.getTabGroupId(), second.getTabGroupId());\n    }\n\n    private boolean restoreSplitInternal(SplitInfo split) {\n        Tab first = getTabById(split.getFirstTabId());\n        Tab second = getTabById(split.getSecondTabId());\n        if (!canRestoreSplit(first, second)) return false;\n        return TabCollectionTabModelImplJni.get().createSplit(\n                mNativeTabCollectionTabModelImplPtr, split.getToken(),\n                List.of(assumeNonNull(first), assumeNonNull(second)),\n                split.getLayout(), split.getRatio());\n    }\n\n    @Override\n    public boolean restoreSplit(SplitInfo split) {\n        assertOnUiThread();\n        try (ScopedStorageBatch ignored = mBatchFactory.get();\n                SplitMutation mutation = beginSplitMutation()) {\n            return restoreSplitInternal(split);\n        }\n    }\n\n    private SplitMutation beginSplitMutation() {\n        return new SplitMutation();\n    }\n\n    private void batchSplitAttributes(Tab tab) {\n        if (mSplitMutationDepth == 0 || tab.isDestroyed() || tab.getUserDataHost() == null) return;\n        TabStateAttributesRegistry registry = tab.getUserDataHost()\n                .getUserData(TabStateAttributesRegistry.class);\n        if (registry == null) return;\n        for (TabStateAttributes attributes : registry.getAllAttributes()) {\n            if (mSplitAttributeBatches.add(attributes)) attributes.beginBatchEdit();\n        }\n    }\n\n    private void finishSplitAttributeBatches() {\n        List<TabStateAttributes> attributes = new ArrayList<>(mSplitAttributeBatches);\n        mSplitAttributeBatches.clear();\n        for (TabStateAttributes entry : attributes) entry.endBatchEdit();\n    }\n\n    /** Keeps collection normalization and notifications atomic across nested model operations. */\n    private final class SplitMutation implements AutoCloseable {\n        SplitMutation() {\n            if (mSplitMutationDepth++ == 0) {\n                mSplitsBeforeMutation = getSplitSnapshots();\n                mSelectionBeforeSplitMutation = new LinkedHashSet<>(mMultiSelectedTabs);\n                mExplicitlyUnsplit.clear();\n                for (Tab tab : getAllTabs()) batchSplitAttributes(tab);\n            }\n        }\n\n        @Override\n        public void close() {\n            if (--mSplitMutationDepth != 0) return;\n            if (mNativeTabCollectionTabModelImplPtr == 0) {\n                finishSplitAttributeBatches();\n                return;\n            }\n            // Keep the depth nonzero while reconstructing/adjusting selection: existing selection\n            // observers may reenter model methods. Publish only complete collection states.\n            mSplitMutationDepth = 1;\n            Map<Token, SplitInfo> before = mSplitsBeforeMutation;\n            for (SplitInfo split : before.values()) {\n                if (mExplicitlyUnsplit.contains(split.getToken())) continue;\n                Tab first = getTabById(split.getFirstTabId());\n                Tab second = getTabById(split.getSecondTabId());\n                if (first != null && second != null && indexOf(first) > indexOf(second)) {\n                    restoreSplitInternal(new SplitInfo(split.getToken(), second.getId(),\n                            first.getId(), split.getLayout(), split.getRatio()));\n                } else {\n                    restoreSplitInternal(split);\n                }\n            }\n            for (SplitInfo split : new ArrayList<>(mClosedSplitSnapshots.values())) {\n                if (mExplicitlyUnsplit.contains(split.getToken())) {\n                    mClosedSplitSnapshots.remove(split.getToken());\n                    continue;\n                }\n                if (restoreSplitInternal(split)) {\n                    mClosedSplitSnapshots.remove(split.getToken());\n                    Tab first = getTabById(split.getFirstTabId());\n                    Tab second = getTabById(split.getSecondTabId());\n                    if (first != null) first.clearSplitDataForClosure();\n                    if (second != null) second.clearSplitDataForClosure();\n                } else if (!isClosurePending(split.getFirstTabId())\n                        && !isClosurePending(split.getSecondTabId())) {\n                    mClosedSplitSnapshots.remove(split.getToken());\n                }\n            }\n            Map<Token, SplitInfo> after = getSplitSnapshots();\n            Set<Integer> changed = new LinkedHashSet<>();\n            Set<Integer> membersChanged = new LinkedHashSet<>();\n            for (SplitInfo old : before.values()) {\n                SplitInfo current = after.get(old.getToken());\n                if (old.equals(current)) continue;\n                changed.add(old.getFirstTabId());\n                changed.add(old.getSecondTabId());\n                if (current == null) {\n                    membersChanged.add(old.getFirstTabId());\n                    membersChanged.add(old.getSecondTabId());\n                    Tab active = mCurrentTabSupplier.get();\n                    for (int id : new int[] {old.getFirstTabId(), old.getSecondTabId()}) {\n                        if (active == null || active.getId() != id) mMultiSelectedTabs.remove(id);\n                    }\n                }\n            }\n            for (SplitInfo current : after.values()) {\n                if (current.equals(before.get(current.getToken()))) continue;\n                changed.add(current.getFirstTabId());\n                changed.add(current.getSecondTabId());\n                if (!before.containsKey(current.getToken())) {\n                    membersChanged.add(current.getFirstTabId());\n                    membersChanged.add(current.getSecondTabId());\n                    Tab active = mCurrentTabSupplier.get();\n                    if ((active != null && current.contains(active.getId()))\n                            || mMultiSelectedTabs.contains(current.getFirstTabId())\n                            || mMultiSelectedTabs.contains(current.getSecondTabId())) {\n                        mMultiSelectedTabs.add(current.getFirstTabId());\n                        mMultiSelectedTabs.add(current.getSecondTabId());\n                    }\n                }\n            }\n            Tab selected = mCurrentTabSupplier.get();\n            if (selected != null) {\n                SplitInfo activeSplit = getSplitInfoForTab(selected.getId());\n                if (activeSplit != null) {\n                    mMultiSelectedTabs.add(activeSplit.getFirstTabId());\n                    mMultiSelectedTabs.add(activeSplit.getSecondTabId());\n                }\n            }\n            mSplitMutationDepth = 0;\n            mSplitsBeforeMutation = new ArrayMap<>();\n            mExplicitlyUnsplit.clear();\n            boolean selectionChanged = !mSelectionBeforeSplitMutation.equals(mMultiSelectedTabs);\n            if (changed.isEmpty() && !selectionChanged) {\n                finishSplitAttributeBatches();\n                return;\n            }\n            int[] changedIds = changed.stream().mapToInt(Integer::intValue).toArray();\n            boolean membershipChanged = !membersChanged.isEmpty();\n            // Persistence observers capture synchronously. Release their existing batch only\n            // after all native membership, pin/group and Java selection values are final.\n            finishSplitAttributeBatches();\n            // Do not access the native model after notification: observers can destroy it.\n            if (selectionChanged) {\n                for (TabModelObserver observer : mTabModelObservers) {\n                    observer.onTabsSelectionChanged();\n                }\n            }\n            if (changedIds.length != 0) {\n                for (TabModelObserver observer : mTabModelObservers) {\n                    observer.didChangeSplit(changedIds.clone(), membershipChanged);\n                }\n            }\n        }\n    }\n\n    // TabCloser overrides.\n\n    @Override\n    public boolean closeTabs(TabClosureParams params) {\n        assertOnUiThread();\n        try (ScopedStorageBatch ignored = mBatchFactory.get();\n                SplitMutation splitMutation = beginSplitMutation()) {\n            return closeTabsInternal(params);\n        }\n    }\n\n"
+- description: Connect Android split collection model, events and transfer semantics
+  regex:
+    re_pattern: '\ \ \ \ \}\
+
+      \
+
+      \ \ \ \ @Override\
+
+      \ \ \ \ public\ void\ removeTab\(Tab\ tab\)\ \{\
+
+      \ \ \ \ \ \ \ \ try\ \(ScopedStorageBatch\ ignored\ =\ mBatchFactory\.get\(\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ removeTabsAndSelectNext\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ Collections\.singletonList\(tab\),\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ /\*\ recommendedNextTab=\ \*/\ null,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ TabSelectionType\.FROM_CLOSE,\
+
+      '
+    replace: "    }\n\n    @Override\n    public void removeTab(Tab tab) {\n        try (ScopedStorageBatch ignored = mBatchFactory.get();\n                SplitMutation splitMutation = beginSplitMutation()) {\n            removeTabsAndSelectNext(\n                    Collections.singletonList(tab),\n                    /* recommendedNextTab= */ null,\n                    TabSelectionType.FROM_CLOSE,\n"
+- description: Connect Android split collection model, events and transfer semantics
+  regex:
+    re_pattern: '\ \ \ \ \}\
+
+      \
+
+      \ \ \ \ @Override\
+
+      \ \ \ \ protected\ void\ moveGroupToIndex\(Token\ tabGroupId,\ int\ newIndex\)\ \{\
+
+      \ \ \ \ \ \ \ \ assertOnUiThread\(\);\
+
+      \ \ \ \ \ \ \ \ if\ \(mNativeTabCollectionTabModelImplPtr\ ==\ 0\)\ return;\
+
+      \
+
+      \ \ \ \ \ \ \ \ List<Tab>\ tabs\ =\ getTabsInGroup\(tabGroupId\);\
+
+      '
+    replace: "    }\n\n    @Override\n    protected void moveGroupToIndex(Token tabGroupId, int newIndex) {\n        assertOnUiThread();\n        try (ScopedStorageBatch ignored = mBatchFactory.get();\n                SplitMutation mutation = beginSplitMutation()) {\n            moveGroupToIndexInternal(tabGroupId, newIndex);\n        }\n    }\n\n    private void moveGroupToIndexInternal(Token tabGroupId, int newIndex) {\n        assertOnUiThread();\n        if (mNativeTabCollectionTabModelImplPtr == 0) return;\n\n        List<Tab> tabs = getTabsInGroup(tabGroupId);\n"
+- description: Connect Android split collection model, events and transfer semantics
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ assertOnUiThread\(\);\
+
+      \ \ \ \ \ \ \ \ if\ \(mNativeTabCollectionTabModelImplPtr\ ==\ 0\)\ return\ null;\
+
+      \ \ \ \ \ \ \ \ if\ \(tabs\.isEmpty\(\)\)\ return\ null;\
+
+      \ \ \ \ \ \ \ \ Tab\ tab\ =\ tabs\.get\(0\);\
+
+      \ \ \ \ \ \ \ \ try\ \(ScopedStorageBatch\ ignored\ =\ mBatchFactory\.get\(\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mergeListOfTabsToGroup\(tabs,\ tab,\ /\*\ notify=\ \*/\ NOTIFY_IF_NOT_NEW_GROUP\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ //\ All\ tabs\ will\ have\ the\ same\ group\ ID,\ so\ return\ the\ first\ one\.\
+
+      \ \ \ \ \ \ \ \ return\ tab\.getTabGroupId\(\);\
+
+      '
+    replace: "        assertOnUiThread();\n        if (mNativeTabCollectionTabModelImplPtr == 0) return null;\n        if (tabs.isEmpty()) return null;\n        Tab tab = tabs.get(0);\n        try (ScopedStorageBatch ignored = mBatchFactory.get();\n                SplitMutation splitMutation = beginSplitMutation()) {\n            mergeListOfTabsToGroup(tabs, tab, /* notify= */ NOTIFY_IF_NOT_NEW_GROUP);\n        }\n        // All tabs will have the same group ID, so return the first one.\n        return tab.getTabGroupId();\n"
+- description: Connect Android split collection model, events and transfer semantics
+  regex:
+    re_pattern: '\
+
+      \ \ \ \ @Override\
+
+      \ \ \ \ protected\ @Nullable\ Token\ addTabsToGroup\(@Nullable\ Token\ tabGroupId,\ List<Tab>\ tabs\)\ \{\
+
+      \ \ \ \ \ \ \ \ assertOnUiThread\(\);\
+
+      \ \ \ \ \ \ \ \ try\ \(ScopedStorageBatch\ ignored\ =\ mBatchFactory\.get\(\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ return\ addTabsToGroupInternal\(tabGroupId,\ tabs\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \}\
+
+      \
+
+      '
+    replace: "\n    @Override\n    protected @Nullable Token addTabsToGroup(@Nullable Token tabGroupId, List<Tab> tabs) {\n        assertOnUiThread();\n        try (ScopedStorageBatch ignored = mBatchFactory.get();\n                SplitMutation splitMutation = beginSplitMutation()) {\n            return addTabsToGroupInternal(tabGroupId, tabs);\n        }\n    }\n\n"
+- description: Connect Android split collection model, events and transfer semantics
+  regex:
+    re_pattern: '\
+
+      \ \ \ \ @Override\
+
+      \ \ \ \ public\ void\ moveRelatedTabs\(@TabId\ int\ id,\ int\ newIndex\)\ \{\
+
+      \ \ \ \ \ \ \ \ assertOnUiThread\(\);\
+
+      \ \ \ \ \ \ \ \ try\ \(ScopedStorageBatch\ ignored\ =\ mBatchFactory\.get\(\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ moveRelatedTabsInternal\(id,\ newIndex\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \}\
+
+      \
+
+      '
+    replace: "\n    @Override\n    public void moveRelatedTabs(@TabId int id, int newIndex) {\n        assertOnUiThread();\n        try (ScopedStorageBatch ignored = mBatchFactory.get();\n                SplitMutation splitMutation = beginSplitMutation()) {\n            moveRelatedTabsInternal(id, newIndex);\n        }\n    }\n\n"
+- description: Connect Android split collection model, events and transfer semantics
+  regex:
+    re_pattern: '\ \ \ \ public\ void\ createSingleTabGroup\(Tab\ tab\)\ \{\
+
+      \ \ \ \ \ \ \ \ assertOnUiThread\(\);\
+
+      \ \ \ \ \ \ \ \ assert\ tab\.getTabGroupId\(\)\ ==\ null;\
+
+      \
+
+      \ \ \ \ \ \ \ \ try\ \(ScopedStorageBatch\ ignored\ =\ mBatchFactory\.get\(\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mergeListOfTabsToGroup\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ Collections\.singletonList\(tab\),\ tab,\ /\*\ notify=\ \*/\ NOTIFY_IF_NOT_NEW_GROUP\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \}\
+
+      '
+    replace: "    public void createSingleTabGroup(Tab tab) {\n        assertOnUiThread();\n        assert tab.getTabGroupId() == null;\n\n        try (ScopedStorageBatch ignored = mBatchFactory.get();\n                SplitMutation splitMutation = beginSplitMutation()) {\n            mergeListOfTabsToGroup(\n                    Collections.singletonList(tab), tab, /* notify= */ NOTIFY_IF_NOT_NEW_GROUP);\n        }\n    }\n"
+- description: Connect Android split collection model, events and transfer semantics
+  regex:
+    re_pattern: '\ \ \ \ @Override\
+
+      \ \ \ \ public\ void\ createTabGroupForTabGroupSync\(List<Tab>\ tabs,\ Token\ tabGroupId\)\ \{\
+
+      \ \ \ \ \ \ \ \ if\ \(tabs\.isEmpty\(\)\)\ return;\
+
+      \
+
+      \ \ \ \ \ \ \ \ try\ \(ScopedStorageBatch\ ignored\ =\ mBatchFactory\.get\(\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mergeListOfTabsToGroupInternal\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ tabs,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ tabs\.get\(0\),\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ /\*\ notify=\ \*/\ DONT_NOTIFY,\
+
+      '
+    replace: "    @Override\n    public void createTabGroupForTabGroupSync(List<Tab> tabs, Token tabGroupId) {\n        if (tabs.isEmpty()) return;\n\n        try (ScopedStorageBatch ignored = mBatchFactory.get();\n                SplitMutation splitMutation = beginSplitMutation()) {\n            mergeListOfTabsToGroupInternal(\n                    tabs,\n                    tabs.get(0),\n                    /* notify= */ DONT_NOTIFY,\n"
+- description: Connect Android split collection model, events and transfer semantics
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ //\ TODO\(crbug\.com/441933200\):\ skipUpdateTabModel\ should\ be\ renamed\ to\ "notify"\ to\ match\ the\
+
+      \ \ \ \ \ \ \ \ //\ signature\ of\ mergeListOfTabsToGroupInternal\(\)\.\ It\ is\ no\ longer\ used\ to\ skip\ updating\ the\
+
+      \ \ \ \ \ \ \ \ //\ tab\ model\ as\ that\ often\ left\ the\ tab\ model\ in\ an\ invalid\ intermediate\ state\.\
+
+      \ \ \ \ \ \ \ \ try\ \(ScopedStorageBatch\ ignored\ =\ mBatchFactory\.get\(\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mergeListOfTabsToGroup\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ tabsToMerge,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ destinationTab,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ skipUpdateTabModel\ \?\ DONT_NOTIFY\ :\ NOTIFY_IF_NOT_NEW_GROUP\);\
+
+      '
+    replace: "        }\n        // TODO(crbug.com/441933200): skipUpdateTabModel should be renamed to \"notify\" to match the\n        // signature of mergeListOfTabsToGroupInternal(). It is no longer used to skip updating the\n        // tab model as that often left the tab model in an invalid intermediate state.\n        try (ScopedStorageBatch ignored = mBatchFactory.get();\n                SplitMutation splitMutation = beginSplitMutation()) {\n            mergeListOfTabsToGroup(\n                    tabsToMerge,\n                    destinationTab,\n                    skipUpdateTabModel ? DONT_NOTIFY : NOTIFY_IF_NOT_NEW_GROUP);\n"
+- description: Connect Android split collection model, events and transfer semantics
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ List<Tab>\ tabs,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ Tab\ destinationTab,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ @Nullable\ Integer\ indexInGroup,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ @TabGroupMergeNotificationType\ int\ notify\)\ \{\
+
+      \ \ \ \ \ \ \ \ try\ \(ScopedStorageBatch\ ignored\ =\ mBatchFactory\.get\(\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mergeListOfTabsToGroupInternal\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ tabs,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ destinationTab,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ notify,\
+
+      '
+    replace: "            List<Tab> tabs,\n            Tab destinationTab,\n            @Nullable Integer indexInGroup,\n            @TabGroupMergeNotificationType int notify) {\n        try (ScopedStorageBatch ignored = mBatchFactory.get();\n                SplitMutation splitMutation = beginSplitMutation()) {\n            mergeListOfTabsToGroupInternal(\n                    tabs,\n                    destinationTab,\n                    notify,\n"
+- description: Connect Android split collection model, events and transfer semantics
+  regex:
+    re_pattern: '\ \ \ \ @Override\
+
+      \ \ \ \ public\ void\ performUndoGroupOperation\(UndoGroupMetadata\ undoGroupMetadata\)\ \{\
+
+      \ \ \ \ \ \ \ \ assertOnUiThread\(\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ try\ \(ScopedStorageBatch\ ignored\ =\ mBatchFactory\.get\(\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ performUndoGroupOperationInternal\(\(UndoGroupMetadataImpl\)\ undoGroupMetadata\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \}\
+
+      \
+
+      '
+    replace: "    @Override\n    public void performUndoGroupOperation(UndoGroupMetadata undoGroupMetadata) {\n        assertOnUiThread();\n\n        try (ScopedStorageBatch ignored = mBatchFactory.get();\n                SplitMutation splitMutation = beginSplitMutation()) {\n            performUndoGroupOperationInternal((UndoGroupMetadataImpl) undoGroupMetadata);\n        }\n    }\n\n"
+- description: Connect Android split collection model, events and transfer semantics
+  regex:
+    re_pattern: '\ \ \ \ @Override\
+
+      \ \ \ \ public\ void\ moveTabOutOfGroupInDirection\(@TabId\ int\ sourceTabId,\ boolean\ trailing\)\ \{\
+
+      \ \ \ \ \ \ \ \ assertOnUiThread\(\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ try\ \(ScopedStorageBatch\ ignored\ =\ mBatchFactory\.get\(\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ moveTabOutOfGroupInDirectionInternal\(sourceTabId,\ trailing\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \}\
+
+      \
+
+      '
+    replace: "    @Override\n    public void moveTabOutOfGroupInDirection(@TabId int sourceTabId, boolean trailing) {\n        assertOnUiThread();\n\n        try (ScopedStorageBatch ignored = mBatchFactory.get();\n                SplitMutation splitMutation = beginSplitMutation()) {\n            moveTabOutOfGroupInDirectionInternal(sourceTabId, trailing);\n        }\n    }\n\n"
+- description: Connect Android split collection model, events and transfer semantics
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ while\ \(observers\.hasNext\(\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ observers\.next\(\)\.willAddTab\(tab,\ type\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ //\ Clear\ the\ multi\-selection\ set\ before\ adding\ the\ tab\.\
+
+      \ \ \ \ \ \ \ \ clearMultiSelection\(/\*\ notifyObservers=\ \*/\ false\);\
+
+      \ \ \ \ \ \ \ \ boolean\ hasAnyTabs\ =\ mCurrentTabSupplier\.get\(\)\ !=\ null;\
+
+      \ \ \ \ \ \ \ \ boolean\ selectTab\ =\
+
+      '
+    replace: "        while (observers.hasNext()) {\n            observers.next().willAddTab(tab, type);\n        }\n\n        // A store may attach attributes in willAddTab, so join its batch before native attach.\n        batchSplitAttributes(tab);\n        // Clear the multi-selection set before adding the tab.\n        clearMultiSelection(/* notifyObservers= */ false);\n        boolean hasAnyTabs = mCurrentTabSupplier.get() != null;\n        boolean selectTab =\n"
+- description: Connect Android split collection model, events and transfer semantics
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ return\ false;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\);\
+
+      \ \ \ \ \ \ \ \ if\ \(tabsToClose\.isEmpty\(\)\)\ return\ false;\
+
+      \
+
+      \ \ \ \ \ \ \ \ addToClosingTabsCount\(tabsToClose\.size\(\)\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ for\ \(Tab\ tab\ :\ tabsToClose\)\ \{\
+
+      '
+    replace: "                    }\n                    return false;\n                });\n        if (tabsToClose.isEmpty()) return false;\n\n        // Historical saves happen after detachment, so retain immutable values before native\n        // normalization clears the live split membership. Undo keeps the original real token.\n        for (Tab tab : tabsToClose) {\n            SplitInfo split = getSplitInfoForTab(tab.getId());\n            if (split != null) {\n                mClosedSplitSnapshots.put(split.getToken(), split);\n                tab.captureSplitDataForClosure();\n            }\n        }\n\n        addToClosingTabsCount(tabsToClose.size());\n\n        for (Tab tab : tabsToClose) {\n"
+- description: Connect Android split collection model, events and transfer semantics
+  regex:
+    re_pattern: '\
+
+      \ \ \ \ \ \ \ \ void\ removeTabRecursive\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ long\ nativeTabCollectionTabModelImpl,\ @JniType\("TabAndroid\*"\)\ Tab\ tabs\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ void\ createTabGroup\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ long\ nativeTabCollectionTabModelImpl,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ @JniType\("base::Token"\)\ Token\ tabGroupId,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ @JniType\("std::u16string"\)\ String\ title,\
+
+      '
+    replace: "\n        void removeTabRecursive(\n                long nativeTabCollectionTabModelImpl, @JniType(\"TabAndroid*\") Tab tabs);\n\n        boolean createSplit(long nativeTabCollectionTabModelImpl,\n                @JniType(\"base::Token\") Token token,\n                @JniType(\"std::vector<TabAndroid*>\") List<Tab> tabs,\n                int layout, double ratio);\n\n        void unsplit(long nativeTabCollectionTabModelImpl, @JniType(\"base::Token\") Token token);\n\n        void createTabGroup(\n                long nativeTabCollectionTabModelImpl,\n                @JniType(\"base::Token\") Token tabGroupId,\n                @JniType(\"std::u16string\") String title,\n"
+- description: Keep split snapshot traversal one tab at a time except for a consumed valid pair
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ for\ \(int\ i\ =\ 0;\ i\ \+\ 1\ <\ tabs\.size\(\);\ i\+\+\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ Tab\ first\ =\ tabs\.get\(i\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ Tab\ second\ =\ tabs\.get\(i\ \+\ 1\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ Token\ token\ =\ first\.getSplitTabId\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(token\ ==\ null\ \|\|\ !token\.equals\(second\.getSplitTabId\(\)\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \|\|\ first\.getSplitPosition\(\)\ !=\ 0\ \|\|\ second\.getSplitPosition\(\)\ !=\ 1\)\ continue;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ splits\.put\(token,\ new\ SplitInfo\(token,\ first\.getId\(\),\ second\.getId\(\),\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ first\.getSplitLayout\(\),\ first\.getSplitRatio\(\)\)\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ i\+\+;\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      '
+    replace: "        int i = 0;\n        while (i + 1 < tabs.size()) {\n            Tab first = tabs.get(i);\n            Tab second = tabs.get(i + 1);\n            Token token = first.getSplitTabId();\n            if (token == null\n                    || !token.equals(second.getSplitTabId())\n                    || first.getSplitPosition() != 0\n                    || second.getSplitPosition() != 1) {\n                i++;\n                continue;\n            }\n            splits.put(token, new SplitInfo(token, first.getId(), second.getId(),\n                    first.getSplitLayout(), first.getSplitRatio()));\n            i += 2;\n        }\n"
+- description: Copy affected tab IDs in LinkedHashSet encounter order without Java streams
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ int\[\]\ changedIds\ =\ changed\.stream\(\)\.mapToInt\(Integer::intValue\)\.toArray\(\);\
+
+      '
+    replace: "            int[] changedIds = new int[changed.size()];\n            int changedIndex = 0;\n            for (int tabId : changed) {\n                changedIds[changedIndex++] = tabId;\n            }\n"

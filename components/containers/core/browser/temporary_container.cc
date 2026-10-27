@@ -17,8 +17,11 @@
 #include "base/uuid.h"
 #include "brave/components/containers/core/mojom/containers.mojom-shared.h"
 #include "brave/components/containers/core/mojom/containers.mojom.h"
+#include "build/build_config.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/third_party/bip39wally-core-native/include/wally_bip39.h"
 #include "brave/ui/color/nala/nala_color_id.h"
+#endif
 #include "third_party/skia/include/core/SkColor.h"
 #include "ui/color/color_provider.h"
 #include "ui/color/color_provider_manager.h"
@@ -29,6 +32,11 @@ namespace {
 // Generates a random temporary container name using first two BIP39 mnemonic
 // words generated from random entropy. The first word is title cased.
 std::string GenerateTemporaryContainerName() {
+#if BUILDFLAG(IS_ANDROID)
+  return base::StrCat(
+      {"Temporary ",
+       base::Uuid::GenerateRandomV4().AsLowercaseString().substr(0, 8)});
+#else
   std::array<uint8_t, 16> entropy;
   base::RandBytes(entropy);
   char* words_cstr = nullptr;
@@ -46,6 +54,7 @@ std::string GenerateTemporaryContainerName() {
   CHECK(!word_0.empty());
   word_0[0] = base::ToUpperASCII(word_0[0]);
   return base::StrCat({word_0, " ", words[1]});
+#endif
 }
 
 // Picks a random container icon from the available icons.
@@ -68,6 +77,19 @@ mojom::Icon PickTemporaryContainerIcon() {
 
 // Picks a random container background color from the available colors.
 SkColor PickTemporaryContainerBackground() {
+#if BUILDFLAG(IS_ANDROID)
+  static constexpr auto kColors = std::to_array<SkColor>({
+      SkColorSetRGB(0xd9, 0x30, 0x25),
+      SkColorSetRGB(0xf2, 0x99, 0x00),
+      SkColorSetRGB(0xf9, 0xab, 0x00),
+      SkColorSetRGB(0x18, 0x80, 0x38),
+      SkColorSetRGB(0x00, 0x80, 0x80),
+      SkColorSetRGB(0x1a, 0x73, 0xe8),
+      SkColorSetRGB(0x93, 0x34, 0xe6),
+      SkColorSetRGB(0xd0, 0x18, 0x84),
+  });
+  return base::RandomChoice(kColors);
+#else
   const auto* color_provider =
       ui::ColorProviderManager::Get().GetColorProviderFor(
           ui::ColorProviderKey());
@@ -86,6 +108,7 @@ SkColor PickTemporaryContainerBackground() {
       nala::kColorPrimitivePink60,
   });
   return color_provider->GetColor(base::RandomChoice(kBackgroundColorIds));
+#endif
 }
 
 }  // namespace

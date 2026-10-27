@@ -1,0 +1,86 @@
+diff --git a/extensions/browser/user_script_loader.cc b/extensions/browser/user_script_loader.cc
+--- a/extensions/browser/user_script_loader.cc
++++ b/extensions/browser/user_script_loader.cc
+@@ -54,6 +54,11 @@
+ // associated with the callback will not cause any script changes.
+ const char kNoScriptChangesErrorMsg[] =
+     "No changes to loaded scripts would result from this operation.";
++
++#if BUILDFLAG(IS_ANDROID)
++const char kUserScriptSerializationErrorMsg[] =
++    "Scripts could not be loaded because shared memory could not be created.";
++#endif
+
+ #if DCHECK_IS_ON()
+ bool AreScriptsUnique(const UserScriptList& scripts) {
+@@ -226,6 +231,9 @@
+   std::list<ScriptsLoadedCallback> remaining_callbacks;
+   remaining_callbacks.splice(remaining_callbacks.end(), queued_load_callbacks_);
+   remaining_callbacks.splice(remaining_callbacks.end(), loading_callbacks_);
++#if BUILDFLAG(IS_ANDROID)
++  remaining_callbacks.splice(remaining_callbacks.end(), failed_load_callbacks_);
++#endif
+
+   for (auto& callback : remaining_callbacks)
+     std::move(callback).Run(this, error);
+@@ -339,6 +347,26 @@
+ void UserScriptLoader::StartLoad() {
+   DCHECK_CURRENTLY_ON(BrowserThread::UI);
+   DCHECK(!is_loading());
++
++#if BUILDFLAG(IS_ANDROID)
++  // Keep the last published state through any coalesced reloads. An operation
++  // reported as failed must not appear in a later unrelated successful load.
++  if (!scripts_before_load_) {
++    scripts_before_load_.emplace();
++    for (const auto& script : *loaded_scripts_) {
++      auto copy = UserScript::CopyMetadataFrom(*script);
++      for (size_t i = 0; i < script->js_scripts().size(); ++i) {
++        copy->js_scripts()[i]->set_content(
++            std::string(script->js_scripts()[i]->GetContent()));
++      }
++      for (size_t i = 0; i < script->css_scripts().size(); ++i) {
++        copy->css_scripts()[i]->set_content(
++            std::string(script->css_scripts()[i]->GetContent()));
++      }
++      scripts_before_load_->push_back(std::move(copy));
++    }
++  }
++#endif
+
+   // Reload any loaded scripts, and clear out |loaded_scripts_| to indicate that
+   // the scripts aren't currently ready.
+@@ -472,11 +500,33 @@
+     // though it removes the possibility that freeing the shared memory block
+     // would open up enough FDs for long enough for a retry to succeed.
+
++#if BUILDFLAG(IS_ANDROID)
++    // Roll back before completing clients, which may start another load or
++    // destroy this loader. Preserve shared_memory_ and do not announce success.
++    DCHECK(scripts_before_load_);
++    loaded_scripts_ = std::move(*scripts_before_load_);
++    scripts_before_load_.reset();
++    failed_load_callbacks_.splice(failed_load_callbacks_.end(),
++                                 loading_callbacks_);
++    base::WeakPtr<UserScriptLoader> weak_this = weak_factory_.GetWeakPtr();
++    while (!failed_load_callbacks_.empty()) {
++      auto callback = std::move(failed_load_callbacks_.front());
++      failed_load_callbacks_.pop_front();
++      std::move(callback).Run(
++          this, std::make_optional(kUserScriptSerializationErrorMsg));
++      if (!weak_this) {
++        return;
++      }
++    }
++#endif
+     // Pretend the extension change didn't happen.
+     return;
+   }
+
+   // We've got scripts ready to go.
++#if BUILDFLAG(IS_ANDROID)
++  scripts_before_load_.reset();
++#endif
+   shared_memory_ = std::move(shared_memory);
+
+   std::vector<int> ids_of_newly_notified_processes;

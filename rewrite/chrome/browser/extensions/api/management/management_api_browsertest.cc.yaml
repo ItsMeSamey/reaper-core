@@ -1,0 +1,303 @@
+# Copyright (c) 2026 The Reaper Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+substitutions:
+- description: Bind Android re-enable consent to the displayed extension and exercise its real modal
+  regex:
+    re_pattern: '\
+
+      \#if\ BUILDFLAG\(ENABLE_EXTENSIONS\)\
+
+      \#include\ "chrome/browser/ui/browser_window/public/browser_window_interface\.h"\
+
+      \#endif\
+
+      \
+
+      static_assert\(BUILDFLAG\(ENABLE_EXTENSIONS_CORE\)\);\
+
+      '
+    replace: '
+
+      #if BUILDFLAG(ENABLE_EXTENSIONS)
+
+      #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+
+      #endif
+
+
+      #if BUILDFLAG(IS_ANDROID)
+
+      #include <algorithm>
+
+      #include <vector>
+
+
+      #include "base/android/jni_android.h"
+
+      #include "base/android/jni_array.h"
+
+      #include "base/android/scoped_java_ref.h"
+
+      #include "base/check.h"
+
+      #include "base/memory/weak_ptr.h"
+
+      #include "base/run_loop.h"
+
+      #include "base/test/run_until.h"
+
+      #include "extensions/browser/extension_function_dispatcher.h"
+
+      #include "extensions/common/mojom/context_type.mojom.h"
+
+      #include "extensions/common/permissions/permission_message.h"
+
+      #include "extensions/common/permissions/permission_set.h"
+
+      #include "extensions/common/permissions/permissions_data.h"
+
+      #include "extensions/test/test_extension_dir.h"
+
+
+      // Must follow the WebContents and JNI conversion declarations.
+
+      #include "chrome/browser/ui/android/extensions/test_support_jni_headers/ExtensionTestUtils_jni.h"
+
+      #endif
+
+
+      static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
+
+      '
+- description: Bind Android re-enable consent to the displayed extension and exercise its real modal
+  regex:
+    re_pattern: '\ \ \}\
+
+      \}\
+
+      \
+
+      \}\ \ //\ namespace\ extensions\
+
+      '
+    replace: "  }\n}\n\n#if BUILDFLAG(IS_ANDROID)\n// Signed local MV3 updates use the real CrxInstaller, management function,\n// Chrome delegate and visible Android modal. Only the actual dialog controller\n// is driven by the test; the permission-completion callback is never replaced.\nclass ExtensionManagementReenableConsentTest\n    : public ExtensionManagementApiBrowserTest {\n protected:\n  void SetUpOnMainThread() override {\n    ExtensionManagementApiBrowserTest::SetUpOnMainThread();\n    extension_dir_.WriteFile(\n        FILE_PATH_LITERAL(\"worker.js\"),\n        \"chrome.runtime.onInstalled.addListener(() => {});\");\n    const base::FilePath a = PackVersion(\"1\", \"\");\n    const base::FilePath b = PackVersion(\"2\", R\"(\"bookmarks\")\");\n    c_path_ = PackVersion(\"3\", R\"(\"bookmarks\", \"history\")\");\n    const Extension* installed = InstallExtension(a, 1);\n    ASSERT_TRUE(installed);\n    id_ = installed->id();\n    ASSERT_FALSE(UpdateExtension(id_, b, -1));\n    b_ = extension_registry()->disabled_extensions().GetByID(id_);\n    ASSERT_TRUE(b_);\n    ASSERT_EQ(\"2\", b_->version().GetString());\n    ASSERT_TRUE(\n        ExtensionPrefs::Get(profile())->DidExtensionEscalatePermissions(id_));\n    original_grants_ =\n        ExtensionPrefs::Get(profile())->GetGrantedPermissions(id_);\n    ASSERT_TRUE(original_grants_);\n    ASSERT_FALSE(original_grants_->HasAPIPermission(\"bookmarks\"));\n    ASSERT_FALSE(original_grants_->HasAPIPermission(\"history\"));\n    ASSERT_TRUE(content::NavigateToURL(GetActiveWebContents(),\n                                       GURL(\"chrome://extensions\")));\n    // Keep the production modal and restore the previous auto-confirm value\n    // when this scope is released. No WindowAndroid manager is replaced.\n    auto_confirm_ = std::make_unique<ScopedTestDialogAutoConfirm>(\n        ScopedTestDialogAutoConfirm::NONE);\n  }\n\n  base::FilePath PackVersion(const char* version, const char* permissions) {\n    extension_dir_.WriteManifest(base::StringPrintf(\n        R\"({\"name\":\"Re-enable consent\",\"manifest_version\":3,\"version\":\"%s\",\n            \"background\":{\"service_worker\":\"worker.js\"},\"permissions\":[%s]})\",\n        version, permissions));\n    return extension_dir_.Pack(base::StringPrintf(\"%s.crx\", version));\n  }\n\n  void BeginEnable() {\n    ResetCompletedRequest();\n    ASSERT_TRUE(GetActiveWebContents());\n    sender_ = GetActiveWebContents()->GetWeakPtr();\n    function_ = base::MakeRefCounted<ManagementSetEnabledFunction>();\n    function_->set_source_context_type(mojom::ContextType::kWebUi);\n    function_->set_user_gesture(true);\n    function_->SetRenderFrameHost(sender_->GetPrimaryMainFrame());\n    base::ListValue args;\n    args.Append(id_);\n    args.Append(true);\n    function_->SetArgs(std::move(args));\n    dispatcher_ = std::make_unique<ExtensionFunctionDispatcher>(profile());\n    function_->SetDispatcher(dispatcher_->AsWeakPtr());\n    response_ =\n        std::make_unique<api_test_utils::SendResponseHelper>(function_.get());\n    function_->RunWithValidation().Execute();\n    ASSERT_TRUE(base::test::RunUntil([&] {\n      CaptureDialog();\n      return !dialog_.is_null() || response_->has_response();\n    }));\n    ASSERT_FALSE(response_->has_response());\n    ASSERT_FALSE(dialog_.is_null());\n    ASSERT_FALSE(PromptPermissions().empty());\n  }\n\n  void CaptureDialog() {\n    if (!dialog_.is_null() || !sender_) {\n      return;\n    }\n    dialog_.Reset(Java_ExtensionTestUtils_captureInstallDialogForTesting(\n        base::android::AttachCurrentThread(), sender_.get()));\n  }\n\n  std::vector<std::u16string> PromptPermissions() {\n    return Java_ExtensionTestUtils_getInstallDialogPermissionsForTesting(\n        base::android::AttachCurrentThread(), dialog_);\n  }\n\n  void CompletePrompt(bool accept) {\n    ASSERT_TRUE(response_);\n    ASSERT_FALSE(response_->has_response());\n    ASSERT_TRUE(Java_ExtensionTestUtils_clickInstallDialogForTesting(\n        base::android::AttachCurrentThread(), dialog_, accept));\n    ASSERT_TRUE(\n        base::test::RunUntil([&] { return response_->has_response(); }));\n    EXPECT_TRUE(function_->did_respond());\n    base::RunLoop().RunUntilIdle();\n  }\n\n  void ExpectOriginalGrants() {\n    auto grants = ExtensionPrefs::Get(profile())->GetGrantedPermissions(id_);\n    ASSERT_TRUE(grants);\n    EXPECT_EQ(*original_grants_, *grants);\n    EXPECT_FALSE(grants->HasAPIPermission(\"history\"));\n  }\n\n  void ResetCompletedRequest() {\n    if (function_) {\n      CHECK(response_ && response_->has_response());\n    }\n    function_.reset();\n    response_.reset();\n    dispatcher_.reset();\n    dialog_.Reset();\n    sender_.reset();\n  }\n\n  void TearDownOnMainThread() override {\n    if (function_ && !response_->has_response()) {\n      // A failed assertion may precede asynchronous icon/modal creation. Keep\n      // the real function and observer alive until its dialog can be dismissed\n      // or it has independently completed; never leak it into the next test.\n      CHECK(base::test::RunUntil([&] {\n        CaptureDialog();\n        return !dialog_.is_null() || response_->has_response();\n      }));\n      if (!response_->has_response()) {\n        Java_ExtensionTestUtils_dismissInstallDialogForTesting(\n            base::android::AttachCurrentThread(), dialog_);\n        CHECK(base::test::RunUntil([&] { return response_->has_response(); }));\n      }\n    }\n    ResetCompletedRequest();\n    auto_confirm_.reset();\n    b_.reset();\n    original_grants_.reset();\n    ExtensionManagementApiBrowserTest::TearDownOnMainThread();\n  }\n\n  TestExtensionDir extension_dir_;\n  ExtensionId id_;\n  base::FilePath c_path_;\n  scoped_refptr<const Extension> b_;\n  std::unique_ptr<PermissionSet> original_grants_;\n  std::unique_ptr<ScopedTestDialogAutoConfirm> auto_confirm_;\n  base::WeakPtr<content::WebContents> sender_;\n  std::unique_ptr<ExtensionFunctionDispatcher> dispatcher_;\n  scoped_refptr<ManagementSetEnabledFunction> function_;\n  std::unique_ptr<api_test_utils::SendResponseHelper> response_;\n  base::android::ScopedJavaGlobalRef<jobject> dialog_;\n};\n\nIN_PROC_BROWSER_TEST_F(ExtensionManagementReenableConsentTest,\n                       SignedReplacementRequiresFreshConsent) {\n  ASSERT_NO_FATAL_FAILURE(BeginEnable());\n  const auto b_messages = PromptPermissions();\n  for (const auto& warning : b_->permissions_data()->GetPermissionMessages()) {\n    EXPECT_NE(b_messages.end(),\n              std::ranges::find(b_messages, warning.message()));\n  }\n\n  ASSERT_FALSE(UpdateExtension(id_, c_path_, 0));\n  scoped_refptr<const Extension> c =\n      extension_registry()->disabled_extensions().GetByID(id_);\n  ASSERT_TRUE(c);\n  ASSERT_NE(b_.get(), c.get());\n  ASSERT_EQ(id_, c->id());\n  ASSERT_EQ(\"3\", c->version().GetString());\n  ASSERT_TRUE(\n      ExtensionPrefs::Get(profile())->DidExtensionEscalatePermissions(id_));\n  ASSERT_NO_FATAL_FAILURE(ExpectOriginalGrants());\n  EXPECT_EQ(b_messages, PromptPermissions());\n  std::vector<std::u16string> c_only_messages;\n  for (const auto& warning : c->permissions_data()->GetPermissionMessages()) {\n    if (std::ranges::find(b_messages, warning.message()) == b_messages.end()) {\n      c_only_messages.push_back(warning.message());\n    }\n  }\n  ASSERT_FALSE(c_only_messages.empty());\n  // The pending prompt actually displays B's warnings, not the added C grant.\n  for (const auto& warning : c_only_messages) {\n    EXPECT_EQ(b_messages.end(), std::ranges::find(b_messages, warning));\n  }\n\n  ASSERT_NO_FATAL_FAILURE(CompletePrompt(true));\n  EXPECT_FALSE(response_->GetResponse());\n  EXPECT_EQ(keys::kUserDidNotReEnableError, function_->GetError());\n  EXPECT_EQ(c.get(), extension_registry()->disabled_extensions().GetByID(id_));\n  EXPECT_FALSE(extension_registry()->enabled_extensions().Contains(id_));\n  ASSERT_NO_FATAL_FAILURE(ExpectOriginalGrants());\n\n  ASSERT_NO_FATAL_FAILURE(BeginEnable());\n  const auto c_messages = PromptPermissions();\n  for (const auto& warning : c_only_messages) {\n    EXPECT_NE(c_messages.end(), std::ranges::find(c_messages, warning));\n  }\n  ASSERT_NO_FATAL_FAILURE(CompletePrompt(true));\n  EXPECT_TRUE(response_->GetResponse());\n  EXPECT_EQ(c.get(), extension_registry()->enabled_extensions().GetByID(id_));\n  auto grants = ExtensionPrefs::Get(profile())->GetGrantedPermissions(id_);\n  ASSERT_TRUE(grants);\n  EXPECT_TRUE(grants->HasAPIPermission(\"bookmarks\"));\n  EXPECT_TRUE(grants->HasAPIPermission(\"history\"));\n}\n\nIN_PROC_BROWSER_TEST_F(ExtensionManagementReenableConsentTest,\n                       UnchangedSignedUpdateAcceptanceEnables) {\n  ASSERT_NO_FATAL_FAILURE(BeginEnable());\n  ASSERT_NO_FATAL_FAILURE(CompletePrompt(true));\n  EXPECT_TRUE(response_->GetResponse());\n  EXPECT_EQ(b_.get(), extension_registry()->enabled_extensions().GetByID(id_));\n  auto grants = ExtensionPrefs::Get(profile())->GetGrantedPermissions(id_);\n  ASSERT_TRUE(grants);\n  EXPECT_TRUE(grants->HasAPIPermission(\"bookmarks\"));\n  EXPECT_FALSE(grants->HasAPIPermission(\"history\"));\n}\n\nIN_PROC_BROWSER_TEST_F(ExtensionManagementReenableConsentTest,\n                       UnchangedSignedUpdateCancellationPreservesGrants) {\n  ASSERT_NO_FATAL_FAILURE(BeginEnable());\n  ASSERT_NO_FATAL_FAILURE(CompletePrompt(false));\n  EXPECT_FALSE(response_->GetResponse());\n  EXPECT_EQ(keys::kUserDidNotReEnableError, function_->GetError());\n  EXPECT_EQ(b_.get(), extension_registry()->disabled_extensions().GetByID(id_));\n  EXPECT_FALSE(extension_registry()->enabled_extensions().Contains(id_));\n  ASSERT_NO_FATAL_FAILURE(ExpectOriginalGrants());\n}\n#endif  // BUILDFLAG(IS_ANDROID)\n\n}  // namespace extensions\n"
+- description: Repair reviewed AN Android native compiler integration errors without changing intended behavior
+  regex:
+    re_pattern: '\#include\ "base/memory/weak_ptr\.h"\
+
+      \#include\ "base/run_loop\.h"\
+
+      \#include\ "base/test/run_until\.h"\
+
+      \#include\ "extensions/browser/extension_function_dispatcher\.h"\
+
+      \#include\ "extensions/common/mojom/context_type\.mojom\.h"\
+
+      \#include\ "extensions/common/permissions/permission_message\.h"\
+
+      \#include\ "extensions/common/permissions/permission_set\.h"\
+
+      \#include\ "extensions/common/permissions/permissions_data\.h"\
+
+      \#include\ "extensions/test/test_extension_dir\.h"\
+
+      \
+
+      //\ Must\ follow\ the\ WebContents\ and\ JNI\ conversion\ declarations\.\
+
+      \#include\ "chrome/browser/ui/android/extensions/test_support_jni_headers/ExtensionTestUtils_jni\.h"\
+
+      \#endif\
+
+      \
+
+      static_assert\(BUILDFLAG\(ENABLE_EXTENSIONS_CORE\)\);\
+
+      '
+    replace: '#include "base/memory/weak_ptr.h"
+
+      #include "base/run_loop.h"
+
+      #include "base/test/run_until.h"
+
+      #include "brave/browser/extensions/android/extension_test_utils.h"
+
+      #include "extensions/browser/extension_function_dispatcher.h"
+
+      #include "extensions/common/mojom/context_type.mojom.h"
+
+      #include "extensions/common/permissions/permission_message.h"
+
+      #include "extensions/common/permissions/permission_set.h"
+
+      #include "extensions/common/permissions/permissions_data.h"
+
+      #include "extensions/test/test_extension_dir.h"
+
+      #endif
+
+
+      static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
+
+      '
+- description: Repair reviewed AN Android native compiler integration errors without changing intended behavior
+  regex:
+    re_pattern: '\ \ \ \ if\ \(!dialog_\.is_null\(\)\ \|\|\ !sender_\)\ \{\
+
+      \ \ \ \ \ \ return;\
+
+      \ \ \ \ \}\
+
+      \ \ \ \ dialog_\.Reset\(Java_ExtensionTestUtils_captureInstallDialogForTesting\(\
+
+      \ \ \ \ \ \ \ \ base::android::AttachCurrentThread\(\),\ sender_\.get\(\)\)\);\
+
+      \ \ \}\
+
+      \
+
+      \ \ std::vector<std::u16string>\ PromptPermissions\(\)\ \{\
+
+      \ \ \ \ return\ Java_ExtensionTestUtils_getInstallDialogPermissionsForTesting\(\
+
+      \ \ \ \ \ \ \ \ base::android::AttachCurrentThread\(\),\ dialog_\);\
+
+      \ \ \}\
+
+      \
+
+      \ \ void\ CompletePrompt\(bool\ accept\)\ \{\
+
+      \ \ \ \ ASSERT_TRUE\(response_\);\
+
+      \ \ \ \ ASSERT_FALSE\(response_\->has_response\(\)\);\
+
+      \ \ \ \ ASSERT_TRUE\(Java_ExtensionTestUtils_clickInstallDialogForTesting\(\
+
+      \ \ \ \ \ \ \ \ base::android::AttachCurrentThread\(\),\ dialog_,\ accept\)\);\
+
+      \ \ \ \ ASSERT_TRUE\(\
+
+      \ \ \ \ \ \ \ \ base::test::RunUntil\(\[\&\]\ \{\ return\ response_\->has_response\(\);\ \}\)\);\
+
+      '
+    replace: "    if (!dialog_.is_null() || !sender_) {\n      return;\n    }\n    dialog_.Reset(android_test::CaptureInstallDialogForTesting(\n        base::android::AttachCurrentThread(), sender_.get()));\n  }\n\n  std::vector<std::u16string> PromptPermissions() {\n    return android_test::GetInstallDialogPermissionsForTesting(\n        base::android::AttachCurrentThread(), dialog_);\n  }\n\n  void CompletePrompt(bool accept) {\n    ASSERT_TRUE(response_);\n    ASSERT_FALSE(response_->has_response());\n    ASSERT_TRUE(android_test::ClickInstallDialogForTesting(\n        base::android::AttachCurrentThread(), dialog_, accept));\n    ASSERT_TRUE(\n        base::test::RunUntil([&] { return response_->has_response(); }));\n"
+- description: Repair reviewed AN Android native compiler integration errors without changing intended behavior
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ return\ !dialog_\.is_null\(\)\ \|\|\ response_\->has_response\(\);\
+
+      \ \ \ \ \ \ \}\)\);\
+
+      \ \ \ \ \ \ if\ \(!response_\->has_response\(\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ Java_ExtensionTestUtils_dismissInstallDialogForTesting\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ base::android::AttachCurrentThread\(\),\ dialog_\);\
+
+      \ \ \ \ \ \ \ \ CHECK\(base::test::RunUntil\(\[\&\]\ \{\ return\ response_\->has_response\(\);\ \}\)\);\
+
+      \ \ \ \ \ \ \}\
+
+      '
+    replace: "        return !dialog_.is_null() || response_->has_response();\n      }));\n      if (!response_->has_response()) {\n        android_test::DismissInstallDialogForTesting(\n            base::android::AttachCurrentThread(), dialog_);\n        CHECK(base::test::RunUntil([&] { return response_->has_response(); }));\n      }\n"
+- description: Round2 reviewed Android signed install consent repair
+  regex:
+    re_pattern: '\
+
+      \#if\ BUILDFLAG\(IS_ANDROID\)\
+
+      \#include\ <algorithm>\
+
+      \#include\ <vector>\
+
+      \
+
+      \#include\ "base/android/jni_android\.h"\
+
+      \#include\ "base/android/jni_array\.h"\
+
+      \#include\ "base/android/scoped_java_ref\.h"\
+
+      \#include\ "base/check\.h"\
+
+      \#include\ "base/memory/weak_ptr\.h"\
+
+      \#include\ "base/run_loop\.h"\
+
+      \#include\ "base/test/run_until\.h"\
+
+      \#include\ "brave/browser/extensions/android/extension_test_utils\.h"\
+
+      \#include\ "extensions/browser/extension_function_dispatcher\.h"\
+
+      \#include\ "extensions/common/mojom/context_type\.mojom\.h"\
+
+      \#include\ "extensions/common/permissions/permission_message\.h"\
+
+      \#include\ "extensions/common/permissions/permission_set\.h"\
+
+      '
+    replace: '
+
+      #if BUILDFLAG(IS_ANDROID)
+
+      #include <algorithm>
+
+      #include <optional>
+
+      #include <vector>
+
+
+      #include "base/android/jni_android.h"
+
+      #include "base/android/jni_array.h"
+
+      #include "base/android/scoped_java_ref.h"
+
+      #include "base/check.h"
+
+      #include "base/functional/bind.h"
+
+      #include "base/memory/weak_ptr.h"
+
+      #include "base/run_loop.h"
+
+      #include "base/test/run_until.h"
+
+      #include "brave/browser/extensions/android/extension_test_utils.h"
+
+      #include "chrome/browser/extensions/extension_install_prompt.h"
+
+      #include "extensions/browser/crx_installer.h"
+
+      #include "extensions/browser/extension_function_dispatcher.h"
+
+      #include "extensions/browser/install/crx_install_error.h"
+
+      #include "extensions/browser/install_prompt_data.h"
+
+      #include "extensions/common/mojom/context_type.mojom.h"
+
+      #include "extensions/common/permissions/permission_message.h"
+
+      #include "extensions/common/permissions/permission_set.h"
+
+      '
+- description: Round2 reviewed Android signed install consent repair
+  regex:
+    re_pattern: '\ \ EXPECT_FALSE\(extension_registry\(\)\->enabled_extensions\(\)\.Contains\(id_\)\);\
+
+      \ \ ASSERT_NO_FATAL_FAILURE\(ExpectOriginalGrants\(\)\);\
+
+      \}\
+
+      \#endif\ \ //\ BUILDFLAG\(IS_ANDROID\)\
+
+      \
+
+      \}\ \ //\ namespace\ extensions\
+
+      '
+    replace: "  EXPECT_FALSE(extension_registry()->enabled_extensions().Contains(id_));\n  ASSERT_NO_FATAL_FAILURE(ExpectOriginalGrants());\n}\n\n// Exercise the separate CrxInstaller re-enable path used by a signed CRX\n// dropped into chrome://extensions. ManagementSetEnabledFunction is not the\n// owner of this prompt, so its consent-instance guard cannot protect it.\nclass ExtensionSettingsUpdateReenableConsentTest\n    : public ExtensionManagementReenableConsentTest {\n protected:\n  void BeginSettingsUpdate() {\n    ResetCompletedRequest();\n    ASSERT_TRUE(GetActiveWebContents());\n    sender_ = GetActiveWebContents()->GetWeakPtr();\n    const base::FilePath b_path = PackVersion(\"2\", R\"(\"bookmarks\")\");\n    ASSERT_FALSE(b_path.empty());\n    auto prompt = std::make_unique<ExtensionInstallPrompt>(\n        sender_.get(), std::make_unique<InstallPromptData>(\n                           InstallPromptData::UNSET_PROMPT_TYPE));\n    installer_ = CrxInstaller::Create(profile(), std::move(prompt));\n    installer_->set_error_on_unsupported_requirements(true);\n    installer_->set_off_store_install_allow_reason(\n        CrxInstaller::OffStoreInstallAllowedFromSettingsPage);\n    installer_->set_install_immediately(true);\n    installer_->AddInstallerCallback(base::BindOnce(\n        [](ExtensionSettingsUpdateReenableConsentTest* self,\n           const std::optional<CrxInstallError>& error) {\n          self->install_finished_ = true;\n          self->install_failed_ = error.has_value();\n        },\n        base::Unretained(this)));\n    settings_prompt_pending_ = true;\n    installer_->InstallCrx(b_path);\n    ASSERT_TRUE(base::test::RunUntil([&] {\n      CaptureDialog();\n      return install_finished_ && (install_failed_ || !dialog_.is_null());\n    }));\n    ASSERT_FALSE(install_failed_);\n    ASSERT_FALSE(dialog_.is_null());\n    b_ = extension_registry()->disabled_extensions().GetByID(id_);\n    ASSERT_TRUE(b_);\n    ASSERT_EQ(installer_->extension(), b_.get());\n    ASSERT_EQ(\"2\", b_->version().GetString());\n    ASSERT_FALSE(PromptPermissions().empty());\n    ASSERT_NO_FATAL_FAILURE(ExpectOriginalGrants());\n  }\n\n  void CompleteSettingsPrompt(bool accept) {\n    ASSERT_TRUE(android_test::ClickInstallDialogForTesting(\n        base::android::AttachCurrentThread(), dialog_, accept));\n    settings_prompt_pending_ = false;\n    base::RunLoop().RunUntilIdle();\n  }\n\n  void TearDownOnMainThread() override {\n    if (settings_prompt_pending_) {\n      CHECK(base::test::RunUntil([&] {\n        CaptureDialog();\n        return install_finished_ && (install_failed_ || !dialog_.is_null());\n      }));\n      if (!dialog_.is_null()) {\n        android_test::DismissInstallDialogForTesting(\n            base::android::AttachCurrentThread(), dialog_);\n      }\n    }\n    installer_.reset();\n    ExtensionManagementReenableConsentTest::TearDownOnMainThread();\n  }\n\n  scoped_refptr<CrxInstaller> installer_;\n  bool install_finished_ = false;\n  bool install_failed_ = false;\n  bool settings_prompt_pending_ = false;\n};\n\nIN_PROC_BROWSER_TEST_F(ExtensionSettingsUpdateReenableConsentTest,\n                       SignedReplacementRequiresFreshConsent) {\n  ASSERT_NO_FATAL_FAILURE(BeginSettingsUpdate());\n  const auto b_messages = PromptPermissions();\n  for (const auto& warning : b_->permissions_data()->GetPermissionMessages()) {\n    EXPECT_NE(b_messages.end(),\n              std::ranges::find(b_messages, warning.message()));\n  }\n  ASSERT_FALSE(UpdateExtension(id_, c_path_, 0));\n  scoped_refptr<const Extension> c =\n      extension_registry()->disabled_extensions().GetByID(id_);\n  ASSERT_TRUE(c);\n  ASSERT_NE(b_.get(), c.get());\n  ASSERT_EQ(\"3\", c->version().GetString());\n  ASSERT_TRUE(\n      ExtensionPrefs::Get(profile())->DidExtensionEscalatePermissions(id_));\n  ASSERT_NO_FATAL_FAILURE(ExpectOriginalGrants());\n  EXPECT_EQ(b_messages, PromptPermissions());\n  std::vector<std::u16string> c_only_messages;\n  for (const auto& warning : c->permissions_data()->GetPermissionMessages()) {\n    if (std::ranges::find(b_messages, warning.message()) == b_messages.end()) {\n      c_only_messages.push_back(warning.message());\n    }\n  }\n  ASSERT_FALSE(c_only_messages.empty());\n  ASSERT_NO_FATAL_FAILURE(CompleteSettingsPrompt(true));\n  EXPECT_EQ(c.get(), extension_registry()->disabled_extensions().GetByID(id_));\n  EXPECT_FALSE(extension_registry()->enabled_extensions().Contains(id_));\n  ASSERT_NO_FATAL_FAILURE(ExpectOriginalGrants());\n\n  // A fresh prompt for C still works through the ordinary management UI.\n  ASSERT_NO_FATAL_FAILURE(BeginEnable());\n  const auto c_messages = PromptPermissions();\n  for (const auto& warning : c_only_messages) {\n    EXPECT_NE(c_messages.end(), std::ranges::find(c_messages, warning));\n  }\n  ASSERT_NO_FATAL_FAILURE(CompletePrompt(true));\n  EXPECT_TRUE(response_->GetResponse());\n  EXPECT_EQ(c.get(), extension_registry()->enabled_extensions().GetByID(id_));\n  auto grants = ExtensionPrefs::Get(profile())->GetGrantedPermissions(id_);\n  ASSERT_TRUE(grants);\n  EXPECT_TRUE(grants->HasAPIPermission(\"bookmarks\"));\n  EXPECT_TRUE(grants->HasAPIPermission(\"history\"));\n}\n\nIN_PROC_BROWSER_TEST_F(ExtensionSettingsUpdateReenableConsentTest,\n                       UnchangedSignedUpdateAcceptanceEnables) {\n  ASSERT_NO_FATAL_FAILURE(BeginSettingsUpdate());\n  ASSERT_NO_FATAL_FAILURE(CompleteSettingsPrompt(true));\n  EXPECT_EQ(b_.get(), extension_registry()->enabled_extensions().GetByID(id_));\n  auto grants = ExtensionPrefs::Get(profile())->GetGrantedPermissions(id_);\n  ASSERT_TRUE(grants);\n  EXPECT_TRUE(grants->HasAPIPermission(\"bookmarks\"));\n  EXPECT_FALSE(grants->HasAPIPermission(\"history\"));\n}\n\nIN_PROC_BROWSER_TEST_F(ExtensionSettingsUpdateReenableConsentTest,\n                       UnchangedSignedUpdateCancellationPreservesGrants) {\n  ASSERT_NO_FATAL_FAILURE(BeginSettingsUpdate());\n  ASSERT_NO_FATAL_FAILURE(CompleteSettingsPrompt(false));\n  EXPECT_EQ(b_.get(), extension_registry()->disabled_extensions().GetByID(id_));\n  EXPECT_FALSE(extension_registry()->enabled_extensions().Contains(id_));\n  ASSERT_NO_FATAL_FAILURE(ExpectOriginalGrants());\n}\n\n#endif  // BUILDFLAG(IS_ANDROID)\n\n}  // namespace extensions\n"

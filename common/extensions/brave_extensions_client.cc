@@ -12,7 +12,10 @@
 #include "base/command_line.h"
 #include "base/strings/string_split.h"
 #include "base/strings/string_util.h"
+#include "build/build_config.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/skus/common/skus_utils.h"
+#endif
 #include "components/component_updater/component_updater_switches.h"
 #include "extensions/common/extension_urls.h"
 
@@ -60,12 +63,15 @@ void BraveExtensionsClient::InitializeWebStoreUrls(
 
 bool BraveExtensionsClient::IsScriptableURL(const GURL& url,
                                             std::string* error) const {
+
+#if !BUILDFLAG(IS_ANDROID)
   if (skus::IsSafeOrigin(url)) {
     if (error) {
       *error = "This site is protected and cannot be scripted.";
     }
     return false;
   }
+#endif
   return ChromeExtensionsClient::IsScriptableURL(url, error);
 }
 

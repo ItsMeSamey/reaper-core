@@ -1,0 +1,686 @@
+diff --git a/chrome/browser/ui/browser_window/internal/android/java/src/org/chromium/chrome/browser/ui/browser_window/ChromeAndroidTaskImpl.java b/chrome/browser/ui/browser_window/internal/android/java/src/org/chromium/chrome/browser/ui/browser_window/ChromeAndroidTaskImpl.java
+index 0a407ebcc1624c97208d72d2f690294e03ae1dba..93e1bc56ba3f734acdd7b81d6756f063534e500a 100644
+--- a/chrome/browser/ui/browser_window/internal/android/java/src/org/chromium/chrome/browser/ui/browser_window/ChromeAndroidTaskImpl.java
++++ b/chrome/browser/ui/browser_window/internal/android/java/src/org/chromium/chrome/browser/ui/browser_window/ChromeAndroidTaskImpl.java
+@@ -68,6 +68,7 @@
+ import java.util.LinkedHashMap;
+ import java.util.List;
+ import java.util.Map;
++import java.util.function.Consumer;
+ import java.util.function.Predicate;
+ import java.util.function.Supplier;
+ 
+@@ -146,6 +147,9 @@
+          */
+         final Map<Profile, AndroidBrowserWindow> mAndroidBrowserWindows = new ArrayMap<>();
+         @Nullable IncognitoTabModelObserver mIncognitoTabModelObserver;
++        final Map<Class<? extends ChromeAndroidTaskFeature>,
++                        Supplier<@Nullable ChromeAndroidTaskFeature>>
++                mTabModelScopedFeatureFactories = new ArrayMap<>();
+ 
+         InternalActivityScopedObjects(
+                 ActivityScopedObjects activityScopedObjects, AndroidBrowserWindow browserWindow) {
+@@ -192,6 +196,12 @@
+             mIncognitoTabModelObserver =
+                     new IncognitoTabModelObserverImpl(chromeAndroidTaskImpl, this);
+             incognitoModel.addIncognitoObserver(mIncognitoTabModelObserver);
++            // Observer registration does not replay creation. A restored, noncurrent
++            // incognito delegate can already exist before this task is initialized.
++            var profile = incognitoModel.getProfile();
++            if (profile != null && !mAndroidBrowserWindows.containsKey(profile)) {
++                mIncognitoTabModelObserver.onIncognitoModelCreated();
++            }
+         }
+ 
+         void removeIncognitoTabModelObserver() {
+@@ -278,6 +288,11 @@
+     private final Profile mInitialProfile;
+ 
+     private final WindowStateManager mWindowStateManager = new WindowStateManager();
++    private boolean mBrowserFullscreenRequested;
++    private String mBrowserFullscreenExtensionUrl = "";
++    private String mBrowserFullscreenExtensionName = "";
++    private @Nullable BrowserFullscreenDelegate mFullscreenDelegate;
++    private @Nullable Callback<Boolean> mBrowserFullscreenCallback;
+ 
+     /**
+      * Contains all {@link ChromeAndroidTaskFeature}s associated with this {@link
+@@ -291,6 +306,11 @@
+      * AndroidBrowserWindow}.
+      */
+     @Nullable private AndroidBrowserWindow mPendingBrowserWindow;
++
++    // Retire the exact pending tracker entry before any disposal or completion
++    // callback can reenter window creation.
++    private @Nullable Consumer<Boolean> mPendingTaskRemovalCallback;
++    private @Nullable Runnable mTransferredTabCleanup;
+ 
+     /**
+      * All {@link InternalActivityScopedObjects} instances associated with this Task.
+@@ -306,6 +326,9 @@
+     private final Deque<InternalActivityScopedObjects> mActivityScopedObjectsDeque =
+             new ArrayDeque<>();
+ 
++    // Invalidates listener continuations after any nested registration or retirement.
++    private long mActivityListenerRegistrationGeneration;
++
+     /**
+      * Observer for profile removal. This is attached to the {@link ProfileManager} in the
+      * constructor and is removed when the {@link ChromeAndroidTask} is destroyed.
+@@ -317,13 +340,14 @@
+ 
+                 @Override
+                 public void onProfileDestroyed(Profile profile) {
+-                    if (mPendingBrowserWindow != null
+-                            && mPendingBrowserWindow.getProfile() == profile) {
+-                        throw new IllegalStateException(
+-                                "Profile destroyed when an associated browser window is pending");
++                    if (mPendingTaskInfo != null
++                            && mPendingTaskInfo.mCreateParams.getProfile() == profile) {
++                        destroy();
++                        return;
+                     }
+ 
+                     removeAllFeaturesForProfile(profile);
++                    if (profile == mInitialProfile) cleanupTransferredTab();
+ 
+                     var iterator = mActivityScopedObjectsDeque.iterator();
+                     while (iterator.hasNext()) {
+@@ -401,16 +425,20 @@
+ 
+         @Override
+         public void onIncognitoModelCreated() {
++            if (!mChromeAndroidTaskImpl.ownsActivity(mInternalActivityScopedObjects)) {
++                return;
++            }
+             var incognitoModel =
+                     mInternalActivityScopedObjects.mActivityScopedObjects.mTabModelSelector
+                             .getModel(/* incognito= */ true);
+ 
+             var incognitoProfile = incognitoModel.getProfile();
+-            assert incognitoProfile != null : "Incognito profile should not be null.";
+-            assert mInternalActivityScopedObjects.mAndroidBrowserWindows.get(incognitoProfile)
+-                            == null
+-                    : "Incognito TabModel created, but its Activity already has the"
+-                            + " incognito Profile";
++            if (incognitoProfile == null
++                    || incognitoProfile.getNativeBrowserContextPointer() == 0
++                    || mInternalActivityScopedObjects.mAndroidBrowserWindows.containsKey(
++                            incognitoProfile)) {
++                return;
++            }
+ 
+             var browserWindow =
+                     new AndroidBrowserWindow(
+@@ -425,6 +453,8 @@
+             mInternalActivityScopedObjects.addBrowserWindow(browserWindow);
+             long ptr = browserWindow.getOrCreateNativePtr();
+             incognitoModel.associateWithBrowserWindow(ptr);
++            mChromeAndroidTaskImpl.addTabModelScopedFeatures(
++                    mInternalActivityScopedObjects, incognitoModel);
+             mChromeAndroidTaskImpl.mAndroidBrowserWindowObserverNotifier.notifyBrowserWindowAdded(
+                     browserWindow);
+             mChromeAndroidTaskImpl.mAndroidBrowserWindowObserverNotifier.updateActiveBrowserWindow(
+@@ -433,6 +463,9 @@
+ 
+         @Override
+         public void didBecomeEmpty() {
++            if (!mChromeAndroidTaskImpl.ownsActivity(mInternalActivityScopedObjects)) {
++                return;
++            }
+             // It is possible that the profile will start destruction shortly after this happens. In
+             // this case, the ProfileObserver will also handle the BrowserWindow destruction (in
+             // addition to profile scoped feature and pending activity cleanup). However, if at
+@@ -497,6 +530,7 @@
+ 
+                 @Override
+                 public void onEnd(WindowInsetsAnimationCompat animation) {
++                    if (mFullscreenDelegate != null) mFullscreenDelegate.onWindowInsetsChanged();
+                     useActivity(
+                             topActivityScopedObjects ->
+                                     mWindowStateManager.update(
+@@ -623,6 +657,12 @@
+         ProfileManager.addObserver(mProfileObserver);
+ 
+         mState = State.PENDING_CREATE;
++        String fullscreenExtensionUrl = pendingTaskInfo.mCreateParams.getFullscreenExtensionUrl();
++        mBrowserFullscreenExtensionUrl =
++                fullscreenExtensionUrl == null ? "" : fullscreenExtensionUrl;
++        String fullscreenExtensionName = pendingTaskInfo.mCreateParams.getFullscreenExtensionName();
++        mBrowserFullscreenExtensionName =
++                fullscreenExtensionName == null ? "" : fullscreenExtensionName;
+         mPendingActionManager.updateFutureStates(mPendingTaskInfo);
+     }
+ 
+@@ -657,6 +697,22 @@
+      *     {@link ChromeAndroidTask}.
+      * @see #removeActivityScopedObjects
+      */
++    void setPendingTaskRemovalCallback(Consumer<Boolean> callback) {
++        assert mPendingTaskInfo != null && mPendingTaskRemovalCallback == null;
++        mPendingTaskRemovalCallback = callback;
++    }
++
++    void setTransferredTabCleanup(Runnable cleanup) {
++        assert mTransferredTabCleanup == null;
++        mTransferredTabCleanup = cleanup;
++    }
++
++    private void cleanupTransferredTab() {
++        var cleanup = mTransferredTabCleanup;
++        mTransferredTabCleanup = null;
++        if (cleanup != null) cleanup.run();
++    }
++
+     void addActivityScopedObjects(ActivityScopedObjects activityScopedObjects) {
+         ThreadUtils.assertOnUiThread();
+         addActivityScopedObjectsInternal(activityScopedObjects);
+@@ -693,15 +749,28 @@
+         mId = getTaskId(topActivityScopedObjects.mActivity);
+         mState = State.IDLE;
+ 
++        // Consume callback ownership before actions or native completion can
++        // destroy this task synchronously.
++        var pendingTaskInfo = mPendingTaskInfo;
++        mPendingTaskInfo = null;
++        var removePendingTask = mPendingTaskRemovalCallback;
++        mPendingTaskRemovalCallback = null;
++        var taskCreationCallbackForNative = pendingTaskInfo.takeTaskCreationCallbackForNative();
++        // Keep the request discoverable until model association has completed,
++        // then retire it before externally observable actions or completion.
++        if (removePendingTask != null) removePendingTask.accept(false);
++
+         // (3) Dispatch pending actions.
+         @Nullable Rect futureBounds = mPendingActionManager.getFutureBoundsInDp();
+         @Nullable Rect futureRestoredBounds = mPendingActionManager.getFutureRestoredBoundsInDp();
+         dispatchPendingActions(topActivityScopedObjects, futureBounds, futureRestoredBounds);
+ 
+         // (4) Invoke the JNI callback for the native CreateBrowserWindow() function.
+-        JniOnceCallback<Long> taskCreationCallbackForNative =
+-                mPendingTaskInfo.mTaskCreationCallbackForNative;
+         if (taskCreationCallbackForNative != null) {
++            if (isDestroyed() || mInitialProfile.shutdownStarted()) {
++                taskCreationCallbackForNative.onResult(0L);
++                return;
++            }
+             assert mActivityScopedObjectsDeque.size() == 1
+                     : "#completePendingCreate() called in an invalid state";
+             var internalActivityScopedObjects = mActivityScopedObjectsDeque.peekFirst();
+@@ -709,7 +778,6 @@
+ 
+             taskCreationCallbackForNative.onResult(browserWindow.getOrCreateNativePtr());
+         }
+-        mPendingTaskInfo = null;
+     }
+ 
+     @Override
+@@ -768,7 +836,11 @@
+     public <T extends ChromeAndroidTaskFeature> @Nullable ChromeAndroidTaskFeature addFeature(
+             ChromeAndroidTaskFeatureKey featureKey, Supplier<@Nullable T> featureSupplier) {
+         ThreadUtils.assertOnUiThread();
+-        assertPendingCreateOrIdle();
++        // Profile-scoped UI can be recreated while the OS completes a window state update.
++        assert mState == State.PENDING_CREATE
++                        || mState == State.IDLE
++                        || mState == State.PENDING_UPDATE
++                : "This Task is not pending or alive.";
+ 
+         ChromeAndroidTaskFeature feature = mFeatures.get(featureKey);
+         if (feature != null) {
+@@ -802,6 +874,53 @@
+     }
+ 
+     @Override
++    public void addTabModelScopedFeatureFactory(
++            ActivityWindowAndroid activityWindowAndroid,
++            Class<? extends ChromeAndroidTaskFeature> featureClass,
++            Supplier<@Nullable ChromeAndroidTaskFeature> featureSupplier) {
++        ThreadUtils.assertOnUiThread();
++        var objects = findInternalActivityScopedObjects(activityWindowAndroid);
++        if (objects == null || !ownsActivity(objects)) {
++            return;
++        }
++        objects.mTabModelScopedFeatureFactories.putIfAbsent(featureClass, featureSupplier);
++        // Enumerate only windows already owned by this activity. In particular, asking for
++        // extension metadata cannot initialize an absent incognito profile or window.
++        for (var profile : objects.mAndroidBrowserWindows.keySet()) {
++            var model = objects.mActivityScopedObjects.mTabModelSelector.getModel(
++                    profile.isOffTheRecord());
++            if (model != null && model.getProfile() == profile) {
++                addTabModelScopedFeatures(objects, model);
++            }
++        }
++        notifyFeatureFocus(isActive(), true);
++    }
++
++    private boolean ownsActivity(InternalActivityScopedObjects objects) {
++        return (mState == State.IDLE || mState == State.PENDING_UPDATE
++                        || mState == State.PENDING_CREATE)
++                && mActivityScopedObjectsDeque.contains(objects);
++    }
++
++    private void addTabModelScopedFeatures(InternalActivityScopedObjects objects, TabModel model) {
++        if (!ownsActivity(objects)) return;
++        var profile = model.getProfile();
++        var window = objects.mAndroidBrowserWindows.get(profile);
++        if (profile == null || window == null || window.getNativePtr() == 0) return;
++        for (var entry : objects.mTabModelScopedFeatureFactories.entrySet()) {
++            addFeature(new ChromeAndroidTaskFeatureKey(entry.getKey(), profile,
++                            objects.mActivityScopedObjects.mActivityWindowAndroid, model),
++                    entry.getValue());
++        }
++    }
++
++    @Override
++    public void removeFeature(ChromeAndroidTaskFeatureKey featureKey) {
++        ThreadUtils.assertOnUiThread();
++        removeFeaturesIf(featureKey::equals);
++    }
++
++    @Override
+     public void removeAllFeaturesForActivity(ActivityWindowAndroid activityWindowAndroid) {
+         ThreadUtils.assertOnUiThread();
+         removeAllFeaturesForActivityInternal(activityWindowAndroid);
+@@ -872,18 +991,29 @@
+         // state to prevent the Feature from accessing the Task's APIs that should only be called
+         // when mState is "ALIVE".
+         mState = State.DESTROYING;
+-
+-        if (mPendingTaskInfo != null) {
+-            mPendingTaskInfo.destroy();
+-            mPendingTaskInfo = null;
+-        }
++        mBrowserFullscreenRequested = false;
++        mBrowserFullscreenExtensionUrl = "";
++        mBrowserFullscreenExtensionName = "";
++
++        var pendingTaskInfo = mPendingTaskInfo;
++        mPendingTaskInfo = null;
++        JniOnceCallback<Long> callback =
++                pendingTaskInfo == null
++                        ? null
++                        : pendingTaskInfo.takeTaskCreationCallbackForNative();
++        var removePendingTask = mPendingTaskRemovalCallback;
++        mPendingTaskRemovalCallback = null;
++        if (removePendingTask != null) removePendingTask.accept(true);
++        if (pendingTaskInfo != null) pendingTaskInfo.destroy();
+ 
+         removeAllFeatures();
++        cleanupTransferredTab();
+         ProfileManager.removeObserver(mProfileObserver);
+ 
+         removeAllActivityScopedObjects();
+ 
+         mState = State.DESTROYED;
++        if (callback != null) callback.onResult(0L);
+     }
+ 
+     /**
+@@ -949,6 +1079,21 @@
+     }
+ 
+     @Override
++    public boolean isProfileWindowActive(
++            Profile profile, @Nullable ActivityWindowAndroid activityWindowAndroid) {
++        ThreadUtils.assertOnUiThread();
++        var objects = mActivityScopedObjectsDeque.peekFirst();
++        if (objects == null || !ownsActivity(objects)
++                || objects.mActivityScopedObjects.mActivityWindowAndroid != activityWindowAndroid
++                || !objects.mAndroidBrowserWindows.containsKey(profile)) {
++            return false;
++        }
++        return objects.mActivityScopedObjects.mTabModelSelector.getCurrentModel().getProfile()
++                        == profile
++                && isActive();
++    }
++
++    @Override
+     public boolean isMaximized() {
+         ThreadUtils.assertOnUiThread();
+         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+@@ -978,10 +1123,50 @@
+     public boolean isFullscreen() {
+         ThreadUtils.assertOnUiThread();
+         if (mState == State.PENDING_CREATE) {
+-            return false;
+-        }
+-
++            return Boolean.TRUE.equals(mPendingActionManager.getFullscreenRequest());
++        }
++        if (mState == State.DESTROYED || mState == State.DESTROYING) return false;
++        if (mFullscreenDelegate != null) {
++            return mFullscreenDelegate.getFullscreenUiModeSupplier().get();
++        }
+         return mWindowStateManager.getWindowState() == WindowState.FULLSCREEN;
++    }
++
++    @Override
++    public void setFullscreen(boolean fullscreen) {
++        setFullscreen(fullscreen, "");
++    }
++
++    @Override
++    public void setFullscreen(boolean fullscreen, String extensionUrl) {
++        setFullscreen(fullscreen, extensionUrl, "");
++    }
++
++    @Override
++    public void setFullscreen(boolean fullscreen, String extensionUrl, String extensionName) {
++        ThreadUtils.assertOnUiThread();
++        if (mState == State.DESTROYING || mState == State.DESTROYED || mState == State.UNKNOWN)
++            return;
++        mBrowserFullscreenRequested = fullscreen;
++        mBrowserFullscreenExtensionUrl = fullscreen ? extensionUrl : "";
++        mBrowserFullscreenExtensionName = fullscreen ? extensionName : "";
++        if (mState == State.PENDING_CREATE) {
++            mPendingActionManager.requestFullscreen(fullscreen);
++            return;
++        }
++        var delegate = mFullscreenDelegate;
++        if (delegate != null) {
++            if (fullscreen) delegate.setBrowserFullscreenExtensionInfo(extensionUrl, extensionName);
++            if (isDestroyed() || mFullscreenDelegate != delegate) return;
++            delegate.setBrowserFullscreenMode(fullscreen);
++            // Match the desktop window-state API: normal state exits actual tab fullscreen too.
++            if (!fullscreen
++                    && !isDestroyed()
++                    && mFullscreenDelegate == delegate
++                    && delegate.getFullscreenUiModeSupplier().get()) {
++                delegate.exitTabFullscreen();
++            }
++        }
+     }
+ 
+     @Override
+@@ -1064,22 +1249,23 @@
+             return;
+         }
+ 
++        requestInactive(PendingAction.SHOW_INACTIVE);
++    }
++
++    private void requestInactive(@PendingAction int action) {
+         useActivity(
+                 topActivityScopedObjects -> {
+-                    if (!AppHeaderUtils.isAppInDesktopWindow(
+-                                    topActivityScopedObjects.mDesktopWindowStateManager)
+-                            || !isActiveInternal(topActivityScopedObjects)) {
+-                        return;
+-                    }
+-
+-                    // Do nothing is there is only one task left.
+-                    if (ChromeAndroidTaskTrackerImpl.getInstance().countOfTasks() <= 1) {
+-                        return;
+-                    }
+-
+-                    mPendingActionManager.requestAction(PendingAction.SHOW_INACTIVE);
++                    if (!isActiveInternal(topActivityScopedObjects)) return;
++
++                    // The creation callback can run before this task is registered in the tracker.
++                    var taskToActivate =
++                            ChromeAndroidTaskTrackerImpl.getInstance()
++                                    .getMostRecentlyActivatedTaskOtherThan(this);
++                    if (taskToActivate == null) return;
++
++                    mPendingActionManager.requestAction(action);
+                     mState = State.PENDING_UPDATE;
+-                    ChromeAndroidTaskTrackerImpl.getInstance().activatePenultimatelyActivatedTask();
++                    taskToActivate.activate();
+                 });
+     }
+ 
+@@ -1124,24 +1310,7 @@
+             return;
+         }
+ 
+-        useActivity(
+-                topActivityScopedObjects -> {
+-                    if (!AppHeaderUtils.isAppInDesktopWindow(
+-                                    topActivityScopedObjects.mDesktopWindowStateManager)
+-                            || !isActiveInternal(topActivityScopedObjects)) {
+-                        return;
+-                    }
+-
+-                    // Do nothing if there is only one task left.
+-                    if (ChromeAndroidTaskTrackerImpl.getInstance().countOfTasks() <= 1) {
+-                        return;
+-                    }
+-
+-                    mPendingActionManager.requestAction(PendingAction.DEACTIVATE);
+-                    mState = State.PENDING_UPDATE;
+-
+-                    ChromeAndroidTaskTrackerImpl.getInstance().activatePenultimatelyActivatedTask();
+-                });
++        requestInactive(PendingAction.DEACTIVATE);
+     }
+ 
+     @Override
+@@ -1155,6 +1324,7 @@
+     @Override
+     public void maximize() {
+         ThreadUtils.assertOnUiThread();
++        setFullscreen(false);
+         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+             Log.w(TAG, "maximize() requires Android R+; does nothing");
+             return;
+@@ -1191,6 +1361,7 @@
+     @Override
+     public void restore() {
+         ThreadUtils.assertOnUiThread();
++        setFullscreen(false);
+         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+             Log.w(TAG, "restore() requires Android R+; does nothing");
+             return;
+@@ -1250,9 +1421,7 @@
+             maybeSetStateIdle(actions);
+         }
+ 
+-        for (var feature : mFeatures.values()) {
+-            feature.onTaskFocusChanged(isTopResumedActivity);
+-        }
++        notifyFeatureFocus(isTopResumedActivity, false);
+ 
+         mAndroidBrowserWindowObserverNotifier.updateActiveBrowserWindow(getActiveBrowserWindow());
+     }
+@@ -1486,7 +1655,16 @@
+ 
+         // By this point, mActivityScopedObjectsDeque has been correctly
+         // updated. Register listeners for its current top Activity.
+-        registerListenersForTopActivity();
++        var expectedTop = mActivityScopedObjectsDeque.peekFirst();
++        boolean registeredCurrentScope = registerListenersForTopActivity();
++        // Native completion can retire or replace this Activity scope. Do not
++        // continue accessing its window or cache bounds for a former owner.
++        if (!registeredCurrentScope
++                || expectedTop == null
++                || !ownsActivity(expectedTop)
++                || mActivityScopedObjectsDeque.peekFirst() != expectedTop) {
++            return;
++        }
+ 
+         // Cache the maximize bound.
+         if (VERSION.SDK_INT >= VERSION_CODES.R) {
+@@ -1500,13 +1678,53 @@
+         }
+     }
+ 
+-    private void registerListenersForTopActivity() {
++    private boolean isCurrentActivityListenerRegistration(
++            long generation, InternalActivityScopedObjects objects) {
++        return generation == mActivityListenerRegistrationGeneration
++                && ownsActivity(objects)
++                && mActivityScopedObjectsDeque.peekFirst() == objects;
++    }
++
++    private boolean registerListenersForTopActivity() {
++        long registrationGeneration = ++mActivityListenerRegistrationGeneration;
+         var internalActivityScopedObjects = mActivityScopedObjectsDeque.peekFirst();
+         if (internalActivityScopedObjects == null) {
+-            return;
++            return false;
+         }
+         var topActivityScopedObjects = internalActivityScopedObjects.mActivityScopedObjects;
+         var topActivityWindowAndroid = topActivityScopedObjects.mActivityWindowAndroid;
++
++        var fullscreenDelegate = topActivityScopedObjects.mBrowserFullscreenDelegate;
++        if (fullscreenDelegate != null) {
++            mFullscreenDelegate = fullscreenDelegate;
++            Boolean pendingFullscreen = mPendingActionManager.getFullscreenRequest();
++            if (pendingFullscreen != null) mBrowserFullscreenRequested = pendingFullscreen;
++            fullscreenDelegate.setBrowserFullscreenExtensionInfo(
++                    mBrowserFullscreenExtensionUrl, mBrowserFullscreenExtensionName);
++            if (!isCurrentActivityListenerRegistration(
++                    registrationGeneration, internalActivityScopedObjects)) return false;
++            fullscreenDelegate.setBrowserFullscreenMode(mBrowserFullscreenRequested);
++            if (!isCurrentActivityListenerRegistration(
++                    registrationGeneration, internalActivityScopedObjects)) return false;
++            Callback<Boolean> browserFullscreenCallback =
++                    fullscreen -> {
++                        if (isCurrentActivityListenerRegistration(
++                                        registrationGeneration, internalActivityScopedObjects)
++                                && mFullscreenDelegate == fullscreenDelegate) {
++                            // Posted initial supplier values may be stale after an ordinary exit.
++                            mBrowserFullscreenRequested =
++                                    fullscreenDelegate.getBrowserFullscreenModeSupplier().get();
++                            if (!mBrowserFullscreenRequested) {
++                                mBrowserFullscreenExtensionUrl = "";
++                                mBrowserFullscreenExtensionName = "";
++                            }
++                        }
++                    };
++            mBrowserFullscreenCallback = browserFullscreenCallback;
++            fullscreenDelegate
++                    .getBrowserFullscreenModeSupplier()
++                    .addSyncObserverAndPostIfNonNull(browserFullscreenCallback);
++        }
+ 
+         // Register Activity LifecycleObservers
+         var lifecycleDispatcher = getActivityLifecycleDispatcher(topActivityWindowAndroid);
+@@ -1517,6 +1735,12 @@
+         if (mIsTopActivityResumedWithNative) {
+             completePendingCreate();
+         }
++        // A once callback can retire this Task or move away and back to the
++        // same scope. Only the most recent registration owns its listeners.
++        if (!isCurrentActivityListenerRegistration(
++                registrationGeneration, internalActivityScopedObjects)) {
++            return false;
++        }
+ 
+         // Register OnLayoutChangeListener for the decor View.
+         var window = getActivity(topActivityWindowAndroid).getWindow();
+@@ -1538,10 +1762,30 @@
+         tabModelSelector
+                 .getCurrentTabModelSupplier()
+                 .addSyncObserverAndPostIfNonNull(mOnTabModelSelectedCallback);
++        if (!isCurrentActivityListenerRegistration(
++                registrationGeneration, internalActivityScopedObjects)) {
++            return false;
++        }
+         onTabModelSelected(tabModelSelector.getCurrentModel());
++        return isCurrentActivityListenerRegistration(
++                registrationGeneration, internalActivityScopedObjects);
+     }
+ 
+     private void unregisterListenersForTopActivity() {
++        ++mActivityListenerRegistrationGeneration;
++        var fullscreenDelegate = mFullscreenDelegate;
++        var fullscreenCallback = mBrowserFullscreenCallback;
++        mFullscreenDelegate = null;
++        mBrowserFullscreenCallback = null;
++        if (fullscreenDelegate != null) {
++            if (fullscreenCallback != null) {
++                fullscreenDelegate
++                        .getBrowserFullscreenModeSupplier()
++                        .removeObserver(fullscreenCallback);
++            }
++            // Clear only the retiring Activity browser UI, not its tab/DOM session.
++            fullscreenDelegate.setBrowserFullscreenMode(false);
++        }
+         var internalActivityScopedObjects = mActivityScopedObjectsDeque.peekFirst();
+         if (internalActivityScopedObjects == null) {
+             return;
+@@ -1590,6 +1834,9 @@
+         // Initiate actions on a live Task.
+         assertAlive();
+ 
++        Boolean fullscreen = mPendingActionManager.takeFullscreenRequest();
++        String fullscreenExtensionUrl = mBrowserFullscreenExtensionUrl;
++        String fullscreenExtensionName = mBrowserFullscreenExtensionName;
+         @PendingAction int[] pendingActions = mPendingActionManager.getAndClearPendingActions();
+         for (@PendingAction int action : pendingActions) {
+             if (action == PendingAction.NONE) continue;
+@@ -1598,8 +1845,10 @@
+                     showInternal(topActivityScopedObjects);
+                     break;
+                 case PendingAction.SHOW_INACTIVE:
++                    showInactive();
++                    break;
+                 case PendingAction.DEACTIVATE:
+-                    ChromeAndroidTaskTrackerImpl.getInstance().activatePenultimatelyActivatedTask();
++                    deactivate();
+                     break;
+                 case PendingAction.CLOSE:
+                     topActivityScopedObjects.mActivity.finishAndRemoveTask();
+@@ -1636,6 +1885,9 @@
+                     assert false : "Unsupported pending action.";
+             }
+         }
++        if (fullscreen != null && !isDestroyed()) {
++            setFullscreen(fullscreen, fullscreenExtensionUrl, fullscreenExtensionName);
++        }
+     }
+ 
+     @Nullable
+@@ -1703,6 +1955,8 @@
+     }
+ 
+     private void removeAllFeaturesForActivityInternal(ActivityWindowAndroid activityWindowAndroid) {
++        var objects = findInternalActivityScopedObjects(activityWindowAndroid);
++        if (objects != null) objects.mTabModelScopedFeatureFactories.clear();
+         removeFeaturesIf(key -> activityWindowAndroid == key.mActivityWindowAndroid);
+     }
+ 
+@@ -1905,10 +2159,42 @@
+         mState = State.IDLE;
+     }
+ 
++    private void notifyFeatureFocus(boolean hasFocus, boolean tabModelScopedOnly) {
++        var objects = mActivityScopedObjectsDeque.peekFirst();
++        if (objects == null || !ownsActivity(objects)) return;
++        var current = objects.mActivityScopedObjects.mTabModelSelector.getCurrentModel();
++        // Emit loss before gain, so a profile switch cannot finish with WINDOW_ID_NONE.
++        for (var entry : mFeatures.entrySet()) {
++            var key = entry.getKey();
++            if (key.mTabModel != null
++                    && (key.mTabModel != current
++                            || key.mActivityWindowAndroid
++                                    != objects.mActivityScopedObjects.mActivityWindowAndroid)) {
++                entry.getValue().onTaskFocusChanged(false);
++            }
++        }
++        for (var entry : mFeatures.entrySet()) {
++            var key = entry.getKey();
++            if (key.mTabModel == null) {
++                if (!tabModelScopedOnly) entry.getValue().onTaskFocusChanged(hasFocus);
++            } else if (key.mTabModel == current
++                    && key.mActivityWindowAndroid
++                            == objects.mActivityScopedObjects.mActivityWindowAndroid) {
++                entry.getValue().onTaskFocusChanged(hasFocus);
++            }
++        }
++    }
++
+     private void onTabModelSelected(TabModel tabModel) {
++        var objects = mActivityScopedObjectsDeque.peekFirst();
++        if (objects == null || !ownsActivity(objects)
++                || objects.mActivityScopedObjects.mTabModelSelector.getCurrentModel() != tabModel) {
++            return;
++        }
+         for (var feature : mFeatures.values()) {
+             feature.onTabModelSelected(tabModel);
+         }
++        notifyFeatureFocus(isActive(), true);
+         mAndroidBrowserWindowObserverNotifier.updateActiveBrowserWindow(getActiveBrowserWindow());
+     }
+ 

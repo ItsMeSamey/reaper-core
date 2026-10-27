@@ -3,6 +3,8 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // you can obtain one at http://mozilla.org/MPL/2.0/.
 
+#include "build/build_config.h"
+
 #include "brave/browser/profiles/brave_profile_manager.h"
 
 #include <string>
@@ -11,7 +13,9 @@
 
 #include "base/check.h"
 #include "base/path_service.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/misc_metrics/profile_misc_metrics_service_factory.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/perf/brave_perf_features_processor.h"
 #include "brave/browser/profiles/profile_util.h"
 #include "brave/browser/request_otr/request_otr_service_factory.h"
@@ -19,7 +23,9 @@
 #include "brave/components/brave_ads/buildflags/buildflags.h"
 #include "brave/components/brave_rewards/core/buildflags/buildflags.h"
 #include "brave/components/brave_shields/content/browser/brave_shields_util.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_shields/core/browser/brave_shields_p3a.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_shields/core/browser/brave_shields_utils.h"
 #include "brave/components/brave_shields/core/common/features.h"
 #include "brave/components/brave_shields/core/common/pref_names.h"
@@ -142,6 +148,7 @@ void MigrateHttpsUpgradeSettings(Profile* profile) {
   }
 }
 
+#if !BUILDFLAG(IS_ANDROID)
 void RecordInitialP3AValues(Profile* profile) {
 #if BUILDFLAG(ENABLE_BRAVE_ADS)
   // Preference is unregistered for some reason in profile_manager_unittest
@@ -161,6 +168,7 @@ void RecordInitialP3AValues(Profile* profile) {
         brave_shields::GetFingerprintingControlType(map, GURL()));
   }
 }
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 }  // namespace
 
@@ -232,7 +240,9 @@ void BraveProfileManager::DoFinalInitForServices(Profile* profile,
   // Android tests
   // TODO(https://github.com/brave/brave-browser/issues/50822)
   // Move RecordInitialP3AValues from here
+#if !BUILDFLAG(IS_ANDROID)
   RecordInitialP3AValues(profile);
+#endif  // !BUILDFLAG(IS_ANDROID)
   // TODO(https://github.com/brave/brave-browser/issues/50823)
   // Move MigrateHttpsUpgradeSettings from here as well
   MigrateHttpsUpgradeSettings(profile);
@@ -261,7 +271,9 @@ void BraveProfileManager::DoFinalInitForServices(Profile* profile,
   DCHECK(status);
   status->UpdateGCMDriverStatus();
 #endif
+#if !BUILDFLAG(IS_ANDROID)
   misc_metrics::ProfileMiscMetricsServiceFactory::GetServiceForContext(profile);
+#endif  // !BUILDFLAG(IS_ANDROID)
 #if BUILDFLAG(ENABLE_REQUEST_OTR)
   request_otr::RequestOTRServiceFactory::GetForBrowserContext(profile);
 #endif

@@ -1,0 +1,270 @@
+diff --git a/chrome/browser/extensions/api/webstore_private/webstore_private_unittest.cc b/chrome/browser/extensions/api/webstore_private/webstore_private_unittest.cc
+index 5f9c7afb0bb17e164c0b45e6508d564a9e005a9e..a357e8424dcb77a024f1d5c9616603552e0d369c 100644
+--- a/chrome/browser/extensions/api/webstore_private/webstore_private_unittest.cc
++++ b/chrome/browser/extensions/api/webstore_private/webstore_private_unittest.cc
+@@ -46,9 +46,13 @@
+ #include "services/data_decoder/public/cpp/test_support/in_process_data_decoder.h"
+ #include "testing/gtest/include/gtest/gtest.h"
+ 
+-#if !BUILDFLAG(IS_ANDROID)
++#if BUILDFLAG(IS_ANDROID)
++#include "extensions/browser/extension_function_constants.h"
++#include "extensions/browser/extensions_browser_client.h"
++#include "extensions/browser/install_tracker.h"
++#else
+ #include "components/enterprise/promotion_types.h"
+-#endif  // !BUILDFLAG(IS_ANDROID)
++#endif  // BUILDFLAG(IS_ANDROID)
+ 
+ static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
+ 
+@@ -56,7 +60,9 @@
+ namespace {
+ constexpr char kInvalidId[] = "Invalid id";
+ constexpr char kExtensionId[] = "abcdefghijklmnopabcdefghijklmnop";
++#if !BUILDFLAG(IS_ANDROID)
+ constexpr char kFakeJustification[] = "I need it!";
++#endif  // !BUILDFLAG(IS_ANDROID)
+ constexpr char kExtensionManifest[] = R"({
+   \"name\" : \"Extension\",
+   \"manifest_version\": 3,
+@@ -340,7 +346,11 @@
+       base::MakeRefCounted<WebstorePrivateGetExtensionStatusFunction>();
+   std::optional<base::Value> response = RunFunctionAndReturnValue(
+       function.get(), GenerateArgs(kExtensionId, kExtensionManifest));
++#if BUILDFLAG(IS_ANDROID)
++  VerifyResponse(ExtensionInstallStatus::kBlockedByPolicy, *response);
++#else
+   VerifyResponse(ExtensionInstallStatus::kCanRequest, *response);
++#endif  // BUILDFLAG(IS_ANDROID)
+ }
+ 
+ TEST_F(WebstorePrivateGetExtensionStatusTest,
+@@ -402,6 +412,17 @@
+     : public WebstorePrivateApiTestBase {
+  public:
+   WebstorePrivateBeginInstallWithManifest3Test() = default;
++
++  std::unique_ptr<content::WebContents> CreateSenderWebContents(Profile* profile) {
++    auto web_contents =
++        content::WebContentsTester::CreateTestWebContents(profile, nullptr);
++#if BUILDFLAG(IS_ANDROID)
++    // These API calls represent a live document, not an uninitialized test frame.
++    content::RenderFrameHostTester::For(web_contents->GetPrimaryMainFrame())
++        ->InitializeRenderFrameIfNeeded();
++#endif
++    return web_contents;
++  }
+ 
+   void EnableExtensionRequest(bool enable) {
+     profile()->GetTestingPrefService()->SetManagedPref(
+@@ -452,11 +473,12 @@
+   test::ScopedDisableRootChecking disable_root_checking_;
+ };
+ 
++#if !BUILDFLAG(IS_ANDROID)
+ TEST_F(WebstorePrivateBeginInstallWithManifest3Test,
+        RequestExtensionWithConfirmThenShowPendingDialog) {
+   EnableExtensionRequest(true);
+   std::unique_ptr<content::WebContents> web_contents =
+-      content::WebContentsTester::CreateTestWebContents(profile(), nullptr);
++      CreateSenderWebContents(profile());
+ 
+   VerifyPendingList({}, profile());
+ 
+@@ -497,7 +519,7 @@
+   VerifyPendingList({}, profile());
+ 
+   std::unique_ptr<content::WebContents> web_contents =
+-      content::WebContentsTester::CreateTestWebContents(profile(), nullptr);
++      CreateSenderWebContents(profile());
+   auto function =
+       base::MakeRefCounted<WebstorePrivateBeginInstallWithManifest3Function>();
+   function->SetRenderFrameHost(web_contents->GetPrimaryMainFrame());
+@@ -514,7 +536,7 @@
+        RequestExtensionWithJustification) {
+   EnableExtensionRequest(true);
+   std::unique_ptr<content::WebContents> web_contents =
+-      content::WebContentsTester::CreateTestWebContents(profile(), nullptr);
++      CreateSenderWebContents(profile());
+ 
+   VerifyPendingList({}, profile());
+ 
+@@ -543,7 +565,7 @@
+   VerifyPendingList({}, profile());
+ 
+   std::unique_ptr<content::WebContents> web_contents =
+-      content::WebContentsTester::CreateTestWebContents(profile(), nullptr);
++      CreateSenderWebContents(profile());
+   auto function =
+       base::MakeRefCounted<WebstorePrivateBeginInstallWithManifest3Function>();
+   function->SetRenderFrameHost(web_contents->GetPrimaryMainFrame());
+@@ -566,7 +588,7 @@
+   VerifyPendingList({}, profile());
+ 
+   std::unique_ptr<content::WebContents> web_contents =
+-      content::WebContentsTester::CreateTestWebContents(profile(), nullptr);
++      CreateSenderWebContents(profile());
+   auto function =
+       base::MakeRefCounted<WebstorePrivateBeginInstallWithManifest3Function>();
+   function->SetRenderFrameHost(web_contents->GetPrimaryMainFrame());
+@@ -602,10 +624,94 @@
+                     profile());
+ }
+ 
++#else
++TEST_F(WebstorePrivateBeginInstallWithManifest3Test,
++       EnterpriseRequestUnavailablePreservesPolicyAndOrdinaryInstall) {
++  EnableExtensionRequest(true);
++  VerifyPendingList({}, profile());
++  auto web_contents = CreateSenderWebContents(profile());
++  auto function =
++      base::MakeRefCounted<WebstorePrivateBeginInstallWithManifest3Function>();
++  function->SetRenderFrameHost(web_contents->GetPrimaryMainFrame());
++  const int approvals_before = WebstorePrivateApi::GetPendingApprovalsCountForTesting();
++  {
++    ScopedTestDialogAutoConfirm auto_confirm(ScopedTestDialogAutoConfirm::ACCEPT);
++    api_test_utils::RunFunction(function.get(),
++                                GenerateArgs(kExtensionId, kExtensionManifest),
++                                profile());
++  }
++  VerifyBlockedByPolicyFunctionResult(function.get(), std::u16string());
++  VerifyPendingList({}, profile());
++  EXPECT_EQ(WebstorePrivateApi::GetPendingApprovalsCountForTesting(), approvals_before);
++
++  // Removing report transmission does not bypass the policy or disable normal consent.
++  EnableExtensionRequest(false);
++  function =
++      base::MakeRefCounted<WebstorePrivateBeginInstallWithManifest3Function>();
++  function->SetRenderFrameHost(web_contents->GetPrimaryMainFrame());
++  {
++    ScopedTestDialogAutoConfirm auto_confirm(ScopedTestDialogAutoConfirm::ACCEPT);
++    auto response = RunFunctionAndReturnValue(
++        function.get(), GenerateArgs(kExtensionId, kExtensionManifest));
++    ASSERT_TRUE(response);
++    ASSERT_TRUE(response->is_string());
++    EXPECT_TRUE(response->GetString().empty());
++  }
++  VerifyPendingList({}, profile());
++  EXPECT_EQ(WebstorePrivateApi::GetPendingApprovalsCountForTesting(),
++            approvals_before + 1);
++}
++
++TEST_F(WebstorePrivateBeginInstallWithManifest3Test,
++       CompleteInstallWithoutSenderAllowsRetry) {
++  auto web_contents = CreateSenderWebContents(profile());
++  InstallTracker* tracker =
++      ExtensionsBrowserClient::Get()->GetInstallTracker(profile());
++  ASSERT_TRUE(tracker);
++  ASSERT_FALSE(tracker->GetActiveInstall(kExtensionId));
++  const int approvals_before =
++      WebstorePrivateApi::GetPendingApprovalsCountForTesting();
++
++  // Each attempt requires a fresh approval through the ordinary consent path.
++  for (int attempt = 0; attempt < 2; ++attempt) {
++    SCOPED_TRACE(attempt);
++    {
++      auto begin = base::MakeRefCounted<
++          WebstorePrivateBeginInstallWithManifest3Function>();
++      begin->SetRenderFrameHost(web_contents->GetPrimaryMainFrame());
++      ScopedTestDialogAutoConfirm auto_confirm(
++          ScopedTestDialogAutoConfirm::ACCEPT);
++      auto response = RunFunctionAndReturnValue(
++          begin.get(), GenerateArgs(kExtensionId, kExtensionManifest));
++      ASSERT_TRUE(response);
++      ASSERT_TRUE(response->is_string());
++      EXPECT_TRUE(response->GetString().empty());
++    }
++    ASSERT_EQ(WebstorePrivateApi::GetPendingApprovalsCountForTesting(),
++              approvals_before + 1);
++    ASSERT_TRUE(tracker->GetActiveInstall(kExtensionId));
++
++    // This owned unit call has a valid pending approval but no sender frame.
++    auto complete =
++        base::MakeRefCounted<WebstorePrivateCompleteInstallFunction>();
++    EXPECT_EQ(function_constants::kCouldNotFindSenderWebContents,
++              RunFunctionAndReturnError(
++                  complete.get(),
++                  WebstorePrivateApiTestBase::GenerateArgs(kExtensionId)));
++    EXPECT_EQ(WebstorePrivateApi::GetPendingApprovalsCountForTesting(),
++              approvals_before);
++    EXPECT_FALSE(tracker->GetActiveInstall(kExtensionId));
++    EXPECT_FALSE(
++        ExtensionRegistry::Get(profile())->GetInstalledExtension(kExtensionId));
++  }
++}
++
++#endif  // !BUILDFLAG(IS_ANDROID)
++
+ TEST_F(WebstorePrivateBeginInstallWithManifest3Test,
+        InvalidManifestVersionZero) {
+   std::unique_ptr<content::WebContents> web_contents =
+-      content::WebContentsTester::CreateTestWebContents(profile(), nullptr);
++      CreateSenderWebContents(profile());
+   auto function =
+       base::MakeRefCounted<WebstorePrivateBeginInstallWithManifest3Function>();
+   function->SetRenderFrameHost(web_contents->GetPrimaryMainFrame());
+@@ -636,7 +742,7 @@
+   SetExtensionSettings(kBlockAllExtensionSettings);
+ 
+   std::unique_ptr<content::WebContents> web_contents =
+-      content::WebContentsTester::CreateTestWebContents(profile(), nullptr);
++      CreateSenderWebContents(profile());
+   auto function =
+       base::MakeRefCounted<WebstorePrivateBeginInstallWithManifest3Function>();
+   function->SetRenderFrameHost(web_contents->GetPrimaryMainFrame());
+@@ -656,7 +762,7 @@
+   VerifyPendingList({}, profile());
+ 
+   std::unique_ptr<content::WebContents> web_contents =
+-      content::WebContentsTester::CreateTestWebContents(profile(), nullptr);
++      CreateSenderWebContents(profile());
+   auto function =
+       base::MakeRefCounted<WebstorePrivateBeginInstallWithManifest3Function>();
+   function->SetRenderFrameHost(web_contents->GetPrimaryMainFrame());
+@@ -674,7 +780,7 @@
+   SetExtensionSettings(kBlockedManifestTypeExtensionSettings);
+ 
+   std::unique_ptr<content::WebContents> web_contents =
+-      content::WebContentsTester::CreateTestWebContents(profile(), nullptr);
++      CreateSenderWebContents(profile());
+   auto function =
+       base::MakeRefCounted<WebstorePrivateBeginInstallWithManifest3Function>();
+   function->SetRenderFrameHost(web_contents->GetPrimaryMainFrame());
+@@ -691,7 +797,7 @@
+   SetExtensionSettings(kBlockedCookiesPermissionsExtensionSettings);
+ 
+   std::unique_ptr<content::WebContents> web_contents =
+-      content::WebContentsTester::CreateTestWebContents(profile(), nullptr);
++      CreateSenderWebContents(profile());
+   auto function =
+       base::MakeRefCounted<WebstorePrivateBeginInstallWithManifest3Function>();
+   function->SetRenderFrameHost(web_contents->GetPrimaryMainFrame());
+@@ -708,7 +814,7 @@
+   SetExtensionSettings(kBlockedNotificationsPermissionsExtensionSettings);
+ 
+   std::unique_ptr<content::WebContents> web_contents =
+-      content::WebContentsTester::CreateTestWebContents(profile(), nullptr);
++      CreateSenderWebContents(profile());
+   auto function =
+       base::MakeRefCounted<WebstorePrivateBeginInstallWithManifest3Function>();
+   function->SetRenderFrameHost(web_contents->GetPrimaryMainFrame());
+@@ -733,8 +839,7 @@
+   EXPECT_EQ(WebstorePrivateApi::GetPendingApprovalsCountForTesting(), 0);
+   {
+     std::unique_ptr<content::WebContents> web_contents =
+-        content::WebContentsTester::CreateTestWebContents(test_profile,
+-                                                          nullptr);
++        CreateSenderWebContents(test_profile);
+     auto function = base::MakeRefCounted<
+         WebstorePrivateBeginInstallWithManifest3Function>();
+     function->SetRenderFrameHost(web_contents->GetPrimaryMainFrame());
+@@ -826,7 +931,7 @@
+   }
+ 
+   std::unique_ptr<content::WebContents> web_contents =
+-      content::WebContentsTester::CreateTestWebContents(profile(), nullptr);
++      CreateSenderWebContents(profile());
+   auto function =
+       base::MakeRefCounted<WebstorePrivateBeginInstallWithManifest3Function>();
+   function->SetRenderFrameHost(web_contents->GetPrimaryMainFrame());

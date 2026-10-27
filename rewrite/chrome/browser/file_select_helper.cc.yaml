@@ -1,32 +1,314 @@
-# Copyright (c) 2026 The Brave Authors. All rights reserved.
-# This Source Code Form is subject to the terms of the Mozilla Public
-# License, v. 2.0. If a copy of the MPL was not distributed with this file,
-# You can obtain one at https://mozilla.org/MPL/2.0/.
-
+# Android split pane request ownership and dialog placement.
 substitutions:
-  - description: |-
-      Strip tracking metadata from uploaded images.
+- description: 'Strip tracking metadata from uploaded images.
 
-      NotifyListenerAndEnd is the point where the chosen files are
-      handed to the renderer. Therefore we override this point to select the picked
-      JPEG files, and pass to our metadata stripping pipeline.
-    preempt_function_impl:
-      function_name: FileSelectHelper::NotifyListenerAndEnd
-      code: |-
-        if (brave::MaybeStripImageMetadataForUpload(
-                image_metadata_processed_, temporary_files_, list,
-                base::BindOnce(&FileSelectHelper::NotifyListenerAndEnd, this))) {
-          return;
-        }
 
-  - description: |-
-      Recursively delete Brave-owned upload-strip temp directories.
+    NotifyListenerAndEnd is the point where the chosen files are
 
-      FileSelectHelper::DeleteFiles uses DeleteFile, which cannot remove a
-      non-empty directory. The metadata stripper creates one temporary root directory
-      which contains K sub-directories where each sub-directory is mapped to one stripped image.
-      This method helps to recursively delete only the temporary root directory we created for a stripping stage.
-    preempt_function_impl:
-      function_name: DeleteFiles
-      code: |-
-        brave::MaybeDeleteImageMetadataStripperTemporaryDir(paths);
+    handed to the renderer. Therefore we override this point to select the picked
+
+    JPEG files, and pass to our metadata stripping pipeline.'
+  preempt_function_impl:
+    function_name: FileSelectHelper::NotifyListenerAndEnd
+    code: "if (brave::MaybeStripImageMetadataForUpload(\n        image_metadata_processed_, temporary_files_, list,\n        base::BindOnce(&FileSelectHelper::NotifyListenerAndEnd, this))) {\n  return;\n}"
+- description: 'Recursively delete Brave-owned upload-strip temp directories.
+
+
+    FileSelectHelper::DeleteFiles uses DeleteFile, which cannot remove a
+
+    non-empty directory. The metadata stripper creates one temporary root directory
+
+    which contains K sub-directories where each sub-directory is mapped to one stripped image.
+
+    This method helps to recursively delete only the temporary root directory we created for a stripping stage.'
+  preempt_function_impl:
+    function_name: DeleteFiles
+    code: brave::MaybeDeleteImageMetadataStripperTemporaryDir(paths);
+- description: Apply the existing active-tab file-picker guard on Android
+  regex:
+    re_pattern: '\#if\ !BUILDFLAG\(IS_ANDROID\)\
+
+      \ \ //\ The\ dialog\ is\ parented\ to\ the\ browser\ window\ rather\ than\ to\ the\ tab,\ so'
+    replace: '  // The dialog is parented to the browser window rather than to the tab, so'
+- description: Preserve asynchronous cancellation and active-pane validation before the OS picker
+  regex:
+    re_pattern: '\ \ \ \ RunFileChooserEnd\(\);\
+
+      \ \ \ \ return;\
+
+      \ \ \}\
+
+      \#endif\ \ //\ !BUILDFLAG\(IS_ANDROID\)\
+
+      \
+
+      \ \ select_file_dialog_\ =\ ui::SelectFileDialog::Create\('
+    replace: "    RunFileChooserEnd();\n    return;\n  }\n\n  select_file_dialog_ = ui::SelectFileDialog::Create("
+- description: import Android picker owner model checks
+  regex:
+    re_pattern: '\#include\ "base/android/content_uri_utils\.h"\
+
+      '
+    replace: '#include "base/android/content_uri_utils.h"
+
+      #include "chrome/browser/android/tab_android.h"
+
+      #include "chrome/browser/tab_list/tab_list_interface.h"
+
+      #include "chrome/browser/ui/android/tab_model/tab_model.h"
+
+      #include "chrome/browser/ui/android/tab_model/tab_model_list.h"
+
+      #include "chrome/browser/ui/android/tab_model/tab_model_observer.h"
+
+      #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+
+      #include "extensions/buildflags/buildflags.h"
+
+      #include "ui/android/view_android.h"
+
+      #include "ui/base/base_window.h"
+
+      #if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+
+      #include "chrome/browser/extensions/extension_view_host.h"
+
+      #include "chrome/browser/extensions/window_controller.h"
+
+      #include "extensions/browser/extension_host_registry.h"
+
+      #include "extensions/browser/extension_registry.h"
+
+      #include "extensions/browser/extension_util.h"
+
+      #include "extensions/common/extension.h"
+
+      #include "extensions/common/manifest_handlers/incognito_info.h"
+
+      #include "extensions/common/mojom/view_type.mojom.h"
+
+      #endif
+
+      '
+- description: resolve registered Android extension picker host to its exact factory window
+  regex:
+    re_pattern: '\#if\ BUILDFLAG\(IS_ANDROID\)\
+
+      std::u16string\ GetDisplayName'
+    replace: "#if BUILDFLAG(IS_ANDROID)\nBrowserWindowInterface* GetAndroidExtensionPickerBrowser(\n    content::WebContents* contents,\n    Profile* profile) {\n#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)\n  auto* registry = extensions::ExtensionHostRegistry::Get(profile);\n  auto* host = registry ? registry->GetExtensionHostForPrimaryMainFrame(\n                              contents->GetPrimaryMainFrame())\n                        : nullptr;\n  if (!host || host->host_contents() != contents || !host->extension() ||\n      (host->extension_host_type() !=\n           extensions::mojom::ViewType::kExtensionPopup &&\n       host->extension_host_type() !=\n           extensions::mojom::ViewType::kExtensionSidePanel) ||\n      !extensions::ExtensionRegistry::Get(profile)->enabled_extensions().Contains(\n          host->extension()->id())) {\n    return nullptr;\n  }\n  // Popup/side-panel hosts are Chrome ExtensionViewHosts. Their delegate keeps\n  // the exact weak browser or tab supplied by the factory, never last-focused.\n  auto* controller = static_cast<extensions::ExtensionViewHost*>(host)\n                         ->GetExtensionWindowController();\n  auto* browser = controller ? controller->GetBrowserWindowInterface() : nullptr;\n  if (!browser || !browser->GetWindow()) {\n    return nullptr;\n  }\n  Profile* owner_profile = browser->GetProfile();\n  // Spanning incognito extensions intentionally execute in the original\n  // profile; require that precise factory-supported relationship and grant.\n  if (owner_profile != profile &&\n      (!owner_profile->IsOffTheRecord() ||\n       owner_profile->GetOriginalProfile() != profile ||\n       extensions::IncognitoInfo::IsSplitMode(host->extension()) ||\n       !extensions::util::IsIncognitoEnabled(host->extension()->id(),\n                                            owner_profile))) {\n    return nullptr;\n  }\n  return browser;\n#else\n  return nullptr;\n#endif\n}\n\nstd::u16string GetDisplayName"
+- description: retire Android picker when its owning selector model is deactivated
+  regex:
+    re_pattern: FileSelectHelper::FileSelectHelper\(Profile\*\ profile\)
+    replace: "#if BUILDFLAG(IS_ANDROID)\n// Model selection is distinct from Activity visibility and from the current\n// tab retained by each regular/incognito model. Retire the original request\n// when its model loses selection, even if that model is selected again later.\nclass FileSelectHelper::AndroidPickerModelObserver : public TabModelObserver {\n public:\n  AndroidPickerModelObserver(FileSelectHelper* helper, TabModel* model)\n      : helper_(helper), model_(model) {\n    model_->AddObserver(this);\n  }\n  ~AndroidPickerModelObserver() override {\n    if (model_) {\n      model_->RemoveObserver(this);\n    }\n  }\n  void OnWillActiveStateChange(TabModel& model, bool active) override {\n    if (!active) {\n      helper_->RunFileChooserEnd();\n    }\n  }\n  void OnTabModelDestroyed(TabModel& model) override {\n    // Shutdown can be dispatched by the model's last JNI observer bridge.\n    // Forget the dying model before the owner deletes this observer.\n    model_ = nullptr;\n    helper_->RunFileChooserEnd();\n  }\n\n private:\n  raw_ptr<FileSelectHelper> helper_;\n  raw_ptr<TabModel> model_;\n};\n#endif\n\nFileSelectHelper::FileSelectHelper(Profile* profile)"
+- description: capture exact extension host window tab context before picker preparation
+  regex:
+    re_pattern: '\ \ \ \ \ \ tabs::TabInterface::MaybeGetFromContents\(web_contents\);\
+
+      \ \ if\ \(tab_interface\)\ \{'
+    replace: "      tabs::TabInterface::MaybeGetFromContents(web_contents);\n#if BUILDFLAG(IS_ANDROID)\n  if (!tab_interface && android_file_picker_request_) {\n    if (auto* browser = GetAndroidExtensionPickerBrowser(web_contents, profile_)) {\n      android_extension_picker_request_ = true;\n      requesting_extension_browser_ = browser->GetWeakPtr();\n      auto* tab_list = TabListInterface::From(browser);\n      tab_interface = tab_list ? tab_list->GetActiveTab() : nullptr;\n    }\n  }\n  if (android_file_picker_request_ && tab_interface) {\n    if (auto* model = TabModelList::GetTabModelForTabAndroid(\n            TabAndroid::FromTabInterface(tab_interface))) {\n      picker_model_observer_ =\n          std::make_unique<AndroidPickerModelObserver>(this, model);\n    }\n  }\n#endif\n  if (tab_interface) {"
+- description: capture original Android picker document before asynchronous preparation
+  regex:
+    re_pattern: '\ \ render_frame_host_\ =\ render_frame_host;\
+
+      \ \ web_contents_\ =\ WebContents::FromRenderFrameHost\(render_frame_host\);\
+
+      '
+    replace: "  render_frame_host_ = render_frame_host;\n  web_contents_ = WebContents::FromRenderFrameHost(render_frame_host);\n#if BUILDFLAG(IS_ANDROID)\n  android_file_picker_request_ = true;\n  requesting_document_ = render_frame_host->GetWeakDocumentPtr();\n#endif\n"
+- description: require visible active original Android picker owner at final launch
+  regex:
+    re_pattern: '\ \ tabs::TabInterface\*\ tab\ =\
+
+      \ \ \ \ \ \ tabs::TabInterface::MaybeGetFromContents\(web_contents_\);\
+
+      \ \ if\ \(tab\ \&\&\ !tab\->IsActivated\(\)\)\ \{\
+
+      \ \ \ \ RunFileChooserEnd\(\);\
+
+      \ \ \ \ return;\
+
+      \ \ \}\
+
+      '
+    replace: "#if BUILDFLAG(IS_ANDROID)\n  if (!IsAndroidPickerOwnerValid() || !requesting_tab_->IsActivated() ||\n      web_contents_->GetVisibility() == content::Visibility::HIDDEN ||\n      (android_extension_picker_request_ &&\n       (!requesting_extension_browser_->GetWindow() ||\n        !requesting_extension_browser_->GetWindow()->IsActive() ||\n        !web_contents_->GetNativeView() ||\n        !web_contents_->GetNativeView()\n             ->IsAttachedAndVisibleWithWindowFocus()))) {\n#else\n  tabs::TabInterface* tab =\n      tabs::TabInterface::MaybeGetFromContents(web_contents_);\n  if (tab && !tab->IsActivated()) {\n#endif\n    RunFileChooserEnd();\n    return;\n  }\n"
+- description: mark Android picker launch before external activity can hide Chrome
+  regex:
+    re_pattern: '\ \ select_file_dialog_\->SelectFile\(\
+
+      '
+    replace: "#if BUILDFLAG(IS_ANDROID)\n  // SelectFile can synchronously launch an external Activity and hide Chrome.\n  android_file_picker_started_ = true;\n#endif\n  select_file_dialog_->SelectFile(\n"
+- description: revalidate Android picker document and active model on final async delivery
+  regex:
+    re_pattern: '\ \ \ \ std::vector<blink::mojom::FileChooserFileInfoPtr>\ list\)\ \{\
+
+      \ \ if\ \(brave::MaybeStripImageMetadataForUpload\('
+    replace: "    std::vector<blink::mojom::FileChooserFileInfoPtr> list) {\n#if BUILDFLAG(IS_ANDROID)\n  scoped_refptr<FileSelectHelper> keep_alive(this);\n  // This method also runs again after asynchronous image metadata stripping.\n  // Directory enumeration is not a renderer file-picker request.\n  if (!listener_ ||\n      (android_file_picker_request_ && !IsAndroidPickerOwnerValid())) {\n    RunFileChooserEnd();\n    return;\n  }\n#endif\n  if (brave::MaybeStripImageMetadataForUpload("
+- description: complete Android picker listener before reentrant selection callbacks
+  regex:
+    re_pattern: '\ \ listener_\->FileSelected\(std::move\(list\),\ base_dir_,\ dialog_mode_\);\
+
+      \ \ listener_\.reset\(\);'
+    replace: "#if BUILDFLAG(IS_ANDROID)\n  // The listener can synchronously navigate, close, or change the active tab.\n  auto listener = std::move(listener_);\n  listener->FileSelected(std::move(list), base_dir_, dialog_mode_);\n#else\n  listener_->FileSelected(std::move(list), base_dir_, dialog_mode_);\n  listener_.reset();\n#endif"
+- description: clean late Android metadata files after the owner was destroyed
+  regex:
+    re_pattern: '\ \ if\ \(!temporary_files_\.empty\(\)\)\ \{\
+
+      \ \ \ \ return;\
+
+      \ \ \}\
+
+      \
+
+      \ \ if\ \(listener_\)\ \{'
+    replace: "  if (!temporary_files_.empty()) {\n#if BUILDFLAG(IS_ANDROID)\n    if (!web_contents_) {\n      DeleteTemporaryFiles();\n    } else {\n      return;\n    }\n#else\n    return;\n#endif\n  }\n\n  if (listener_) {"
+- description: finish Android picker cancellation before temporary-file retention
+  regex:
+    re_pattern: 'void\ FileSelectHelper::RunFileChooserEnd\(\)\ \{\
+
+      '
+    replace: "void FileSelectHelper::RunFileChooserEnd() {\n#if BUILDFLAG(IS_ANDROID)\n  scoped_refptr<FileSelectHelper> keep_alive(this);\n  tab_hidden_subscription_ = {};\n  picker_model_observer_.reset();\n  // Temp-file cleanup may keep this object alive, but not the pending request.\n  // Move the listener before invoking it to make cancellation reentrant-safe.\n  if (listener_) {\n    auto listener = std::move(listener_);\n    listener->FileSelectionCanceled();\n  }\n  if (select_file_dialog_) {\n    select_file_dialog_->ListenerDestroyed();\n    select_file_dialog_.reset();\n  }\n  render_frame_host_ = nullptr;\n#endif\n"
+- description: observe Android picker preparation visibility independently of activation
+  regex:
+    re_pattern: '\ \ if\ \(tab_interface\)\ \{\
+
+      \ \ \ \ tab_deactivated_subscription_\ =\
+
+      '
+    replace: "  if (tab_interface) {\n#if BUILDFLAG(IS_ANDROID)\n    requesting_tab_ = tab_interface->GetWeakPtr();\n    tab_hidden_subscription_ =\n        tab_interface->RegisterWillBecomeHidden(base::BindRepeating(\n            &FileSelectHelper::OnAndroidTabHidden, base::Unretained(this)));\n#endif\n    tab_deactivated_subscription_ =\n"
+- description: validate exact Android picker document tab profile and active owning model
+  regex:
+    re_pattern: 'void\ FileSelectHelper::OnTabDeactivated\(tabs::TabInterface\*\ tab\)\ \{\
+
+      \ \ RunFileChooserEnd\(\);\
+
+      \}\
+
+      '
+    replace: "void FileSelectHelper::OnTabDeactivated(tabs::TabInterface* tab) {\n  RunFileChooserEnd();\n}\n\n#if BUILDFLAG(IS_ANDROID)\nvoid FileSelectHelper::OnVisibilityChanged(content::Visibility visibility) {\n  if (android_file_picker_request_ && !android_file_picker_started_ &&\n      visibility == content::Visibility::HIDDEN) {\n    RunFileChooserEnd();\n  }\n}\n\nvoid FileSelectHelper::OnAndroidTabHidden(tabs::TabInterface* tab) {\n  // A launched OS picker naturally hides its owner. Only preparation is\n  // canceled on hide; actual tab deactivation remains a cancellation above.\n  if (android_file_picker_request_ && !android_file_picker_started_) {\n    RunFileChooserEnd();\n  }\n}\n\nbool FileSelectHelper::IsAndroidPickerOwnerValid() const {\n  auto* document = requesting_document_.AsRenderFrameHostIfValid();\n  if (!document || !document->IsActive() || document != render_frame_host_ ||\n      !web_contents_ ||\n      WebContents::FromRenderFrameHost(document) != web_contents_ ||\n      !IsValidProfile(profile_) ||\n      Profile::FromBrowserContext(web_contents_->GetBrowserContext()) !=\n          profile_) {\n    return false;\n  }\n  auto* tab = requesting_tab_.get();\n  if (!tab) {\n    return false;\n  }\n  if (android_extension_picker_request_) {\n    auto* browser = requesting_extension_browser_.get();\n    auto* tab_list = browser ? TabListInterface::From(browser) : nullptr;\n    if (!browser || !tab_list ||\n        GetAndroidExtensionPickerBrowser(web_contents_, profile_) !=\n                        browser ||\n        tab_list->GetActiveTab() != tab ||\n        browser->GetProfile() != tab->GetProfile() ||\n        !web_contents_->GetTopLevelNativeWindow()) {\n      return false;\n    }\n  } else if (TabAndroid::FromWebContents(web_contents_) != tab ||\n             tab->GetContents() != web_contents_ || tab->GetProfile() != profile_) {\n    return false;\n  }\n  auto* model = TabModelList::GetTabModelForTabAndroid(\n      TabAndroid::FromTabInterface(tab));\n  return model && model->GetProfile() == tab->GetProfile() &&\n         model->IsActiveModel() && model->GetActiveTab() == tab;\n}\n#endif\n"
+- description: Format modified Android split dialog code
+  regex:
+    re_pattern: '\ \ \ \ \ \ \(host\->extension_host_type\(\)\ !=\
+
+      \ \ \ \ \ \ \ \ \ \ \ extensions::mojom::ViewType::kExtensionPopup\ \&\&\
+
+      \ \ \ \ \ \ \ host\->extension_host_type\(\)\ !=\
+
+      \ \ \ \ \ \ \ \ \ \ \ extensions::mojom::ViewType::kExtensionSidePanel\)\ \|\|\
+
+      \ \ \ \ \ \ !extensions::ExtensionRegistry::Get\(profile\)\->enabled_extensions\(\)\.Contains\(\
+
+      \ \ \ \ \ \ \ \ \ \ host\->extension\(\)\->id\(\)\)\)\ \{\
+
+      \ \ \ \ return\ nullptr;\
+
+      \ \ \}\
+
+      \ \ //\ Popup/side\-panel\ hosts\ are\ Chrome\ ExtensionViewHosts\.\ Their\ delegate\ keeps\
+
+      \ \ //\ the\ exact\ weak\ browser\ or\ tab\ supplied\ by\ the\ factory,\ never\ last\-focused\.\
+
+      \ \ auto\*\ controller\ =\ static_cast<extensions::ExtensionViewHost\*>\(host\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \->GetExtensionWindowController\(\);\
+
+      \ \ auto\*\ browser\ =\ controller\ \?\ controller\->GetBrowserWindowInterface\(\)\ :\ nullptr;\
+
+      \ \ if\ \(!browser\ \|\|\ !browser\->GetWindow\(\)\)\ \{\
+
+      \ \ \ \ return\ nullptr;\
+
+      \ \ \}\
+
+      \ \ Profile\*\ owner_profile\ =\ browser\->GetProfile\(\);\
+
+      '
+    replace: "      (host->extension_host_type() !=\n           extensions::mojom::ViewType::kExtensionPopup &&\n       host->extension_host_type() !=\n           extensions::mojom::ViewType::kExtensionSidePanel) ||\n      !extensions::ExtensionRegistry::Get(profile)\n           ->enabled_extensions()\n           .Contains(host->extension()->id())) {\n    return nullptr;\n  }\n  // Popup/side-panel hosts are Chrome ExtensionViewHosts. Their delegate keeps\n  // the exact weak browser or tab supplied by the factory, never last-focused.\n  auto* controller = static_cast<extensions::ExtensionViewHost*>(host)\n                         ->GetExtensionWindowController();\n  auto* browser =\n      controller ? controller->GetBrowserWindowInterface() : nullptr;\n  if (!browser || !browser->GetWindow()) {\n    return nullptr;\n  }\n  Profile* owner_profile = browser->GetProfile();\n"
+- description: Format modified Android split dialog code
+  regex:
+    re_pattern: '\ \ \ \ \ \ \(!owner_profile\->IsOffTheRecord\(\)\ \|\|\
+
+      \ \ \ \ \ \ \ owner_profile\->GetOriginalProfile\(\)\ !=\ profile\ \|\|\
+
+      \ \ \ \ \ \ \ extensions::IncognitoInfo::IsSplitMode\(host\->extension\(\)\)\ \|\|\
+
+      \ \ \ \ \ \ \ !extensions::util::IsIncognitoEnabled\(host\->extension\(\)\->id\(\),\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ owner_profile\)\)\)\ \{\
+
+      \ \ \ \ return\ nullptr;\
+
+      \ \ \}\
+
+      \ \ return\ browser;\
+
+      \#else\
+
+      '
+    replace: "      (!owner_profile->IsOffTheRecord() ||\n       owner_profile->GetOriginalProfile() != profile ||\n       extensions::IncognitoInfo::IsSplitMode(host->extension()) ||\n       !extensions::util::IsIncognitoEnabled(host->extension()->id(),\n                                             owner_profile))) {\n    return nullptr;\n  }\n  return browser;\n#else\n"
+- description: Format modified Android split dialog code
+  regex:
+    re_pattern: '\ \ tabs::TabInterface\*\ tab_interface\ =\
+
+      \ \ \ \ \ \ tabs::TabInterface::MaybeGetFromContents\(web_contents\);\
+
+      \#if\ BUILDFLAG\(IS_ANDROID\)\
+
+      \ \ if\ \(!tab_interface\ \&\&\ android_file_picker_request_\)\ \{\
+
+      \ \ \ \ if\ \(auto\*\ browser\ =\ GetAndroidExtensionPickerBrowser\(web_contents,\ profile_\)\)\ \{\
+
+      \ \ \ \ \ \ android_extension_picker_request_\ =\ true;\
+
+      \ \ \ \ \ \ requesting_extension_browser_\ =\ browser\->GetWeakPtr\(\);\
+
+      \ \ \ \ \ \ auto\*\ tab_list\ =\ TabListInterface::From\(browser\);\
+
+      \ \ \ \ \ \ tab_interface\ =\ tab_list\ \?\ tab_list\->GetActiveTab\(\)\ :\ nullptr;\
+
+      '
+    replace: "  tabs::TabInterface* tab_interface =\n      tabs::TabInterface::MaybeGetFromContents(web_contents);\n#if BUILDFLAG(IS_ANDROID)\n  if (!tab_interface && android_file_picker_request_) {\n    if (auto* browser =\n            GetAndroidExtensionPickerBrowser(web_contents, profile_)) {\n      android_extension_picker_request_ = true;\n      requesting_extension_browser_ = browser->GetWeakPtr();\n      auto* tab_list = TabListInterface::From(browser);\n      tab_interface = tab_list ? tab_list->GetActiveTab() : nullptr;\n"
+- description: Format modified Android split dialog code
+  regex:
+    re_pattern: '\ \ if\ \(android_extension_picker_request_\)\ \{\
+
+      \ \ \ \ auto\*\ browser\ =\ requesting_extension_browser_\.get\(\);\
+
+      \ \ \ \ auto\*\ tab_list\ =\ browser\ \?\ TabListInterface::From\(browser\)\ :\ nullptr;\
+
+      \ \ \ \ if\ \(!browser\ \|\|\ !tab_list\ \|\|\
+
+      \ \ \ \ \ \ \ \ GetAndroidExtensionPickerBrowser\(web_contents_,\ profile_\)\ !=\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ browser\ \|\|\
+
+      \ \ \ \ \ \ \ \ tab_list\->GetActiveTab\(\)\ !=\ tab\ \|\|\
+
+      \ \ \ \ \ \ \ \ browser\->GetProfile\(\)\ !=\ tab\->GetProfile\(\)\ \|\|\
+
+      \ \ \ \ \ \ \ \ !web_contents_\->GetTopLevelNativeWindow\(\)\)\ \{\
+
+      \ \ \ \ \ \ return\ false;\
+
+      \ \ \ \ \}\
+
+      \ \ \}\ else\ if\ \(TabAndroid::FromWebContents\(web_contents_\)\ !=\ tab\ \|\|\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ tab\->GetContents\(\)\ !=\ web_contents_\ \|\|\ tab\->GetProfile\(\)\ !=\ profile_\)\ \{\
+
+      \ \ \ \ return\ false;\
+
+      \ \ \}\
+
+      \ \ auto\*\ model\ =\ TabModelList::GetTabModelForTabAndroid\(\
+
+      \ \ \ \ \ \ TabAndroid::FromTabInterface\(tab\)\);\
+
+      \ \ return\ model\ \&\&\ model\->GetProfile\(\)\ ==\ tab\->GetProfile\(\)\ \&\&\
+
+      \ \ \ \ \ \ \ \ \ model\->IsActiveModel\(\)\ \&\&\ model\->GetActiveTab\(\)\ ==\ tab;\
+
+      \}\
+
+      \#endif\
+
+      '
+    replace: "  if (android_extension_picker_request_) {\n    auto* browser = requesting_extension_browser_.get();\n    auto* tab_list = browser ? TabListInterface::From(browser) : nullptr;\n    if (!browser || !tab_list ||\n        GetAndroidExtensionPickerBrowser(web_contents_, profile_) != browser ||\n        tab_list->GetActiveTab() != tab ||\n        browser->GetProfile() != tab->GetProfile() ||\n        !web_contents_->GetTopLevelNativeWindow()) {\n      return false;\n    }\n  } else if (TabAndroid::FromWebContents(web_contents_) != tab ||\n             tab->GetContents() != web_contents_ ||\n             tab->GetProfile() != profile_) {\n    return false;\n  }\n  auto* model =\n      TabModelList::GetTabModelForTabAndroid(TabAndroid::FromTabInterface(tab));\n  return model && model->GetProfile() == tab->GetProfile() &&\n         model->IsActiveModel() && model->GetActiveTab() == tab;\n}\n#endif\n"

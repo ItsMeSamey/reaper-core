@@ -1,0 +1,531 @@
+diff --git a/chrome/browser/extensions/api/tabs/tabs_event_router.cc b/chrome/browser/extensions/api/tabs/tabs_event_router.cc
+index 46e7836c3d5fbfafe030be7724db1bd3e0a70b74..28edcbbc37199042795d2eec46fc6cf9c612566c 100644
+--- a/chrome/browser/extensions/api/tabs/tabs_event_router.cc
++++ b/chrome/browser/extensions/api/tabs/tabs_event_router.cc
+@@ -4,9 +4,11 @@
+ 
+ #include "chrome/browser/extensions/api/tabs/tabs_event_router.h"
+ 
++#include <algorithm>
+ #include <memory>
+ #include <set>
+ 
++#include "base/task/single_thread_task_runner.h"
+ #include "base/values.h"
+ #include "chrome/browser/extensions/api/tabs/tabs_api.h"
+ #include "chrome/browser/extensions/api/tabs/tabs_constants.h"
+@@ -103,6 +105,60 @@ bool WillDispatchTabCreatedEvent(
+   return true;
+ }
+ 
++#if BUILDFLAG(IS_ANDROID)
++bool WillDispatchNativeTabEvent(
++    tabs::TabHandle handle,
++    bool created,
++    bool active,
++    const std::set<std::string>& changed_property_names,
++    content::BrowserContext* browser_context,
++    mojom::ContextType target_context,
++    const Extension* extension,
++    const base::DictValue* listener_filter,
++    std::optional<base::ListValue>& event_args_out,
++    mojom::EventFilteringInfoPtr& event_filtering_info_out,
++    bool* dispatch_separate_event_out) {
++  auto* tab = handle.Get();
++  if (!tab) {
++    return false;
++  }
++  auto scrub = ExtensionTabUtil::GetScrubTabBehavior(
++      extension, target_context, *tab);
++  auto value = ExtensionTabUtil::CreateTabObject(*tab, scrub, extension).ToValue();
++  event_args_out.emplace();
++  if (created) {
++    value.Set(tabs_constants::kSelectedKey, active);
++    value.Set(tabs_constants::kActiveKey, active);
++  } else {
++    base::DictValue changed;
++    for (const auto& key : changed_property_names) {
++      if (auto* property = value.Find(key)) {
++        changed.Set(key, property->Clone());
++      }
++    }
++    event_args_out->Append(ExtensionTabUtil::GetTabId(*tab));
++    event_args_out->Append(std::move(changed));
++  }
++  event_args_out->Append(std::move(value));
++  return true;
++}
++
++void DispatchNativeTabEvent(tabs::TabInterface& tab,
++                            bool created,
++                            std::set<std::string> changed = {}) {
++  auto* profile = tab.GetProfile();
++  auto event = std::make_unique<Event>(
++      created ? events::TABS_ON_CREATED : events::TABS_ON_UPDATED,
++      created ? api::tabs::OnCreated::kEventName : api::tabs::OnUpdated::kEventName,
++      base::ListValue(), profile);
++  event->user_gesture = EventRouter::UserGestureState::kNotEnabled;
++  event->will_dispatch_callback = base::BindRepeating(
++      &WillDispatchNativeTabEvent, tab.GetHandle(), created, tab.IsActivated(),
++      std::move(changed));
++  EventRouter::Get(profile)->BroadcastEvent(std::move(event));
++}
++#endif
++
+ }  // namespace
+ 
+ ////////////////////////////////////////////////////////////////////////////////
+@@ -112,9 +168,16 @@ TabsEventRouter::TabEntry::TabEntry(TabsEventRouter& router,
+                                     content::WebContents& contents)
+     : WebContentsObserver(&contents),
+       router_(router) {
++#if BUILDFLAG(IS_ANDROID)
++  last_known_discarded_ = contents.WasDiscarded();
++#endif
+   // We should only get here for WebContents that are tabs.
+   tabs::TabInterface* tab = tabs::TabInterface::GetFromContents(&contents);
+   CHECK(tab);
++#if BUILDFLAG(IS_ANDROID)
++  last_known_split_ = tab->GetSplit();
++  native_observation_.Observe(TabAndroid::FromTabInterface(tab));
++#endif
+ 
+   pinned_state_subscription_ =
+       tab->RegisterPinnedStateChanged(base::BindRepeating(
+@@ -132,6 +195,79 @@ TabsEventRouter::TabEntry::TabEntry(TabsEventRouter& router,
+ 
+ TabsEventRouter::TabEntry::~TabEntry() = default;
+ 
++#if BUILDFLAG(IS_ANDROID)
++bool TabsEventRouter::TabEntry::SetSplit(
++    std::optional<split_tabs::SplitTabId> split) {
++  if (last_known_split_ == split) {
++    return false;
++  }
++  last_known_split_ = split;
++  return true;
++}
++
++void TabsEventRouter::OnSplitChanged(TabListInterface& tab_list,
++                                     tabs::TabInterface* tab) {
++  auto* contents = tab->GetContents();
++  if (!contents) {
++    if (auto* pending = GetPendingTab(*tab)) {
++      if (pending->last_known_split != tab->GetSplit()) {
++        pending->last_known_split = tab->GetSplit();
++        DispatchNativeTabEvent(*tab, false, {"splitViewId"});
++      }
++    }
++    return;
++  }
++  auto* entry = GetTabEntry(*contents);
++  if (entry && entry->SetSplit(tab->GetSplit())) {
++    DispatchTabUpdatedEvent(contents, {"splitViewId"});
++  }
++}
++#endif
++
++#if BUILDFLAG(IS_ANDROID)
++void TabsEventRouter::TabEntry::MaybeDispatchDiscardedStateChange() {
++  const bool discarded = web_contents()->WasDiscarded();
++  if (discarded == last_known_discarded_) {
++    return;
++  }
++  last_known_discarded_ = discarded;
++  router_->TabUpdated(this, {"discarded", tabs_constants::kStatusKey});
++}
++
++void TabsEventRouter::TabEntry::WasDiscarded() {
++  // A pending commit can cause the underlying discard operation to be refused.
++  // The observer callback alone does not prove the state actually changed.
++  MaybeDispatchDiscardedStateChange();
++}
++
++void TabsEventRouter::TabEntry::QueueSplitPropertyUpdate(const char* property) {
++  bool already_pending = !pending_split_properties_.empty();
++  pending_split_properties_.insert(property);
++  if (!already_pending) {
++    // Java coalesces multi-tab mutations before returning to the UI event loop.
++    // Pin/group callbacks occur while normalizing the tree; serialize the full
++    // extension Tab object only after its final split membership is restored.
++    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
++        FROM_HERE, base::BindOnce(&TabEntry::DispatchSplitPropertyUpdates,
++                                  weak_factory_.GetWeakPtr()));
++  }
++}
++
++void TabsEventRouter::TabEntry::DispatchSplitPropertyUpdates() {
++  std::set<std::string> properties;
++  properties.swap(pending_split_properties_);
++  if (!properties.empty()) {
++    router_->TabUpdated(this, std::move(properties));
++  }
++}
++
++void TabsEventRouter::TabEntry::DidStartLoading() {
++  // TakeNavigationRequest resets the primary frame's discarded bit before
++  // notifying loading observers, even if the navigation never starts/commits.
++  MaybeDispatchDiscardedStateChange();
++}
++#endif
++
+ void TabsEventRouter::TabEntry::NavigationEntryCommitted(
+     const content::LoadCommittedDetails& load_details) {
+   // Send 'status' of tab change. Expecting 'loading' is fired.
+@@ -147,6 +283,10 @@ void TabsEventRouter::TabEntry::NavigationEntryCommitted(
+ }
+ 
+ void TabsEventRouter::TabEntry::DidStopLoading() {
++#if BUILDFLAG(IS_ANDROID)
++  // Catch cancellation before commit without duplicating an earlier change.
++  MaybeDispatchDiscardedStateChange();
++#endif
+   // The tab may go in & out of loading (for instance if iframes navigate).
+   // We only want to respond to the first change from loading to !loading after
+   // the NavigationEntryCommitted() was fired.
+@@ -202,15 +342,130 @@ void TabsEventRouter::TabEntry::OnRecentlyAudibleStateChanged(
+ 
+ void TabsEventRouter::TabEntry::OnPinnedStateChanged(tabs::TabInterface* tab,
+                                                      bool new_pinned_state) {
++#if BUILDFLAG(IS_ANDROID)
++  if (last_known_split_) {
++    QueueSplitPropertyUpdate(kPinnedKey);
++    return;
++  }
++#endif
+   router_->TabUpdated(this, {kPinnedKey});
+ }
+ 
+ void TabsEventRouter::TabEntry::OnGroupChanged(
+     tabs::TabInterface* tab,
+     std::optional<tab_groups::TabGroupId> new_group) {
++#if BUILDFLAG(IS_ANDROID)
++  if (last_known_split_) {
++    QueueSplitPropertyUpdate(kGroupIdKey);
++    return;
++  }
++#endif
+   router_->TabUpdated(this, {kGroupIdKey});
+ }
+ 
++#if BUILDFLAG(IS_ANDROID)
++void TabsEventRouter::TabEntry::OnWillDetachWebContents(
++    TabAndroid* tab, bool keep_session_id) {
++  auto* contents = web_contents();
++  if (keep_session_id && !router_->GetPendingTab(*tab)) {
++    auto* browser = tab->GetBrowserWindowInterface();
++    auto* list = browser ? TabListInterface::From(browser) : nullptr;
++    router_->pending_tabs_[tab->GetHandle()] = std::make_unique<PendingTab>(
++        *router_, *tab, list, last_known_index());
++  }
++  native_observation_.Reset();
++  // This deletes the entry while old contents and their helpers are still
++  // alive, before a slow shutdown can overlap materialization of the same ID.
++  router_->UnregisterForTabNotifications(*contents, /*expect_registered=*/true);
++}
++
++void TabsEventRouter::TabEntry::OnTabAndroidDestroyed(TabAndroid* tab) {
++  auto* contents = web_contents();
++  native_observation_.Reset();
++  router_->UnregisterForTabNotifications(*contents, /*expect_registered=*/true);
++}
++
++TabsEventRouter::PendingTab::PendingTab(TabsEventRouter& router,
++                                        TabAndroid& tab,
++                                        TabListInterface* tab_list,
++                                        int index)
++    : tab_list(tab_list), index(index),
++      last_known_split(tab.GetSplit()), router_(router), handle_(tab.GetHandle()) {
++  observation_.Observe(&tab);
++  pinned_subscription_ = tab.RegisterPinnedStateChanged(base::BindRepeating(
++      [](PendingTab* entry, tabs::TabInterface* tab, bool) {
++        entry->PropertyChanged(*tab, kPinnedKey);
++      }, base::Unretained(this)));
++  group_subscription_ = tab.RegisterGroupChanged(base::BindRepeating(
++      [](PendingTab* entry, tabs::TabInterface* tab,
++         std::optional<tab_groups::TabGroupId>) {
++        entry->PropertyChanged(*tab, kGroupIdKey);
++      }, base::Unretained(this)));
++}
++
++TabsEventRouter::PendingTab::~PendingTab() = default;
++
++void TabsEventRouter::PendingTab::PropertyChanged(
++    tabs::TabInterface& tab, const char* property) {
++  if (!last_known_split) {
++    DispatchNativeTabEvent(tab, false, {property});
++    return;
++  }
++  // Java normalizes the collection temporarily when changing split members.
++  // Match eager tabs: serialize only after the final split tree is restored.
++  const bool already_pending = !changed_properties.empty();
++  changed_properties.insert(property);
++  if (!already_pending) {
++    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
++        FROM_HERE, base::BindOnce(&PendingTab::DispatchProperties,
++                                 weak_factory_.GetWeakPtr()));
++  }
++}
++
++void TabsEventRouter::PendingTab::DispatchProperties() {
++  if (auto* tab = handle_.Get(); tab && !changed_properties.empty()) {
++    auto changed = std::move(changed_properties);
++    changed_properties.clear();
++    DispatchNativeTabEvent(*tab, false, std::move(changed));
++  }
++}
++
++void TabsEventRouter::PendingTab::OnInitWebContents(TabAndroid* tab) {
++  // MaterializeTab removes this observer and deletes this pending entry.
++  router_->MaterializeTab(*tab);
++}
++
++void TabsEventRouter::PendingTab::OnTabAndroidDestroyed(TabAndroid* tab) {
++  observation_.Reset();
++  // The tab can be destroyed while detached from every tracked model.
++  // Erasing the entry also cancels its posted split-property callback.
++  router_->pending_tabs_.erase(tab->GetHandle());
++}
++
++TabsEventRouter::PendingTab* TabsEventRouter::GetPendingTab(
++    tabs::TabInterface& tab) {
++  auto it = pending_tabs_.find(tab.GetHandle());
++  return it == pending_tabs_.end() ? nullptr : it->second.get();
++}
++
++void TabsEventRouter::MaterializeTab(TabAndroid& tab) {
++  auto it = pending_tabs_.find(tab.GetHandle());
++  CHECK(it != pending_tabs_.end());
++  content::WebContents* contents = tab.GetContents();
++  CHECK(contents);
++  const int index = it->second->index;
++  const auto handle = tab.GetHandle();
++  auto changed_properties = std::move(it->second->changed_properties);
++  pending_tabs_.erase(it);
++  RegisterForTabNotifications(*contents, index);
++  if (handle.Get() && handle.Get()->GetContents() == contents &&
++      !changed_properties.empty()) {
++    DispatchTabUpdatedEvent(contents, std::move(changed_properties));
++  }
++}
++
++#endif
++
+ ////////////////////////////////////////////////////////////////////////////////
+ // TabsEventRouter:
+ 
+@@ -404,6 +659,14 @@ void TabsEventRouter::UpdateTabIndices(TabListInterface& tab_list) {
+   std::vector<tabs::TabInterface*> tabs = tab_list.GetAllTabs();
+   for (size_t i = 0; i < tabs.size(); ++i) {
+     content::WebContents* web_contents = tabs[i]->GetContents();
++#if BUILDFLAG(IS_ANDROID)
++    if (!web_contents) {
++      if (auto* entry = GetPendingTab(*tabs[i])) {
++        entry->index = i;
++      }
++      continue;
++    }
++#endif
+     CHECK(web_contents);
+     TabEntry* tab_entry = GetTabEntry(*web_contents);
+     if (!tab_entry) {
+@@ -420,12 +683,44 @@ void TabsEventRouter::OnTabAdded(TabListInterface& tab_list,
+                                  tabs::TabInterface* tab,
+                                  int index) {
+   content::WebContents* contents = tab->GetContents();
++#if !BUILDFLAG(IS_ANDROID)
+   CHECK(contents);
++#endif
+ 
+   // Adding a new tab can affect the indices of all existing tabs in the tab
+   // list. Update them.
+   UpdateTabIndices(tab_list);
+ 
++#if BUILDFLAG(IS_ANDROID)
++  if (!contents) {
++    if (auto* entry = GetPendingTab(*tab)) {
++      entry->tab_list = &tab_list;
++      entry->index = index;
++      base::ListValue args;
++      args.Append(ExtensionTabUtil::GetTabId(*tab));
++      base::DictValue properties;
++      properties.Set(kNewWindowIdKey, ExtensionTabUtil::GetWindowIdOfTab(*tab));
++      properties.Set(kNewPositionKey, index);
++      args.Append(std::move(properties));
++      DispatchEvent(tab->GetProfile(), events::TABS_ON_ATTACHED,
++                    api::tabs::OnAttached::kEventName, std::move(args),
++                    EventRouter::UserGestureState::kUnknown);
++      if (tab->GetGroup()) {
++        DispatchNativeTabEvent(*tab, false, {kGroupIdKey});
++      }
++    } else {
++      auto* android_tab = TabAndroid::FromTabInterface(tab);
++      pending_tabs_[tab->GetHandle()] = std::make_unique<PendingTab>(
++          *this, *android_tab, &tab_list, index);
++      if (initialized_) {
++        DispatchNativeTabEvent(*tab, true);
++      }
++    }
++    return;
++  }
++  CHECK(contents);
++#endif
++
+   // Check if we've ever seen this tab.
+   TabEntry* tab_entry = GetTabEntry(*contents);
+   if (tab_entry) {
+@@ -473,6 +768,35 @@ void TabsEventRouter::OnTabAdded(TabListInterface& tab_list,
+ 
+ void TabsEventRouter::OnActiveTabChanged(TabListInterface& tab_list,
+                                          tabs::TabInterface* tab) {
++#if BUILDFLAG(IS_ANDROID)
++  base::ListValue args;
++  const int tab_id = ExtensionTabUtil::GetTabId(*tab);
++  args.Append(tab_id);
++
++  base::DictValue object_args;
++  object_args.Set(tabs_constants::kWindowIdKey,
++                 ExtensionTabUtil::GetWindowIdOfTab(*tab));
++  args.Append(object_args.Clone());
++
++  // FROM_EXIT can select a restored native tab before Java calls show().
++  // Reporting activation must not materialize its contents during exit.
++  Profile* profile = tab->GetProfile();
++
++  DispatchEvent(profile, events::TABS_ON_SELECTION_CHANGED,
++                api::tabs::OnSelectionChanged::kEventName, args.Clone(),
++                EventRouter::UserGestureState::kUnknown);
++  DispatchEvent(profile, events::TABS_ON_ACTIVE_CHANGED,
++                api::tabs::OnActiveChanged::kEventName, std::move(args),
++                EventRouter::UserGestureState::kUnknown);
++
++  // The onActivated event takes one argument: {windowId, tabId}.
++  base::ListValue on_activated_args;
++  object_args.Set(kTabIdKey, tab_id);
++  on_activated_args.Append(std::move(object_args));
++  DispatchEvent(
++      profile, events::TABS_ON_ACTIVATED, api::tabs::OnActivated::kEventName,
++      std::move(on_activated_args), EventRouter::UserGestureState::kUnknown);
++#else
+   content::WebContents* tab_contents = tab->GetContents();
+   CHECK(tab_contents);
+ 
+@@ -504,18 +828,54 @@ void TabsEventRouter::OnActiveTabChanged(TabListInterface& tab_list,
+   DispatchEvent(
+       profile, events::TABS_ON_ACTIVATED, api::tabs::OnActivated::kEventName,
+       std::move(on_activated_args), EventRouter::UserGestureState::kUnknown);
++#endif
+ }
+ 
+ void TabsEventRouter::OnTabRemoved(TabListInterface& tab_list,
+                                    tabs::TabInterface* tab,
+                                    TabRemovedReason removed_reason) {
+   content::WebContents* web_contents = tab->GetContents();
++#if !BUILDFLAG(IS_ANDROID)
+   CHECK(web_contents);
++#endif
+ 
+   // Removing a tab can affect the indices of all existing tabs in the tab
+   // list. Update them.
+   UpdateTabIndices(tab_list);
+ 
++#if BUILDFLAG(IS_ANDROID)
++  if (!web_contents) {
++    if (auto* entry = GetPendingTab(*tab)) {
++      const bool closing = TabRemoveReasonUtils::WillDeleteTab(removed_reason);
++      base::ListValue args;
++      args.Append(ExtensionTabUtil::GetTabId(*tab));
++      base::DictValue properties;
++      if (closing) {
++        properties.Set(tabs_constants::kWindowIdKey,
++                       ExtensionTabUtil::GetWindowIdOfTab(*tab));
++        properties.Set(tabs_constants::kIsWindowClosingKey,
++                       tab_list.IsClosingAllTabs());
++        pending_tabs_.erase(tab->GetHandle());
++      } else {
++        properties.Set(kOldWindowIdKey, ExtensionTabUtil::GetWindowIdOfTab(*tab));
++        properties.Set(kOldPositionKey, entry->index);
++        entry->tab_list = nullptr;
++        if (tab->GetGroup()) {
++          DispatchNativeTabEvent(*tab, false, {kGroupIdKey});
++        }
++      }
++      args.Append(std::move(properties));
++      DispatchEvent(tab->GetProfile(),
++                    closing ? events::TABS_ON_REMOVED : events::TABS_ON_DETACHED,
++                    closing ? api::tabs::OnRemoved::kEventName
++                            : api::tabs::OnDetached::kEventName,
++                    std::move(args), EventRouter::UserGestureState::kUnknown);
++    }
++    return;
++  }
++  CHECK(web_contents);
++#endif
++
+   if (TabRemoveReasonUtils::WillDeleteTab(removed_reason)) {
+     DispatchTabRemovedEvent(*web_contents, tab_list.IsClosingAllTabs());
+   } else {
+@@ -536,12 +896,34 @@ void TabsEventRouter::OnTabMoved(TabListInterface& tab_list,
+                                  int to_index) {
+   CHECK(tab);
+   content::WebContents* web_contents = tab->GetContents();
++#if !BUILDFLAG(IS_ANDROID)
+   CHECK(web_contents);
++#endif
+ 
+   // Moving tab can affect the indices of all existing tabs in the tab list
+   // (not just the one being moved). Update them.
+   UpdateTabIndices(tab_list);
+ 
++#if BUILDFLAG(IS_ANDROID)
++  if (!web_contents) {
++    if (GetPendingTab(*tab)) {
++      base::ListValue args;
++      args.Append(ExtensionTabUtil::GetTabId(*tab));
++      base::DictValue properties;
++      properties.Set(tabs_constants::kWindowIdKey,
++                     ExtensionTabUtil::GetWindowIdOfTab(*tab));
++      properties.Set(kFromIndexKey, from_index);
++      properties.Set(kToIndexKey, to_index);
++      args.Append(std::move(properties));
++      DispatchEvent(tab->GetProfile(), events::TABS_ON_MOVED,
++                    api::tabs::OnMoved::kEventName, std::move(args),
++                    EventRouter::UserGestureState::kUnknown);
++    }
++    return;
++  }
++  CHECK(web_contents);
++#endif
++
+   base::ListValue args;
+   args.Append(ExtensionTabUtil::GetTabId(web_contents));
+ 
+@@ -574,6 +956,16 @@ void TabsEventRouter::OnHighlightedTabsChanged(
+ 
+   for (tabs::TabInterface* tab : highlighted_tabs) {
+     content::WebContents* web_contents = tab->GetContents();
++#if BUILDFLAG(IS_ANDROID)
++    if (!web_contents) {
++      if (highlight_info.window_id == -1) {
++        profile = tab->GetProfile();
++        highlight_info.window_id = ExtensionTabUtil::GetWindowIdOfTab(*tab);
++      }
++      highlight_info.tab_ids.push_back(ExtensionTabUtil::GetTabId(*tab));
++      continue;
++    }
++#endif
+     CHECK(web_contents);
+ 
+     // All the tabs should be in the same window, so just grab the window ID and
+@@ -626,6 +1018,11 @@ void TabsEventRouter::OnWebContentsReplaced(
+ }
+ 
+ void TabsEventRouter::OnTabListDestroyed(TabListInterface& tab_list) {
++#if BUILDFLAG(IS_ANDROID)
++  std::erase_if(pending_tabs_, [&tab_list](const auto& entry) {
++    return entry.second->tab_list == &tab_list;
++  });
++#endif
+   tab_list_observations_.RemoveObservation(&tab_list);
+ }
+ 

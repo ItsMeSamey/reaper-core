@@ -1,0 +1,196 @@
+diff --git a/chrome/browser/extensions/api/scripting/scripting_apitest.cc b/chrome/browser/extensions/api/scripting/scripting_apitest.cc
+--- a/chrome/browser/extensions/api/scripting/scripting_apitest.cc
++++ b/chrome/browser/extensions/api/scripting/scripting_apitest.cc
+@@ -3,9 +3,11 @@
+ // found in the LICENSE file.
+ 
+ #include <optional>
++#include <set>
+ 
+ #include "base/strings/stringprintf.h"
+ #include "base/test/bind.h"
++#include "base/test/test_future.h"
+ #include "build/build_config.h"
+ #include "chrome/browser/extensions/extension_apitest.h"
+ #include "chrome/browser/extensions/extension_tab_util.h"
+@@ -28,10 +30,13 @@
+ #include "extensions/browser/extension_system.h"
+ #include "extensions/browser/extension_user_script_loader.h"
+ #include "extensions/browser/script_executor.h"
++#include "extensions/browser/scripting_constants.h"
++#include "extensions/browser/state_store.h"
+ #include "extensions/browser/test_extension_registry_observer.h"
+ #include "extensions/browser/user_script_manager.h"
+ #include "extensions/buildflags/buildflags.h"
+ #include "extensions/common/features/feature_channel.h"
++#include "extensions/common/user_script.h"
+ #include "extensions/common/utils/content_script_utils.h"
+ #include "extensions/test/extension_test_message_listener.h"
+ #include "extensions/test/result_catcher.h"
+@@ -216,6 +221,166 @@
+ IN_PROC_BROWSER_TEST_F(ScriptingAPITest, UpdateContentScripts) {
+   ASSERT_TRUE(RunExtensionTest("scripting/update_scripts")) << message_;
+ }
++
++#if BUILDFLAG(IS_ANDROID)
++IN_PROC_BROWSER_TEST_F(ScriptingAPITest,
++                       UpdatedScriptsKeepOmittedPersistence) {
++  TestExtensionDir test_dir;
++  test_dir.WriteManifest(R"({
++    "name": "Persistence update", "manifest_version": 3, "version": "1",
++    "permissions": ["scripting"],
++    "host_permissions": ["http://example.com/*"]
++  })");
++  test_dir.WriteFile(FILE_PATH_LITERAL("script.js"), "void 0;");
++  scoped_refptr<const Extension> extension =
++      LoadExtension(test_dir.UnpackedPath());
++  ASSERT_TRUE(extension);
++  auto run = [&](scoped_refptr<ExtensionFunction> function,
++                 const std::string& args) {
++    function->set_extension(extension.get());
++    return api_test_utils::RunFunction(function, args, profile());
++  };
++  auto get_scripts = [&]() {
++    auto function =
++        base::MakeRefCounted<ScriptingGetRegisteredContentScriptsFunction>();
++    function->set_extension(extension.get());
++    return api_test_utils::RunFunctionAndReturnSingleResult(function, "[]",
++                                                          profile());
++  };
++  ASSERT_TRUE(run(
++      base::MakeRefCounted<ScriptingRegisterContentScriptsFunction>(),
++      R"([[{"id":"keep", "matches":["http://example.com/*"],
++            "js":["script.js"]},
++           {"id":"session", "matches":["http://example.com/*"],
++            "js":["script.js"], "persistAcrossSessions":false},
++           {"id":"to_session", "matches":["http://example.com/*"],
++            "js":["script.js"]},
++           {"id":"to_persist", "matches":["http://example.com/*"],
++            "js":["script.js"], "persistAcrossSessions":false}]])"));
++  ASSERT_TRUE(run(
++      base::MakeRefCounted<ScriptingUpdateContentScriptsFunction>(),
++      R"([[{"id":"keep", "runAt":"document_end"},
++           {"id":"session", "runAt":"document_end"},
++           {"id":"to_session", "persistAcrossSessions":false},
++           {"id":"to_persist", "persistAcrossSessions":true}]])"));
++  auto scripts = get_scripts();
++  ASSERT_TRUE(scripts && scripts->is_list());
++  ASSERT_EQ(4u, scripts->GetList().size());
++  for (const auto& script : scripts->GetList()) {
++    const auto& dict = script.GetDict();
++    const std::string* id = dict.FindString("id");
++    ASSERT_TRUE(id);
++    const bool expected = *id == "keep" || *id == "to_persist";
++    EXPECT_EQ(std::optional<bool>(expected),
++              dict.FindBool("persistAcrossSessions"));
++  }
++
++  // Read the real StateStore after the update's queued writes. Metadata alone
++  // would not prove which registrations will be available to the next loader.
++  base::test::TestFuture<std::optional<base::Value>> stored;
++  ExtensionSystem::Get(profile())
++      ->dynamic_user_scripts_store()
++      ->GetExtensionValue(extension->id(), scripting::kRegisteredScriptsStorageKey,
++                          stored.GetCallback());
++  const auto& value = stored.Get();
++  ASSERT_TRUE(value && value->is_list());
++  std::set<std::string> stored_ids;
++  for (const auto& script : value->GetList()) {
++    const std::string* id = script.GetDict().FindString("id");
++    ASSERT_TRUE(id);
++    stored_ids.insert(UserScript::TrimPrefixFromScriptID(*id));
++  }
++  ASSERT_EQ((std::set<std::string>{"keep", "to_persist"}), stored_ids);
++
++  // Reconstruct the loader from its stored registrations, without rerunning a
++  // worker that could register them again. This is not a process-restart test.
++  DisableExtension(extension->id());
++  extension_registrar()->EnableExtension(extension->id());
++  ContentScriptLoadWaiter waiter(
++      ExtensionSystem::Get(profile())
++          ->user_script_manager()
++          ->GetUserScriptLoaderForExtension(extension->id()));
++  waiter.Wait();
++  scripts = get_scripts();
++  ASSERT_TRUE(scripts && scripts->is_list());
++  std::set<std::string> restored_ids;
++  for (const auto& script : scripts->GetList()) {
++    const auto& dict = script.GetDict();
++    const std::string* id = dict.FindString("id");
++    ASSERT_TRUE(id);
++    restored_ids.insert(*id);
++    EXPECT_EQ(std::optional<bool>(true), dict.FindBool("persistAcrossSessions"));
++  }
++  EXPECT_EQ(stored_ids, restored_ids);
++}
++
++IN_PROC_BROWSER_TEST_F(ScriptingAPITest, UpdatedScriptChangesExecutionWorld) {
++  TestExtensionDir test_dir;
++  test_dir.WriteManifest(R"({
++    "name": "World update", "manifest_version": 3, "version": "1",
++    "permissions": ["scripting"],
++    "host_permissions": ["http://example.com/*"]
++  })");
++  test_dir.WriteFile(FILE_PATH_LITERAL("script.js"), R"(
++    window.reaperUpdatedScriptWorld = 'injected';
++    const markExecution = () => {
++      document.documentElement.setAttribute('data-reaper-script-executed', 'yes');
++    };
++    if (document.readyState === 'loading') {
++      document.addEventListener('DOMContentLoaded', markExecution, {once: true});
++    } else {
++      markExecution();
++    }
++  )");
++  const Extension* extension = LoadExtension(test_dir.UnpackedPath());
++  ASSERT_TRUE(extension);
++  auto run = [&](scoped_refptr<ExtensionFunction> function,
++                 const std::string& args) {
++    function->set_extension(extension);
++    return api_test_utils::RunFunction(function, args, profile());
++  };
++  auto expect_world = [&](const char* world, int navigation) {
++    auto function =
++        base::MakeRefCounted<ScriptingGetRegisteredContentScriptsFunction>();
++    function->set_extension(extension);
++    auto scripts = api_test_utils::RunFunctionAndReturnSingleResult(
++        function, "[]", profile());
++    ASSERT_TRUE(scripts && scripts->is_list());
++    ASSERT_EQ(1u, scripts->GetList().size());
++    const auto& dict = scripts->GetList()[0].GetDict();
++    const std::string* actual_world = dict.FindString("world");
++    ASSERT_TRUE(actual_world);
++    EXPECT_EQ(world, *actual_world);
++    OpenURLInCurrentTab(embedded_test_server()->GetURL(
++        "example.com", base::StringPrintf("/simple.html?world=%d", navigation)));
++    // A shared DOM marker proves the script ran in either world; absence of a
++    // page global alone could also mean no injection happened.
++    EXPECT_EQ("yes", content::EvalJs(
++                         GetActiveWebContents(),
++                         "document.documentElement.getAttribute("
++                         "'data-reaper-script-executed')"));
++    // EvalJs runs in the page's main world, so isolated-world writes must not
++    // appear here. Navigation gives each assertion a fresh document.
++    EXPECT_EQ(std::string(world) == "MAIN" ? "string" : "undefined",
++              content::EvalJs(GetActiveWebContents(),
++                              "typeof window.reaperUpdatedScriptWorld"));
++  };
++  ASSERT_TRUE(run(
++      base::MakeRefCounted<ScriptingRegisterContentScriptsFunction>(),
++      R"([[{"id":"world", "matches":["http://example.com/*"],
++            "js":["script.js"], "runAt":"document_end"}]])"));
++  expect_world("ISOLATED", 1);
++  ASSERT_TRUE(run(base::MakeRefCounted<ScriptingUpdateContentScriptsFunction>(),
++                  R"([[{"id":"world", "world":"MAIN"}]])"));
++  expect_world("MAIN", 2);
++  ASSERT_TRUE(run(base::MakeRefCounted<ScriptingUpdateContentScriptsFunction>(),
++                  R"([[{"id":"world", "runAt":"document_start"}]])"));
++  expect_world("MAIN", 3);
++  ASSERT_TRUE(run(base::MakeRefCounted<ScriptingUpdateContentScriptsFunction>(),
++                  R"([[{"id":"world", "world":"ISOLATED"}]])"));
++  expect_world("ISOLATED", 4);
++}
++#endif  // BUILDFLAG(IS_ANDROID)
+ 
+ IN_PROC_BROWSER_TEST_F(ScriptingAPITest, DynamicContentScriptParameters) {
+   // Dynamic content script parameters are currently limited to trunk.

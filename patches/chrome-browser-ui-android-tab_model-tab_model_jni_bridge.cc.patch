@@ -1,0 +1,186 @@
+diff --git a/chrome/browser/ui/android/tab_model/tab_model_jni_bridge.cc b/chrome/browser/ui/android/tab_model/tab_model_jni_bridge.cc
+index a1007a6e767a62d47b0f837c28d1092bbdac87fb..26a0da11fba655cd670c0332bb2614bf61e36086 100644
+--- a/chrome/browser/ui/android/tab_model/tab_model_jni_bridge.cc
++++ b/chrome/browser/ui/android/tab_model/tab_model_jni_bridge.cc
+@@ -19,6 +19,7 @@
+ #include "base/check_op.h"
+ #include "base/feature.h"
+ #include "base/feature_list.h"
++#include "base/functional/bind.h"
+ #include "base/logging.h"
+ #include "base/metrics/histogram_macros.h"
+ #include "base/notimplemented.h"
+@@ -136,16 +137,34 @@
+       reinterpret_cast<BrowserWindowInterface*>(native_android_browser_window);
+   CHECK(android_browser_window != nullptr);
+ 
++  const SessionID previous_window_id = GetSessionId();
+   scoped_unowned_user_data_ =
+       std::make_unique<ui::ScopedUnownedUserData<TabListInterface>>(
+           android_browser_window->GetUnownedUserDataHost(), *this);
+   SetSessionId(android_browser_window->GetSessionID());
++  // Tabs can precede window association. Reparenting can also temporarily leave
++  // a transferred tab listed in its former model; preserve its new window ID.
++  // SetWindowSessionID updates frozen tabs without creating WebContents.
++  for (int i = 0; i < GetTabCount(); ++i) {
++    TabAndroid* tab = GetTabAt(i);
++    if (tab && (tab->GetWindowId() == previous_window_id ||
++                !tab->GetWindowId().is_valid())) {
++      tab->SetWindowSessionID(GetSessionId());
++    }
++  }
+ }
+ 
+ void TabModelJniBridge::DissociateWithBrowserWindow(JNIEnv* env) {
+   CHECK(scoped_unowned_user_data_ != nullptr);
++  const SessionID previous_window_id = GetSessionId();
+   scoped_unowned_user_data_.reset();
+   SetSessionId(SessionID::InvalidValue());
++  for (int i = 0; i < GetTabCount(); ++i) {
++    TabAndroid* tab = GetTabAt(i);
++    if (tab && tab->GetWindowId() == previous_window_id) {
++      tab->SetWindowSessionID(GetSessionId());
++    }
++  }
+ }
+ 
+ void TabModelJniBridge::TabAddedToModel(JNIEnv* env,
+@@ -288,8 +307,10 @@
+   // If a first observer is being added then instantiate an observer bridge.
+   if (!observer_bridge_) {
+     JNIEnv* env = AttachCurrentThread();
+-    observer_bridge_ = std::make_unique<TabModelObserverJniBridge>(
+-        env, java_object_.get(env), *this);
++    observer_bridge_ = base::MakeRefCounted<TabModelObserverJniBridge>(
++        env, java_object_.get(env), *this,
++        base::BindRepeating(&TabModelJniBridge::ReleaseEmptyObserverBridge,
++                            base::Unretained(this)));
+   }
+   observer_bridge_->AddTabListInterfaceObserver(observer);
+ }
+@@ -297,11 +318,6 @@
+ void TabModelJniBridge::RemoveTabListInterfaceObserver(
+     TabListInterfaceObserver* observer) {
+   observer_bridge_->RemoveTabListInterfaceObserver(observer);
+-
+-  // Tear down the bridge if there are no observers left.
+-  if (!observer_bridge_->has_observers()) {
+-    observer_bridge_.reset();
+-  }
+ }
+ 
+ int TabModelJniBridge::GetTabCount() const {
+@@ -461,19 +477,22 @@
+   // If a first observer is being added then instantiate an observer bridge.
+   if (!observer_bridge_) {
+     JNIEnv* env = AttachCurrentThread();
+-    observer_bridge_ = std::make_unique<TabModelObserverJniBridge>(
+-        env, java_object_.get(env), *this);
++    observer_bridge_ = base::MakeRefCounted<TabModelObserverJniBridge>(
++        env, java_object_.get(env), *this,
++        base::BindRepeating(&TabModelJniBridge::ReleaseEmptyObserverBridge,
++                            base::Unretained(this)));
+   }
+   observer_bridge_->AddObserver(observer);
+ }
+ 
+ void TabModelJniBridge::RemoveObserver(TabModelObserver* observer) {
+   observer_bridge_->RemoveObserver(observer);
+-
+-  // Tear down the bridge if there are no observers left.
+-  if (!observer_bridge_->has_observers()) {
+-    observer_bridge_.reset();
+-  }
++}
++
++void TabModelJniBridge::ReleaseEmptyObserverBridge() {
++  CHECK(observer_bridge_);
++  CHECK(!observer_bridge_->has_observers());
++  observer_bridge_.reset();
+ }
+ 
+ void TabModelJniBridge::BroadcastSessionRestoreComplete(JNIEnv* env) {
+@@ -631,8 +650,12 @@
+   if (!web_contents || web_contents->WasDiscarded()) {
+     return nullptr;
+   }
++  auto weak_contents = web_contents->GetWeakPtr();
+   web_contents->Discard(base::DoNothing());
+-  return web_contents;
++  // A speculative pending commit can refuse the discard. Preserve that
++  // failure so callers do not report a successful tabs.discard operation.
++  return weak_contents && weak_contents->WasDiscarded() ? weak_contents.get()
++                                                        : nullptr;
+ }
+ 
+ tabs::TabInterface* TabModelJniBridge::DuplicateTab(tabs::TabHandle tab) {
+@@ -778,10 +801,13 @@
+ }
+ 
+ std::set<split_tabs::SplitTabId> TabModelJniBridge::ListSplits() {
+-  // TODO(https://crbug.com/480192698): Implement this once split tabs are
+-  // supported on Desktop Android.
+-  NOTIMPLEMENTED();
+-  return {};
++  std::set<split_tabs::SplitTabId> splits;
++  for (tabs::TabInterface* tab : GetAllTabs()) {
++    if (auto split = tab->GetSplit()) {
++      splits.insert(*split);
++    }
++  }
++  return splits;
+ }
+ 
+ std::optional<TabGroupVisualData> TabModelJniBridge::GetTabGroupVisualData(
+@@ -836,10 +862,17 @@
+ 
+ std::optional<split_tabs::SplitTabId> TabModelJniBridge::CreateSplit(
+     const std::vector<tabs::TabHandle>& tabs) {
+-  // TODO(https://crbug.com/480192698): Implement this once split tabs are
+-  // supported on Desktop Android.
+-  NOTIMPLEMENTED();
+-  return std::nullopt;
++  if (tabs.size() != 2 || !tabs[0].Get() || !tabs[1].Get()) {
++    return std::nullopt;
++  }
++  JNIEnv* env = AttachCurrentThread();
++  auto jobj = java_object_.get(env);
++  if (!jobj) {
++    return std::nullopt;
++  }
++  auto token = Java_TabModelJniBridge_createSplit(env, jobj,
++                                                  GetAllTabsFromHandles(tabs));
++  return split_tabs::SplitTabId::FromOptionalToken(token);
+ }
+ 
+ void TabModelJniBridge::SetTabGroupVisualData(
+@@ -887,9 +920,11 @@
+ }
+ 
+ void TabModelJniBridge::Unsplit(split_tabs::SplitTabId split_id) {
+-  // TODO(https://crbug.com/480192698): Implement this once split tabs are
+-  // supported on Desktop Android.
+-  NOTIMPLEMENTED();
++  JNIEnv* env = AttachCurrentThread();
++  auto jobj = java_object_.get(env);
++  if (jobj) {
++    Java_TabModelJniBridge_unsplit(env, jobj, split_id.token());
++  }
+ }
+ 
+ void TabModelJniBridge::MoveGroupTo(tab_groups::TabGroupId group_id,
+@@ -969,6 +1004,14 @@
+   return Java_TabModelJniBridge_isTabLaunchedInForeground(
+       env, static_cast<int>(type), is_new_tab_incognito,
+       is_current_model_incognito);
++}
++
++// static
++bool TabModelJniBridge::RestoreSplit(
++    JNIEnv* env, const JavaRef<jobject>& model, const base::Token& id,
++    const std::vector<int>& tab_ids, int layout, double ratio) {
++  return Java_TabModelJniBridge_restoreSplit(
++      env, model, id, tab_ids, layout, ratio);
+ }
+ 
+ // static

@@ -1,0 +1,136 @@
+diff --git a/chrome/android/junit/src/org/chromium/chrome/browser/tabmodel/TabModelSelectorImplTest.java b/chrome/android/junit/src/org/chromium/chrome/browser/tabmodel/TabModelSelectorImplTest.java
+index 16f0e52d65de4b9f58feb884629bc799e8cb7c49..711850abb9bfed3af8d9265996c1848ba7ea3262 100644
+--- a/chrome/android/junit/src/org/chromium/chrome/browser/tabmodel/TabModelSelectorImplTest.java
++++ b/chrome/android/junit/src/org/chromium/chrome/browser/tabmodel/TabModelSelectorImplTest.java
+@@ -38,6 +38,7 @@
+ 
+ import org.chromium.base.Callback;
+ import org.chromium.base.Token;
++import org.chromium.base.UserDataHost;
+ import org.chromium.base.supplier.ObservableSuppliers;
+ import org.chromium.base.supplier.OneshotSupplierImpl;
+ import org.chromium.base.test.BaseRobolectricTestRunner;
+@@ -129,7 +130,7 @@
+ 
+         TabRemover regularTabRemover =
+                 new PassthroughTabRemover(() -> mTabModelSelector.getModel(false));
+-        mRegularTabModel = new MockTabModel(mProfile, null);
++        mRegularTabModel = spy(new MockTabModel(mProfile, null));
+         mRegularTabModel.setActive(true);
+         mRegularTabModel.setTabRemoverForTesting(regularTabRemover);
+         TabRemover incognitoTabRemover =
+@@ -158,6 +159,102 @@
+         mTabModelSelector.destroy();
+         RobolectricUtil.runAllBackgroundAndUi();
+         assertFalse(currentTabModelSupplierHasObservers());
++    }
++
++    private Tab addSplitVisibilityTab(int id) {
++        Tab tab = mock(Tab.class);
++        when(tab.getId()).thenReturn(id);
++        when(tab.getProfile()).thenReturn(mProfile);
++        when(tab.getUserDataHost()).thenReturn(new UserDataHost());
++        WindowAndroid window = mock(WindowAndroid.class);
++        org.chromium.content_public.browser.WebContents contents =
++                mock(org.chromium.content_public.browser.WebContents.class);
++        when(contents.getTopLevelNativeWindow()).thenReturn(window);
++        doReturn(contents).when(tab).getWebContents();
++        doReturn(window).when(tab).getWindowAndroid();
++        doReturn(false).when(tab).isDetachedFromActivity();
++        doReturn(false).when(tab).isHidden();
++        when(tab.isInitialized()).thenReturn(true);
++        mRegularTabModel.addTab(
++                tab,
++                mRegularTabModel.getCount(),
++                TabLaunchType.FROM_CHROME_UI,
++                TabCreationState.LIVE_IN_BACKGROUND);
++        return tab;
++    }
++
++    @Test
++    public void splitRefreshDoesNotWakeHiddenActivity() {
++        Tab first = addSplitVisibilityTab(51);
++        Tab second = addSplitVisibilityTab(52);
++        doReturn(first.getWindowAndroid()).when(second).getWindowAndroid();
++        mRegularTabModel.setIndex(0, TabSelectionType.FROM_USER);
++        mTabModelSelector.requestToShowTab(first, TabSelectionType.FROM_USER);
++        doReturn(true).when(first).isHidden();
++        SplitInfo pair = new SplitInfo(new Token(2, 3), 51, 52, SplitInfo.SIDE_BY_SIDE, 0.5);
++        doReturn(pair).when(mRegularTabModel).getSplitInfoForTab(51);
++        org.mockito.Mockito.clearInvocations(first, second);
++        mTabModelSelector.refreshSplitVisibility();
++        verify(first, never()).show(TabSelectionType.FROM_USER);
++        verify(second, never()).show(TabSelectionType.FROM_USER);
++        doReturn(null).when(mRegularTabModel).getSplitInfoForTab(51);
++        mTabModelSelector.refreshSplitVisibility();
++        verify(first, never()).show(TabSelectionType.FROM_USER);
++        verify(second, never()).show(TabSelectionType.FROM_USER);
++    }
++
++    @Test
++    public void splitRefreshShowsPeerOfVisibleCurrentTab() {
++        Tab first = addSplitVisibilityTab(61);
++        Tab second = addSplitVisibilityTab(62);
++        doReturn(first.getWindowAndroid()).when(second).getWindowAndroid();
++        mRegularTabModel.setIndex(0, TabSelectionType.FROM_USER);
++        SplitInfo pair = new SplitInfo(new Token(2, 3), 61, 62, SplitInfo.SIDE_BY_SIDE, 0.5);
++        doReturn(pair).when(mRegularTabModel).getSplitInfoForTab(61);
++        org.mockito.Mockito.clearInvocations(first, second);
++        mTabModelSelector.refreshSplitVisibility();
++        verify(second).show(TabSelectionType.FROM_USER);
++        assertEquals(first, mTabModelSelector.getCurrentTab());
++    }
++
++    @Test
++    public void visibilityCacheCallbackCannotOverwriteReentrantSelection() {
++        Tab first = addSplitVisibilityTab(71);
++        Tab outerTarget = addSplitVisibilityTab(72);
++        Tab nestedTarget = addSplitVisibilityTab(73);
++        mTabModelSelector.requestToShowTab(first, TabSelectionType.FROM_USER);
++        doAnswer(
++                        call -> {
++                            mTabModelSelector.requestToShowTab(
++                                    nestedTarget, TabSelectionType.FROM_USER);
++                            return null;
++                        })
++                .when(mMockTabContentManager)
++                .cacheTabThumbnail(first);
++        org.mockito.Mockito.clearInvocations(outerTarget, nestedTarget);
++        mTabModelSelector.requestToShowTab(outerTarget, TabSelectionType.FROM_USER);
++        verify(outerTarget, never()).show(TabSelectionType.FROM_USER);
++        verify(nestedTarget).show(TabSelectionType.FROM_USER);
++    }
++
++    @Test
++    public void visibilityHideCallbackCannotOverwriteReentrantSelection() {
++        Tab first = addSplitVisibilityTab(81);
++        Tab outerTarget = addSplitVisibilityTab(82);
++        Tab nestedTarget = addSplitVisibilityTab(83);
++        mTabModelSelector.requestToShowTab(first, TabSelectionType.FROM_USER);
++        doAnswer(
++                        call -> {
++                            mTabModelSelector.requestToShowTab(
++                                    nestedTarget, TabSelectionType.FROM_USER);
++                            return null;
++                        })
++                .when(first)
++                .hide(org.chromium.chrome.browser.tab.TabHidingType.CHANGED_TABS);
++        org.mockito.Mockito.clearInvocations(outerTarget, nestedTarget);
++        mTabModelSelector.requestToShowTab(outerTarget, TabSelectionType.FROM_USER);
++        verify(outerTarget, never()).show(TabSelectionType.FROM_USER);
++        verify(nestedTarget).show(TabSelectionType.FROM_USER);
+     }
+ 
+     @Test
+@@ -338,10 +435,7 @@
+                 .getCurrentTabModelSupplier()
+                 .addSyncObserverAndCallIfNonNull(mTabModelSupplierObserverMock);
+ 
+-        InOrder order =
+-                inOrder(
+-                        mIncognitoReauthDialogDelegateMock,
+-                        mTabModelSupplierObserverMock);
++        InOrder order = inOrder(mIncognitoReauthDialogDelegateMock, mTabModelSupplierObserverMock);
+         mTabModelSelector.selectModel(/* incognito= */ true);
+ 
+         order.verify(mIncognitoReauthDialogDelegateMock).onBeforeIncognitoTabModelSelected();

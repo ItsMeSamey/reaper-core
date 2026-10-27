@@ -1,0 +1,147 @@
+diff --git a/chrome/android/java/src/org/chromium/chrome/browser/ui/ExclusiveAccessContext.java b/chrome/android/java/src/org/chromium/chrome/browser/ui/ExclusiveAccessContext.java
+index 4d096618feff353540b12188c2db038ac207178f..5fc10827fc62a38f11cb2d5d3fb23750fbc60431 100644
+--- a/chrome/android/java/src/org/chromium/chrome/browser/ui/ExclusiveAccessContext.java
++++ b/chrome/android/java/src/org/chromium/chrome/browser/ui/ExclusiveAccessContext.java
+@@ -33,8 +33,12 @@
+ 
+     private final WindowAndroid mWindowAndroid;
+     private final FullscreenManager mFullscreenManager;
++    @Nullable private final ExclusiveAccessManager mExclusiveAccessManager;
+     final ActivityTabProvider.ActivityTabTabObserver mActiveTabObserver;
+     @Nullable private Tab mActiveTab;
++    @Nullable private Tab mTabFullscreenRequestTab;
++    private long mTabFullscreenRequestGeneration;
++    private long mExclusiveAccessRequestGeneration;
+     private long mNativeExclusiveAccessContextAndroid;
+     private long mLastTouchTime;
+ 
+@@ -47,7 +51,6 @@
+      */
+     private static final long TOUCH_EVENT_THROTTLE_MS = 60000; // 1 minute
+ 
+-    @CalledByNative
+     public static ExclusiveAccessContext create(
+             long nativeExclusiveAccessContextAndroid,
+             WindowAndroid windowAndroid,
+@@ -60,14 +63,44 @@
+                 activityTabProvider);
+     }
+ 
++    @CalledByNative
++    public static ExclusiveAccessContext create(
++            long nativeExclusiveAccessContextAndroid,
++            WindowAndroid windowAndroid,
++            FullscreenManager fullscreenManager,
++            ActivityTabProvider activityTabProvider,
++            ExclusiveAccessManager exclusiveAccessManager) {
++        return new ExclusiveAccessContext(
++                nativeExclusiveAccessContextAndroid,
++                windowAndroid,
++                fullscreenManager,
++                activityTabProvider,
++                exclusiveAccessManager);
++    }
++
+     public ExclusiveAccessContext(
+             long nativeExclusiveAccessContextAndroid,
+             WindowAndroid windowAndroid,
+             FullscreenManager fullscreenManager,
+             ActivityTabProvider activityTabProvider) {
++        this(
++                nativeExclusiveAccessContextAndroid,
++                windowAndroid,
++                fullscreenManager,
++                activityTabProvider,
++                null);
++    }
++
++    public ExclusiveAccessContext(
++            long nativeExclusiveAccessContextAndroid,
++            WindowAndroid windowAndroid,
++            FullscreenManager fullscreenManager,
++            ActivityTabProvider activityTabProvider,
++            @Nullable ExclusiveAccessManager exclusiveAccessManager) {
+         mNativeExclusiveAccessContextAndroid = nativeExclusiveAccessContextAndroid;
+         mWindowAndroid = windowAndroid;
+         mFullscreenManager = fullscreenManager;
++        mExclusiveAccessManager = exclusiveAccessManager;
+         mActiveTabObserver =
+                 new ActivityTabProvider.ActivityTabTabObserver(
+                         activityTabProvider, /* shouldTrigger= */ true) {
+@@ -113,6 +146,7 @@
+         // Explicitly null the native pointer to prevent any stray callbacks from attempting to
+         // use it after the native object has been destroyed.
+         mNativeExclusiveAccessContextAndroid = 0;
++        retireTabFullscreenRequest();
+         mActiveTabObserver.destroy();
+     }
+ 
+@@ -128,16 +162,49 @@
+ 
+     @CalledByNative
+     boolean isFullscreen() {
+-        return mFullscreenManager.getPersistentFullscreenMode();
++        return mFullscreenManager.getFullscreenUiModeSupplier().get();
+     }
+ 
+     @CalledByNative
+     public void enterFullscreenModeForTab(
+             long displayId, boolean prefersNavigationBar, boolean prefersStatusBar) {
+-        if (mActiveTab != null) {
++        Tab tab = mActiveTab;
++        if (tab != null) {
++            // Publish the accepted owner before fullscreen observers can reenter.
++            mTabFullscreenRequestTab = tab;
++            mTabFullscreenRequestGeneration++;
+             FullscreenOptions options =
+                     new FullscreenOptions(prefersNavigationBar, prefersStatusBar, displayId);
+-            mFullscreenManager.onEnterFullscreen(mActiveTab, options);
++            mExclusiveAccessRequestGeneration =
++                    mExclusiveAccessManager == null
++                            ? 0
++                            : mExclusiveAccessManager.onFullscreenRequestAccepted(tab, options);
++            mFullscreenManager.onEnterFullscreen(tab, options);
++        }
++    }
++
++    @CalledByNative
++    public long getTabFullscreenRequestGeneration() {
++        return mTabFullscreenRequestGeneration;
++    }
++
++    @CalledByNative
++    public void exitTabFullscreenMode(long requestGeneration) {
++        Tab tab = mTabFullscreenRequestTab;
++        if (tab == null || requestGeneration != mTabFullscreenRequestGeneration) return;
++        // Retire this request before callbacks. A replacement request keeps its own token.
++        retireTabFullscreenRequest();
++        mFullscreenManager.onExitFullscreen(tab);
++    }
++
++    private void retireTabFullscreenRequest() {
++        Tab tab = mTabFullscreenRequestTab;
++        long requestGeneration = mExclusiveAccessRequestGeneration;
++        mTabFullscreenRequestTab = null;
++        mTabFullscreenRequestGeneration++;
++        mExclusiveAccessRequestGeneration = 0;
++        if (tab != null && mExclusiveAccessManager != null) {
++            mExclusiveAccessManager.onFullscreenRequestExited(tab, requestGeneration);
+         }
+     }
+ 
+@@ -148,8 +215,15 @@
+ 
+     @CalledByNative
+     public void exitFullscreenModeForTab() {
++        // Native context ExitFullscreen exits the window. The native DOM-to-browser return
++        // branch bypasses this callback and preserves the browser request.
++        retireTabFullscreenRequest();
++        mFullscreenManager.setBrowserFullscreenMode(false);
+         if (mActiveTab != null) {
+             mFullscreenManager.onExitFullscreen(mActiveTab);
++        }
++        if (mActiveTab == null || mFullscreenManager.getPersistentFullscreenMode()) {
++            mFullscreenManager.exitPersistentFullscreenMode();
+         }
+     }
+ 

@@ -29,7 +29,6 @@ import org.chromium.chrome.browser.app.BraveActivity;
 import org.chromium.chrome.browser.preferences.BravePrefServiceBridge;
 import org.chromium.chrome.browser.profiles.Profile;
 import org.chromium.chrome.browser.profiles.ProfileManager;
-import org.chromium.misc_metrics.mojom.MiscAndroidMetrics;
 
 import java.io.File;
 import java.io.FileNotFoundException;
@@ -111,10 +110,6 @@ public class BraveStatsUtil {
                     BraveStatsBottomSheetDialogFragment.newInstance();
             braveStatsBottomSheetDialogFragment.show(
                     activity.getSupportFragmentManager(), STATS_FRAGMENT_TAG);
-            MiscAndroidMetrics miscAndroidMetrics = activity.getMiscAndroidMetrics();
-            if (miscAndroidMetrics != null) {
-                miscAndroidMetrics.recordPrivacyHubView();
-            }
         } catch (BraveActivity.BraveActivityNotFoundException e) {
             Log.e(TAG, "showBraveStats " + e);
         }
@@ -125,30 +120,6 @@ public class BraveStatsUtil {
         SimpleDateFormat s = new SimpleDateFormat(dateFormat, Locale.getDefault());
         cal.add(Calendar.DAY_OF_YEAR, days);
         return s.format(new Date(cal.getTimeInMillis()));
-    }
-
-    public static void updateBraveStatsLayout(View view) {
-        TextView mAdsBlockedCountTextView =
-                (TextView) view.findViewById(R.id.brave_stats_text_ads_count);
-        TextView mDataSavedValueTextView =
-                (TextView) view.findViewById(R.id.brave_stats_data_saved_value);
-        TextView mEstTimeSavedCountTextView =
-                (TextView) view.findViewById(R.id.brave_stats_text_time_count);
-        TextView mAdsBlockedCountTextTextView =
-                (TextView) view.findViewById(R.id.brave_stats_text_ads_count_text);
-        TextView mDataSavedValueTextTextView =
-                (TextView) view.findViewById(R.id.brave_stats_data_saved_value_text);
-        TextView mEstTimeSavedCountTextTextView =
-                (TextView) view.findViewById(R.id.brave_stats_text_time_count_text);
-
-        List<Pair<String, String>> statsPairs = getStatsPairs();
-
-        mAdsBlockedCountTextView.setText(statsPairs.get(0).first);
-        mDataSavedValueTextView.setText(statsPairs.get(1).first);
-        mEstTimeSavedCountTextView.setText(statsPairs.get(2).first);
-        mAdsBlockedCountTextTextView.setText(statsPairs.get(0).second);
-        mDataSavedValueTextTextView.setText(statsPairs.get(1).second);
-        mEstTimeSavedCountTextTextView.setText(statsPairs.get(2).second);
     }
 
     public static void updateBraveShareStatsLayoutAndShare(View view) {

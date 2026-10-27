@@ -1,0 +1,226 @@
+diff --git a/chrome/browser/ui/android/tab_model/android_live_tab_context_wrapper.cc b/chrome/browser/ui/android/tab_model/android_live_tab_context_wrapper.cc
+--- a/chrome/browser/ui/android/tab_model/android_live_tab_context_wrapper.cc
++++ b/chrome/browser/ui/android/tab_model/android_live_tab_context_wrapper.cc
+@@ -4,16 +4,41 @@
+
+ #include "chrome/browser/ui/android/tab_model/android_live_tab_context_wrapper.h"
+
++#include <algorithm>
++#include <cmath>
++#include <set>
+ #include <utility>
++
++#include "base/android/jni_android.h"
+
+ #include "base/check_op.h"
+ #include "base/memory/raw_ptr.h"
+ #include "base/numerics/safe_conversions.h"
+ #include "chrome/browser/android/tab_android.h"
+ #include "chrome/browser/ui/android/tab_model/tab_model.h"
++#include "chrome/browser/ui/android/tab_model/tab_model_list.h"
++#include "components/dom_distiller/core/url_constants.h"
+ #include "components/sessions/content/content_live_tab.h"
++#include "components/sessions/core/serialized_navigation_entry.h"
+ #include "components/sessions/core/tab_restore_types.h"
+ #include "components/tab_groups/tab_group_id.h"
++
++namespace {
++
++// Match PopulateTab's navigation filtering before advertising a complete pair.
++bool CanSaveSplitMember(sessions::LiveTab* tab) {
++  if (tab->IsInitialBlankNavigation())
++    return false;
++  for (int i = 0; i < tab->GetEntryCount(); ++i) {
++    const auto entry = tab->GetEntryAtIndex(i);
++    if (!entry.virtual_url().is_empty() &&
++        !entry.virtual_url().SchemeIs(dom_distiller::kDomDistillerScheme))
++      return true;
++  }
++  return false;
++}
++
++}  // namespace
+
+ AndroidLiveTabContextCloseWrapper::AndroidLiveTabContextCloseWrapper(
+     TabModel* tab_model,
+@@ -31,6 +56,86 @@
+       saved_tab_group_ids_(std::move(saved_tab_group_ids)),
+       web_contents_state_(std::move(web_contents_state)) {
+   CHECK_EQ(closed_tabs_.size(), web_contents_state_.size());
++  scoped_web_contents_.resize(closed_tabs_.size());
++  // Java retains these value snapshots before native normalization removes the
++  // split. Only complete pairs are exposed: TabRestoreService requires exactly
++  // two members.
++  struct Member {
++    size_t index;
++    int position;
++    split_tabs::SplitTabVisualData visual_data;
++  };
++  std::map<split_tabs::SplitTabId, std::vector<Member>> candidates;
++  JNIEnv* env = base::android::AttachCurrentThread();
++  for (size_t i = 0; i < closed_tabs_.size(); ++i) {
++    auto jtab = closed_tabs_[i]->GetJavaObject();
++    if (!jtab)
++      continue;
++    auto token = TabAndroid::GetHistoricalSplitTabId(env, jtab);
++    if (!token || token->is_zero())
++      continue;
++    int layout = TabAndroid::GetHistoricalSplitLayout(env, jtab);
++    double ratio = TabAndroid::GetHistoricalSplitRatio(env, jtab);
++    int position = TabAndroid::GetHistoricalSplitPosition(env, jtab);
++    if (layout < 0 || layout > 1 || !std::isfinite(ratio) || ratio <= 0 ||
++        ratio >= 1 || position < 0 || position > 1)
++      continue;
++    candidates[split_tabs::SplitTabId::FromRawToken(*token)].push_back(
++        {i, position,
++         split_tabs::SplitTabVisualData(
++             static_cast<split_tabs::SplitTabLayout>(layout), ratio)});
++  }
++  for (const auto& [id, members] : candidates) {
++    if (members.size() != 2 || members[0].position == members[1].position ||
++        members[0].visual_data != members[1].visual_data)
++      continue;
++    size_t a = members[0].index;
++    size_t b = members[1].index;
++    // A historical group must never advertise half a split spanning another
++    // group.
++    if (GetTabGroupForTab(a) != GetTabGroupForTab(b) ||
++        !CanSaveSplitMember(GetLiveTabAt(a)) ||
++        !CanSaveSplitMember(GetLiveTabAt(b)))
++      continue;
++    tab_id_to_split_.emplace(closed_tabs_[a]->GetAndroidId(), id);
++    tab_id_to_split_.emplace(closed_tabs_[b]->GetAndroidId(), id);
++    split_visual_data_.emplace(id, members[0].visual_data);
++  }
++  // Closure lists need not be in model order. Keep complete pairs adjacent and
++  // leading-first so native reconstruction sees the same ordered collection.
++  std::vector<size_t> order;
++  std::set<int> emitted;
++  for (size_t i = 0; i < closed_tabs_.size(); ++i) {
++    const int tab_id = closed_tabs_[i]->GetAndroidId();
++    if (emitted.contains(tab_id))
++      continue;
++    auto split = tab_id_to_split_.find(tab_id);
++    if (split == tab_id_to_split_.end()) {
++      order.push_back(i);
++      emitted.insert(tab_id);
++      continue;
++    }
++    const auto& members = candidates.at(split->second);
++    const size_t first =
++        members[0].position == 0 ? members[0].index : members[1].index;
++    const size_t second =
++        members[0].position == 0 ? members[1].index : members[0].index;
++    order.push_back(first);
++    order.push_back(second);
++    emitted.insert(closed_tabs_[first]->GetAndroidId());
++    emitted.insert(closed_tabs_[second]->GetAndroidId());
++  }
++  auto tabs = std::move(closed_tabs_);
++  auto states = std::move(web_contents_state_);
++  auto contents = std::move(scoped_web_contents_);
++  closed_tabs_.clear();
++  web_contents_state_.clear();
++  scoped_web_contents_.clear();
++  for (size_t index : order) {
++    closed_tabs_.push_back(tabs[index]);
++    web_contents_state_.push_back(std::move(states[index]));
++    scoped_web_contents_.push_back(std::move(contents[index]));
++  }
+ }
+
+ AndroidLiveTabContextCloseWrapper::~AndroidLiveTabContextCloseWrapper() =
+@@ -48,11 +153,14 @@
+     int relative_index) const {
+   DCHECK_LT(base::checked_cast<size_t>(relative_index),
+             web_contents_state_.size());
+-  scoped_web_contents_ = historical_tab_saver::ScopedWebContents::CreateForTab(
+-      GetTabAt(relative_index), &web_contents_state_[relative_index]);
+-  DCHECK(scoped_web_contents_->web_contents());
++  auto& scoped = scoped_web_contents_[relative_index];
++  if (!scoped) {
++    scoped = historical_tab_saver::ScopedWebContents::CreateForTab(
++        GetTabAt(relative_index), &web_contents_state_[relative_index]);
++  }
++  DCHECK(scoped->web_contents());
+   return sessions::ContentLiveTab::GetOrCreateForWebContents(
+-      scoped_web_contents_->web_contents());
++      scoped->web_contents());
+ }
+
+ std::optional<tab_groups::TabGroupId>
+@@ -87,6 +195,30 @@
+     }
+   }
+   return std::nullopt;
++}
++
++bool AndroidLiveTabContextCloseWrapper::IsTabPinned(int relative_index) const {
++  return GetTabAt(relative_index)->IsPinned();
++}
++
++std::map<std::string, std::string>
++AndroidLiveTabContextCloseWrapper::GetExtraDataForTab(
++    int relative_index) const {
++  return {};
++}
++
++std::optional<split_tabs::SplitTabId>
++AndroidLiveTabContextCloseWrapper::GetSplitForTab(int relative_index) const {
++  auto it = tab_id_to_split_.find(GetTabAt(relative_index)->GetAndroidId());
++  return it == tab_id_to_split_.end() ? std::nullopt
++                                      : std::make_optional(it->second);
++}
++
++const split_tabs::SplitTabVisualData*
++AndroidLiveTabContextCloseWrapper::GetVisualDataForSplit(
++    const split_tabs::SplitTabId& split_id) const {
++  auto it = split_visual_data_.find(split_id);
++  return it == split_visual_data_.end() ? nullptr : &it->second;
+ }
+
+ TabAndroid* AndroidLiveTabContextCloseWrapper::GetTabAt(
+@@ -127,6 +259,9 @@
+   auto* live_tab = AndroidLiveTabContext::AddRestoredTab(
+       tab, tab_index, select, is_restoring_group_or_window,
+       original_session_type);
++  if (!live_tab) {
++    return nullptr;
++  }
+   if (tab.group) {
+     TabAndroid* restored_tab = TabAndroid::FromWebContents(
+         &static_cast<sessions::ContentLiveTab*>(live_tab)->GetWebContents());
+@@ -139,6 +274,33 @@
+   return live_tab;
+ }
+
++void AndroidLiveTabContextRestoreWrapper::ReconstructSplit(
++    sessions::LiveTab* leading_tab,
++    sessions::LiveTab* trailing_tab,
++    split_tabs::SplitTabId split_id,
++    const split_tabs::SplitTabVisualData& visual_data) {
++  if (!leading_tab || !trailing_tab)
++    return;
++  auto* leading = TabAndroid::FromWebContents(
++      &static_cast<sessions::ContentLiveTab*>(leading_tab)->GetWebContents());
++  auto* trailing = TabAndroid::FromWebContents(
++      &static_cast<sessions::ContentLiveTab*>(trailing_tab)->GetWebContents());
++  if (leading && trailing) {
++    pending_splits_.push_back(
++        {{leading->GetAndroidId(), trailing->GetAndroidId()},
++         split_id,
++         visual_data});
++  }
++}
++
++void AndroidLiveTabContextRestoreWrapper::RestoreSplits() {
++  auto pending = std::move(pending_splits_);
++  pending_splits_.clear();
++  for (const auto& split : pending) {
++    RestoreSplitByTabIds(split.tab_ids, split.id, split.visual_data);
++  }
++}
++
+ const std::map<tab_groups::TabGroupId,
+                AndroidLiveTabContextRestoreWrapper::TabGroup>&
+ AndroidLiveTabContextRestoreWrapper::GetTabGroups() {

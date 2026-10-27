@@ -1,0 +1,232 @@
+diff --git a/build/android/pylib/local/device/local_device_instrumentation_test_run_test.py b/build/android/pylib/local/device/local_device_instrumentation_test_run_test.py
+--- a/build/android/pylib/local/device/local_device_instrumentation_test_run_test.py
++++ b/build/android/pylib/local/device/local_device_instrumentation_test_run_test.py
+@@ -30,9 +30,157 @@
+         self._env = mock_environment.MockEnvironment()
+         self._env.trace_output = None
+         self._ti = mock_test_instance.MockTestInstance()
++        self._ti.test_launch_display_extras = {}
+         self._obj = local_device_instrumentation_test_run.LocalDeviceInstrumentationTestRun(
+             self._env, self._ti
+         )
++
++    def _SetUpInstallPolicy(self, skip_clear_data, install_failure=None):
++        module = local_device_instrumentation_test_run
++        self._env.skip_clear_data = skip_clear_data
++        self._env.concurrent_adb = False
++        self._ti.store_data_dependencies_in_temp = False
++        self._ti.replace_system_package = None
++        self._ti.system_packages_to_remove = []
++        self._ti.additional_apexs = []
++        self._ti.test_apk_incremental_install_json = None
++        self._ti.test_apk_as_instant = False
++        self._ti.apk_under_test_incremental_install_json = None
++        self._ti.use_webview_provider = False
++        self._ti.voice_interaction_service = None
++        self._ti.run_setup_commands = []
++        self._ti.store_tombstones = False
++        self._ti.wait_for_java_debugger = False
++        self._ti.modules = self._ti.fake_modules = None
++        self._ti.additional_locales = None
++        self._ti.GetDataDependencies.return_value = []
++        self._ti.IsApkInstant.return_value = False
++        self._ti.IsApkForceQueryable.return_value = False
++        apks = [mock.MagicMock(name=name) for name in
++                ('additional', 'test', 'under_test')]
++        for apk in apks:
++            apk.GetPackageName.return_value = 'com.example.' + apk._mock_name
++            apk.GetPermissions.return_value = ['android.permission.INTERNET']
++        self._ti.additional_apks = [apks[0]]
++        self._ti.test_apk, self._ti.apk_under_test = apks[1:]
++        device = mock.MagicMock()
++        device.GetExternalStoragePath.return_value = '/sdcard'
++        device.IsOnline.return_value = True
++        device.Install.side_effect = install_failure
++        self._install_device = device
++        self._env.parallel_devices.pMap.side_effect = (
++            lambda fn, deps: fn(device, deps))
++
++        def run_install_step(step, dev):
++            # Exercise real SetUp scheduling and its install closure, without
++            # unrelated fixture, role, keyboard, or device setup operations.
++            if step.__name__ == 'install_helper_internal':
++                return step(dev)
++            return None
++
++        with contextlib.ExitStack() as stack:
++            for owner, name, effect in (
++                (module.local_device_environment, 'handle_shard_failures_with',
++                 lambda *_a, **_k: lambda fn: fn),
++                (module.measures, 'timed_func',
++                 lambda *_a, **_k: lambda fn: fn),
++                (module.trace_event, 'traced', lambda fn: fn),
++                (module.instrumentation_tracing, 'no_tracing', lambda fn: fn),
++                (module.crash_handler, 'RetryOnSystemCrash', run_install_step),
++            ):
++                stack.enter_context(mock.patch.object(owner, name,
++                                                       side_effect=effect))
++            stack.enter_context(mock.patch.object(module.tempfile, 'mkdtemp',
++                                                   return_value='/mock/skia'))
++            stack.enter_context(mock.patch.object(
++                module.gold_utils, 'AndroidSkiaGoldSessionManager'))
++            stack.enter_context(mock.patch.object(
++                module.exception_recorder, 'register'))
++            self._obj.SetUp()
++        return device, apks
++
++    def testSetUp_skipClearDataPreservesEveryInstalledApk(self):
++        device, apks = self._SetUpInstallPolicy(True)
++        self.assertEqual(device.Install.call_count, 3)
++        for apk, call in zip(apks, device.Install.call_args_list):
++            self.assertIs(call.args[0], apk)
++            self.assertIs(call.kwargs.get('reinstall', False), True)
++            self.assertIs(call.kwargs['force_queryable'], False)
++        device.Uninstall.assert_not_called()
++        device.ClearApplicationState.assert_not_called()
++
++    def testSetUp_defaultInstallIsolationUnchanged(self):
++        device, apks = self._SetUpInstallPolicy(False)
++        self.assertEqual(device.Install.call_count, len(apks))
++        for call in device.Install.call_args_list:
++            self.assertIs(call.kwargs.get('reinstall', False), False)
++
++    def testSetUp_skipClearDataInstallFailureHasNoFallback(self):
++        failure = local_device_instrumentation_test_run.device_errors.CommandFailedError(
++            'INSTALL_FAILED_UPDATE_INCOMPATIBLE')
++        with self.assertRaises(type(failure)) as raised:
++            self._SetUpInstallPolicy(True, failure)
++        self.assertIs(raised.exception, failure)
++        self._install_device.Install.assert_called_once()
++        self.assertIs(self._install_device.Install.call_args.kwargs['reinstall'],
++                      True)
++        self._install_device.Uninstall.assert_not_called()
++        self._install_device.ClearApplicationState.assert_not_called()
++
++    def _MockDeviceUtilsInstall(self, changed, failure=None):
++        device = mock.MagicMock()
++        device._GetApplicationPathsInternal.return_value = ['/installed/base.apk']
++        host_apk = '/host/test.apk'
++        device._ComputeStaleApks.return_value = (
++            [host_apk] if changed else [], [], {})
++        device._cache = {'package_apk_hashes': {}, 'package_apk_paths': {}}
++        device.IsApplicationInstalled.return_value = True
++        device.adb.Install.side_effect = failure
++        apk = mock.MagicMock()
++        apk.GetPackageName.return_value = 'org.chromium.chrome.tests'
++        return device, apk, host_apk
++
++    def testDeviceUtils_reinstallSignerFailureDoesNotResetPackage(self):
++        module = local_device_instrumentation_test_run
++        failure = module.device_errors.CommandFailedError(
++            'INSTALL_FAILED_UPDATE_INCOMPATIBLE')
++        device, apk, host_apk = self._MockDeviceUtilsInstall(True, failure)
++        with mock.patch.object(module.device_utils.os.path, 'exists',
++                               return_value=True):
++            with self.assertRaises(type(failure)) as raised:
++                module.device_utils.DeviceUtils._InstallInternal(
++                    device, apk, [host_apk], reinstall=True,
++                    permissions=[], streaming=False)
++        self.assertIs(raised.exception, failure)
++        device.adb.Install.assert_called_once()
++        self.assertIs(device.adb.Install.call_args.kwargs['reinstall'], True)
++        device.Uninstall.assert_not_called()
++        device.ClearApplicationState.assert_not_called()
++        device.RunShellCommand.assert_not_called()
++
++    def testDeviceUtils_reinstallIdenticalApkDoesNotClearData(self):
++        module = local_device_instrumentation_test_run
++        device, apk, host_apk = self._MockDeviceUtilsInstall(False)
++        with mock.patch.object(module.device_utils.os.path, 'exists',
++                               return_value=True):
++            module.device_utils.DeviceUtils._InstallInternal(
++                device, apk, [host_apk], reinstall=True,
++                permissions=[], streaming=False)
++        device.adb.Install.assert_not_called()
++        device.Uninstall.assert_not_called()
++        device.ClearApplicationState.assert_not_called()
++        device.ForceStop.assert_called_once_with('org.chromium.chrome.tests')
++
++    def testDeviceUtils_defaultChangedApkIsolationUnchanged(self):
++        module = local_device_instrumentation_test_run
++        device, apk, host_apk = self._MockDeviceUtilsInstall(True)
++        with mock.patch.object(module.device_utils.os.path, 'exists',
++                               return_value=True):
++            module.device_utils.DeviceUtils._InstallInternal(
++                device, apk, [host_apk], reinstall=False,
++                permissions=[], streaming=False)
++        device.Uninstall.assert_called_once_with('org.chromium.chrome.tests')
++        self.assertIs(device.adb.Install.call_args.kwargs['reinstall'], False)
+ 
+     # TODO(crbug.com/41361955): Decide whether the _ShouldRetry hook is worth
+     # retaining and remove these tests if not.
+@@ -256,6 +404,10 @@
+             'annotations': {},
+         }
+         self._obj._RunTest(device, test)
++        self.assertNotIn(
++            'org.chromium.base.test.BaseActivityTestRule.LaunchDisplayId',
++            device.StartInstrumentation.call_args.kwargs['extras'],
++        )
+ 
+         expected_jacoco_device_file = '/data/media/10/chrome/test/coverage/com.example.MyTest_testFoo.exec'
+         device.PathExists.assert_any_call(
+@@ -288,6 +440,8 @@
+         self, mock_pull_clang, _mock_exists, _mock_logcat
+     ):
+         self._env.force_main_user = False
++        display_key = 'org.chromium.base.test.BaseActivityTestRule.LaunchDisplayId'
++        self._ti.test_launch_display_extras = {display_key: 1560}
+         self._ti.coverage_directory = '/host/coverage/dir'
+         self._ti.apk_under_test = None
+         self._ti.use_native_coverage_listener = False
+@@ -314,6 +468,9 @@
+             'annotations': {},
+         }
+         self._obj._RunTest(device, test)
++        self.assertEqual(
++            1560, device.StartInstrumentation.call_args.kwargs['extras'][display_key]
++        )
+ 
+         expected_jacoco_device_file = (
+             '/sdcard/chrome/test/coverage/com.example.MyTest_testFoo.exec'
+@@ -334,6 +491,40 @@
+             'com.example.MyTest_testFoo',
+             as_root=False,
+         )
++
++    def test_GetTestsFromRunner_launchDisplayPropagatesWithoutChangingListing(self):
++        module = local_device_instrumentation_test_run
++        key = 'org.chromium.base.test.BaseActivityTestRule.LaunchDisplayId'
++        device = mock.MagicMock()
++        device.StartInstrumentation.return_value = ['test-list-output']
++        self._ti.junit4_runner_class = 'org.chromium.base.test.BaseChromiumAndroidJUnitRunner'
++        self._ti.test_package = 'com.example.test'
++        self._ti.webview_process_mode = None
++        self._ti.timeout_scale = 1
++        self._ti.wait_for_java_debugger = False
++        self._ti.has_chromium_test_listener = True
++        expected = [{'class': 'ExampleTest', 'methods': []}]
++        parallel = mock.MagicMock()
++        self._env.parallel_devices.pMap.side_effect = (
++            lambda fn: parallel.configure_mock(**{'pGet.return_value': [fn(device)]})
++            or parallel
++        )
++        with mock.patch.object(self._obj, '_ArchiveLogcat',
++                               return_value=contextlib.nullcontext()), (
++            mock.patch.object(module.crash_handler, 'RetryOnSystemCrash',
++                              side_effect=lambda fn, dev: fn(dev))
++        ), mock.patch.object(module, '_ParseTestListOutputFromChromiumListener',
++                             return_value=expected):
++            for display_extras in ({}, {key: 1560}):
++                with self.subTest(display_extras=display_extras):
++                    self._ti.test_launch_display_extras = display_extras
++                    self.assertEqual(expected, self._obj._GetTestsFromRunner(False))
++                    extras = device.StartInstrumentation.call_args.kwargs['extras']
++                    self.assertEqual('true', extras['log'])
++                    self.assertEqual('net.bytebuddy', extras['notPackage'])
++                    self.assertEqual(1560 if display_extras else None, extras.get(key))
++                    self.assertEqual(0, device.StartInstrumentation.call_args.kwargs['retries'])
++                    self.assertEqual({key: 1560} if display_extras else {}, display_extras)
+ 
+ 
+ def create_test(annotation_dict, class_name, method_name):

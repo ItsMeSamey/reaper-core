@@ -3,6 +3,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+#include "build/build_config.h"
+
 #include "brave/components/speedreader/speedreader_service.h"
 
 #include <string>
@@ -43,8 +45,11 @@ SpeedreaderService::SpeedreaderService(content::BrowserContext* browser_context,
                                        HostContentSettingsMap* content_rules)
     : browser_context_(browser_context),
       content_rules_(content_rules),
-      prefs_(user_prefs::UserPrefs::Get(browser_context_)),
-      metrics_(local_state, content_rules_, IsAllowedForAllReadableSites()) {
+      prefs_(user_prefs::UserPrefs::Get(browser_context_))
+#if !BUILDFLAG(IS_ANDROID)
+      , metrics_(local_state, content_rules_, IsAllowedForAllReadableSites())
+#endif  // !BUILDFLAG(IS_ANDROID)
+{
   DCHECK(base::FeatureList::IsEnabled(features::kSpeedreaderFeature));
 }
 
@@ -84,7 +89,9 @@ void SpeedreaderService::RegisterProfilePrefs(PrefRegistrySimple* registry) {
 
 // static
 void SpeedreaderService::RegisterLocalStatePrefs(PrefRegistrySimple* registry) {
+#if !BUILDFLAG(IS_ANDROID)
   SpeedreaderMetrics::RegisterPrefs(registry);
+#endif  // !BUILDFLAG(IS_ANDROID)
 }
 
 void SpeedreaderService::AddObserver(Observer* observer) {
@@ -176,7 +183,9 @@ void SpeedreaderService::SetAllowedForAllReadableSites(bool enabled) {
     o.OnAllSitesEnableSettingChanged(enabled);
   }
 
+#if !BUILDFLAG(IS_ANDROID)
   metrics_.UpdateEnabledSitesMetric(enabled);
+#endif  // !BUILDFLAG(IS_ANDROID)
 }
 
 void SpeedreaderService::SetEnabledForSite(const GURL& url, bool enabled) {
@@ -202,7 +211,9 @@ void SpeedreaderService::SetEnabledForSite(const GURL& url, bool enabled) {
       pattern, ContentSettingsPattern::Wildcard(),
       ContentSettingsType::BRAVE_SPEEDREADER, setting);
 
+#if !BUILDFLAG(IS_ANDROID)
   metrics_.UpdateEnabledSitesMetric(IsAllowedForAllReadableSites());
+#endif  // !BUILDFLAG(IS_ANDROID)
 }
 
 void SpeedreaderService::SetEnabledForSite(content::WebContents* contents,
@@ -214,7 +225,9 @@ void SpeedreaderService::SetEnabledForSite(content::WebContents* contents,
     }
   }
 
+#if !BUILDFLAG(IS_ANDROID)
   metrics_.UpdateEnabledSitesMetric(IsAllowedForAllReadableSites());
+#endif  // !BUILDFLAG(IS_ANDROID)
 }
 
 void SpeedreaderService::SetAppearanceSettings(

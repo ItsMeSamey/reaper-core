@@ -1,0 +1,167 @@
+# Android extension text-to-speech engine integration.
+substitutions:
+- description: Complete failed event dispatch through the controller asynchronously
+  regex:
+    re_pattern: \#include\ "base/no_destructor\.h"
+    replace: '#include "base/no_destructor.h"
+
+      #include "base/functional/bind.h"
+
+      #include "base/location.h"
+
+      #include "base/task/single_thread_task_runner.h"'
+- description: Respect the existing incognito extension permission
+  regex:
+    re_pattern: \#include\ "extensions/browser/extension_system\.h"
+    replace: '#include "extensions/browser/extension_system.h"
+
+      #include "extensions/browser/extension_util.h"'
+- description: Do not dereference an absent MV3 background page for a warning
+  regex:
+    re_pattern: \ \ host\->host_contents\(\)\->GetPrimaryMainFrame\(\)\->AddMessageToConsole\(
+    replace: "#if BUILDFLAG(IS_ANDROID)\n  // MV3 service workers do not have a background page to receive this warning.\n  if (!host || !host->host_contents()) {\n    return;\n  }\n#endif\n  host->host_contents()->GetPrimaryMainFrame()->AddMessageToConsole("
+- description: Do not dispatch engine events after the browser context is cleared or shutting down
+  count: 7
+  regex:
+    re_pattern: \ \ Profile\*\ profile\ =\ Profile::FromBrowserContext\(browser_context\);
+    replace: "#if BUILDFLAG(IS_ANDROID)\n  if (!browser_context || browser_context->ShutdownStarted()) {\n    return;\n  }\n#endif\n  Profile* profile = Profile::FromBrowserContext(browser_context);"
+- description: Only enumerate engines permitted in the requesting private context
+  regex:
+    re_pattern: \ \ \ \ const\ Extension\*\ extension\ =\ iter\->get\(\);
+    replace: "    const Extension* extension = iter->get();\n#if BUILDFLAG(IS_ANDROID)\n    if (profile->IsOffTheRecord() &&\n        !extensions::util::IsIncognitoEnabled(extension->id(), profile)) {\n      continue;\n    }\n#endif"
+- description: Report missing listeners and failed worker startup without leaving queued speech pending
+  regex:
+    re_pattern: 'void\ TtsExtensionEngine::Speak\(content::TtsUtterance\*\ utterance,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ const\ content::VoiceData\&\ voice\)\ \{\
+
+      \ \ base::ListValue\ args\ =\ BuildSpeakArgs\(utterance,\ voice\);\
+
+      \ \ Profile\*\ profile\ =\
+
+      \ \ \ \ \ \ Profile::FromBrowserContext\(utterance\->GetBrowserContext\(\)\);\
+
+      \ \ extensions::EventRouter\*\ event_router\ =\ EventRouter::Get\(profile\);\
+
+      \ \ const\ auto\&\ engine_id\ =\ utterance\->GetEngineId\(\);\
+
+      \ \ if\ \(!event_router\->ExtensionHasEventListener\(engine_id,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ tts_engine_events::kOnSpeak\)\)\ \{\
+
+      \ \ \ \ //\ The\ extension\ removed\ its\ event\ listener\ after\ we\ processed\ the\ speak\
+
+      \ \ \ \ //\ call\ matching\ its\ voice\.\
+
+      \ \ \ \ return;\
+
+      \ \ \}\
+
+      \
+
+      \ \ auto\ event\ =\ std::make_unique<extensions::Event>\(\
+
+      \ \ \ \ \ \ extensions::events::TTS_ENGINE_ON_SPEAK,\ tts_engine_events::kOnSpeak,\
+
+      \ \ \ \ \ \ std::move\(args\),\ profile\);\
+
+      \ \ event_router\->DispatchEventToExtension\(engine_id,\ std::move\(event\)\);\
+
+      \}\
+
+      '
+    replace: "void TtsExtensionEngine::Speak(content::TtsUtterance* utterance,\n                               const content::VoiceData& voice) {\n#if BUILDFLAG(IS_ANDROID)\n  auto on_failure = base::BindRepeating([](int utterance_id) {\n    content::TtsController::GetInstance()->OnTtsEvent(\n        utterance_id, content::TTS_EVENT_ERROR, -1, -1,\n        \"The speech extension is unavailable.\");\n  }, utterance->GetId());\n  content::BrowserContext* context = utterance->GetBrowserContext();\n  if (!context || context->ShutdownStarted()) {\n    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(\n        FROM_HERE, base::BindOnce(on_failure));\n    return;\n  }\n#endif\n  base::ListValue args = BuildSpeakArgs(utterance, voice);\n  Profile* profile =\n      Profile::FromBrowserContext(utterance->GetBrowserContext());\n  extensions::EventRouter* event_router = EventRouter::Get(profile);\n  const auto& engine_id = utterance->GetEngineId();\n#if !BUILDFLAG(IS_ANDROID)\n  if (!event_router->ExtensionHasEventListener(engine_id,\n                                               tts_engine_events::kOnSpeak)) {\n    // The extension removed its event listener after we processed the speak\n    // call matching its voice.\n    return;\n  }\n#endif\n  auto event = std::make_unique<extensions::Event>(\n      extensions::events::TTS_ENGINE_ON_SPEAK, tts_engine_events::kOnSpeak,\n      std::move(args), profile);\n#if BUILDFLAG(IS_ANDROID)\n  // Includes service-worker startup failure and a listener removed since voice\n  // enumeration. The router posts failures, so the controller can finish its\n  // current SpeakNow call before completing the utterance.\n  event->cannot_dispatch_callback = std::move(on_failure);\n#endif\n  event_router->DispatchEventToExtension(engine_id, std::move(event));\n}\n"
+- description: Format the modified implementation with Chromium style
+  regex:
+    re_pattern: '\
+
+      \#include\ "ash/constants/ash_extension_constants\.h"\
+
+      \#include\ "ash/webui/settings/public/constants/routes_util\.h"\
+
+      \#include\ "base/compiler_specific\.h"\
+
+      \#include\ "base/i18n/language_tag\.h"\
+
+      \#include\ "base/i18n/tag_converters\.h"\
+
+      \#include\ "base/no_destructor\.h"\
+
+      \#include\ "base/functional/bind\.h"\
+
+      \#include\ "base/location\.h"\
+
+      \#include\ "base/task/single_thread_task_runner\.h"\
+
+      \#include\ "base/strings/utf_string_conversions\.h"\
+
+      \#include\ "base/values\.h"\
+
+      \#include\ "build/build_config\.h"\
+
+      \#include\ "chrome/browser/profiles/profile\.h"\
+
+      \#include\ "chrome/browser/speech/extension_api/tts_extension_api\.h"\
+
+      '
+    replace: '
+
+      #include "ash/constants/ash_extension_constants.h"
+
+      #include "ash/webui/settings/public/constants/routes_util.h"
+
+      #include "base/compiler_specific.h"
+
+      #include "base/functional/bind.h"
+
+      #include "base/i18n/language_tag.h"
+
+      #include "base/i18n/tag_converters.h"
+
+      #include "base/location.h"
+
+      #include "base/no_destructor.h"
+
+      #include "base/strings/utf_string_conversions.h"
+
+      #include "base/task/single_thread_task_runner.h"
+
+      #include "base/values.h"
+
+      #include "build/build_config.h"
+
+      #include "chrome/browser/profiles/profile.h"
+
+      #include "chrome/browser/speech/extension_api/tts_extension_api.h"
+
+      '
+- description: Format the modified implementation with Chromium style
+  regex:
+    re_pattern: '\
+
+      void\ TtsExtensionEngine::Speak\(content::TtsUtterance\*\ utterance,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ const\ content::VoiceData\&\ voice\)\ \{\
+
+      \#if\ BUILDFLAG\(IS_ANDROID\)\
+
+      \ \ auto\ on_failure\ =\ base::BindRepeating\(\[\]\(int\ utterance_id\)\ \{\
+
+      \ \ \ \ content::TtsController::GetInstance\(\)\->OnTtsEvent\(\
+
+      \ \ \ \ \ \ \ \ utterance_id,\ content::TTS_EVENT_ERROR,\ \-1,\ \-1,\
+
+      \ \ \ \ \ \ \ \ "The\ speech\ extension\ is\ unavailable\."\);\
+
+      \ \ \},\ utterance\->GetId\(\)\);\
+
+      \ \ content::BrowserContext\*\ context\ =\ utterance\->GetBrowserContext\(\);\
+
+      \ \ if\ \(!context\ \|\|\ context\->ShutdownStarted\(\)\)\ \{\
+
+      \ \ \ \ base::SingleThreadTaskRunner::GetCurrentDefault\(\)\->PostTask\(\
+
+      \ \ \ \ \ \ \ \ FROM_HERE,\ base::BindOnce\(on_failure\)\);\
+
+      '
+    replace: "\nvoid TtsExtensionEngine::Speak(content::TtsUtterance* utterance,\n                               const content::VoiceData& voice) {\n#if BUILDFLAG(IS_ANDROID)\n  auto on_failure = base::BindRepeating(\n      [](int utterance_id) {\n        content::TtsController::GetInstance()->OnTtsEvent(\n            utterance_id, content::TTS_EVENT_ERROR, -1, -1,\n            \"The speech extension is unavailable.\");\n      },\n      utterance->GetId());\n  content::BrowserContext* context = utterance->GetBrowserContext();\n  if (!context || context->ShutdownStarted()) {\n    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(\n        FROM_HERE, base::BindOnce(on_failure));\n"

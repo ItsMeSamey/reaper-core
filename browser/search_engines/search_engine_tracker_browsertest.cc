@@ -7,10 +7,14 @@
 
 #include <memory>
 
+#include "base/functional/bind.h"
 #include "base/test/metrics/histogram_tester.h"
+#include "build/build_config.h"
 #include "brave/browser/ui/browser_commands.h"
 #include "brave/components/brave_ads/buildflags/buildflags.h"
+#if !BUILDFLAG(IS_ANDROID) || BUILDFLAG(ENABLE_BRAVE_REWARDS)
 #include "brave/components/brave_rewards/core/pref_names.h"
+#endif  // !BUILDFLAG(IS_ANDROID) || BUILDFLAG(ENABLE_BRAVE_REWARDS)
 #include "brave/components/constants/pref_names.h"
 #include "brave/components/search_engines/brave_prepopulated_engines.h"
 #include "brave/components/tor/buildflags/buildflags.h"
@@ -18,8 +22,12 @@
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/regional_capabilities/regional_capabilities_service_factory.h"
 #include "chrome/browser/search_engines/template_url_service_factory.h"
+#if BUILDFLAG(IS_ANDROID)
+#include "chrome/test/base/android/android_browser_test.h"
+#else
 #include "chrome/browser/ui/browser.h"
 #include "chrome/test/base/in_process_browser_test.h"
+#endif  // BUILDFLAG(IS_ANDROID)
 #include "chrome/test/base/search_test_utils.h"
 #include "components/country_codes/country_codes.h"
 #include "components/keyed_service/content/browser_context_dependency_manager.h"
@@ -33,7 +41,11 @@
 #include "brave/components/brave_ads/core/public/prefs/pref_names.h"
 #endif  // BUILDFLAG(ENABLE_BRAVE_ADS)
 
+#if BUILDFLAG(IS_ANDROID)
+class SearchEngineProviderP3ATest : public AndroidBrowserTest {
+#else
 class SearchEngineProviderP3ATest : public InProcessBrowserTest {
+#endif  // BUILDFLAG(IS_ANDROID)
  public:
   SearchEngineProviderP3ATest() {
     histogram_tester_ = std::make_unique<base::HistogramTester>();
@@ -63,10 +75,14 @@ class SearchEngineProviderP3ATest : public InProcessBrowserTest {
 };
 
 IN_PROC_BROWSER_TEST_F(SearchEngineProviderP3ATest, DefaultSearchEngineP3A) {
+#if BUILDFLAG(IS_ANDROID)
+  ASSERT_TRUE(GetProfile());
+#endif  // BUILDFLAG(IS_ANDROID)
   // Check that the metric is reported on startup.
   // By default, Rewards is disabled
   histogram_tester_->ExpectUniqueSample(kDefaultSearchEngineMetric,
                                         SearchEngineP3A::kBrave, 1);
+#if !BUILDFLAG(IS_ANDROID) || BUILDFLAG(ENABLE_BRAVE_REWARDS)
   // Since Rewards is disabled, NonRewards metric should have the value
   histogram_tester_->ExpectUniqueSample(kNonRewardsDefaultEngineMetric,
                                         SearchEngineP3A::kBrave, 1);
@@ -77,25 +93,48 @@ IN_PROC_BROWSER_TEST_F(SearchEngineProviderP3ATest, DefaultSearchEngineP3A) {
   // disabled)
   histogram_tester_->ExpectUniqueSample(kNonBraveSearchWalletConnectedMetric,
                                         INT_MAX - 1, 1);
+#endif  // !BUILDFLAG(IS_ANDROID) || BUILDFLAG(ENABLE_BRAVE_REWARDS)
+
+#if BUILDFLAG(IS_ANDROID) && !BUILDFLAG(ENABLE_BRAVE_REWARDS)
+  ASSERT_TRUE(SearchEngineTrackerFactory::GetForBrowserContext(
+#if BUILDFLAG(IS_ANDROID)
+      GetProfile()));
+#else
+      browser()->GetProfile()));
+#endif  // BUILDFLAG(IS_ANDROID)
+#endif  // BUILDFLAG(IS_ANDROID) && !BUILDFLAG(ENABLE_BRAVE_REWARDS)
 
   auto* service =
+#if BUILDFLAG(IS_ANDROID)
+      TemplateURLServiceFactory::GetForProfile(GetProfile());
+#else
       TemplateURLServiceFactory::GetForProfile(browser()->GetProfile());
+#endif  // BUILDFLAG(IS_ANDROID)
   search_test_utils::WaitForTemplateURLServiceToLoad(service);
 
   auto regional_engines =
       regional_capabilities::RegionalCapabilitiesServiceFactory::GetForProfile(
+#if BUILDFLAG(IS_ANDROID)
+          GetProfile())
+#else
           browser()->GetProfile())
+#endif  // BUILDFLAG(IS_ANDROID)
           ->GetRegionalPrepopulatedEngines();
 
   // Check that changing the default engine triggers emitting of a new value.
   auto ddg_data = TemplateURLPrepopulateData::GetPrepopulatedEngine(
+#if BUILDFLAG(IS_ANDROID)
+      *GetProfile()->GetPrefs(), regional_engines,
+#else
       *browser()->GetProfile()->GetPrefs(), regional_engines,
+#endif  // BUILDFLAG(IS_ANDROID)
       TemplateURLPrepopulateData::PREPOPULATED_ENGINE_ID_DUCKDUCKGO);
   TemplateURL ddg_url(*ddg_data);
 
   service->SetUserSelectedDefaultSearchProvider(&ddg_url);
   histogram_tester_->ExpectBucketCount(kDefaultSearchEngineMetric,
                                        SearchEngineP3A::kDuckDuckGo, 1);
+#if !BUILDFLAG(IS_ANDROID) || BUILDFLAG(ENABLE_BRAVE_REWARDS)
   histogram_tester_->ExpectBucketCount(kNonRewardsDefaultEngineMetric,
                                        SearchEngineP3A::kDuckDuckGo, 1);
   histogram_tester_->ExpectUniqueSample(kRewardsDefaultEngineMetric,
@@ -105,7 +144,11 @@ IN_PROC_BROWSER_TEST_F(SearchEngineProviderP3ATest, DefaultSearchEngineP3A) {
                                         INT_MAX - 1, 2);
 
   // Enable Rewards and check metrics switch
+#if BUILDFLAG(IS_ANDROID)
+  PrefService* prefs = GetProfile()->GetPrefs();
+#else
   PrefService* prefs = browser()->GetProfile()->GetPrefs();
+#endif  // BUILDFLAG(IS_ANDROID)
   prefs->SetBoolean(brave_rewards::prefs::kEnabled, true);
 
   // Now Rewards metric should have the value and NonRewards should be
@@ -125,14 +168,21 @@ IN_PROC_BROWSER_TEST_F(SearchEngineProviderP3ATest, DefaultSearchEngineP3A) {
   histogram_tester_->ExpectBucketCount(kNonBraveSearchWalletConnectedMetric, 1,
                                        1);
 
+#endif  // !BUILDFLAG(IS_ANDROID) || BUILDFLAG(ENABLE_BRAVE_REWARDS)
+
   // Check switching back to original engine.
   auto brave_data = TemplateURLPrepopulateData::GetPrepopulatedEngine(
+#if BUILDFLAG(IS_ANDROID)
+      *GetProfile()->GetPrefs(), regional_engines,
+#else
       *browser()->GetProfile()->GetPrefs(), regional_engines,
+#endif  // BUILDFLAG(IS_ANDROID)
       TemplateURLPrepopulateData::PREPOPULATED_ENGINE_ID_BRAVE);
   TemplateURL brave_url(*brave_data);
   service->SetUserSelectedDefaultSearchProvider(&brave_url);
   histogram_tester_->ExpectBucketCount(kDefaultSearchEngineMetric,
                                        SearchEngineP3A::kBrave, 2);
+#if !BUILDFLAG(IS_ANDROID) || BUILDFLAG(ENABLE_BRAVE_REWARDS)
   // With Rewards enabled, Rewards metric should show Brave
   histogram_tester_->ExpectBucketCount(kRewardsDefaultEngineMetric,
                                        SearchEngineP3A::kBrave, 1);
@@ -153,19 +203,39 @@ IN_PROC_BROWSER_TEST_F(SearchEngineProviderP3ATest, DefaultSearchEngineP3A) {
   histogram_tester_->ExpectBucketCount(kNonBraveSearchWalletConnectedMetric,
                                        INT_MAX - 1, 4);
 
+#endif  // !BUILDFLAG(IS_ANDROID) || BUILDFLAG(ENABLE_BRAVE_REWARDS)
+
   // Check that incognito or TOR profiles do not emit the metric.
+#if BUILDFLAG(IS_ANDROID)
+  Profile* otr_profile =
+      GetProfile()->GetPrimaryOTRProfile(/*create_if_needed=*/true);
+  ASSERT_TRUE(otr_profile);
+  EXPECT_TRUE(otr_profile->IsOffTheRecord());
+#else
   CreateIncognitoBrowser();
+#endif  // BUILDFLAG(IS_ANDROID)
 #if BUILDFLAG(ENABLE_TOR)
+#if BUILDFLAG(IS_ANDROID)
+  brave::NewOffTheRecordWindowTor(GetBrowserWindowInterface());
+#else
   brave::NewOffTheRecordWindowTor(browser());
+#endif  // BUILDFLAG(IS_ANDROID)
 #endif
 
+#if !BUILDFLAG(IS_ANDROID) || BUILDFLAG(ENABLE_BRAVE_REWARDS)
   histogram_tester_->ExpectTotalCount(kDefaultSearchEngineMetric, 5);
   histogram_tester_->ExpectTotalCount(kRewardsDefaultEngineMetric, 5);
   histogram_tester_->ExpectTotalCount(kNonRewardsDefaultEngineMetric, 5);
   histogram_tester_->ExpectTotalCount(kNonBraveSearchWalletConnectedMetric, 6);
+#else
+  histogram_tester_->ExpectTotalCount(kDefaultSearchEngineMetric, 3);
+#endif  // !BUILDFLAG(IS_ANDROID) || BUILDFLAG(ENABLE_BRAVE_REWARDS)
 }
 
 IN_PROC_BROWSER_TEST_F(SearchEngineProviderP3ATest, SwitchSearchEngineP3A) {
+#if BUILDFLAG(IS_ANDROID)
+  ASSERT_TRUE(GetProfile());
+#endif  // BUILDFLAG(IS_ANDROID)
   // Check that the metric is reported on startup.
   // Since we override the region to US, Brave Search should be the default
   auto start_count_brave = histogram_tester_->GetBucketCount(
@@ -175,16 +245,28 @@ IN_PROC_BROWSER_TEST_F(SearchEngineProviderP3ATest, SwitchSearchEngineP3A) {
 
   // Load service for switching the default search engine.
   auto* service =
+#if BUILDFLAG(IS_ANDROID)
+      TemplateURLServiceFactory::GetForProfile(GetProfile());
+#else
       TemplateURLServiceFactory::GetForProfile(browser()->GetProfile());
+#endif  // BUILDFLAG(IS_ANDROID)
   search_test_utils::WaitForTemplateURLServiceToLoad(service);
 
   auto regional_engines =
       regional_capabilities::RegionalCapabilitiesServiceFactory::GetForProfile(
+#if BUILDFLAG(IS_ANDROID)
+          GetProfile())
+#else
           browser()->GetProfile())
+#endif  // BUILDFLAG(IS_ANDROID)
           ->GetRegionalPrepopulatedEngines();
   // Check that changing the default engine triggers emission of a new value.
   auto ddg_data = TemplateURLPrepopulateData::GetPrepopulatedEngine(
+#if BUILDFLAG(IS_ANDROID)
+      *GetProfile()->GetPrefs(), regional_engines,
+#else
       *browser()->GetProfile()->GetPrefs(), regional_engines,
+#endif  // BUILDFLAG(IS_ANDROID)
       TemplateURLPrepopulateData::PREPOPULATED_ENGINE_ID_DUCKDUCKGO);
   TemplateURL ddg_url(*ddg_data);
 
@@ -195,7 +277,11 @@ IN_PROC_BROWSER_TEST_F(SearchEngineProviderP3ATest, SwitchSearchEngineP3A) {
 
   // Check additional changes.
   auto brave_data = TemplateURLPrepopulateData::GetPrepopulatedEngine(
+#if BUILDFLAG(IS_ANDROID)
+      *GetProfile()->GetPrefs(), regional_engines,
+#else
       *browser()->GetProfile()->GetPrefs(), regional_engines,
+#endif  // BUILDFLAG(IS_ANDROID)
       TemplateURLPrepopulateData::PREPOPULATED_ENGINE_ID_BRAVE);
   TemplateURL brave_url(*brave_data);
 
@@ -205,7 +291,11 @@ IN_PROC_BROWSER_TEST_F(SearchEngineProviderP3ATest, SwitchSearchEngineP3A) {
 
   // Check additional changes.
   auto bing_data = TemplateURLPrepopulateData::GetPrepopulatedEngine(
+#if BUILDFLAG(IS_ANDROID)
+      *GetProfile()->GetPrefs(), regional_engines,
+#else
       *browser()->GetProfile()->GetPrefs(), regional_engines,
+#endif  // BUILDFLAG(IS_ANDROID)
       TemplateURLPrepopulateData::PREPOPULATED_ENGINE_ID_BING);
   TemplateURL bing_url(*bing_data);
 
@@ -220,9 +310,20 @@ IN_PROC_BROWSER_TEST_F(SearchEngineProviderP3ATest, SwitchSearchEngineP3A) {
 
   // Check that incognito or TOR profiles do not emit the metric.
   histogram_tester_->ExpectTotalCount(kSwitchSearchEngineMetric, 5);
+#if BUILDFLAG(IS_ANDROID)
+  Profile* otr_profile =
+      GetProfile()->GetPrimaryOTRProfile(/*create_if_needed=*/true);
+  ASSERT_TRUE(otr_profile);
+  EXPECT_TRUE(otr_profile->IsOffTheRecord());
+#else
   CreateIncognitoBrowser();
+#endif  // BUILDFLAG(IS_ANDROID)
 #if BUILDFLAG(ENABLE_TOR)
+#if BUILDFLAG(IS_ANDROID)
+  brave::NewOffTheRecordWindowTor(GetBrowserWindowInterface());
+#else
   brave::NewOffTheRecordWindowTor(browser());
+#endif  // BUILDFLAG(IS_ANDROID)
 #endif
 
   histogram_tester_->ExpectTotalCount(kSwitchSearchEngineMetric, 5);
@@ -230,11 +331,18 @@ IN_PROC_BROWSER_TEST_F(SearchEngineProviderP3ATest, SwitchSearchEngineP3A) {
 
 #if BUILDFLAG(ENABLE_WEB_DISCOVERY)
 IN_PROC_BROWSER_TEST_F(SearchEngineProviderP3ATest, WebDiscoveryEnabledP3A) {
+#if BUILDFLAG(IS_ANDROID)
+  ASSERT_TRUE(GetProfile());
+#endif  // BUILDFLAG(IS_ANDROID)
   histogram_tester_->ExpectBucketCount(kWebDiscoveryEnabledMetric, 0, 1);
   histogram_tester_->ExpectUniqueSample(kWebDiscoveryDefaultEngineMetric,
                                         INT_MAX - 1, 1);
 
+#if BUILDFLAG(IS_ANDROID)
+  PrefService* prefs = GetProfile()->GetPrefs();
+#else
   PrefService* prefs = browser()->GetProfile()->GetPrefs();
+#endif  // BUILDFLAG(IS_ANDROID)
   prefs->SetBoolean(kWebDiscoveryEnabled, true);
 
   histogram_tester_->ExpectBucketCount(kWebDiscoveryEnabledMetric, 1, 1);
@@ -243,16 +351,28 @@ IN_PROC_BROWSER_TEST_F(SearchEngineProviderP3ATest, WebDiscoveryEnabledP3A) {
 
   // Test changing search engine while web discovery is enabled
   auto* service =
+#if BUILDFLAG(IS_ANDROID)
+      TemplateURLServiceFactory::GetForProfile(GetProfile());
+#else
       TemplateURLServiceFactory::GetForProfile(browser()->GetProfile());
+#endif  // BUILDFLAG(IS_ANDROID)
   search_test_utils::WaitForTemplateURLServiceToLoad(service);
 
   auto regional_engines =
       regional_capabilities::RegionalCapabilitiesServiceFactory::GetForProfile(
+#if BUILDFLAG(IS_ANDROID)
+          GetProfile())
+#else
           browser()->GetProfile())
+#endif  // BUILDFLAG(IS_ANDROID)
           ->GetRegionalPrepopulatedEngines();
 
   auto ddg_data = TemplateURLPrepopulateData::GetPrepopulatedEngine(
+#if BUILDFLAG(IS_ANDROID)
+      *GetProfile()->GetPrefs(), regional_engines,
+#else
       *browser()->GetProfile()->GetPrefs(), regional_engines,
+#endif  // BUILDFLAG(IS_ANDROID)
       TemplateURLPrepopulateData::PREPOPULATED_ENGINE_ID_DUCKDUCKGO);
   TemplateURL ddg_url(*ddg_data);
   service->SetUserSelectedDefaultSearchProvider(&ddg_url);

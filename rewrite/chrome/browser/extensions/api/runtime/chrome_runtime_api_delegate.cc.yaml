@@ -1,0 +1,135 @@
+# Android runtime ownership and attached DevTools window metadata.
+substitutions:
+- description: Keep a weak reference across tab ownership transfer
+  regex:
+    re_pattern: \#include\ "base/location\.h"
+    replace: '#include "base/location.h"
+
+      #include "base/memory/weak_ptr.h"'
+- description: Select only a standard Android tab model with the exact runtime profile
+  regex:
+    re_pattern: \ \ \ \ if\ \(model\->GetProfile\(\)\ ==\ profile\)\ \{
+    replace: "    if (model->GetProfile() == profile &&\n        model->GetTabModelType() == TabModel::TabModelType::kStandard) {"
+- description: Do not navigate destroyed or refused contents after CreateTab takes ownership
+  regex:
+    re_pattern: '\ \ content::WebContents\*\ raw_web_contents\ =\ contents\.get\(\);\
+
+      \ \ tab_model\->CreateTab\(nullptr,\ std::move\(contents\),\ TabModel::kInvalidIndex,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ TabModel::TabLaunchType::FROM_RECENT_TABS_FOREGROUND,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ /\*should_pin=\*/false\);'
+    replace: "  base::WeakPtr<content::WebContents> weak_contents = contents->GetWeakPtr();\n  // Creation can reject the tab or synchronously destroy its contents.\n  auto* created_tab = tab_model->CreateTab(\n      nullptr, std::move(contents), TabModel::kInvalidIndex,\n      TabModel::TabLaunchType::FROM_RECENT_TABS_FOREGROUND,\n      /*should_pin=*/false);\n  if (!created_tab || !weak_contents || weak_contents->IsBeingDestroyed()) {\n    return;\n  }"
+- description: Navigate only the surviving newly created tab
+  regex:
+    re_pattern: raw_web_contents\->GetController\(\)\.LoadURLWithParams\(load_params\)
+    replace: weak_contents->GetController().LoadURLWithParams(load_params)
+- description: Report the actual attached Android DevTools window without a desktop docking lookup
+  regex:
+    re_pattern: '\ \ //\ TODO\(crbug\.com/383366125\):\ Implement\ this\ function\ for\ desktop\ android\.\
+
+      \ \ NOTIMPLEMENTED\(\);\
+
+      \ \ return\ \-1;'
+    replace: "  if (!developer_tools_web_contents ||\n      developer_tools_web_contents->IsBeingDestroyed()) {\n    return extension_misc::kUnknownWindowId;\n  }\n  CHECK_EQ(extensions::GetViewType(developer_tools_web_contents),\n           extensions::mojom::ViewType::kDeveloperTools);\n  // The caller has already selected this extension's accessible contexts.\n  // DevToolsActivity attaches the frontend to its own Android tab list, which\n  // sets the session window ID. Before attachment the helper returns unknown.\n  return extensions::ExtensionTabUtil::GetWindowIdOfTab(\n      developer_tools_web_contents);"
+
+- description: Owned Android window/auth/options/fullscreen and fixture routing final integration (1)
+  regex:
+    re_pattern: '\#include\ "chrome/browser/ui/navigator/browser_navigator_params\.h"\
+
+      \#else\
+
+      \#include\ "chrome/browser/ui/android/tab_model/tab_model\.h"\
+
+      \#include\ "chrome/browser/ui/android/tab_model/tab_model_list\.h"\
+
+      \#endif\
+
+      \
+
+      namespace\ \{\
+
+      \
+
+      '
+    replace: '#include "chrome/browser/ui/navigator/browser_navigator_params.h"
+
+      #else
+
+      #include "chrome/browser/ui/android/tab_model/tab_model.h"
+
+      #include "chrome/browser/ui/android/tab_model/tab_model_list.h"
+
+      #include "extensions/browser/extension_registry.h"
+
+      #endif
+
+
+      namespace {
+
+
+      '
+- description: Owned Android window/auth/options/fullscreen and fixture routing final integration (2)
+  regex:
+    re_pattern: '\
+
+      \#if\ BUILDFLAG\(IS_ANDROID\)\
+
+      \ \ \ \ //\ Asynchronously\ create\ the\ window\ on\ Android,\ then\ open\ the\ options\ page\.\
+
+      \ \ \ \ auto\ creation_callback\ =\ base::BindOnce\(\
+
+      \ \ \ \ \ \ \ \ \[\]\(scoped_refptr<const\ Extension>\ extension,\
+
+      \ \ \ \ \ \ \ \ \ \ \ base::OnceCallback<void\(bool\)>\ complete_callback,\
+
+      \ \ \ \ \ \ \ \ \ \ \ BrowserWindowInterface\*\ new_browser\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ if\ \(!new_browser\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ std::move\(complete_callback\)\.Run\(false\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ return;\
+
+      \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \ \ std::move\(complete_callback\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \.Run\(extensions::ExtensionTabUtil::OpenOptionsPage\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ extension\.get\(\),\ new_browser\)\);\
+
+      \ \ \ \ \ \ \ \ \},\
+
+      \ \ \ \ \ \ \ \ base::WrapRefCounted\(extension\),\ std::move\(callback\)\);\
+
+      \ \ \ \ CreateBrowserWindow\(std::move\(params\),\ std::move\(creation_callback\)\);\
+
+      \
+
+      \ \ \ \ //\ Nothing\ to\ do\ here,\ the\ callback\ will\ open\ the\ options\ page\ eventually\.\
+
+      \ \ \ \ return;\
+
+      '
+    replace: "\n#if BUILDFLAG(IS_ANDROID)\n    // Asynchronously create the window on Android, then open the options page.\n\
+      \    auto creation_callback = base::BindOnce(\n        [](base::WeakPtr<Profile> profile,\n           scoped_refptr<const\
+      \ Extension> extension,\n           base::OnceCallback<void(bool)> complete_callback,\n           BrowserWindowInterface*\
+      \ new_browser) {\n          if (!profile || profile->ShutdownStarted() || !new_browser ||\n              new_browser->IsDeleteScheduled()\
+      \ ||\n              new_browser->GetProfile() != profile.get() ||\n              ExtensionRegistry::Get(profile.get())\n\
+      \                      ->enabled_extensions()\n                      .GetByID(extension->id()) != extension.get()) {\n\
+      \            // Unloading or replacing an extension retires its pending request.\n            std::move(complete_callback).Run(false);\n\
+      \            return;\n          }\n          std::move(complete_callback)\n              .Run(extensions::ExtensionTabUtil::OpenOptionsPage(\n\
+      \                  extension.get(), new_browser));\n        },\n        profile->GetWeakPtr(), base::WrapRefCounted(extension),\n\
+      \        std::move(callback));\n    CreateBrowserWindow(std::move(params), std::move(creation_callback));\n\n    //\
+      \ Nothing to do here, the callback will open the options page eventually.\n    return;\n"
+- description: Qualify the existing extension registry type in the global ChromeRuntimeAPIDelegate Android callback without
+    changing its retirement checks
+  regex:
+    pattern: '              ExtensionRegistry::Get(profile.get())
+
+      '
+    replace: '              extensions::ExtensionRegistry::Get(profile.get())
+
+      '
+  count: 1

@@ -94,6 +94,7 @@ public class BraveSyncScreensPreference extends BravePreferenceFragment
     private static final int RC_HANDLE_CAMERA_PERM = 2;
 
     private QRCodeCameraManager mCameraManager;
+    private SyncService mSyncService;
 
     // The have a sync code button displayed in the Sync view.
     private Button mScanChainCodeButton;
@@ -326,7 +327,13 @@ public class BraveSyncScreensPreference extends BravePreferenceFragment
     @Override
     public View onCreateView(
             LayoutInflater inflater, ViewGroup container, Bundle savedInstanceState) {
-        SyncServiceFactory.getForProfile(getProfile()).addSyncStateChangedListener(this);
+        if (mSyncService != null) {
+            mSyncService.removeSyncStateChangedListener(this);
+        }
+        mSyncService = SyncServiceFactory.getForProfile(getProfile());
+        if (mSyncService != null) {
+            mSyncService.addSyncStateChangedListener(this);
+        }
 
         invalidateCodephrase();
 
@@ -351,6 +358,11 @@ public class BraveSyncScreensPreference extends BravePreferenceFragment
 
     @Override
     public void onDestroyView() {
+        if (mSyncService != null) {
+            mSyncService.removeSyncStateChangedListener(this);
+            mSyncService = null;
+        }
+        releaseCameraManager();
         if (mRotationLayoutListener != null) {
             mRootView.removeOnLayoutChangeListener(mRotationLayoutListener);
             mRotationLayoutListener = null;
@@ -798,11 +810,20 @@ public class BraveSyncScreensPreference extends BravePreferenceFragment
             return;
         }
 
+        if (mSyncService == null) {
+            onSyncError(null);
+            return;
+        }
+
         if (mScanChainCodeButton == v) {
             setJoinExistingChainLayout();
         } else if (mStartNewChainButton == v) {
             // Creating a new chain
-            getPureWords();
+            String codePhrase = getPureWords();
+            if (codePhrase == null || codePhrase.isEmpty()) {
+                onSyncError(null);
+                return;
+            }
             setNewChainLayout();
             seedWordsReceived(mCodephrase, SyncInputType.NEW);
         } else if (mMobileButton == v) {
@@ -940,7 +961,10 @@ public class BraveSyncScreensPreference extends BravePreferenceFragment
         ThreadUtils.assertOnUiThread();
 
         String codePhrase = getPureWords();
-        assert codePhrase != null && !codePhrase.isEmpty();
+        if (codePhrase == null || codePhrase.isEmpty()) {
+            onSyncError(null);
+            return;
+        }
         String timeLimitedWords = getBraveSyncWorker().getTimeLimitedWordsFromPure(codePhrase);
         assert timeLimitedWords != null && !timeLimitedWords.isEmpty();
         mBraveSyncAddDeviceCodeWords.setVisibility(View.VISIBLE);
@@ -956,7 +980,12 @@ public class BraveSyncScreensPreference extends BravePreferenceFragment
     void generateNewQrCode() {
         ThreadUtils.assertOnUiThread();
 
-        String seedHex = getBraveSyncWorker().getSeedHexFromWords(getPureWords());
+        String codePhrase = getPureWords();
+        if (codePhrase == null || codePhrase.isEmpty()) {
+            onSyncError(null);
+            return;
+        }
+        String seedHex = getBraveSyncWorker().getSeedHexFromWords(codePhrase);
         if (null == seedHex || seedHex.isEmpty()) {
             // Give up, seed must be valid
             Log.e(TAG, "generateNewQrCode seedHex is empty");
@@ -1090,11 +1119,18 @@ public class BraveSyncScreensPreference extends BravePreferenceFragment
 
     private enum SyncInputType { NEW, JOIN }
     private void seedWordsReceivedImpl(String seedWords, SyncInputType syncInputType) {
+        final View initiatingView = getView();
+        if (initiatingView == null) {
+            return;
+        }
         pauseSyncStateChangedObserver();
 
         getBraveSyncWorker()
                 .setJoinSyncChainCallback(
                         (Boolean result) -> {
+                            if (getView() != initiatingView) {
+                                return;
+                            }
                             if (result) {
                                 if (syncInputType == SyncInputType.JOIN) {
                                     setAppropriateView();
@@ -1155,15 +1191,24 @@ public class BraveSyncScreensPreference extends BravePreferenceFragment
             mPlayServicesErrorDialog.dismiss();
             mPlayServicesErrorDialog = null;
         }
-        if (mCameraManager != null) {
-            mCameraManager.release();
-        }
+        releaseCameraManager();
 
-        SyncServiceFactory.getForProfile(getProfile()).removeSyncStateChangedListener(this);
+        if (mSyncService != null) {
+            mSyncService.removeSyncStateChangedListener(this);
+            mSyncService = null;
+        }
 
         if (mDeviceInfoObserverSet) {
             BraveSyncDevices.get().removeDeviceInfoChangedListener(this);
             mDeviceInfoObserverSet = false;
+        }
+    }
+
+    private void releaseCameraManager() {
+        QRCodeCameraManager manager = mCameraManager;
+        mCameraManager = null;
+        if (manager != null) {
+            manager.release();
         }
     }
 
@@ -1218,6 +1263,11 @@ public class BraveSyncScreensPreference extends BravePreferenceFragment
     @Override
     public void onDetectedQrCode(Barcode barcode) {
         if (barcode != null) {
+            final View scannerView = getView();
+            final Activity activity = getActivity();
+            if (scannerView == null || activity == null) {
+                return;
+            }
             synchronized (mQrInProcessingOrFinalizedLock) {
                 // If camera looks on the QR image and final security warning is shown,
                 // we could arrive here again and show 2nd alert while the 1st is not yet closed;
@@ -1232,10 +1282,16 @@ public class BraveSyncScreensPreference extends BravePreferenceFragment
             String validationError = getQrCodeValidationString(jsonQr);
 
             if (!validationError.isEmpty()) {
-                getActivity().runOnUiThread(() -> {
+                activity.runOnUiThread(() -> {
+                    if (getView() != scannerView) {
+                        return;
+                    }
                     showEndDialog(validationError, new Runnable() {
                         @Override
                         public void run() {
+                            if (getView() != scannerView) {
+                                return;
+                            }
                             synchronized (mQrInProcessingOrFinalizedLock) {
                                 assert mQrInProcessingOrFinalized;
                                 mQrInProcessingOrFinalized = false;
@@ -1258,11 +1314,17 @@ public class BraveSyncScreensPreference extends BravePreferenceFragment
             // but cl format then makes a glitchy formatting and lint does not
             // accept the well-formatted change. So use the full syntax for Runnable.
 
-            getActivity().runOnUiThread(() -> {
+            activity.runOnUiThread(() -> {
+                if (getView() != scannerView) {
+                    return;
+                }
                 showFinalSecurityWarning(FinalWarningFor.QR_CODE,
                         new Runnable() {
                             @Override
                             public void run() {
+                                if (getView() != scannerView) {
+                                    return;
+                                }
                                 synchronized (mQrInProcessingOrFinalizedLock) {
                                     assert mQrInProcessingOrFinalized;
                                     // Supposed to set here mQrInProcessingOrFinalized
@@ -1280,6 +1342,9 @@ public class BraveSyncScreensPreference extends BravePreferenceFragment
                         new Runnable() {
                             @Override
                             public void run() {
+                                if (getView() != scannerView) {
+                                    return;
+                                }
                                 synchronized (mQrInProcessingOrFinalizedLock) {
                                     assert mQrInProcessingOrFinalized;
                                     mQrInProcessingOrFinalized = false;
@@ -1441,7 +1506,7 @@ public class BraveSyncScreensPreference extends BravePreferenceFragment
 
     @Override
     public void syncStateChanged() {
-        if (isSyncStateChangedObserverPaused()) {
+        if (mSyncService == null || getView() == null || isSyncStateChangedObserverPaused()) {
             return;
         }
         if (!getBraveSyncWorker().isInitialSyncFeatureSetupComplete()) {

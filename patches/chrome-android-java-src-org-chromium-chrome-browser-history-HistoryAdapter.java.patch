@@ -1,0 +1,158 @@
+diff --git a/chrome/android/java/src/org/chromium/chrome/browser/history/HistoryAdapter.java b/chrome/android/java/src/org/chromium/chrome/browser/history/HistoryAdapter.java
+index f81086d2b69bdf461f5291fcb5efa555aff61d4f..91051a4d90a5361ae09523fc7eb01a42d9410dab 100644
+--- a/chrome/android/java/src/org/chromium/chrome/browser/history/HistoryAdapter.java
++++ b/chrome/android/java/src/org/chromium/chrome/browser/history/HistoryAdapter.java
+@@ -25,8 +25,6 @@
+ import org.chromium.build.annotations.NullMarked;
+ import org.chromium.build.annotations.Nullable;
+ import org.chromium.chrome.R;
+-import org.chromium.chrome.browser.finds.FindsFeatures;
+-import org.chromium.chrome.browser.finds.FindsUtils;
+ import org.chromium.chrome.browser.history.AppFilterCoordinator.AppInfo;
+ import org.chromium.chrome.browser.history.HistoryProvider.BrowsingHistoryObserver;
+ import org.chromium.chrome.browser.profiles.Profile;
+@@ -57,8 +55,6 @@
+     private final DefaultFaviconHelper mFaviconHelper;
+     private final boolean mShowAppFilter;
+     private @Nullable final SigninPromoCoordinator mHistorySyncPromoCoordinator;
+-    private @Nullable final SnackbarManager mSnackbarManager;
+-    private @Nullable final Profile mProfile;
+ 
+     private @Nullable RecyclerView mRecyclerView;
+     private HistoryProvider mHistoryProvider;
+@@ -72,7 +68,6 @@
+     private @Nullable HeaderItem mHistoryOpenInChromeHeaderItem;
+     private @Nullable HeaderItem mHistorySyncPromoHeaderItem;
+     private @Nullable HeaderItem mAppFilterHeaderItem;
+-    private @Nullable HeaderItem mFindsPromoHeaderItem;
+     private ChipView mAppFilterChip;
+ 
+     // Footers
+@@ -89,8 +84,6 @@
+     private boolean mPrivacyDisclaimersVisible;
+     private boolean mClearBrowsingDataButtonVisible;
+     private boolean mHistorySyncPromoVisible;
+-    private boolean mFindsPromoVisible;
+-    private boolean mFindsPromoShowEligible;
+     private String mQueryText = EMPTY_QUERY;
+     private @Nullable String mHostName;
+ 
+@@ -130,8 +123,6 @@
+         mHistoryProvider = provider;
+         mHistoryProvider.setObserver(this);
+         mManager = manager;
+-        mSnackbarManager = snackbarManager;
+-        mProfile = profile;
+         mFaviconHelper = new DefaultFaviconHelper();
+         mItemViews = new ArrayList<>();
+         mShowAppFilter = mManager.showAppFilter();
+@@ -460,24 +451,11 @@
+             mHistorySyncPromoHeaderItem = new PersistentHeaderItem(2, historySyncPromoView);
+         }
+ 
+-        // Initialize the Finds Opt-In Promo Card with the same position as the History Sync Promo
+-        // as they are enforced to be mutually exclusive when showing.
+-        View findsPromoContainer = getFindsPromoContainer();
+-        mFindsPromoHeaderItem = new StandardHeaderItem(2, findsPromoContainer);
+-
+         updateClearBrowsingDataButtonVisibility();
+         setPrivacyDisclaimer();
+         updatePrivacyDisclaimerBottomSpace();
+         updateHistorySyncPromoVisibility();
+ 
+-        // Only attempt to show the Finds promo if the Profile is not offTheRecord (set to be null
+-        // as a dependency) and if the SnackbarManager is not null as in certain flows such as
+-        // PageInfo and in the sidebar history page it can be null.
+-        if (mSnackbarManager != null
+-                && mProfile != null
+-                && FindsFeatures.sEnableHistoryPageOptIn.getValue()) {
+-            checkFindsPromoShowCriteriaAsync(mProfile);
+-        }
+     }
+ 
+     private ViewGroup getClearBrowsingDataButtonContainer(@Nullable ViewGroup parent) {
+@@ -541,37 +519,6 @@
+         mAppFilterChip.getPrimaryTextView().setText(R.string.history_filter_by_app);
+         mAppFilterChip.setSelected(false);
+         mAppFilterChip.setIcon(ChipView.INVALID_ICON_ID, false);
+-    }
+-
+-    private View getFindsPromoContainer() {
+-        Context context = mManager.getContext();
+-        View view =
+-                LayoutInflater.from(context)
+-                        .inflate(R.layout.finds_promo_view_history_page, null, false);
+-        Button positiveButton = view.findViewById(R.id.finds_promo_positive_button);
+-        Button negativeButton = view.findViewById(R.id.finds_promo_negative_button);
+-        View closeButton = view.findViewById(R.id.finds_promo_close_button);
+-        positiveButton.setOnClickListener(
+-                _ ->
+-                        FindsUtils.acceptOptIn(
+-                                context,
+-                                assumeNonNull(mProfile),
+-                                assumeNonNull(mSnackbarManager),
+-                                this::dismissFindsOptInPromo));
+-        negativeButton.setOnClickListener(_ -> dismissFindsOptInPromo());
+-        closeButton.setOnClickListener(_ -> dismissFindsOptInPromo());
+-        return view;
+-    }
+-
+-    private void dismissFindsOptInPromo() {
+-        if (!mFindsPromoVisible) return;
+-
+-        mFindsPromoVisible = false;
+-        setHeaders();
+-
+-        if (mProfile != null) {
+-            FindsUtils.setOptInPromoInteracted(mProfile);
+-        }
+     }
+ 
+     @EnsuresNonNull("mPrivacyDisclaimerTextView")
+@@ -653,9 +600,6 @@
+             if (mHistorySyncPromoVisible) {
+                 args.add(mHistorySyncPromoHeaderItem);
+             }
+-            if (mFindsPromoVisible) {
+-                args.add(mFindsPromoHeaderItem);
+-            }
+         }
+         setHeaders(args.toArray(new HeaderItem[args.size()]));
+     }
+@@ -765,36 +709,6 @@
+             // When removing the history sync promo, other headers should be removed when there's
+             // no history record.
+             removeHeaderIfEmpty();
+-        }
+-    }
+-
+-    /**
+-     * Checks whether the finds promo is eligible to show, through an async call for notification
+-     * channels. Update the eligibility cached tracker and if eligible, refresh the set of headers.
+-     * Setting the headers will update the visibility tracker separately.
+-     *
+-     * @param profile The current user profile.
+-     */
+-    private void checkFindsPromoShowCriteriaAsync(Profile profile) {
+-        FindsUtils.checkShowCriteriaOptInPromo(
+-                profile,
+-                (show) -> {
+-                    mFindsPromoShowEligible = show;
+-                    if (show || FindsFeatures.sAlwaysShowOptInPromo.getValue()) {
+-                        // Only update the Finds Promo visibility here since there is no need to
+-                        // rerun this logic if there are any dynamic changes to other promos.
+-                        updateFindsPromoVisibility();
+-                        setHeaders();
+-                    }
+-                });
+-    }
+-
+-    private void updateFindsPromoVisibility() {
+-        // Ensure that the Finds Promo is mutually exclusive with the History Sync Promo.
+-        mFindsPromoVisible = !mHistorySyncPromoVisible;
+-
+-        if (mFindsPromoVisible && mProfile != null) {
+-            FindsUtils.setOptInPromoSeen(mProfile);
+         }
+     }
+ 

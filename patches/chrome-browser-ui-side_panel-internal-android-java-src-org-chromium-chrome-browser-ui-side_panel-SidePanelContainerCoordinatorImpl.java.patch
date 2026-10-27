@@ -1,0 +1,310 @@
+diff --git a/chrome/browser/ui/side_panel/internal/android/java/src/org/chromium/chrome/browser/ui/side_panel/SidePanelContainerCoordinatorImpl.java b/chrome/browser/ui/side_panel/internal/android/java/src/org/chromium/chrome/browser/ui/side_panel/SidePanelContainerCoordinatorImpl.java
+--- a/chrome/browser/ui/side_panel/internal/android/java/src/org/chromium/chrome/browser/ui/side_panel/SidePanelContainerCoordinatorImpl.java
++++ b/chrome/browser/ui/side_panel/internal/android/java/src/org/chromium/chrome/browser/ui/side_panel/SidePanelContainerCoordinatorImpl.java
+@@ -40,6 +40,7 @@
+ import org.chromium.components.thinwebview.ThinWebView;
+ import org.chromium.ui.accessibility.AccessibilityState;
+ import org.chromium.ui.base.ActivityWindowAndroid;
++import org.chromium.ui.base.DeviceFormFactor;
+ import org.chromium.ui.base.ViewUtils;
+ 
+ /** Implementation of {@link SidePanelContainerCoordinator}. */
+@@ -51,6 +52,12 @@
+     private static final @AnchorSide int SIDE_PANEL_DEFAULT_ANCHOR_SIDE = AnchorSide.RIGHT;
+ 
+     private final LinearLayout mContainerView;
++    private final ActivityWindowAndroid mWindowAndroid;
++    private final boolean mIsPhone;
++    private @Nullable LinearLayout mOverlayContainerView;
++    private @Nullable ExtensionSidePanelOverlay mExtensionOverlay;
++    private @Nullable SidePanelCoordinatorAndroidBridge mOverlayOwner;
++    private int mOverlayWidth;
+     private final SidePanelNativeBridgeSelector mNativeBridgeSelector;
+     private final SideUiCoordinator mSideUiCoordinator;
+     private final TopControlsStacker mTopControlsStacker;
+@@ -59,6 +66,7 @@
+ 
+     /** {@link Runnable} for {@link #startReplacingPanelContent} to remove the old content View. */
+     private @Nullable Runnable mPendingReplaceRunnable;
++    private boolean mDestroyed;
+ 
+     /**
+      * Whether {@link #onWillAutoClose} is running.
+@@ -98,6 +106,8 @@
+         log(TAG, "constructor");
+ 
+         var activity = assertNonNull(windowAndroid.getActivity().get());
++        mWindowAndroid = windowAndroid;
++        mIsPhone = !DeviceFormFactor.isNonMultiDisplayContextOnTablet(activity);
+         mContainerView =
+                 (LinearLayout)
+                         LayoutInflater.from(activity)
+@@ -129,8 +139,13 @@
+      * @see org.chromium.chrome.browser.ui.side_ui.SideUiStateProvider#canShowSideUi
+      */
+     boolean canShow() {
+-        ThreadUtils.assertOnUiThread();
+-        boolean canShow = mSideUiCoordinator.canShowSideUi(SideUiId.SIDE_PANEL);
++        return canShow(/* isExtension= */ false);
++    }
++
++    boolean canShow(boolean isExtension) {
++        ThreadUtils.assertOnUiThread();
++        boolean canShow = mSideUiCoordinator.canShowSideUi(SideUiId.SIDE_PANEL)
++                || (isExtension && mWindowAndroid.getModalDialogManager() != null);
+ 
+         log(TAG, "canShow", canShow);
+         return canShow;
+@@ -148,15 +163,41 @@
+     void startOpeningPanel(SidePanelContent content, boolean suppressAnimations) {
+         log(TAG, "startOpeningPanel", content, suppressAnimations);
+         ThreadUtils.assertOnUiThread();
++        if (mDestroyed) return;
+ 
+         // TODO(crbug.com/513302000): assert the side panel is currently closed.
+ 
++        if (content.mIsExtension
++                && (mIsPhone || !mSideUiCoordinator.canShowSideUi(SideUiId.SIDE_PANEL))) {
++            mOverlayContainerView =
++                    (LinearLayout) LayoutInflater.from(mContainerView.getContext())
++                            .inflate(R.layout.side_panel_container, /* root= */ null);
++            mOverlayContainerView.setLayoutParams(
++                    new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
++            mOverlayOwner = assertNonNull(mNativeBridgeSelector.getCurrentCoordinatorBridge());
++            var owner = assertNonNull(mOverlayOwner);
++            mExtensionOverlay =
++                    new ExtensionSidePanelOverlay(
++                            assertNonNull(mWindowAndroid.getModalDialogManager()),
++                            mOverlayContainerView,
++                            () -> owner.closePanel(/* suppressAnimations= */ true));
++        }
+         mCurrentContent = content;
+         ViewGroup contentContainer = getContentContainer();
+         contentContainer.removeAllViews();
+         configureHeader(content);
+         contentContainer.addView(content.mView);
+ 
++        if (mExtensionOverlay != null) {
++            mOverlayWidth = Math.max(1, mContainerView.getResources().getDisplayMetrics().widthPixels);
++            var overlay = mExtensionOverlay;
++            assertNonNull(mOverlayOwner).onPanelContainerUpdated(0, mOverlayWidth);
++            // Native caches this entry's view after returning from startOpeningPanel().
++            // Present on the next UI turn so a synchronous dialog failure cannot close
++            // and destroy an entry whose view has not been cached yet.
++            overlay.showDeferred();
++            return;
++        }
+         assert !mIsPreparingForAutoClose;
+         if (!mIsPreparingForAutoRestore) {
+             mSideUiCoordinator.updateUi(
+@@ -174,7 +215,12 @@
+     void startClosingPanel(boolean suppressAnimations) {
+         log(TAG, "startClosingPanel", suppressAnimations);
+         ThreadUtils.assertOnUiThread();
+-
++        if (mDestroyed) return;
++
++        if (mExtensionOverlay != null) {
++            closeExtensionOverlay(/* notifyNative= */ true);
++            return;
++        }
+         assert !mIsPreparingForAutoRestore;
+         if (!mIsPreparingForAutoClose) {
+             mSideUiCoordinator.updateUi(
+@@ -197,12 +243,15 @@
+     void startReplacingPanelContent(SidePanelContent newContent) {
+         log(TAG, "startReplacingPanelContent", newContent);
+         ThreadUtils.assertOnUiThread();
++        if (mDestroyed) return;
+ 
+         // TODO(crbug.com/513302000): assert the side panel is currently open.
+         // TODO(crbug.com/513302000): assert the side panel isn't preparing for auto-restore/close.
+ 
+         assert mCurrentContent != null : "no content to replace";
+         View oldContentView = mCurrentContent.mView;
++        var replacementOwner =
++                assertNonNull(mNativeBridgeSelector.getCurrentCoordinatorBridge());
+         mCurrentContent = newContent;
+ 
+         configureHeader(newContent);
+@@ -230,21 +279,20 @@
+                     public void run() {
+                         if (mRan) return;
+ 
+-                        // Immediately set mRan to true to prevent re-entrancy.
++                        // Retire this owner before native completion can re-enter Java.
+                         mRan = true;
+-
+-                        contentContainer.removeView(oldContentView);
+-                        assertNonNull(mNativeBridgeSelector.getCurrentCoordinatorBridge())
+-                                .onPanelContentReplaced();
+-
+-                        notifyAccessibilityStateChanged(
+-                                AccessibilityEvent.CONTENT_CHANGE_TYPE_PANE_TITLE,
+-                                newContent.mTitle,
+-                                /* requestFocus= */ true);
+-
+-                        // If the work is for the current runnable, clear the runnable.
+                         if (mPendingReplaceRunnable == this) {
+                             mPendingReplaceRunnable = null;
++                        }
++
++                        contentContainer.removeView(oldContentView);
++                        replacementOwner.onPanelContentReplaced();
++
++                        if (!mDestroyed && mCurrentContent == newContent) {
++                            notifyAccessibilityStateChanged(
++                                    AccessibilityEvent.CONTENT_CHANGE_TYPE_PANE_TITLE,
++                                    newContent.mTitle,
++                                    /* requestFocus= */ true);
+                         }
+                     }
+                 };
+@@ -293,6 +341,10 @@
+     public void destroy() {
+         log(TAG, "destroy");
+         ThreadUtils.assertOnUiThread();
++        if (mDestroyed) return;
++        mDestroyed = true;
++        completePendingContentReplacementInternal();
++        closeExtensionOverlay(/* notifyNative= */ false);
+         mSideUiCoordinator.unregisterSideUiContainer(this);
+ 
+         // Detach the side panel content View.
+@@ -432,7 +484,8 @@
+     @Override
+     public boolean hasContentToShow(Tab tab) {
+         ThreadUtils.assertOnUiThread();
+-        boolean hasContent = mNativeBridgeSelector.hasContentToShow(tab);
++        boolean hasContent = mExtensionOverlay == null
++                && mNativeBridgeSelector.hasContentToShow(tab);
+         log(TAG, "hasContentToShow", hasContent, "Tab#" + tab.getId());
+         return hasContent;
+     }
+@@ -454,7 +507,7 @@
+         }
+ 
+         // Remove the content if setting the width the 0 (i.e. hiding the panel).
+-        if (width == 0) {
++        if (width == 0 && mExtensionOverlay == null) {
+             getContentContainer().removeAllViews();
+             mCurrentContent = null;
+         }
+@@ -482,6 +535,7 @@
+             @Px int newWidth,
+             @HeightType int oldHeightType,
+             @HeightType int newHeightType) {
++        if (mExtensionOverlay != null) return;
+         assertNonNull(mNativeBridgeSelector.getCurrentCoordinatorBridge())
+                 .onPanelContainerUpdated(oldWidth, newWidth);
+ 
+@@ -503,8 +557,9 @@
+     @SuppressWarnings("AccessibilityFocus")
+     private void notifyAccessibilityStateChanged(
+             int eventType, @Nullable CharSequence title, boolean requestFocus) {
+-        CharSequence oldTitle = ViewCompat.getAccessibilityPaneTitle(mContainerView);
+-        ViewCompat.setAccessibilityPaneTitle(mContainerView, title);
++        LinearLayout containerView = getPanelContainerView();
++        CharSequence oldTitle = ViewCompat.getAccessibilityPaneTitle(containerView);
++        ViewCompat.setAccessibilityPaneTitle(containerView, title);
+ 
+         AccessibilityEvent event =
+                 AccessibilityEvent.obtain(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED);
+@@ -517,17 +572,19 @@
+         if (eventText != null) {
+             event.getText().add(eventText);
+         }
+-        event.setSource(mContainerView);
++        event.setSource(containerView);
+         AccessibilityState.sendAccessibilityEvent(event);
+ 
+         if (requestFocus) {
+             // The focus change needs to happen after the view has measured its bounds per the
+             // a11y contract, or else TalkBack will lose focus or not focus at all. Posting
+             // gives a chance for this to come afterwards.
+-            mContainerView.post(
++            containerView.post(
+                     () -> {
+-                        mContainerView.performAccessibilityAction(
+-                                AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS, null);
++                        if (!mDestroyed) {
++                            containerView.performAccessibilityAction(
++                                    AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS, null);
++                        }
+                     });
+         }
+     }
+@@ -625,37 +682,56 @@
+ 
+     private void configureHeader(SidePanelContent content) {
+         int vis;
+-        if (!content.mShowHeader) {
++        if (!content.mShowHeader && mExtensionOverlay == null) {
+             vis = View.GONE;
+         } else {
+             vis = View.VISIBLE;
+             assert content.mTitle != null;
+-            TextView titleView = mContainerView.findViewById(R.id.side_panel_title);
++            TextView titleView = getPanelContainerView().findViewById(R.id.side_panel_title);
+             titleView.setText(content.mTitle);
+-            mContainerView
++            getPanelContainerView()
+                     .findViewById(R.id.side_panel_close_button)
+                     .setOnClickListener(
+-                            v ->
+-                                    assertNonNull(
+-                                                    mNativeBridgeSelector
+-                                                            .getCurrentCoordinatorBridge())
+-                                            .closePanel(/* suppressAnimations= */ false));
+-        }
+-        View headerView = mContainerView.findViewById(R.id.side_panel_header);
++                            v -> {
++                                var owner = mOverlayOwner != null
++                                        ? mOverlayOwner
++                                        : mNativeBridgeSelector.getCurrentCoordinatorBridge();
++                                if (owner != null) owner.closePanel(/* suppressAnimations= */ false);
++                            });
++        }
++        View headerView = getPanelContainerView().findViewById(R.id.side_panel_header);
+         headerView.setVisibility(vis);
+     }
+ 
++    private LinearLayout getPanelContainerView() {
++        return mOverlayContainerView != null ? mOverlayContainerView : mContainerView;
++    }
++
++    private void closeExtensionOverlay(boolean notifyNative) {
++        if (mExtensionOverlay == null) return;
++        completePendingContentReplacementInternal();
++        var overlay = mExtensionOverlay;
++        var owner = mOverlayOwner;
++        int oldWidth = mOverlayWidth;
++        getContentContainer().removeAllViews();
++        mCurrentContent = null;
++        mExtensionOverlay = null;
++        mOverlayContainerView = null;
++        mOverlayOwner = null;
++        mOverlayWidth = 0;
++        overlay.dismiss();
++        if (notifyNative && owner != null) owner.onPanelContainerUpdated(oldWidth, 0);
++    }
++
+     private void completePendingContentReplacementInternal() {
+-        if (mPendingReplaceRunnable != null) {
+-            mPendingReplaceRunnable.run();
+-
+-            // Explicitly set to null for readability, though it is also handled
+-            // internally by the runnable's run() method.
+-            mPendingReplaceRunnable = null;
++        var pending = mPendingReplaceRunnable;
++        mPendingReplaceRunnable = null;
++        if (pending != null) {
++            pending.run();
+         }
+     }
+ 
+     private ViewGroup getContentContainer() {
+-        return (ViewGroup) mContainerView.findViewById(R.id.side_panel_content_container);
++        return (ViewGroup) getPanelContainerView().findViewById(R.id.side_panel_content_container);
+     }
+ }

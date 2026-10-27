@@ -24,27 +24,15 @@ import android.view.View.OnClickListener;
 import android.view.ViewGroup;
 import android.widget.FrameLayout;
 import android.widget.ImageButton;
-import android.widget.ImageView;
 import android.widget.TextView;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.constraintlayout.widget.ConstraintLayout;
 import androidx.core.content.ContextCompat;
-import androidx.core.content.res.ResourcesCompat;
 import androidx.core.widget.ImageViewCompat;
 
-import com.brave.playlist.enums.PlaylistOptionsEnum;
-import com.brave.playlist.listener.PlaylistOnboardingActionClickListener;
-import com.brave.playlist.listener.PlaylistOptionsListener;
-import com.brave.playlist.model.PlaylistOptionsModel;
-import com.brave.playlist.model.SnackBarActionModel;
-import com.brave.playlist.util.ConstantUtils;
-import com.brave.playlist.util.PlaylistViewUtils;
-
 import org.chromium.base.ApiCompatibilityUtils;
-import org.chromium.base.BraveFeatureList;
-import org.chromium.base.BravePreferenceKeys;
 import org.chromium.base.BraveReflectionUtil;
 import org.chromium.base.Log;
 import org.chromium.base.MathUtils;
@@ -52,32 +40,19 @@ import org.chromium.base.ThreadUtils;
 import org.chromium.base.supplier.MonotonicObservableSupplier;
 import org.chromium.base.task.AsyncTask;
 import org.chromium.chrome.R;
-import org.chromium.chrome.browser.BraveConstants;
-import org.chromium.chrome.browser.BraveRewardsHelper;
-import org.chromium.chrome.browser.BraveRewardsNativeWorker;
-import org.chromium.chrome.browser.BraveRewardsObserver;
-import org.chromium.chrome.browser.BraveRewardsPolicy;
 import org.chromium.chrome.browser.app.BraveActivity;
 import org.chromium.chrome.browser.brave_stats.BraveStatsUtil;
-import org.chromium.chrome.browser.crypto_wallet.BraveWalletPolicy;
-import org.chromium.chrome.browser.crypto_wallet.controller.DAppsWalletController;
+import org.chromium.chrome.browser.containers.ContainerMetadataObserver;
+import org.chromium.chrome.browser.containers.ContainerToolbarIndicator;
 import org.chromium.chrome.browser.custom_layout.popup_window_tooltip.PopupWindowTooltip;
-import org.chromium.chrome.browser.customtabs.FullScreenCustomTabActivity;
 import org.chromium.chrome.browser.customtabs.features.toolbar.CustomTabToolbar;
-import org.chromium.chrome.browser.dialogs.BraveAdsSignupDialog;
-import org.chromium.chrome.browser.flags.ChromeFeatureList;
 import org.chromium.chrome.browser.local_database.BraveStatsTable;
 import org.chromium.chrome.browser.local_database.DatabaseHelper;
 import org.chromium.chrome.browser.local_database.SavedBandwidthTable;
 import org.chromium.chrome.browser.media.PictureInPicture;
-import org.chromium.chrome.browser.ntp.NtpUtil;
 import org.chromium.chrome.browser.omnibox.BraveLocationBarCoordinator;
 import org.chromium.chrome.browser.omnibox.LocationBarCoordinator;
 import org.chromium.chrome.browser.onboarding.OnboardingPrefManager;
-import org.chromium.chrome.browser.playlist.PlaylistServiceFactoryAndroid;
-import org.chromium.chrome.browser.playlist.PlaylistServiceObserverImpl;
-import org.chromium.chrome.browser.playlist.PlaylistServiceObserverImpl.PlaylistServiceObserverImplDelegate;
-import org.chromium.chrome.browser.preferences.ChromeSharedPreferences;
 import org.chromium.chrome.browser.preferences.website.BraveShieldsContentSettings;
 import org.chromium.chrome.browser.preferences.website.BraveShieldsContentSettingsObserver;
 import org.chromium.chrome.browser.profiles.Profile;
@@ -85,7 +60,6 @@ import org.chromium.chrome.browser.shields.BraveShieldsMenuObserver;
 import org.chromium.chrome.browser.shields.BraveShieldsUtils;
 import org.chromium.chrome.browser.shields.BraveUnifiedPanelHandler;
 import org.chromium.chrome.browser.tab.Tab;
-import org.chromium.chrome.browser.tab.TabHidingType;
 import org.chromium.chrome.browser.tab.TabSelectionType;
 import org.chromium.chrome.browser.tabmodel.IncognitoStateProvider;
 import org.chromium.chrome.browser.tabmodel.TabModelSelector;
@@ -99,6 +73,7 @@ import org.chromium.chrome.browser.toolbar.ToolbarTabController;
 import org.chromium.chrome.browser.toolbar.back_button.BackButtonCoordinator;
 import org.chromium.chrome.browser.toolbar.bottom.BottomToolbarConfiguration;
 import org.chromium.chrome.browser.toolbar.bottom.BottomToolbarVariationManager;
+import org.chromium.chrome.browser.toolbar.extensions.ExtensionsToolbarCoordinator;
 import org.chromium.chrome.browser.toolbar.forward_button.ForwardButtonCoordinator;
 import org.chromium.chrome.browser.toolbar.home_button.HomeButton;
 import org.chromium.chrome.browser.toolbar.home_button.HomeButtonCoordinator;
@@ -109,15 +84,10 @@ import org.chromium.chrome.browser.toolbar.signin_button.SigninButtonCoordinator
 import org.chromium.chrome.browser.toolbar.top.NavigationPopup.HistoryDelegate;
 import org.chromium.chrome.browser.user_education.UserEducationHelper;
 import org.chromium.chrome.browser.util.BraveTouchUtils;
-import org.chromium.chrome.browser.util.PackageUtils;
 import org.chromium.chrome.browser.youtube_script_injector.BraveYouTubeScriptInjectorNativeHelper;
 import org.chromium.components.embedder_support.util.UrlUtilities;
 import org.chromium.components.feature_engagement.Tracker;
 import org.chromium.content_public.browser.NavigationHandle;
-import org.chromium.mojo.bindings.ConnectionErrorHandler;
-import org.chromium.mojo.system.MojoException;
-import org.chromium.playlist.mojom.PlaylistItem;
-import org.chromium.playlist.mojom.PlaylistService;
 import org.chromium.ui.base.DeviceFormFactor;
 import org.chromium.ui.base.ViewUtils;
 import org.chromium.ui.base.WindowAndroid;
@@ -126,50 +96,26 @@ import org.chromium.ui.resources.dynamics.ViewResourceAdapter;
 import org.chromium.ui.util.ColorUtils;
 import org.chromium.ui.widget.Toast;
 import org.chromium.url.GURL;
-import org.chromium.url.mojom.Url;
 
 import java.net.URL;
-import java.net.URLEncoder;
-import java.util.ArrayList;
-import java.util.Calendar;
-import java.util.Collections;
-import java.util.Date;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Locale;
-import java.util.Set;
 import java.util.function.Supplier;
 
 public abstract class BraveToolbarLayoutImpl extends ToolbarLayout
         implements BraveToolbarLayout,
                 OnClickListener,
-                View.OnLongClickListener,
-                BraveRewardsObserver,
-                BraveRewardsNativeWorker.PublisherObserver,
-                ConnectionErrorHandler,
-                PlaylistServiceObserverImplDelegate {
+                View.OnLongClickListener {
     private static final String TAG = "BraveToolbar";
 
-    private static final String PREF_WAS_TOOLBAR_BAT_LOGO_BUTTON_PRESSED =
-            "was_toolbar_bat_logo_button_pressed";
-
     private static final int URL_FOCUS_TOOLBAR_BUTTONS_TRANSLATION_X_DP = 10;
-
-    private static final int DAYS_7 = 7;
-    public static boolean mShouldShowPlaylistMenu;
-
-    private PlaylistServiceObserverImpl mPlaylistServiceObserver;
+    private static final int PHONE_TOOLBAR_RESERVED_WIDTH_DP = 280;
 
     private final DatabaseHelper mDatabaseHelper = DatabaseHelper.getInstance();
 
-    private ImageButton mBraveWalletButton;
     private ImageButton mBraveShieldsButton;
-    private ImageButton mBraveRewardsButton;
     private ImageButton mYouTubePipButton;
     private HomeButton mHomeButton;
-    private FrameLayout mWalletLayout;
     private FrameLayout mShieldsLayout;
-    private FrameLayout mRewardsLayout;
     private FrameLayout mYouTubePipLayout;
     private BraveUnifiedPanelHandler mUnifiedPanelHandler;
 
@@ -181,14 +127,8 @@ public abstract class BraveToolbarLayoutImpl extends ToolbarLayout
     @SuppressWarnings("UnusedVariable")
     private TabModelSelectorTabModelObserver mTabModelSelectorTabModelObserver;
 
-    private BraveRewardsNativeWorker mBraveRewardsNativeWorker;
-    private DAppsWalletController mDAppsWalletController;
     private BraveShieldsContentSettings mBraveShieldsContentSettings;
     private BraveShieldsContentSettingsObserver mBraveShieldsContentSettingsObserver;
-    private TextView mBraveRewardsNotificationsCount;
-    private ImageView mBraveRewardsOnboardingIcon;
-    private View mBraveWalletBadge;
-    private ImageView mWalletIcon;
     private int mCurrentToolbarColor;
     // True once the Brave buttons sit inside the location bar text box, which happens on tablet
     // only. The location bar then paints their background, and the segment drawables the phone
@@ -197,11 +137,6 @@ public abstract class BraveToolbarLayoutImpl extends ToolbarLayout
 
     @Nullable private final Runnable mToolbarSnapshotCaptureRunnable;
 
-    private boolean mIsPublisherVerified;
-    private String mPublisherId;
-    private boolean mIsNotificationPosted;
-    private boolean mIsInitialNotificationPosted; // initial red circle notification
-
     private PopupWindowTooltip mShieldsPopupWindowTooltip;
 
     private boolean mIsBottomControlsVisible;
@@ -209,10 +144,11 @@ public abstract class BraveToolbarLayoutImpl extends ToolbarLayout
     private ColorStateList mDarkModeTint;
     private ColorStateList mLightModeTint;
 
-    private final Set<Integer> mTabsWithWalletIcon =
-            Collections.synchronizedSet(new HashSet<Integer>());
-
-    private PlaylistService mPlaylistService;
+    private @Nullable ExtensionsToolbarCoordinator mPhoneExtensionsToolbarCoordinator;
+    private @Nullable ContainerToolbarIndicator mContainerIndicator;
+    private final ContainerMetadataObserver mContainerMetadataObserver =
+            new ContainerMetadataObserver(
+                    () -> updateContainerIndicator(getToolbarDataProvider().getTab()));
 
     public BraveToolbarLayoutImpl(Context context, AttributeSet attrs) {
         super(context, attrs);
@@ -232,47 +168,29 @@ public abstract class BraveToolbarLayoutImpl extends ToolbarLayout
 
     @Override
     public void destroy() {
+        mContainerMetadataObserver.destroy();
+        mContainerIndicator = null;
+        if (mTabModelSelectorTabObserver != null) mTabModelSelectorTabObserver.destroy();
+        if (mTabModelSelectorTabModelObserver != null) mTabModelSelectorTabModelObserver.destroy();
+        mPhoneExtensionsToolbarCoordinator = null;
         if (mUnifiedPanelHandler != null) {
             mUnifiedPanelHandler.destroy();
         }
         if (mBraveShieldsContentSettings != null) {
             mBraveShieldsContentSettings.removeObserver(mBraveShieldsContentSettingsObserver);
         }
-        if (mPlaylistService != null) {
-            mPlaylistService.close();
-        }
-        if (mPlaylistServiceObserver != null) {
-            mPlaylistServiceObserver.close();
-            mPlaylistServiceObserver.destroy();
-            mPlaylistServiceObserver = null;
-        }
         super.destroy();
-        if (mBraveRewardsNativeWorker != null) {
-            mBraveRewardsNativeWorker.removeObserver(this);
-            mBraveRewardsNativeWorker.removePublisherObserver(this);
-        }
     }
 
     @Override
     protected void onFinishInflate() {
         super.onFinishInflate();
 
-        mWalletLayout = findViewById(R.id.brave_wallet_button_layout);
         mShieldsLayout = findViewById(R.id.brave_shields_button_layout);
-        mRewardsLayout = findViewById(R.id.brave_rewards_button_layout);
         mYouTubePipLayout = findViewById(R.id.brave_youtube_pip_layout);
-        mBraveRewardsNotificationsCount = findViewById(R.id.br_notifications_count);
-        mBraveRewardsOnboardingIcon = findViewById(R.id.br_rewards_onboarding_icon);
-        mBraveWalletButton = findViewById(R.id.brave_wallet_button);
         mBraveShieldsButton = findViewById(R.id.brave_shields_button);
-        mBraveRewardsButton = findViewById(R.id.brave_rewards_button);
         mYouTubePipButton = findViewById(R.id.brave_youtube_pip_button);
         mHomeButton = findViewById(R.id.home_button);
-        mBraveWalletBadge = findViewById(R.id.wallet_notfication_badge);
-        if (mWalletLayout != null) {
-            mWalletIcon = mWalletLayout.findViewById(R.id.brave_wallet_button);
-        }
-
         // Use the same tints as the omnibox status icon, so the icons Brave adds inside the URL
         // bar match the ones upstream puts there.
         mDarkModeTint = ThemeUtils.getThemedToolbarIconTint(getContext(), false);
@@ -289,26 +207,21 @@ public abstract class BraveToolbarLayoutImpl extends ToolbarLayout
             BraveTouchUtils.ensureMinTouchTarget(mBraveShieldsButton);
         }
 
-        if (mBraveRewardsButton != null) {
-            mBraveRewardsButton.setClickable(true);
-            mBraveRewardsButton.setOnClickListener(this);
-            mBraveRewardsButton.setOnLongClickListener(this);
-            BraveTouchUtils.ensureMinTouchTarget(mBraveRewardsButton);
-        }
-
-        if (mBraveWalletButton != null) {
-            mBraveWalletButton.setClickable(true);
-            mBraveWalletButton.setOnClickListener(this);
-            mBraveWalletButton.setOnLongClickListener(this);
-            BraveTouchUtils.ensureMinTouchTarget(mBraveWalletButton);
-        }
-
         if (mYouTubePipButton != null) {
             mYouTubePipButton.setClickable(true);
             mYouTubePipButton.setOnClickListener(this);
             mYouTubePipButton.setOnLongClickListener(this);
             BraveTouchUtils.ensureMinTouchTarget(mYouTubePipButton);
         }
+
+        mContainerIndicator = new ContainerToolbarIndicator(getContext());
+        FrameLayout.LayoutParams containerLayout =
+                new FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        Math.round(3 * getResources().getDisplayMetrics().density),
+                        Gravity.BOTTOM);
+        containerLayout.bottomMargin = Math.round(3 * getResources().getDisplayMetrics().density);
+        addView(mContainerIndicator, containerLayout);
 
         maybeAnchorBraveButtonsInLocationBar();
 
@@ -369,7 +282,7 @@ public abstract class BraveToolbarLayoutImpl extends ToolbarLayout
             }
         }
 
-        updateShieldsLayoutBackground(isIncognito() || !NtpUtil.shouldShowRewardsIcon());
+        updateShieldsLayoutBackground(true);
     }
 
     public String getLocationBarQuery() {
@@ -399,81 +312,22 @@ public abstract class BraveToolbarLayoutImpl extends ToolbarLayout
     }
 
     @Override
-    public void onConnectionError(MojoException e) {
-        if (isPlaylistEnabledByPrefsAndFlags()) {
-            mPlaylistService = null;
-            initPlaylistService();
-        }
-    }
-
-    private void initPlaylistService() {
-        Tab currentTab = getToolbarDataProvider().getTab();
-        if (mPlaylistService != null || currentTab == null) {
-            return;
-        }
-
-        if (currentTab.isIncognito()) {
-            return;
-        }
-
-        mPlaylistService =
-                PlaylistServiceFactoryAndroid.getInstance()
-                        .getPlaylistService(
-                                Profile.fromWebContents(currentTab.getWebContents()), this);
-    }
-
-    @Override
-    public void onTermsOfServiceUpdateAccepted() {
-        showOrHideRewardsBadge(false);
-    }
-
-    private void showOrHideRewardsBadge(boolean shouldShow) {
-        Context context = getContext();
-        if (context instanceof Activity
-                && (((Activity) context).isFinishing() || ((Activity) context).isDestroyed())) {
-            return;
-        }
-        View rewardsBadge = findViewById(R.id.rewards_notfication_badge);
-        if (rewardsBadge != null) {
-            mIsInitialNotificationPosted = shouldShow;
-            rewardsBadge.setVisibility(shouldShow ? View.VISIBLE : View.GONE);
-            if (shouldShow) {
-                // We shouldn't show both badges at the same time
-                mBraveRewardsNotificationsCount.setVisibility(View.INVISIBLE);
-            } else {
-                // Update the verified publisher mark depending on the current tab
-                updateVerifiedPublisherMark();
-            }
-        }
-    }
-
-    @Override
     protected void onNativeLibraryReady() {
         super.onNativeLibraryReady();
-        if (isPlaylistEnabledByPrefsAndFlags()) {
-            initPlaylistService();
-            mPlaylistServiceObserver = new PlaylistServiceObserverImpl(this);
-            mPlaylistService.addObserver(mPlaylistServiceObserver);
-        }
 
         mBraveShieldsContentSettings = BraveShieldsContentSettings.getInstance();
         mBraveShieldsContentSettings.addObserver(mBraveShieldsContentSettingsObserver);
 
-        mBraveRewardsNativeWorker = BraveRewardsNativeWorker.getInstance();
-        if (mBraveRewardsNativeWorker != null
-                && mBraveRewardsNativeWorker.isSupported()
-                && NtpUtil.shouldShowRewardsIcon()
-                && mRewardsLayout != null) {
-            // Check if Brave Rewards is disabled by policy before showing
-            checkRewardsPolicyAndUpdateToolbarButton();
-        } else {
-            // Rewards not supported or user disabled it - complete initialization without policy
-            // check
-            completeRewardsInitialization();
+        if (mShieldsLayout != null) {
+            updateShieldsLayoutBackground(true);
+            mShieldsLayout.setVisibility(View.VISIBLE);
         }
     }
 
     public void setTabModelSelector(TabModelSelector selector) {
+        if (mTabModelSelectorTabObserver != null) mTabModelSelectorTabObserver.destroy();
+        if (mTabModelSelectorTabModelObserver != null) mTabModelSelectorTabModelObserver.destroy();
+        updateContainerIndicator(getToolbarDataProvider().getTab());
         // We might miss events before calling setTabModelSelector, so we need
         // to proactively update the shields button state here, otherwise shields
         // might sometimes show as disabled while it is actually enabled.
@@ -490,52 +344,33 @@ public abstract class BraveToolbarLayoutImpl extends ToolbarLayout
         mTabModelSelectorTabObserver =
                 new TabModelSelectorTabObserver(selector) {
                     @Override
-                    protected void onTabRegistered(Tab tab) {
-                        super.onTabRegistered(tab);
-                        if (tab.isIncognito()) {
-                            showWalletIcon(false);
+                    public void onCrash(Tab tab) {
+                        super.onCrash(tab);
+                        // When a tab crashes it shows a custom view with a reload button.
+                        // The active tab's crash view does not support PiP.
+                        if (getToolbarDataProvider().getTab() == tab) {
+                            hideYouTubePipIcon();
                         }
                     }
 
                     @Override
-                    public void onCrash(Tab tab) {
-                        super.onCrash(tab);
-                        // When a tab crashes it shows a custom view with a reload button.
-                        // The PIP layout must be hidden.
-                        hideYouTubePipIcon();
-                    }
-
-                    @Override
                     public void onShown(Tab tab, @TabSelectionType int type) {
+                        updateContainerIndicator(tab);
                         if (!PictureInPicture.isEnabled(getContext())) {
                             hideYouTubePipIcon();
                         }
                         // Update shields button state when visible tab is changed.
                         updateBraveShieldsButtonState(tab);
-                        // case when window.open is triggered from dapps site and new tab is in
-                        // focus
-                        if (type != TabSelectionType.FROM_USER) {
-                            dismissWalletPanelOrDialog();
-                        }
-                        findMediaFiles();
-                    }
-
-                    @Override
-                    public void onHidden(Tab tab, @TabHidingType int reason) {
-                        hidePlaylistButton();
                     }
 
                     @Override
                     public void onPageLoadStarted(Tab tab, GURL url) {
-                        hideYouTubePipIcon();
-                        showWalletIcon(false, tab);
                         if (getToolbarDataProvider().getTab() == tab) {
+                            hideYouTubePipIcon();
                             updateBraveShieldsButtonState(tab);
                         }
                         mUnifiedPanelHandler.clearBraveShieldsCount(tab.getId());
                         dismissShieldsTooltip();
-                        hidePlaylistButton();
-                        mPublisherId = "";
                     }
 
                     @Override
@@ -558,43 +393,29 @@ public abstract class BraveToolbarLayoutImpl extends ToolbarLayout
                             // yet true at navigation commit time.
                             showYouTubePipIcon(tab);
                         }
-
-                        String countryCode = Locale.getDefault().getCountry();
-                        if (countryCode.equals(BraveConstants.INDIA_COUNTRY_CODE)
-                                && url.domainIs(BraveConstants.YOUTUBE_DOMAIN)
-                                && ChromeSharedPreferences.getInstance()
-                                        .readBoolean(
-                                                BravePreferenceKeys.BRAVE_AD_FREE_CALLOUT_DIALOG,
-                                                true)) {
-                            ChromeSharedPreferences.getInstance()
-                                    .writeBoolean(BravePreferenceKeys.BRAVE_OPENED_YOUTUBE, true);
-                        }
                     }
 
                     @Override
                     public void onDidFinishNavigationInPrimaryMainFrame(
                             Tab tab, NavigationHandle navigation) {
+                        if (getToolbarDataProvider().getTab() != tab) return;
                         if (navigation.isInPrimaryMainFrame() && navigation.hasCommitted()) {
                             showYouTubePipIcon(tab);
                         } else {
                             hideYouTubePipIcon();
                         }
-                        if (mBraveRewardsNativeWorker != null) {
-                            mBraveRewardsNativeWorker.triggerOnNotifyFrontTabUrlChanged();
-                        }
-                        if (getToolbarDataProvider().getTab() == tab
-                                && mBraveRewardsNativeWorker != null
-                                && !tab.isIncognito()) {
-                            mBraveRewardsNativeWorker.onNotifyFrontTabUrlChanged(
-                                    tab.getId(), tab.getUrl().getSpec());
-                        }
-                        hidePlaylistButton();
+                    }
+
+                    @Override
+                    public void onContentChanged(Tab tab) {
+                        if (getToolbarDataProvider().getTab() == tab) updateContainerIndicator(tab);
                     }
 
                     @Override
                     public void onDestroyed(Tab tab) {
+                        if (getToolbarDataProvider().getTab() == tab)
+                            updateContainerIndicator(null);
                         mUnifiedPanelHandler.removeStat(tab.getId());
-                        mTabsWithWalletIcon.remove(tab.getId());
                     }
                 };
 
@@ -602,29 +423,18 @@ public abstract class BraveToolbarLayoutImpl extends ToolbarLayout
                 new TabModelSelectorTabModelObserver(selector) {
                     @Override
                     public void didSelectTab(Tab tab, @TabSelectionType int type, int lastId) {
+                        updateContainerIndicator(tab);
                         showYouTubePipIcon(tab);
-                        // Reset verified publisher checkmark immediately on tab
-                        // switch. The correct state will be restored asynchronously
-                        // by onFrontTabPublisherChanged once the publisher query
-                        // for the new tab completes.
-                        mIsPublisherVerified = false;
-                        mPublisherId = "";
-                        updateVerifiedPublisherMark();
-                        if (mBraveRewardsNativeWorker != null && !tab.isIncognito()) {
-                            mBraveRewardsNativeWorker.onNotifyFrontTabUrlChanged(
-                                    tab.getId(), tab.getUrl().getSpec());
-                            Tab providerTab = getToolbarDataProvider().getTab();
-                            if (providerTab != null && providerTab.getId() == tab.getId()) {
-                                showWalletIcon(mTabsWithWalletIcon.contains(tab.getId()));
-                            } else if (mWalletLayout != null) {
-                                mWalletLayout.setVisibility(
-                                        mTabsWithWalletIcon.contains(tab.getId())
-                                                ? View.VISIBLE
-                                                : View.GONE);
-                            }
-                        }
                     }
                 };
+    }
+
+    private void updateContainerIndicator(@Nullable Tab tab) {
+        mContainerMetadataObserver.setProfile(
+                tab == null || tab.isDestroyed() || tab.isIncognito() ? null : tab.getProfile());
+        if (mContainerIndicator == null) return;
+        mContainerIndicator.update(tab);
+        invalidateToolbarSnapshotOnTablet();
     }
 
     private void showYouTubePipIcon(@NonNull final Tab tab) {
@@ -681,20 +491,6 @@ public abstract class BraveToolbarLayoutImpl extends ToolbarLayout
         post(mToolbarSnapshotCaptureRunnable);
     }
 
-    /** Updates the rewards layout visibility, keeping the tablet toolbar layout in sync. */
-    private void setRewardsLayoutVisibility(int visibility) {
-        if (mRewardsLayout == null || mRewardsLayout.getVisibility() == visibility) {
-            return;
-        }
-        mRewardsLayout.setVisibility(visibility);
-        // Tablet only: re-request layout on the rewards view so its row re-measures and the
-        // location bar reclaims the freed width, then refresh the toolbar snapshot.
-        if (BraveReflectionUtil.equalTypes(this.getClass(), ToolbarTablet.class)) {
-            post(mRewardsLayout::requestLayout);
-            invalidateToolbarSnapshotOnTablet();
-        }
-    }
-
     private void requestToolbarSnapshotCapture() {
         final ToolbarControlContainer toolbarControlContainer =
                 getRootView().findViewById(R.id.control_container);
@@ -708,208 +504,6 @@ public abstract class BraveToolbarLayoutImpl extends ToolbarLayout
         }
         adapter.invalidate(null);
         adapter.triggerBitmapCapture();
-    }
-
-    private boolean isPlaylistEnabledByPrefsAndFlags() {
-        Tab currentTab = getToolbarDataProvider().getTab();
-        if (currentTab == null) {
-            return false;
-        }
-        return ChromeFeatureList.isEnabled(BraveFeatureList.BRAVE_PLAYLIST)
-                && ChromeSharedPreferences.getInstance()
-                        .readBoolean(BravePreferenceKeys.PREF_ENABLE_PLAYLIST, true)
-                && !currentTab.isIncognito();
-    }
-
-    private void hidePlaylistButton() {
-        mShouldShowPlaylistMenu = false;
-        try {
-            ViewGroup viewGroup =
-                    BraveActivity.getBraveActivity().getWindow().getDecorView().findViewById(
-                            android.R.id.content);
-            View playlistButton = viewGroup.findViewById(R.id.playlist_button_id);
-            if (playlistButton != null && playlistButton.getVisibility() == View.VISIBLE) {
-                playlistButton.setVisibility(View.GONE);
-            }
-        } catch (BraveActivity.BraveActivityNotFoundException e) {
-            Log.e(TAG, "hidePlaylistButton " + e);
-        }
-    }
-
-    private boolean isPlaylistButtonVisible() {
-        try {
-            ViewGroup viewGroup =
-                    BraveActivity.getBraveActivity().getWindow().getDecorView().findViewById(
-                            android.R.id.content);
-            View playlistButton = viewGroup.findViewById(R.id.playlist_button_id);
-            return playlistButton != null && playlistButton.getVisibility() == View.VISIBLE;
-        } catch (BraveActivity.BraveActivityNotFoundException e) {
-            Log.e(TAG, "isPlaylistButtonVisible " + e);
-            return false;
-        }
-    }
-
-    private void findMediaFiles() {
-        if (mPlaylistService != null && isPlaylistEnabledByPrefsAndFlags()) {
-            hidePlaylistButton();
-            mPlaylistService.findMediaFilesFromActiveTab();
-        }
-    }
-
-    private void showPlaylistButton(PlaylistItem[] items) {
-        try {
-            ViewGroup viewGroup =
-                    BraveActivity.getBraveActivity().getWindow().getDecorView().findViewById(
-                            android.R.id.content);
-
-            PlaylistOptionsListener playlistOptionsListener =
-                    new PlaylistOptionsListener() {
-                        @Override
-                        public void onPlaylistOptionClicked(
-                                PlaylistOptionsModel playlistOptionsModel) {
-                            try {
-                                if (playlistOptionsModel.getOptionType()
-                                        == PlaylistOptionsEnum.ADD_MEDIA) {
-                                    addMediaToPlaylist(items);
-                                } else if (playlistOptionsModel.getOptionType()
-                                        == PlaylistOptionsEnum.OPEN_PLAYLIST) {
-                                    BraveActivity.getBraveActivity()
-                                            .openPlaylistActivity(
-                                                    getContext(), ConstantUtils.DEFAULT_PLAYLIST);
-                                } else if (playlistOptionsModel.getOptionType()
-                                        == PlaylistOptionsEnum.PLAYLIST_SETTINGS) {
-                                    BraveActivity.getBraveActivity().openBravePlaylistSettings();
-                                }
-                            } catch (BraveActivity.BraveActivityNotFoundException e) {
-                                Log.e(TAG, "showPlaylistButton onOptionClicked " + e);
-                            }
-                        }
-                    };
-            if (!isPlaylistButtonVisible()) {
-                PlaylistOnboardingActionClickListener playlistOnboardingActionClickListener =
-                        new PlaylistOnboardingActionClickListener() {
-                            @Override
-                            public void onOnboardingActionClick() {
-                                addMediaToPlaylist(items);
-                            }
-                        };
-
-                PlaylistViewUtils.showPlaylistButton(
-                        BraveActivity.getBraveActivity(),
-                        viewGroup,
-                        playlistOptionsListener,
-                        playlistOnboardingActionClickListener);
-            }
-        } catch (BraveActivity.BraveActivityNotFoundException e) {
-            Log.e(TAG, "showPlaylistButton " + e);
-        }
-    }
-
-    private void addMediaToPlaylist(PlaylistItem[] items) {
-        if (mPlaylistService == null) {
-            return;
-        }
-        mPlaylistService.getPlaylist(
-                ConstantUtils.DEFAULT_PLAYLIST,
-                defaultPlaylist -> {
-                    Set<String> pageSources = new HashSet<String>();
-                    for (PlaylistItem defaultPlaylistItem : defaultPlaylist.items) {
-                        pageSources.add(defaultPlaylistItem.pageSource.url);
-                    }
-                    List<PlaylistItem> playlistItems = new ArrayList<>();
-                    for (PlaylistItem playlistItem : items) {
-                        // Check for duplicates in default playlist
-                        if (!pageSources.contains(playlistItem.pageSource.url)) {
-                            playlistItems.add(playlistItem);
-                        }
-                    }
-                    if (playlistItems.size() > 0) {
-                        mPlaylistService.addMediaFiles(
-                                playlistItems.toArray(new PlaylistItem[0]),
-                                ConstantUtils.DEFAULT_PLAYLIST,
-                                true,
-                                addedItems -> {
-                                    if (addedItems.length > 0) {
-                                        showAddedToPlaylistSnackBar();
-                                    }
-                                });
-                    } else {
-                        showAlreadyAddedToPlaylistSnackBar();
-                    }
-                });
-    }
-
-    public void addMediaToPlaylist() {
-        Tab currentTab = getToolbarDataProvider().getTab();
-        if (mPlaylistService == null || currentTab == null) {
-            return;
-        }
-        mPlaylistService.addMediaFilesFromActiveTabToPlaylist(
-                ConstantUtils.DEFAULT_PLAYLIST,
-                true,
-                addedItems -> {
-                    if (addedItems.length > 0) {
-                        showAddedToPlaylistSnackBar();
-                    }
-                });
-    }
-
-    private void showAddedToPlaylistSnackBar() {
-        SnackBarActionModel snackBarActionModel =
-                new SnackBarActionModel(
-                        getContext().getResources().getString(R.string.view_action),
-                        new View.OnClickListener() {
-                            @Override
-                            public void onClick(View v) {
-                                try {
-                                    BraveActivity.getBraveActivity()
-                                            .openPlaylistActivity(
-                                                    getContext(), ConstantUtils.DEFAULT_PLAYLIST);
-                                } catch (BraveActivity.BraveActivityNotFoundException e) {
-                                    Log.e(TAG, "showAddedToPlaylistSnackBar onClick ", e);
-                                }
-                            }
-                        });
-        try {
-            ViewGroup viewGroup =
-                    BraveActivity.getBraveActivity().getWindow().getDecorView().findViewById(
-                            android.R.id.content);
-            String playlistName =
-                    getContext().getResources().getString(R.string.playlist_play_later);
-            PlaylistViewUtils.showSnackBarWithActions(
-                    viewGroup,
-                    String.format(
-                            getContext().getResources().getString(R.string.added_to_playlist),
-                            playlistName),
-                    snackBarActionModel);
-        } catch (BraveActivity.BraveActivityNotFoundException e) {
-            Log.e(TAG, "showAddedToPlaylistSnackBar ", e);
-        }
-    }
-
-    private void showAlreadyAddedToPlaylistSnackBar() {
-        SnackBarActionModel snackBarActionModel =
-                new SnackBarActionModel(
-                        getContext().getResources().getString(R.string.close_text),
-                        new View.OnClickListener() {
-                            @Override
-                            public void onClick(View v) {
-                                // Do nothing
-                            }
-                        });
-        try {
-            ViewGroup viewGroup =
-                    BraveActivity.getBraveActivity()
-                            .getWindow()
-                            .getDecorView()
-                            .findViewById(android.R.id.content);
-            PlaylistViewUtils.showSnackBarWithActions(
-                    viewGroup,
-                    getContext().getResources().getString(R.string.already_added_in_playlist),
-                    snackBarActionModel);
-        } catch (BraveActivity.BraveActivityNotFoundException e) {
-            Log.e(TAG, "showAlreadyAddedToPlaylistSnackBar " + e);
-        }
     }
 
     private void checkForTooltip(Tab tab) {
@@ -988,9 +582,6 @@ public abstract class BraveToolbarLayoutImpl extends ToolbarLayout
         }
         dismissShieldsTooltip();
         reopenShieldsPanel();
-        if (mDAppsWalletController != null) {
-            mDAppsWalletController.refreshVisibleWalletPopup();
-        }
     }
 
     private void addSavedBandwidthToDb(long savings) {
@@ -1050,49 +641,6 @@ public abstract class BraveToolbarLayoutImpl extends ToolbarLayout
         }.executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR);
     }
 
-    public boolean isWalletIconVisible() {
-        if (mWalletLayout == null) {
-            return false;
-        }
-        return mWalletLayout.getVisibility() == View.VISIBLE;
-    }
-
-    public void showWalletIcon(boolean show, Tab tab) {
-        // The layout could be null in Custom Tabs layout
-        if (mWalletLayout == null) {
-            return;
-        }
-        Tab currentTab = tab;
-        if (currentTab == null) {
-            currentTab = getToolbarDataProvider().getTab();
-            if (currentTab == null) {
-                return;
-            }
-        }
-        if (show && !BraveWalletPolicy.isDisabledByPolicy(currentTab.getProfile())) {
-            mWalletLayout.setVisibility(View.VISIBLE);
-            mTabsWithWalletIcon.add(currentTab.getId());
-        } else {
-            mWalletLayout.setVisibility(View.GONE);
-            mTabsWithWalletIcon.remove(currentTab.getId());
-        }
-    }
-
-    public void showWalletIcon(boolean show) {
-        showWalletIcon(show, null);
-    }
-
-    public void hideRewardsOnboardingIcon() {
-        if (mBraveRewardsOnboardingIcon != null) {
-            mBraveRewardsOnboardingIcon.setVisibility(View.GONE);
-        }
-        if (mBraveRewardsNotificationsCount != null) {
-            mBraveRewardsNotificationsCount.setVisibility(View.GONE);
-        }
-        ChromeSharedPreferences.getInstance()
-                .writeBoolean(PREF_WAS_TOOLBAR_BAT_LOGO_BUTTON_PRESSED, true);
-    }
-
     @Override
     public void onClickImpl(View v) {
         if (mUnifiedPanelHandler == null) {
@@ -1101,26 +649,6 @@ public abstract class BraveToolbarLayoutImpl extends ToolbarLayout
         }
         if (mBraveShieldsButton == v && mBraveShieldsButton != null) {
             showShieldsMenu();
-        } else if (mBraveRewardsButton == v && mBraveRewardsButton != null) {
-            hideRewardsOnboardingIcon();
-            OnboardingPrefManager.getInstance().setOnboardingShown(true);
-            showRewardsPage();
-
-            if (mBraveRewardsNotificationsCount.isShown()) {
-                ChromeSharedPreferences.getInstance()
-                        .writeBoolean(PREF_WAS_TOOLBAR_BAT_LOGO_BUTTON_PRESSED, true);
-                mBraveRewardsNotificationsCount.setVisibility(View.INVISIBLE);
-                mIsInitialNotificationPosted = false;
-            }
-        } else if (mHomeButton == v) {
-            // Helps Brave News know how to behave on home button action
-            try {
-                BraveActivity.getBraveActivity().setComesFromNewTab(true);
-            } catch (BraveActivity.BraveActivityNotFoundException e) {
-                Log.e(TAG, "HomeButton click " + e);
-            }
-        } else if (mBraveWalletButton == v && mBraveWalletButton != null) {
-            maybeShowWalletPanel();
         } else if (mYouTubePipButton == v && mYouTubePipButton != null) {
             Tab currentTab = getToolbarDataProvider().getTab();
             if (currentTab != null
@@ -1135,53 +663,9 @@ public abstract class BraveToolbarLayoutImpl extends ToolbarLayout
         }
     }
 
-    public void showRewardsPage() {
-        String rewardsUrl = BraveActivity.BRAVE_REWARDS_SETTINGS_URL + "?bubble";
-        if (mPublisherId != null && !mPublisherId.isEmpty()) {
-            rewardsUrl += "&creator=" + URLEncoder.encode(mPublisherId);
-        }
-        FullScreenCustomTabActivity.showPage(getContext(), rewardsUrl);
-    }
-
-    private void maybeShowWalletPanel() {
-        try {
-            BraveActivity activity = BraveActivity.getBraveActivity();
-            activity.showWalletPanel(true);
-        } catch (BraveActivity.BraveActivityNotFoundException e) {
-            Log.e(TAG, "maybeShowWalletPanel " + e);
-        }
-    }
-
-    private void showWalletPanelInternal(View v) {
-        mDAppsWalletController =
-                new DAppsWalletController(getContext(), v, dialog -> mDAppsWalletController = null);
-        mDAppsWalletController.showWalletPanel();
-    }
-
-    public void showWalletPanel() {
-        if (mDAppsWalletController == null) {
-            showWalletPanelInternal(this);
-        } else if (!mDAppsWalletController.isShowingPanel()) {
-            mDAppsWalletController.showWalletPanel();
-        }
-    }
-
     @Override
     public void onClick(View v) {
         onClickImpl(v);
-    }
-
-    private boolean checkForRewardsOnboarding() {
-        return PackageUtils.isFirstInstall(getContext())
-                && mBraveRewardsNativeWorker != null
-                && !mBraveRewardsNativeWorker.isRewardsEnabled()
-                && mBraveRewardsNativeWorker.isSupported()
-                && !OnboardingPrefManager.getInstance().isOnboardingShown()
-                && (BraveRewardsHelper.getRewardsOnboardingIconInvisibleTiming() == 0
-                        || (BraveRewardsHelper.getRewardsOnboardingIconInvisibleTiming() > 0
-                                && System.currentTimeMillis()
-                                        <= BraveRewardsHelper
-                                                .getRewardsOnboardingIconInvisibleTiming()));
     }
 
     private void showShieldsMenu() {
@@ -1210,12 +694,8 @@ public abstract class BraveToolbarLayoutImpl extends ToolbarLayout
 
         if (v == mBraveShieldsButton) {
             description = resources.getString(R.string.accessibility_toolbar_btn_brave_shields);
-        } else if (v == mBraveRewardsButton) {
-            description = resources.getString(R.string.accessibility_toolbar_btn_brave_rewards);
         } else if (v == mHomeButton) {
             description = resources.getString(R.string.accessibility_toolbar_btn_home);
-        } else if (v == mBraveWalletButton) {
-            description = resources.getString(R.string.accessibility_toolbar_btn_brave_wallet);
         } else if (v == mYouTubePipButton) {
             description = resources.getString(R.string.accessibility_toolbar_btn_brave_pip);
         }
@@ -1278,12 +758,6 @@ public abstract class BraveToolbarLayoutImpl extends ToolbarLayout
         if (mShieldsLayout != null) {
             mShieldsLayout.getBackground().setColorFilter(color, PorterDuff.Mode.SRC_IN);
         }
-        if (mRewardsLayout != null) {
-            mRewardsLayout.getBackground().setColorFilter(color, PorterDuff.Mode.SRC_IN);
-        }
-        if (mWalletLayout != null) {
-            mWalletLayout.getBackground().setColorFilter(color, PorterDuff.Mode.SRC_IN);
-        }
         if (mYouTubePipLayout != null) {
             mYouTubePipLayout.getBackground().setColorFilter(color, PorterDuff.Mode.SRC_IN);
         }
@@ -1301,33 +775,15 @@ public abstract class BraveToolbarLayoutImpl extends ToolbarLayout
 
         if (tab == null) {
             mBraveShieldsButton.setImageResource(
-                    R.drawable.ic_social_brave_monochrome_favicon_fullheight_color);
+                    R.drawable.ic_reaper_shields_off);
             return;
         }
         mBraveShieldsButton.setImageResource(
                 isShieldsOnForTab(tab)
-                        ? R.drawable.ic_social_brave_release_favicon_fullheight_color
-                        : R.drawable.ic_social_brave_monochrome_favicon_fullheight_color);
+                        ? R.drawable.ic_reaper_shields_on
+                        : R.drawable.ic_reaper_shields_off);
 
-        if (mRewardsLayout == null) return;
-        if (isIncognito()) {
-            setRewardsLayoutVisibility(View.GONE);
-            updateShieldsLayoutBackground(true);
-        } else if (isNativeLibraryReady()
-                && mBraveRewardsNativeWorker != null
-                && mBraveRewardsNativeWorker.isSupported()
-                && NtpUtil.shouldShowRewardsIcon()) {
-            // Check policy before showing rewards icon
-            Profile profile = Profile.fromWebContents(tab.getWebContents());
-            boolean isDisabled = BraveRewardsPolicy.isDisabledByPolicy(profile);
-            if (!isDisabled) {
-                setRewardsLayoutVisibility(View.VISIBLE);
-                updateShieldsLayoutBackground(false);
-            } else {
-                setRewardsLayoutVisibility(View.GONE);
-                updateShieldsLayoutBackground(true);
-            }
-        }
+        updateShieldsLayoutBackground(true);
     }
 
     private boolean isShieldsOnForTab(Tab tab) {
@@ -1351,106 +807,11 @@ public abstract class BraveToolbarLayoutImpl extends ToolbarLayout
         return false;
     }
 
-    public void dismissWalletPanelOrDialog() {
-        if (mDAppsWalletController != null) {
-            mDAppsWalletController.dismiss();
-            mDAppsWalletController = null;
-        }
-    }
-
-    public void openRewardsPanel() {
-        onClick(mBraveRewardsButton);
-    }
-
     public boolean isShieldsTooltipShown() {
         if (mShieldsPopupWindowTooltip != null) {
             return mShieldsPopupWindowTooltip.isShowing();
         }
         return false;
-    }
-
-    @Override
-    public void onCompleteReset(boolean success) {
-        if (success) {
-            BraveRewardsHelper.resetRewards();
-        }
-    }
-
-    @Override
-    public void onNotificationAdded(String id, int type, long timestamp, String[] args) {
-        if (mBraveRewardsNativeWorker == null) {
-            return;
-        }
-        mBraveRewardsNativeWorker.getAllNotifications();
-    }
-
-    private boolean mayShowBraveAdsOnboardingDialog() {
-        Context context = getContext();
-
-        if (BraveAdsSignupDialog.shouldShowNewUserDialog(context)) {
-            BraveAdsSignupDialog.showNewUserDialog(getContext());
-            return true;
-        } else if (BraveAdsSignupDialog.shouldShowNewUserDialogIfRewardsIsSwitchedOff(context)) {
-            BraveAdsSignupDialog.showNewUserDialog(getContext());
-            return true;
-        } else if (BraveAdsSignupDialog.shouldShowExistingUserDialog(context)) {
-            BraveAdsSignupDialog.showExistingUserDialog(getContext());
-            return true;
-        }
-
-        return false;
-    }
-
-    @Override
-    public void onNotificationsCount(int count) {
-        if (mBraveRewardsNotificationsCount != null) {
-            if (count != 0) {
-                String value = Integer.toString(count);
-                if (count > 99) {
-                    mBraveRewardsNotificationsCount.setBackground(
-                            ResourcesCompat.getDrawable(getContext().getResources(),
-                                    R.drawable.brave_rewards_rectangle, /* theme= */ null));
-                    value = "99+";
-                } else {
-                    mBraveRewardsNotificationsCount.setBackground(
-                            ResourcesCompat.getDrawable(getContext().getResources(),
-                                    R.drawable.brave_rewards_circle, /* theme= */ null));
-                }
-                mBraveRewardsNotificationsCount.setText(value);
-                mBraveRewardsNotificationsCount.setVisibility(View.VISIBLE);
-                mIsNotificationPosted = true;
-            } else {
-                mBraveRewardsNotificationsCount.setText("");
-                mBraveRewardsNotificationsCount.setBackgroundResource(0);
-                mBraveRewardsNotificationsCount.setVisibility(View.INVISIBLE);
-                mIsNotificationPosted = false;
-                updateVerifiedPublisherMark();
-            }
-        }
-
-        if (!PackageUtils.isFirstInstall(getContext())
-                && !OnboardingPrefManager.getInstance().isAdsAvailable()) {
-            mayShowBraveAdsOnboardingDialog();
-        }
-
-        if (System.currentTimeMillis() > BraveRewardsHelper.getRewardsOnboardingIconTiming()
-                && checkForRewardsOnboarding()) {
-            if (mBraveRewardsOnboardingIcon != null) {
-                mBraveRewardsOnboardingIcon.setVisibility(View.VISIBLE);
-            }
-            if (mBraveRewardsNotificationsCount != null) {
-                mBraveRewardsNotificationsCount.setVisibility(View.GONE);
-            }
-
-            if (!BraveRewardsHelper.hasRewardsOnboardingIconInvisibleUpdated()) {
-                Calendar calender = Calendar.getInstance();
-                calender.setTime(new Date());
-                calender.add(Calendar.DATE, DAYS_7);
-                BraveRewardsHelper.setRewardsOnboardingIconInvisibleTiming(
-                        calender.getTimeInMillis());
-                BraveRewardsHelper.setRewardsOnboardingIconInvisible(true);
-            }
-        }
     }
 
     private boolean isCustomTab() {
@@ -1459,14 +820,11 @@ public abstract class BraveToolbarLayoutImpl extends ToolbarLayout
 
     @Override
     public void onThemeColorChanged(int color, boolean shouldAnimate) {
-        // Shields and rewards are brand-colored and stay untinted.
+        // Shields are brand-colored and stay untinted.
         ColorStateList tint =
                 ColorUtils.shouldUseLightForegroundOnBackground(color)
                         ? mLightModeTint
                         : mDarkModeTint;
-        if (mWalletIcon != null) {
-            ImageViewCompat.setImageTintList(mWalletIcon, tint);
-        }
         if (mYouTubePipButton != null) {
             ImageViewCompat.setImageTintList(mYouTubePipButton, tint);
         }
@@ -1482,38 +840,6 @@ public abstract class BraveToolbarLayoutImpl extends ToolbarLayout
                 ThemeUtils.getTextBoxColorForToolbarBackgroundInNonNativePage(
                         getContext(), color, isIncognito(), isCustomTab());
         updateModernLocationBarColorImpl(textBoxColor);
-    }
-
-    /**
-     * BraveRewardsNativeWorker.PublisherObserver: Update a 'verified publisher' checkmark on url
-     * bar BAT icon only if no notifications are posted.
-     */
-    @Override
-    public void onFrontTabPublisherChanged(boolean verified, String publisherId) {
-        mIsPublisherVerified = verified;
-        mPublisherId = publisherId;
-        updateVerifiedPublisherMark();
-        maybeShowTermsOfServiceUpdateRequiredBadge();
-    }
-
-    private void updateVerifiedPublisherMark() {
-        if (mBraveRewardsNotificationsCount == null) {
-            // Most likely we are on a custom page
-            return;
-        }
-        if (mIsInitialNotificationPosted) {
-            return;
-        } else if (!mIsNotificationPosted) {
-            if (mIsPublisherVerified) {
-                mBraveRewardsNotificationsCount.setVisibility(View.VISIBLE);
-                mBraveRewardsNotificationsCount.setBackground(
-                        ResourcesCompat.getDrawable(getContext().getResources(),
-                                R.drawable.rewards_verified_tick_icon, /* theme= */ null));
-            } else {
-                mBraveRewardsNotificationsCount.setBackgroundResource(0);
-                mBraveRewardsNotificationsCount.setVisibility(View.INVISIBLE);
-            }
-        }
     }
 
     public void onBottomControlsVisibilityChanged(boolean isVisible) {
@@ -1538,7 +864,7 @@ public abstract class BraveToolbarLayoutImpl extends ToolbarLayout
 
     /**
      * Anchors the Brave button row at the trailing end of the tablet location bar, so that the
-     * focus ring upstream draws around the text box encloses the shields and rewards buttons as
+     * focus ring upstream draws around the text box encloses the shields button as
      * well. The row is inflated as a child of the location bar (see toolbar_tablet.xml), which is a
      * ConstraintLayout, so it has no usable constraints until they are set here.
      */
@@ -1578,7 +904,7 @@ public abstract class BraveToolbarLayoutImpl extends ToolbarLayout
         // The location bar paints the text box behind the buttons now, so the segment drawables
         // that continue it on phones would only double up here.
         for (View layout :
-                new View[] {mYouTubePipLayout, mWalletLayout, mShieldsLayout, mRewardsLayout}) {
+                new View[] {mYouTubePipLayout, mShieldsLayout}) {
             if (layout != null) {
                 layout.setBackground(null);
             }
@@ -1650,11 +976,6 @@ public abstract class BraveToolbarLayoutImpl extends ToolbarLayout
                 isMenuButtonOnBottomControls() || isMenuOnBottomWithBottomAddressBar());
     }
 
-    public void updateWalletBadgeVisibility(boolean visible) {
-        assert mBraveWalletBadge != null;
-        mBraveWalletBadge.setVisibility(visible ? View.VISIBLE : View.GONE);
-    }
-
     public void updateMenuButtonState() {
         if (BottomToolbarConfiguration.isBraveBottomControlsEnabled()) {
             BraveMenuButtonCoordinator.setMenuFromBottom(mIsBottomControlsVisible);
@@ -1684,22 +1005,10 @@ public abstract class BraveToolbarLayoutImpl extends ToolbarLayout
 
     @Override
     public void drawAnimationOverlay(ViewGroup toolbarButtonsContainer, Canvas canvas) {
-        if (mWalletLayout != null && mWalletLayout.getVisibility() != View.GONE) {
-            canvas.save();
-            ViewUtils.translateCanvasToView(toolbarButtonsContainer, mWalletLayout, canvas);
-            mWalletLayout.draw(canvas);
-            canvas.restore();
-        }
         if (mShieldsLayout != null && mShieldsLayout.getVisibility() != View.GONE) {
             canvas.save();
             ViewUtils.translateCanvasToView(toolbarButtonsContainer, mShieldsLayout, canvas);
             mShieldsLayout.draw(canvas);
-            canvas.restore();
-        }
-        if (mRewardsLayout != null && mRewardsLayout.getVisibility() != View.GONE) {
-            canvas.save();
-            ViewUtils.translateCanvasToView(toolbarButtonsContainer, mRewardsLayout, canvas);
-            mRewardsLayout.draw(canvas);
             canvas.restore();
         }
         if (mYouTubePipLayout != null && mYouTubePipLayout.getVisibility() != View.GONE) {
@@ -1707,21 +1016,6 @@ public abstract class BraveToolbarLayoutImpl extends ToolbarLayout
             ViewUtils.translateCanvasToView(toolbarButtonsContainer, mYouTubePipLayout, canvas);
             mYouTubePipLayout.draw(canvas);
             canvas.restore();
-        }
-    }
-
-    @Override
-    public void onMediaFilesUpdated(Url pageUrl, PlaylistItem[] playlistItems) {
-        Tab currentTab = getToolbarDataProvider().getTab();
-        if (currentTab == null || !pageUrl.url.equals(currentTab.getUrl().getSpec())) {
-            return;
-        }
-        if (playlistItems.length > 0 && !UrlUtilities.isNtpUrl(currentTab.getUrl().getSpec())) {
-            mShouldShowPlaylistMenu = true;
-            if (ChromeSharedPreferences.getInstance()
-                    .readBoolean(BravePreferenceKeys.PREF_ADD_TO_PLAYLIST_BUTTON, true)) {
-                showPlaylistButton(playlistItems);
-            }
         }
     }
 
@@ -1743,12 +1037,59 @@ public abstract class BraveToolbarLayoutImpl extends ToolbarLayout
     }
 
     @Override
+    public void setExtensionsToolbarCoordinator(
+            @Nullable ExtensionsToolbarCoordinator extensionsToolbarCoordinator) {
+        if (!BraveReflectionUtil.equalTypes(this.getClass(), ToolbarPhone.class)) {
+            super.setExtensionsToolbarCoordinator(extensionsToolbarCoordinator);
+            return;
+        }
+        mPhoneExtensionsToolbarCoordinator = extensionsToolbarCoordinator;
+        requestLayout();
+    }
+
+    private void allocatePhoneExtensionsWidth(int toolbarWidth) {
+        ExtensionsToolbarCoordinator coordinator = mPhoneExtensionsToolbarCoordinator;
+        if (coordinator == null) {
+            return;
+        }
+        int buttonWidth = getResources().getDimensionPixelSize(R.dimen.toolbar_button_width);
+        // Keep room for navigation and the omnibox while retaining an extension popup anchor.
+        int availableWidth =
+                Math.max(
+                        buttonWidth,
+                        Math.min(
+                                2 * buttonWidth,
+                                toolbarWidth - dpToPx(getContext(), PHONE_TOOLBAR_RESERVED_WIDTH_DP)));
+        availableWidth =
+                Math.max(
+                        0,
+                        availableWidth
+                                - coordinator
+                                        .getPoppedOutActionWidthConsumer()
+                                        .updateVisibility(availableWidth));
+        availableWidth =
+                Math.max(
+                        0,
+                        availableWidth
+                                - coordinator.getMenuButtonWidthConsumer()
+                                        .updateVisibility(availableWidth));
+        availableWidth =
+                Math.max(
+                        0,
+                        availableWidth
+                                - coordinator
+                                        .getRequestAccessButtonWidthConsumer()
+                                        .updateVisibility(availableWidth));
+        coordinator.getActionListWidthConsumer().updateVisibility(availableWidth);
+    }
+
+    @Override
     protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+        allocatePhoneExtensionsWidth(MeasureSpec.getSize(widthMeasureSpec));
         maybeHideTopTabSwitcherButton();
 
         super.onMeasure(widthMeasureSpec, heightMeasureSpec);
 
-        maybeHideRewardsLayout(MeasureSpec.getSize(widthMeasureSpec));
     }
 
     /**
@@ -1767,84 +1108,4 @@ public abstract class BraveToolbarLayoutImpl extends ToolbarLayout
         }
     }
 
-    /**
-     * Updates the rewards layout visibility on tablet. The layout is shown only when all of the
-     * following are true: the current tab is not incognito, the toolbar width is at least the
-     * minimum tablet width (same threshold as the existing toolbar button visibility logic in
-     * ToolbarTablet), rewards are not disabled by policy, and the native rewards worker is
-     * available and reports rewards as supported. Also updates the shields layout background to
-     * match the resulting rewards layout visibility.
-     */
-    private void maybeHideRewardsLayout(int width) {
-        // Only hide the rewards layout on tablet devices, like it is done in the upstream code.
-        if (!BraveReflectionUtil.equalTypes(this.getClass(), ToolbarTablet.class)) {
-            return;
-        }
-
-        if (mRewardsLayout == null || !NtpUtil.shouldShowRewardsIcon()) {
-            return;
-        }
-
-        Tab tab = getToolbarDataProvider().getTab();
-        Profile profile = tab != null ? Profile.fromWebContents(tab.getWebContents()) : null;
-        boolean shouldShowRewards =
-                !isIncognito()
-                        && width
-                                >= DeviceFormFactor.getNonMultiDisplayMinimumTabletWidthPx(
-                                        getContext())
-                        && !BraveRewardsPolicy.isDisabledByPolicy(profile)
-                        && mBraveRewardsNativeWorker != null
-                        && mBraveRewardsNativeWorker.isSupported();
-        setRewardsLayoutVisibility(shouldShowRewards ? View.VISIBLE : View.GONE);
-        // Update the shields layout background to match the rewards layout visibility.
-        updateShieldsLayoutBackground(!shouldShowRewards);
-    }
-
-    public void maybeShowTermsOfServiceUpdateRequiredBadge() {
-        if (mBraveRewardsNativeWorker != null
-                && mBraveRewardsNativeWorker.isRewardsEnabled()
-                && mBraveRewardsNativeWorker.isSupported()
-                && mBraveRewardsNativeWorker.isTermsOfServiceUpdateRequired()) {
-            showOrHideRewardsBadge(true);
-        }
-    }
-
-    /**
-     * Completes rewards-related initialization that should happen after policy check. This includes
-     * updating shields layout background and setting up rewards observers.
-     */
-    private void completeRewardsInitialization() {
-        maybeShowTermsOfServiceUpdateRequiredBadge();
-        if (mShieldsLayout != null) {
-            updateShieldsLayoutBackground(
-                    !(mRewardsLayout != null && mRewardsLayout.getVisibility() == View.VISIBLE));
-            mShieldsLayout.setVisibility(View.VISIBLE);
-        }
-        if (mBraveRewardsNativeWorker != null) {
-            mBraveRewardsNativeWorker.addObserver(this);
-            mBraveRewardsNativeWorker.addPublisherObserver(this);
-            mBraveRewardsNativeWorker.getAllNotifications();
-        }
-    }
-
-    /**
-     * Checks if Brave Rewards is disabled by policy and updates the toolbar rewards button
-     * visibility accordingly. This ensures that when Brave Rewards is disabled by policy, the
-     * rewards icon in the toolbar is force-hidden regardless of user preference.
-     */
-    private void checkRewardsPolicyAndUpdateToolbarButton() {
-        Tab currentTab = getToolbarDataProvider().getTab();
-        Profile profile =
-                currentTab != null ? Profile.fromWebContents(currentTab.getWebContents()) : null;
-
-        boolean isDisabled = BraveRewardsPolicy.isDisabledByPolicy(profile);
-        // Only show if policy allows (not disabled)
-        if (!isDisabled) {
-            setRewardsLayoutVisibility(View.VISIBLE);
-        }
-        // If policy disables rewards, keep it hidden (default is GONE)
-
-        // Complete the rest of initialization after policy check
-        completeRewardsInitialization();
-    }
 }

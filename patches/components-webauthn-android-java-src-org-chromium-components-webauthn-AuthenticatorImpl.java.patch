@@ -1,0 +1,389 @@
+diff --git a/components/webauthn/android/java/src/org/chromium/components/webauthn/AuthenticatorImpl.java b/components/webauthn/android/java/src/org/chromium/components/webauthn/AuthenticatorImpl.java
+--- a/components/webauthn/android/java/src/org/chromium/components/webauthn/AuthenticatorImpl.java
++++ b/components/webauthn/android/java/src/org/chromium/components/webauthn/AuthenticatorImpl.java
+@@ -68,8 +68,12 @@
+     /** The payment information to be added to the "clientDataJson". */
+     private @Nullable PaymentOptions mPayment;
+ 
++    private @Nullable WebAuthenticationProxyBridge mRequestProxy;
++    private boolean mClosed;
++    private boolean mAwaitingProxyConfirmation;
+     private @Nullable WebauthnRequestCallback mRequestCallback;
+     private @Nullable Fido2CredentialRequest mPendingFido2CredentialRequest;
++    private @Nullable WebauthnRequestCallback mGuardedRequest;
+     private final Set<Fido2CredentialRequest> mUnclosedFido2CredentialRequests = new HashSet<>();
+ 
+     // Information about the request cached here for metric reporting purposes.
+@@ -123,13 +127,141 @@
+         ResettersForTesting.register(() -> sFido2CredentialRequestOverrideForTesting = oldValue);
+     }
+ 
++    void enableRequestProxy() {
++        assert mRequestProxy == null && mRenderFrameHost != null;
++        mRequestProxy = new WebAuthenticationProxyBridge(assertNonNull(mRenderFrameHost));
++    }
++
++    private boolean hasRequestProxy() {
++        return !mClosed && mRequestProxy != null && mRequestProxy.isActive();
++    }
++
++    private void completeProxyRequest(WebauthnRequestCallback expected,
++            WebauthnRequestResponse response) {
++        if (!mClosed && mRequestCallback == expected) expected.onComplete(response);
++    }
++
++    private void cancelProxyConfirmation(WebauthnRequestCallback expected) {
++        if (mClosed || mRequestCallback != expected || !mAwaitingProxyConfirmation) return;
++        cleanupRequest(expected);
++        if (mCreateConfirmationUiDelegate != null) mCreateConfirmationUiDelegate.cancel();
++        expected.onComplete(WebauthnRequestResponse.forFailedMakeCredential(
++                AuthenticatorStatus.ABORT_ERROR, new RequestMetrics.Builder().build()));
++    }
++
++    private boolean isCurrentRequest(WebauthnRequestCallback expected) {
++        return !mClosed && mRequestCallback == expected;
++    }
++
++    private boolean beginGuardedRequest(WebauthnRequestCallback expected, boolean conditional) {
++        WebAuthenticationProxyBridge bridge = mRequestProxy;
++        if (bridge == null) return true;
++        mGuardedRequest = expected;
++        if (!bridge.startRequestGuard(conditional, () -> cancelForContextLoss(expected))) {
++            completeContextFailure(expected, AuthenticatorStatus.NOT_FOCUSED);
++            return false;
++        }
++        expected.setResponseValidator(
++                () ->
++                        isCurrentRequest(expected)
++                                && mRequestProxy == bridge
++                                && bridge.canCompleteRequest());
++        return true;
++    }
++
++    private void completeContextFailure(WebauthnRequestCallback expected, int status) {
++        expected.onComplete(
++                expected.getCallbackType() == WebauthnRequestCallback.CallbackType.MAKE_CREDENTIAL
++                        ? WebauthnRequestResponse.forFailedMakeCredential(
++                                status, new RequestMetrics.Builder().build())
++                        : WebauthnRequestResponse.forFailedGetCredential(
++                                status, new RequestMetrics.Builder().build()));
++    }
++
++    private void cancelForContextLoss(WebauthnRequestCallback expected) {
++        if (!isCurrentRequest(expected)) return;
++        Fido2CredentialRequest pending = mPendingFido2CredentialRequest;
++        boolean confirmation = mAwaitingProxyConfirmation;
++        // Retire the old callback before canceling providers; cancellation can
++        // synchronously reply, and a later OS result must never target a new call.
++        cleanupRequest();
++        if (mRequestProxy != null) mRequestProxy.cancel();
++        if (confirmation && mCreateConfirmationUiDelegate != null) {
++            mCreateConfirmationUiDelegate.cancel();
++        }
++        if (pending != null) {
++            if (expected.getCallbackType() == WebauthnRequestCallback.CallbackType.GET_CREDENTIAL) {
++                pending.cancelGetAssertion();
++            }
++            pending.destroyBridge();
++        }
++        completeContextFailure(expected, AuthenticatorStatus.ABORT_ERROR);
++    }
++
++    private boolean beginRequestInteraction(WebauthnRequestCallback expected) {
++        if (!isCurrentRequest(expected)) return false;
++        return mGuardedRequest != expected
++                || mRequestProxy == null
++                || mRequestProxy.beginRequestInteraction();
++    }
++
++    private AuthenticationContextProvider contextForRequest(
++            @Nullable WebauthnRequestCallback expected) {
++        return new AuthenticationContextProvider() {
++            @Override
++            public @Nullable Context getContext() {
++                return mContext;
++            }
++
++            @Override
++            public @Nullable RenderFrameHost getRenderFrameHost() {
++                return mRenderFrameHost;
++            }
++
++            @Override
++            public @Nullable WebContents getWebContents() {
++                return mWebContents;
++            }
++
++            @Override
++            public @Nullable WebauthnRequestCallback getRequestCallback() {
++                if (expected == null || !isCurrentRequest(expected)) return null;
++                if (mGuardedRequest == expected
++                        && mRequestProxy != null
++                        && !mRequestProxy.isRequestValid()) return null;
++                return expected;
++            }
++
++            @Override
++            public boolean shouldBlockUserInteraction() {
++                return expected != null && !beginRequestInteraction(expected);
++            }
++
++            @Override
++            public FidoIntentSender getIntentSender() {
++                FidoIntentSender sender = AuthenticatorImpl.this.getIntentSender();
++                return (PendingIntent intent,
++                        Callback<Pair<Integer, @Nullable Intent>> callback) -> {
++                    if (shouldBlockUserInteraction()) return false;
++                    return sender.showIntent(
++                            intent,
++                            result -> {
++                                if (expected == null || isCurrentRequest(expected))
++                                    callback.onResult(result);
++                            });
++                };
++            }
++        };
++    }
++
+     private Fido2CredentialRequest getFido2CredentialRequest() {
++        AuthenticationContextProvider provider = contextForRequest(mRequestCallback);
+         if (sFido2CredentialRequestOverrideForTesting != null) {
+-            sFido2CredentialRequestOverrideForTesting.setAuthenticationContextProvider(this);
++            sFido2CredentialRequestOverrideForTesting.setAuthenticationContextProvider(provider);
+             mUnclosedFido2CredentialRequests.add(sFido2CredentialRequestOverrideForTesting);
+             return sFido2CredentialRequestOverrideForTesting;
+         }
+-        Fido2CredentialRequest request = new Fido2CredentialRequest(this);
++        Fido2CredentialRequest request = new Fido2CredentialRequest(provider);
+         mUnclosedFido2CredentialRequests.add(request);
+         return request;
+     }
+@@ -176,7 +308,7 @@
+ 
+         mIsPaymentRequest = options.isPaymentCredentialCreation;
+         mRequestCallback = requestCallback;
+-        mRequestCallback.setCompletionCallback(this::cleanupRequest);
++        mRequestCallback.setCompletionCallback(() -> cleanupRequest(requestCallback));
+ 
+         if (isChrome(mWebContents)
+                 && WebauthnBrowserBridge.shouldDisallowCredentialRequest(mRenderFrameHost)) {
+@@ -189,8 +321,8 @@
+                                     .build()));
+             return;
+         }
+-        if (!GmsCoreUtils.isWebauthnSupported()
+-                || (!isChrome(mWebContents) && !GmsCoreUtils.isResultReceiverSupported())) {
++        if (!hasRequestProxy() && (!GmsCoreUtils.isWebauthnSupported()
++                || (!isChrome(mWebContents) && !GmsCoreUtils.isResultReceiverSupported()))) {
+             mRequestCallback.onComplete(
+                     WebauthnRequestResponse.forFailedMakeCredential(
+                             AuthenticatorStatus.NOT_IMPLEMENTED,
+@@ -207,11 +339,21 @@
+             return;
+         }
+ 
++        if (!beginGuardedRequest(requestCallback, false)) return;
++        WebauthnRequestCallback confirmationRequest = mRequestCallback;
+         if (mCreateConfirmationUiDelegate != null && !options.isConditional) {
++            mAwaitingProxyConfirmation = mRequestProxy != null;
++            if (mAwaitingProxyConfirmation && mRequestProxy != null) {
++                mRequestProxy.watchConfirmation(() -> cancelProxyConfirmation(confirmationRequest));
++            }
+             if (!mCreateConfirmationUiDelegate.show(
+-                    () -> continueMakeCredential(options),
+                     () -> {
+-                        if (mRequestCallback == null) {
++                        if (!mClosed && mRequestCallback == confirmationRequest) {
++                            continueMakeCredential(options);
++                        }
++                    },
++                    () -> {
++                        if (mClosed || mRequestCallback != confirmationRequest) {
+                             return;
+                         }
+                         RequestMetrics metrics =
+@@ -234,6 +376,28 @@
+ 
+     private void continueMakeCredential(PublicKeyCredentialCreationOptions options) {
+         log(TAG, "continueMakeCredential");
++        if (mClosed || mRequestCallback == null) return;
++        if (mAwaitingProxyConfirmation
++                && (mRequestProxy == null || !mRequestProxy.finishConfirmation())) {
++            cancelProxyConfirmation(mRequestCallback);
++            return;
++        }
++        mAwaitingProxyConfirmation = false;
++        if (mRequestProxy != null) mRequestProxy.clearConfirmation();
++        WebauthnRequestCallback expected = mRequestCallback;
++        if (mRequestProxy != null && mRequestProxy.makeCredential(options,
++                response -> completeProxyRequest(expected, response))) return;
++        // A proxy may detach while create confirmation UI is open.
++        if (!GmsCoreUtils.isWebauthnSupported()
++                || (!isChrome(mWebContents) && !GmsCoreUtils.isResultReceiverSupported())) {
++            mRequestCallback.onComplete(
++                    WebauthnRequestResponse.forFailedMakeCredential(
++                            AuthenticatorStatus.NOT_IMPLEMENTED,
++                            new RequestMetrics.Builder()
++                                    .setMakeCredentialOutcome(MakeCredentialOutcome.OTHER_FAILURE)
++                                    .build()));
++            return;
++        }
+         mPendingFido2CredentialRequest = getFido2CredentialRequest();
+         mPendingFido2CredentialRequest.handleMakeCredentialRequest(
+                 options, maybeCreateBrowserOptions(), assertNonNull(mOrigin), mTopOrigin, mPayment);
+@@ -271,7 +435,7 @@
+         log(TAG, "getCredential");
+ 
+         mRequestCallback = requestCallback;
+-        mRequestCallback.setCompletionCallback(this::cleanupRequest);
++        mRequestCallback.setCompletionCallback(() -> cleanupRequest(requestCallback));
+         mIsPaymentRequest = mPayment != null;
+         mIsConditionalRequest = options.mediation == Mediation.CONDITIONAL;
+         mIsImmediateRequest = options.mediation == Mediation.IMMEDIATE;
+@@ -286,6 +450,23 @@
+                                     .build()));
+             return;
+         }
++
++
++        if (mWebContents != null
++                && options.mediation != Mediation.CONDITIONAL
++                && mWebContents.getVisibility() != Visibility.VISIBLE) {
++            requestCallback.onComplete(
++                    WebauthnRequestResponse.forFailedGetCredential(
++                            AuthenticatorStatus.NOT_FOCUSED, new RequestMetrics.Builder().build()));
++            return;
++        }
++
++        if (!beginGuardedRequest(requestCallback, options.mediation == Mediation.CONDITIONAL))
++            return;
++        WebauthnRequestCallback expected = mRequestCallback;
++        if (mRequestProxy != null && mPayment == null
++                && mRequestProxy.getCredential(options,
++                        response -> completeProxyRequest(expected, response))) return;
+ 
+         boolean isPasswordOnlyFlux =
+                 options.publicKey == null
+@@ -304,15 +485,6 @@
+             return;
+         }
+ 
+-        if (mWebContents != null
+-                && options.mediation != Mediation.CONDITIONAL
+-                && mWebContents.getVisibility() != Visibility.VISIBLE) {
+-            requestCallback.onComplete(
+-                    WebauthnRequestResponse.forFailedGetCredential(
+-                            AuthenticatorStatus.NOT_FOCUSED, new RequestMetrics.Builder().build()));
+-            return;
+-        }
+-
+         mPendingFido2CredentialRequest = getFido2CredentialRequest();
+         mPendingFido2CredentialRequest.handleGetCredentialRequest(
+                 options, assertNonNull(mOrigin), mTopOrigin, mPayment);
+@@ -330,14 +502,14 @@
+         }
+ 
+         mRequestCallback = requestCallback;
+-        mRequestCallback.setCompletionCallback(this::cleanupRequest);
++        mRequestCallback.setCompletionCallback(() -> cleanupRequest(requestCallback));
+ 
+         mPendingFido2CredentialRequest = getFido2CredentialRequest();
+         mPendingFido2CredentialRequest.handleReportRequest(options, assertNonNull(mOrigin));
+     }
+ 
+     private boolean couldSupportConditionalMediation() {
+-        return GmsCoreUtils.isWebauthnSupported() && isChrome(mWebContents);
++        return !hasRequestProxy() && GmsCoreUtils.isWebauthnSupported() && isChrome(mWebContents);
+     }
+ 
+     private boolean couldSupportUvpaa() {
+@@ -356,6 +528,7 @@
+                     callback.call(isUvpaa);
+                 };
+ 
++        if (mRequestProxy != null && mRequestProxy.isUvpaa(decoratedCallback::call)) return;
+         if (!couldSupportUvpaa()) {
+             decoratedCallback.call(false);
+             return;
+@@ -369,6 +542,33 @@
+     @Override
+     public void getClientCapabilities(final GetClientCapabilities_Response callback) {
+         log(TAG, "getClientCapabilities");
++        // A proxy answers UVPAA independently of Android credential providers.
++        // Only advertise operations supported by the forwarding protocol.
++        if (mRequestProxy != null && mRequestProxy.isUvpaa(isUvpaa -> {
++            ArrayList<WebAuthnClientCapability> proxyCapabilities = new ArrayList<>();
++            proxyCapabilities.add(createWebAuthnClientCapability(
++                    AuthenticatorConstants.CAPABILITY_RELATED_ORIGINS, true));
++            proxyCapabilities.add(createWebAuthnClientCapability(
++                    AuthenticatorConstants.CAPABILITY_HYBRID_TRANSPORT, false));
++            proxyCapabilities.add(createWebAuthnClientCapability(
++                    AuthenticatorConstants.CAPABILITY_PPAA, isUvpaa));
++            proxyCapabilities.add(createWebAuthnClientCapability(
++                    AuthenticatorConstants.CAPABILITY_UVPAA, isUvpaa));
++            proxyCapabilities.add(createWebAuthnClientCapability(
++                    AuthenticatorConstants.CAPABILITY_CONDITIONAL_GET, false));
++            proxyCapabilities.add(createWebAuthnClientCapability(
++                    AuthenticatorConstants.CAPABILITY_CONDITIONAL_CREATE, true));
++            proxyCapabilities.add(createWebAuthnClientCapability(
++                    AuthenticatorConstants.CAPABILITY_IMMEDIATE_GET, true));
++            proxyCapabilities.add(createWebAuthnClientCapability(
++                    AuthenticatorConstants.CAPABILITY_SIGNAL_ALL_ACCEPTED_CREDENTIALS, false));
++            proxyCapabilities.add(createWebAuthnClientCapability(
++                    AuthenticatorConstants.CAPABILITY_SIGNAL_CURRENT_USER_DETAILS, false));
++            proxyCapabilities.add(createWebAuthnClientCapability(
++                    AuthenticatorConstants.CAPABILITY_SIGNAL_UNKNOWN_CREDENTIAL, false));
++            callback.call(proxyCapabilities.toArray(new WebAuthnClientCapability[0]));
++        })) return;
++
+         ArrayList<WebAuthnClientCapability> capabilities = new ArrayList<>();
+         capabilities.add(
+                 createWebAuthnClientCapability(
+@@ -498,6 +698,11 @@
+     @Override
+     public void cancel() {
+         log(TAG, "cancel");
++        if (mAwaitingProxyConfirmation && mRequestCallback != null) {
++            cancelProxyConfirmation(mRequestCallback);
++            return;
++        }
++        if (mRequestProxy != null && mRequestProxy.cancel()) return;
+         // This is not implemented for anything other than getAssertion requests, since there is
+         // no way to cancel a request that has already triggered GMSCore or CredMan UI. Get
+         // requests can be cancelled in situations such as while pending credential enumeration.
+@@ -575,7 +780,21 @@
+                 .record();
+     }
+ 
++    private void cleanupRequest(WebauthnRequestCallback expected) {
++        if (mRequestCallback != expected) return;
++        // Provider cleanup is document-scoped. Finish it before admitting a new
++        // request in this document, and never lazily recreate a completed bridge.
++        if (mPendingFido2CredentialRequest != null) mPendingFido2CredentialRequest.destroyBridge();
++        cleanupRequest();
++    }
++
+     private void cleanupRequest() {
++        mAwaitingProxyConfirmation = false;
++        if (mRequestProxy != null) {
++            mRequestProxy.clearConfirmation();
++            if (mGuardedRequest != null) mRequestProxy.endRequestGuard();
++        }
++        mGuardedRequest = null;
+         mRequestCallback = null;
+         mPendingFido2CredentialRequest = null;
+     }
+@@ -583,6 +802,13 @@
+     @Override
+     public void close() {
+         log(TAG, "close");
++        mClosed = true;
++        mAwaitingProxyConfirmation = false;
++        if (mCreateConfirmationUiDelegate != null) mCreateConfirmationUiDelegate.cancel();
++        if (mRequestProxy != null) {
++            mRequestProxy.destroy();
++            mRequestProxy = null;
++        }
+         mUnclosedFido2CredentialRequests.forEach(Fido2CredentialRequest::destroyBridge);
+         mUnclosedFido2CredentialRequests.clear();
+         cleanupRequest();

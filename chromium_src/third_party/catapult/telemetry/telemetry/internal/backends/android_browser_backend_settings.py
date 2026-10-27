@@ -5,23 +5,23 @@
 """A inline part of android_browser_backend_settings.py"""
 
 ANDROID_BRAVE = GenericChromeBackendSettings(
-    browser_type='android-brave', package='com.brave.browser'
+    browser_type='android-brave', package='app.smallthingz.reaper'
 )
 
 ANDROID_BRAVE_DEFAULT = GenericChromeBackendSettings(
-    browser_type='android-brave-default', package='com.brave.browser_default'
+    browser_type='android-brave-default', package='app.smallthingz.reaper'
 )
 
 ANDROID_BRAVE_BETA = GenericChromeBackendSettings(
-    browser_type='android-brave-beta', package='com.brave.browser_beta'
+    browser_type='android-brave-beta', package='app.smallthingz.reaper'
 )
 
 ANDROID_BRAVE_DEV = GenericChromeBackendSettings(
-    browser_type='android-brave-dev', package='com.brave.browser_dev'
+    browser_type='android-brave-dev', package='app.smallthingz.reaper'
 )
 
 ANDROID_BRAVE_NIGHTLY = GenericChromeBackendSettings(
-    browser_type='android-brave-nightly', package='com.brave.browser_nightly'
+    browser_type='android-brave-nightly', package='app.smallthingz.reaper'
 )
 
 BRAVE_ANDROID_BACKEND_SETTINGS = (

@@ -1,0 +1,98 @@
+diff --git a/chrome/browser/extensions/api/identity/identity_launch_web_auth_flow_function.cc b/chrome/browser/extensions/api/identity/identity_launch_web_auth_flow_function.cc
+index 7fa83ae06d1c32cecbaddd08f4d30f58c0797b30..19ec926e48af60096b151b84ca8c8dc1836fcc48 100644
+--- a/chrome/browser/extensions/api/identity/identity_launch_web_auth_flow_function.cc
++++ b/chrome/browser/extensions/api/identity/identity_launch_web_auth_flow_function.cc
+@@ -166,6 +166,9 @@ ExtensionFunction::ResponseAction IdentityLaunchWebAuthFlowFunction::Run() {
+   }
+ 
+   AddRef();  // Balanced in OnAuthFlowSuccess/Failure.
++#if BUILDFLAG(IS_ANDROID)
++  registry_observation_.Observe(ExtensionRegistry::Get(browser_context()));
++#endif
+ 
+   if (delegate_) {
+     delegate_->GetOptionalWindowBounds(
+@@ -217,6 +220,11 @@ bool IdentityLaunchWebAuthFlowFunction::ShouldKeepWorkerAliveIndefinitely() {
+ }
+ 
+ void IdentityLaunchWebAuthFlowFunction::OnBrowserContextShutdown() {
++#if BUILDFLAG(IS_ANDROID)
++  if (completion_started_) {
++    return;
++  }
++#endif
+   // auth_flow_ internally observes profile destruction. It may have already
+   // notified us if the navigation got cancelled prematurely because of profile
+   // destruction. Do not attempt to respond again in this case.
+@@ -263,6 +271,11 @@ void IdentityLaunchWebAuthFlowFunction::InitFinalRedirectUrls(
+ 
+ void IdentityLaunchWebAuthFlowFunction::OnAuthFlowFailure(
+     WebAuthFlow::Failure failure) {
++#if BUILDFLAG(IS_ANDROID)
++  if (completion_started_) {
++    return;
++  }
++#endif
+   Error error = WebAuthFlowFailureToError(failure);
+ 
+   RecordHistogramFunctionResult(error);
+@@ -290,6 +303,11 @@ bool IdentityLaunchWebAuthFlowFunction::ShouldInterceptRedirect(
+ 
+ void IdentityLaunchWebAuthFlowFunction::OnAuthFlowURLChange(
+     const GURL& redirect_url) {
++#if BUILDFLAG(IS_ANDROID)
++  if (completion_started_) {
++    return;
++  }
++#endif
+   if (ShouldInterceptRedirect(redirect_url, default_origin_,
+                               final_redirect_urls_)) {
+     RecordHistogramFunctionResult(
+@@ -300,13 +318,47 @@ void IdentityLaunchWebAuthFlowFunction::OnAuthFlowURLChange(
+ 
+ void IdentityLaunchWebAuthFlowFunction::CompleteAsyncRun(
+     ResponseValue response) {
++#if BUILDFLAG(IS_ANDROID)
++  if (completion_started_) {
++    return;
++  }
++  completion_started_ = true;
++  registry_observation_.Reset();
++  if (auth_flow_) {
++    auth_flow_.release()->DetachDelegateAndDelete();
++  }
++  // Retire the old flow before replying. A test may retain this function, or a
++  // reply may start a new flow for the same extension ID.
++  auth_flow_tracker_.RunAndReset();
++  Respond(std::move(response));
++#else
+   Respond(std::move(response));
+   if (auth_flow_) {
+     auth_flow_.release()->DetachDelegateAndDelete();
+   }
++#endif
+   Release();  // Balanced in Run.
+ }
+ 
++#if BUILDFLAG(IS_ANDROID)
++void IdentityLaunchWebAuthFlowFunction::OnExtensionUnloaded(
++    content::BrowserContext* browser_context,
++    const Extension* extension,
++    UnloadedExtensionReason reason) {
++  if (browser_context != this->browser_context() ||
++      extension != this->extension() || completion_started_) {
++    return;
++  }
++  OnAuthFlowFailure(WebAuthFlow::WINDOW_CLOSED);
++}
++
++void IdentityLaunchWebAuthFlowFunction::OnShutdown(
++    ExtensionRegistry* registry) {
++  registry_observation_.Reset();
++  OnBrowserContextShutdown();
++}
++#endif
++
+ WebAuthFlow* IdentityLaunchWebAuthFlowFunction::GetWebAuthFlowForTesting() {
+   return auth_flow_.get();
+ }

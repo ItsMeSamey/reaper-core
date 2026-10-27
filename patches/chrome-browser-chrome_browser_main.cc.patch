@@ -1,12 +1,120 @@
 diff --git a/chrome/browser/chrome_browser_main.cc b/chrome/browser/chrome_browser_main.cc
-index cbf3b6c563090a64c427e1b0ce8cbf7118aa82d2..3815c68b1d802065424d70b7d1203e228ba1eb8e 100644
 --- a/chrome/browser/chrome_browser_main.cc
 +++ b/chrome/browser/chrome_browser_main.cc
-@@ -1070,6 +1070,7 @@ void ChromeBrowserMainParts::ToolkitInitialized() {
+@@ -37,7 +37,9 @@
+ #include "chrome/browser/chrome_browser_main_extra_parts.h"
+ #include "chrome/browser/component_updater/registration.h"
+ #include "chrome/browser/enterprise/browser_management/management_service_factory.h"
++#if !BUILDFLAG(IS_ANDROID)
+ #include "chrome/browser/enterprise/chrome_browser_main_extra_parts_enterprise.h"
++#endif  // !BUILDFLAG(IS_ANDROID)
+ #include "chrome/browser/first_run/bookmark_importer.h"
+ #include "chrome/browser/first_run/first_run_features.h"
+ #include "chrome/browser/gpu/chrome_browser_main_extra_parts_gpu.h"
+@@ -844,9 +846,11 @@
+ 
+   chrome::AddMetricsExtraParts(main_parts.get());
+ 
++#if !BUILDFLAG(IS_ANDROID)
+   main_parts->AddParts(
+       std::make_unique<
+           enterprise_util::ChromeBrowserMainExtraPartsEnterprise>());
++#endif  // !BUILDFLAG(IS_ANDROID)
+ 
+ #if !BUILDFLAG(IS_ANDROID)
+   main_parts->AddParts(
+@@ -900,6 +904,14 @@
+ void ChromeBrowserMainParts::SetupMetrics() {
+   TRACE_EVENT0("startup", "ChromeBrowserMainParts::SetupMetrics");
+   CHECK(metrics::SubprocessMetricsProvider::CreateInstance());
++#if BUILDFLAG(IS_ANDROID)
++  auto* registry = browser_process_->GetMetricsServicesManager()
++                       ->GetSyntheticTrialRegistry();
++  registry->AddObserver(variations::VariationsIdsProvider::GetInstance());
++  registry->AddObserver(
++      variations::SyntheticTrialsActiveGroupIdProvider::GetInstance());
++  synthetic_trial_syncer_ = content::SyntheticTrialSyncer::Create(registry);
++#else
+   metrics::MetricsService* metrics = browser_process_->metrics_service();
+   metrics->GetSyntheticTrialRegistry()->AddObserver(
+       variations::VariationsIdsProvider::GetInstance());
+@@ -909,6 +921,7 @@
+       metrics->GetSyntheticTrialRegistry());
+   // Now that field trials have been created, initializes metrics recording.
+   metrics->InitializeMetricsRecordingState();
++#endif
+ 
+   startup_data_->chrome_feature_list_creator()
+       ->browser_field_trials()
+@@ -937,15 +950,7 @@
+         variations::SyntheticTrialAnnotationMode::kCurrentLog);
+   }
+ 
+-#if BUILDFLAG(IS_ANDROID)
+-  // Android updates the metrics service dynamically depending on whether the
+-  // application is in the foreground or not. Do not start here unless
+-  // kUmaBackgroundSessions is enabled.
+-  if (!base::FeatureList::IsEnabled(chrome::android::kUmaBackgroundSessions)) {
+-    return;
+-  }
+-#endif
+-
++#if !BUILDFLAG(IS_ANDROID)
+   g_browser_process->metrics_service()->CheckForClonedInstall();
+ 
+ #if BUILDFLAG(IS_WIN)
+@@ -973,6 +978,7 @@
+ #endif
+ 
+   g_browser_process->GetMetricsServicesManager()->UpdateUploadPermissions();
++#endif  // !BUILDFLAG(IS_ANDROID)
+ }
+ 
+ void ChromeBrowserMainParts::RecordBrowserStartupTime() {
+@@ -997,8 +1003,6 @@
+ 
+ // -----------------------------------------------------------------------------
+ // TODO(viettrungluu): move more/rest of BrowserMain() into BrowserMainParts.
+-
+-
+ 
+ // content::BrowserMainParts implementation ------------------------------------
+ 
+@@ -1070,6 +1074,8 @@
  
  #if BUILDFLAG(IS_MAC) && BUILDFLAG(ENABLE_UPDATER)
  void PromptUpdaterPromotion() {
-+  if (!ShouldPromptUpdaterPromotion()) return;
++  if (!ShouldPromptUpdaterPromotion())
++    return;
    content::GetUIThreadTaskRunner({})->PostTask(
        FROM_HERE, base::BindOnce([]() {
          if (base::CommandLine::ForCurrentProcess()->HasSwitch(
+@@ -1782,6 +1788,13 @@
+ 
+   SCOPED_UMA_HISTOGRAM_LONG_TIMER("Startup.PreMainMessageLoopRunImplLongTime");
+ 
++#if BUILDFLAG(IS_ANDROID)
++  // Profile initialization can deserialize navigations while extensions start.
++  // Install Chrome's driver before the content fallback can be created.
++  sessions::ContentSerializedNavigationDriver::SetInstance(
++      ChromeSerializedNavigationDriver::GetInstance());
++#endif
++
+ #if BUILDFLAG(IS_WIN)
+   // Windows parental controls calls can be slow, so we do an early init here
+   // that calculates this value off of the UI thread.
+@@ -2076,12 +2089,14 @@
+ 
+   HandleTestParameters(*base::CommandLine::ForCurrentProcess());
+ 
++#if !BUILDFLAG(IS_ANDROID)
+   // This has to come before the first GetInstance() call. PreBrowserStart()
+   // seems like a reasonable place to put this, except on Android,
+   // OfflinePageInfoHandler::Register() below calls GetInstance().
+   // TODO(thestig): See if the Android code below can be moved to later.
+   sessions::ContentSerializedNavigationDriver::SetInstance(
+       ChromeSerializedNavigationDriver::GetInstance());
++#endif
+ 
+ #if BUILDFLAG(ENABLE_OFFLINE_PAGES)
+   offline_pages::OfflinePageInfoHandler::Register();

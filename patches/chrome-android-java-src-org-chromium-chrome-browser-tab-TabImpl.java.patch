@@ -1,0 +1,437 @@
+diff --git a/chrome/android/java/src/org/chromium/chrome/browser/tab/TabImpl.java b/chrome/android/java/src/org/chromium/chrome/browser/tab/TabImpl.java
+--- a/chrome/android/java/src/org/chromium/chrome/browser/tab/TabImpl.java
++++ b/chrome/android/java/src/org/chromium/chrome/browser/tab/TabImpl.java
+@@ -59,6 +59,8 @@
+ import org.chromium.build.annotations.NullMarked;
+ import org.chromium.build.annotations.Nullable;
+ import org.chromium.chrome.R;
++import org.chromium.chrome.browser.containers.ContainersBridge;
++import org.chromium.chrome.browser.containers.ContainersPersistentTabReferences;
+ import org.chromium.chrome.browser.ActivityUtils;
+ import org.chromium.chrome.browser.WarmupManager;
+ import org.chromium.chrome.browser.app.tabwindow.TabWindowManagerSingleton;
+@@ -87,6 +89,7 @@
+ import org.chromium.chrome.browser.tabmodel.TabModel;
+ import org.chromium.chrome.browser.tabmodel.TabModelType;
+ import org.chromium.chrome.browser.tabwindow.TabWindowManager;
++import org.chromium.chrome.browser.ui.extensions.ExtensionUi;
+ import org.chromium.chrome.browser.ui.native_page.BeforeUnloadCallback;
+ import org.chromium.chrome.browser.ui.native_page.FrozenNativePage;
+ import org.chromium.chrome.browser.ui.native_page.NativePage;
+@@ -102,7 +105,6 @@
+ import org.chromium.components.embedder_support.contextmenu.ContextMenuPopulatorFactory;
+ import org.chromium.components.embedder_support.util.UrlConstants;
+ import org.chromium.components.embedder_support.view.ContentView;
+-import org.chromium.components.embedder_support.virtual_structure.PageContentProtoViewStructureBuilder;
+ import org.chromium.components.prefs.PrefChangeRegistrar;
+ import org.chromium.components.prefs.PrefService;
+ import org.chromium.components.security_state.ConnectionSecurityLevel;
+@@ -196,6 +198,12 @@
+     /** The Profile associated with this tab. */
+     private final Profile mProfile;
+
++    // Set once before native initialization; existing WebContents are never retagged.
++    private String mContainerId = "";
++    private boolean mContainerAdmissionFailed;
++    private boolean mContainerIdentityAssigned;
++    private boolean mSeparateStoragePartitionExperiment;
++
+     /** The tab model this tab is currently attached to. */
+     private @Nullable LookAheadObservableSupplier<Tab> mCurrentTabSupplier;
+
+@@ -278,6 +286,8 @@
+
+     /** Whether or not the Tab is currently visible to the user. */
+     private boolean mIsHidden = true;
++
++    private boolean mDispatchingWillHide;
+
+     /** Called when the current window's occlusion changes. */
+     private final Callback<Boolean> mOcclusionCallback = (v) -> updateWebContentsVisibility();
+@@ -326,6 +336,11 @@
+     private int mParentId = INVALID_TAB_ID;
+     private int mRootId;
+     private @Nullable Token mTabGroupId;
++    private @Nullable Token mSplitTabId;
++    private int mSplitLayout;
++    private double mSplitRatio = 0.5;
++    private int mSplitPosition = -1;
++    private Tab.@Nullable SplitData mClosingSplitData;
+     private boolean mTabHasSensitiveContent;
+     private boolean mIsPinned;
+     private @TabAlert int mAlertState = TabAlert.NONE;
+@@ -971,6 +986,10 @@
+         if (mWebContents == null) return new LoadUrlResult(TabLoadStatus.PAGE_LOAD_FAILED, null);
+
+         if (!fixedUrl.isValid()) return new LoadUrlResult(TabLoadStatus.PAGE_LOAD_FAILED, null);
++        if ((!mContainerId.isEmpty() || mSeparateStoragePartitionExperiment)
++                && !matchesExpectedStoragePartition(mWebContents)) {
++            return new LoadUrlResult(TabLoadStatus.PAGE_LOAD_FAILED, null);
++        }
+
+         // Discard pending load params if they exist. At this point we are navigating to a new URL
+         // programmatically and the pending load never occurred.
+@@ -1131,8 +1150,9 @@
+         if (mPendingLoadParams != null) {
+             if (mWebContents == null) {
+                 WebContents webContents =
+-                        WebContentsFactory.createWebContents(
+-                                mProfile, isHidden(), /* initializeRenderer= */ false);
++                        createContainerWebContents(
++                                isHidden(), /* initializeRenderer= */ false);
++                if (webContents == null) return false;
+                 initWebContents(webContents);
+             }
+             loadUrl(mPendingLoadParams);
+@@ -1280,6 +1300,56 @@
+
+     // TabLifecycle implementation.
+
++    @CalledByNative
++    @Override
++    public @JniType("std::string") String getContainerId() {
++        return mContainerId;
++    }
++
++    void setContainerIdForCreation(String containerId) {
++        if (mContainerIdentityAssigned || isInitialized() || mWebContents != null) {
++            throw new IllegalStateException("Cannot change an initialized tab's container");
++        }
++        if (!ContainersBridge.isContainerIdValid(mProfile, containerId)) {
++            throw new IllegalArgumentException("Invalid or unavailable storage container");
++        }
++        if (!containerId.isEmpty()) ContainersPersistentTabReferences.invalidate(mProfile);
++        mContainerId = containerId;
++        mContainerIdentityAssigned = true;
++    }
++
++    void setSeparateStoragePartitionExperimentForCreation(WebContents contents) {
++        if (!mContainerIdentityAssigned || !mContainerId.isEmpty() || isInitialized()
++                || mWebContents != null || mSeparateStoragePartitionExperiment) {
++            throw new IllegalStateException("Cannot change an initialized tab's storage policy");
++        }
++        if (!WebContentsFactory.isWebContentsForSeparateStoragePartitionExperiment(
++                mProfile, contents)) {
++            throw new IllegalArgumentException("Invalid speculative CCT contents");
++        }
++        mSeparateStoragePartitionExperiment = true;
++    }
++
++    private boolean matchesExpectedStoragePartition(WebContents contents) {
++        return mSeparateStoragePartitionExperiment
++                ? mContainerId.isEmpty()
++                        && WebContentsFactory.isWebContentsForSeparateStoragePartitionExperiment(
++                                mProfile, contents)
++                : ContainersBridge.isWebContentsInContainer(mProfile, contents, mContainerId);
++    }
++
++    private @Nullable WebContents createContainerWebContents(
++            boolean initiallyHidden, boolean initializeRenderer) {
++        WebContents contents =
++                mSeparateStoragePartitionExperiment
++                        ? WebContentsFactory.createWebContentsWithSeparateStoragePartitionForExperiment(
++                                mProfile)
++                        : WebContentsFactory.createWebContentsForContainer(
++                                mProfile, initiallyHidden, initializeRenderer, mContainerId);
++        mContainerAdmissionFailed = contents == null;
++        return contents;
++    }
++
+     @Override
+     public boolean isInitialized() {
+         return mNativeTabAndroid != 0;
+@@ -1337,6 +1407,7 @@
+         try (ScopedServiceBindingBatch scope = ScopedServiceBindingBatch.scoped()) {
+
+             TraceEvent.begin("Tab.show");
++            if (isDestroyed()) return;
+             if (!isHidden()) {
+                 var wc = getWebContents();
+                 if (wc == null) {
+@@ -1361,6 +1432,12 @@
+             // Keep unsetting mIsHidden above loadIfNeeded(), so that we pass correct visibility
+             // when spawning WebContents in loadIfNeeded().
+             mIsHidden = false;
++            if (mNativeTabAndroid != 0) {
++                // Visible split panes can remain inactive. Notify after the visibility transition,
++                // independently of the current-tab supplier's activation notifications.
++                TabImplJni.get().sendDidBecomeVisibleUpdate(mNativeTabAndroid);
++                if (isDestroyed() || isHidden() || mNativeTabAndroid == 0) return;
++            }
+             updateInteractableState();
+
+             loadIfNeeded(/* forceBackingSize= */ false);
+@@ -1414,7 +1491,18 @@
+         // triggered not only on tab switch, but also when the window is hidden.
+         try (ScopedServiceBindingBatch scope = ScopedServiceBindingBatch.scoped()) {
+             TraceEvent.begin("Tab.hide");
+-            if (isHidden()) return;
++            if (isDestroyed() || isHidden() || mDispatchingWillHide) return;
++            if (mNativeTabAndroid != 0) {
++                // The will-hide callback must observe the old visible state. Reentrant hide calls
++                // are already covered by this pending transition.
++                mDispatchingWillHide = true;
++                try {
++                    TabImplJni.get().sendWillBecomeHiddenUpdate(mNativeTabAndroid);
++                } finally {
++                    mDispatchingWillHide = false;
++                }
++                if (isDestroyed() || isHidden()) return;
++            }
+             mIsHidden = true;
+             updateInteractableState();
+             updateWebContentsVisibility();
+@@ -1664,19 +1752,17 @@
+                 webContents = getWebContents();
+                 // unfreezeContents() already called initWebContents().
+                 needsToCallInitWebContents = false;
+-                assert webContents != null;
++                assert webContents != null || mContainerAdmissionFailed;
+             } else if (hasPendingLoadUrlParams) {
+                 assert webContents == null;
+
+                 webContents =
+-                        WebContentsFactory.createWebContents(
+-                                mProfile, isHidden(), initializeRenderer);
++                        createContainerWebContents(isHidden(), initializeRenderer);
+             } else if (eligibleToCreateWebContents) {
+                 webContents =
+-                        WebContentsFactory.createWebContents(
+-                                mProfile, initiallyHidden, initializeRenderer);
+-            }
+-            assert webContents != null;
++                        createContainerWebContents(initiallyHidden, initializeRenderer);
++            }
++            assert webContents != null || mContainerAdmissionFailed;
+         } else if (mWebContentsState == null
+                 && !hasPendingLoadUrlParams
+                 && eligibleToCreateWebContents) {
+@@ -1685,8 +1771,7 @@
+             // also correct to not create a WebContents if one was provided to this method.
+
+             webContents =
+-                    WebContentsFactory.createWebContents(
+-                            mProfile, initiallyHidden, initializeRenderer);
++                    createContainerWebContents(initiallyHidden, initializeRenderer);
+         }
+
+         // WebContents may still be null at this point if:
+@@ -1741,6 +1826,9 @@
+      */
+     void restoreFieldsFromState(TabState state) {
+         assert state != null;
++        if (!state.containerId.equals(mContainerId)) {
++            throw new IllegalArgumentException("Restored storage identity does not match tab");
++        }
+         mWebContentsState = state.contentsState;
+         setTimestampMillis(state.timestampMillis);
+         setLastNavigationCommittedTimestampMillis(state.lastNavigationCommittedTimestampMillis);
+@@ -1753,6 +1841,7 @@
+         setUserAgent(state.userAgent);
+         setTabHasSensitiveContent(state.tabHasSensitiveContent);
+         setIsPinned(state.isPinned);
++        setSplitData(state.splitTabId, state.splitLayout, state.splitRatio, state.splitPosition);
+     }
+
+     /**
+@@ -2263,6 +2352,33 @@
+         notifyPageTitleChanged();
+     }
+
++    @CalledByNative
++    private @JniType("GURL") GURL getPendingUrl() {
++        boolean serializedPending =
++                mWebContentsState != null && mWebContentsState.hasPendingNavigation();
++        return mPendingLoadParams != null || serializedPending ? getUrl() : GURL.emptyGURL();
++    }
++
++    @CalledByNative
++    private @JniType("GURL") GURL getCommittedUrl() {
++        if (mPendingLoadParams != null) return GURL.emptyGURL();
++        if (mWebContentsState != null && mWebContentsState.hasPendingNavigation()) {
++            var metadata = mWebContentsState.getLastCommittedMetadata();
++            return metadata == null ? GURL.emptyGURL() : new GURL(metadata.virtualUrl);
++        }
++        return getUrl();
++    }
++
++    @CalledByNative
++    private @JniType("std::u16string") String getCommittedTitle() {
++        if (mPendingLoadParams != null) return "";
++        if (mWebContentsState != null && mWebContentsState.hasPendingNavigation()) {
++            var metadata = mWebContentsState.getLastCommittedMetadata();
++            return metadata == null ? "" : metadata.title;
++        }
++        return getTitle();
++    }
++
+     @Override
+     public @Nullable LoadUrlParams getPendingLoadParams() {
+         return mPendingLoadParams;
+@@ -2404,10 +2520,6 @@
+         Context context = getThemedApplicationContext();
+         ContentView cv = ContentView.createContentView(context, webContents);
+         cv.setContentDescription(context.getString(R.string.accessibility_content_view));
+-        if (ChromeFeatureList.isEnabled(
+-                ChromeFeatureList.ANNOTATED_PAGE_CONTENTS_VIRTUAL_STRUCTURE)) {
+-            cv.setVirtualStructureProvider(new PageContentProtoViewStructureBuilder());
+-        }
+         mContentView = cv;
+
+         TabViewAndroidDelegate delegate;
+@@ -2442,6 +2554,9 @@
+      */
+     private void initWebContents(WebContents webContents) {
+         assert !isDormant() : "Dormant tabs must never initialize WebContents.";
++        if (!matchesExpectedStoragePartition(webContents)) {
++            throw new IllegalArgumentException("Contents storage does not match immutable tab");
++        }
+         try {
+             TraceEvent.begin("ChromeTab.initWebContents");
+             WebContents oldWebContents = mWebContents;
+@@ -2728,8 +2843,13 @@
+             TraceEvent.begin("Tab.unfreezeContents");
+             assert mWebContentsState != null;
+
++            if (mWebContentsState.hasContainerIdentityConflict(getProfile(), mContainerId)) {
++                // A readable conflicting jar must not enter the corrupt-data URL fallback.
++                return false;
++            }
+             WebContents webContents =
+-                    mWebContentsState.restoreWebContents(getProfile(), isHidden(), noRenderer);
++                    mWebContentsState.restoreWebContents(
++                            getProfile(), isHidden(), noRenderer, mContainerId);
+
+             UrlConstantResolver urlConstantResolver =
+                     UrlConstantResolverFactory.getForProfile(mProfile);
+@@ -2737,8 +2857,9 @@
+             if (webContents == null) {
+                 // State restore failed, just create a new empty web contents as that is the best
+                 // that can be done at this point.
+-                webContents = WebContentsFactory.createWebContents(mProfile, isHidden(), false);
++                webContents = createContainerWebContents(isHidden(), false);
+                 for (TabObserver observer : mObservers) observer.onRestoreFailed(this);
++                if (webContents == null) return false;
+                 restored = false;
+
+                 assumeNonNull(mUrl);
+@@ -2986,6 +3107,90 @@
+         if (mNativeTabAndroid != 0) {
+             TabImplJni.get().notifyTabGroupChanged(mNativeTabAndroid, tabGroupId);
+         }
++    }
++
++    @Override
++    public @Nullable Token getSplitTabId() {
++        return mSplitTabId;
++    }
++
++    @Override
++    public int getSplitLayout() {
++        return mSplitLayout;
++    }
++
++    @Override
++    public double getSplitRatio() {
++        return mSplitRatio;
++    }
++
++    @Override
++    public int getSplitPosition() {
++        return mSplitPosition;
++    }
++
++    @Override
++    @CalledByNative
++    public void setSplitData(
++            @JniType("std::optional<base::Token>") @Nullable Token token,
++            int layout,
++            double ratio,
++            int position) {
++        if (isDestroyed()) return;
++        if (!Tab.SplitData.isValid(token, layout, ratio, position)) {
++            token = null;
++            layout = 0;
++            ratio = 0.5;
++            position = -1;
++        }
++        if (Objects.equals(mSplitTabId, token)
++                && mSplitLayout == layout
++                && Double.compare(mSplitRatio, ratio) == 0
++                && mSplitPosition == position) return;
++        mSplitTabId = token;
++        mSplitLayout = layout;
++        mSplitRatio = ratio;
++        mSplitPosition = position;
++        for (TabObserver observer : mObservers) observer.onSplitDataChanged(this);
++    }
++
++    @Override
++    public void captureSplitDataForClosure() {
++        Token token = mSplitTabId;
++        mClosingSplitData =
++                token == null
++                        ? null
++                        : new Tab.SplitData(token, mSplitLayout, mSplitRatio, mSplitPosition);
++    }
++
++    @Override
++    public Tab.@Nullable SplitData getSplitDataForClosure() {
++        return mClosingSplitData;
++    }
++
++    @Override
++    public void clearSplitDataForClosure() {
++        mClosingSplitData = null;
++    }
++
++    @CalledByNative
++    private @JniType("std::optional<base::Token>") @Nullable Token getHistoricalSplitTabId() {
++        return mClosingSplitData == null ? mSplitTabId : mClosingSplitData.getToken();
++    }
++
++    @CalledByNative
++    private int getHistoricalSplitLayout() {
++        return mClosingSplitData == null ? mSplitLayout : mClosingSplitData.getLayout();
++    }
++
++    @CalledByNative
++    private double getHistoricalSplitRatio() {
++        return mClosingSplitData == null ? mSplitRatio : mClosingSplitData.getRatio();
++    }
++
++    @CalledByNative
++    private int getHistoricalSplitPosition() {
++        return mClosingSplitData == null ? mSplitPosition : mClosingSplitData.getPosition();
+     }
+
+     @Override
+@@ -3173,8 +3378,16 @@
+             url = webContents.getVisibleUrl();
+         }
+
++        // The Web Store serves a non-installable marketing page to mobile UAs.
++        // Reuse the normal desktop UA + client-hint override for this exact host.
++        boolean isExtensionStore =
++                url != null
++                        && "https".equals(url.getScheme())
++                        && "chromewebstore.google.com".equals(url.getHost())
++                        && ExtensionUi.isEnabled(mProfile);
+         boolean shouldRequestDesktopSite =
+-                DesktopSiteUtils.shouldOverrideDesktopSite(mProfile, url, getContext());
++                isExtensionStore
++                        || DesktopSiteUtils.shouldOverrideDesktopSite(mProfile, url, getContext());
+
+         if (shouldRequestDesktopSite != currentRequestDesktopSite) {
+             // The user is not forcing any mode and we determined that we need to
+@@ -3577,6 +3790,10 @@
+
+         void sendWillDeactivateUpdate(long nativeTabAndroid);
+
++        void sendDidBecomeVisibleUpdate(long nativeTabAndroid);
++
++        void sendWillBecomeHiddenUpdate(long nativeTabAndroid);
++
+         void sendDidInsertUpdate(long nativeTabAndroid);
+
+         void sendWillDetachUpdate(long nativeTabAndroid, @DetachReason int detachReason);

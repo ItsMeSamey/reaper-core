@@ -1,0 +1,301 @@
+diff --git a/chrome/browser/resources/extensions/toolbar.ts b/chrome/browser/resources/extensions/toolbar.ts
+--- a/chrome/browser/resources/extensions/toolbar.ts
++++ b/chrome/browser/resources/extensions/toolbar.ts
+@@ -3,16 +3,25 @@
+ // found in the LICENSE file.
+ 
+ import 'chrome://resources/cr_elements/cr_button/cr_button.js';
++// <if expr="not is_android">
+ import 'chrome://resources/cr_elements/cr_toggle/cr_toggle.js';
++// </if>
+ import 'chrome://resources/cr_elements/cr_toolbar/cr_toolbar.js';
+ import 'chrome://resources/cr_elements/policy/cr_tooltip_icon.js';
+ import './pack_dialog.js';
+ 
+ import {getToastManager} from 'chrome://resources/cr_elements/cr_toast/cr_toast_manager.js';
++// <if expr="not is_android">
+ import type {CrToggleElement} from 'chrome://resources/cr_elements/cr_toggle/cr_toggle.js';
++// </if>
+ import type {CrToolbarElement} from 'chrome://resources/cr_elements/cr_toolbar/cr_toolbar.js';
+ import {I18nMixinLit} from 'chrome://resources/cr_elements/i18n_mixin_lit.js';
++// <if expr="is_android">
++import {getDeepActiveElement} from 'chrome://resources/js/util.js';
++// </if>
++// <if expr="not is_android">
+ import {listenOnce} from 'chrome://resources/js/util.js';
++// </if>
+ import {CrLitElement} from 'chrome://resources/lit/v3_0/lit.rollup.js';
+ import type {PropertyValues} from 'chrome://resources/lit/v3_0/lit.rollup.js';
+ 
+@@ -28,6 +37,9 @@
+ 
+   /** Opens the dialog to load unpacked extensions. */
+   loadUnpacked(): Promise<boolean>;
++  // <if expr="is_android">
++  installFromFile(): Promise<boolean>;
++  // </if>
+ 
+   /** Updates all extensions. */
+   updateAllExtensions(extensions: chrome.developerPrivate.ExtensionInfo[]):
+@@ -39,6 +51,11 @@
+   loadUnpacked() {
+     return Promise.resolve(true);
+   }
++  // <if expr="is_android">
++  installFromFile() {
++    return Promise.resolve(false);
++  }
++  // </if>
+   updateAllExtensions(_extensions: chrome.developerPrivate.ExtensionInfo[]) {
+     return Promise.resolve();
+   }
+@@ -47,8 +64,16 @@
+ export interface ExtensionsToolbarElement {
+   $: {
+     devDrawer: HTMLElement,
++    // <if expr="is_android">
++    devMode: HTMLInputElement,
++    // </if>
++    // <if expr="not is_android">
+     devMode: CrToggleElement,
++    // </if>
+     loadUnpacked: HTMLElement,
++    // <if expr="is_android">
++    installCrx: HTMLElement,
++    // </if>
+     packExtensions: HTMLElement,
+     toolbar: CrToolbarElement,
+     updateNow: HTMLElement,
+@@ -97,6 +122,12 @@
+        * Prevents initiating update while update is in progress.
+        */
+       isUpdating_: {type: Boolean},
++      // <if expr="is_android">
++      isLoadingUnpacked_: {type: Boolean},
++      isInstallingCrx_: {type: Boolean},
++      installCrxError_: {type: String},
++      interruptedLocalImport_: {type: Boolean},
++      // </if>
+     };
+   }
+ 
+@@ -112,6 +143,13 @@
+   protected accessor expanded_: boolean = false;
+   protected accessor showPackDialog_: boolean = false;
+   private accessor isUpdating_: boolean = false;
++  // <if expr="is_android">
++  protected accessor isLoadingUnpacked_: boolean = false;
++  protected accessor isInstallingCrx_: boolean = false;
++  protected accessor installCrxError_: string = '';
++  protected accessor interruptedLocalImport_: boolean = false;
++  private finishAndroidUpdateToast_: (() => boolean)|null = null;
++  // </if>
+ 
+   override firstUpdated(changedProperties: PropertyValues<this>) {
+     super.firstUpdated(changedProperties);
+@@ -149,13 +187,29 @@
+     return this.isChildAccount ? 'cr20:family-link' : 'cr20:domain';
+   }
+ 
++  // <if expr="is_android">
++  protected onDevModeToggleChange_(e: Event) {
++    this.delegate.setProfileInDevMode((e.target as HTMLInputElement).checked);
++  }
++  // </if>
++  // <if expr="not is_android">
+   protected onDevModeToggleChange_(e: CustomEvent<boolean>) {
+     this.delegate.setProfileInDevMode(e.detail);
+     chrome.metricsPrivate.recordUserAction(
+         'Options_ToggleDeveloperMode_' + (e.detail ? 'Enabled' : 'Disabled'));
+   }
++  // </if>
+ 
+   private onInDevModeChanged_(_current: boolean, previous: boolean) {
++    // <if expr="is_android">
++    // Wrapped controls have an intrinsic height; there is no fixed-height
++    // transition to wait for before removing hidden buttons from focus order.
++    if (previous !== this.inDevMode) {
++      this.$.devDrawer.hidden = !this.inDevMode;
++      this.expanded_ = this.inDevMode;
++    }
++    // </if>
++    // <if expr="not is_android">
+     const drawer = this.$.devDrawer;
+     if (this.inDevMode) {
+       if (drawer.hidden) {
+@@ -177,9 +231,14 @@
+       });
+     }
+     this.expanded_ = !this.expanded_;
++    // </if>
+   }
+ 
+   protected onLoadUnpackedClick_() {
++    // <if expr="is_android">
++    void this.loadUnpackedAndroid_();
++    // </if>
++    // <if expr="not is_android">
+     this.delegate.loadUnpacked()
+         .then((success) => {
+           if (success) {
+@@ -192,10 +251,88 @@
+           this.fire('load-error', loadError);
+         });
+     chrome.metricsPrivate.recordUserAction('Options_LoadUnpackedExtension');
+-  }
++    // </if>
++  }
++
++  // <if expr="is_android">
++  private async loadUnpackedAndroid_() {
++    // Guard synchronously: a second tap can arrive before Lit disables the
++    // button, and loading continues after the Android picker has closed.
++    if (this.isLoadingUnpacked_ || this.isInstallingCrx_) {
++      return;
++    }
++    this.installCrxError_ = '';
++    this.interruptedLocalImport_ = false;
++    this.isLoadingUnpacked_ = true;
++    try {
++      const success = await this.delegate.loadUnpacked();
++      if (success && this.isConnected) {
++        const toastManager = getToastManager();
++        toastManager.duration = TOAST_DURATION_MS;
++        toastManager.show(this.i18n('toolbarLoadUnpackedDone'));
++      }
++    } catch (loadError) {
++      if (this.isConnected) {
++        this.fire('load-error', loadError);
++      }
++    } finally {
++      this.isLoadingUnpacked_ = false;
++      await this.updateComplete;
++      // The Brave button forwards disabled state to its native Leo control.
++      await (this.$.loadUnpacked as CrLitElement).updateComplete;
++      const active = getDeepActiveElement();
++      if (this.isConnected && this.inDevMode && !this.isChildAccount &&
++          this.canLoadUnpacked_() &&
++          (!active || active === document.body ||
++           this.$.loadUnpacked.matches(':focus-within'))) {
++        this.$.loadUnpacked.focus();
++      }
++    }
++  }
++  // </if>
++
++  // <if expr="is_android">
++  showInterruptedLocalImport() {
++    // Report the retired operation without moving focus or reopening consent.
++    this.interruptedLocalImport_ = true;
++  }
++
++  protected async onInstallCrxClick_() {
++    if (this.isInstallingCrx_ || this.isLoadingUnpacked_) {
++      return;
++    }
++    this.installCrxError_ = '';
++    this.interruptedLocalImport_ = false;
++    this.isInstallingCrx_ = true;
++    try {
++      const installed = await this.delegate.installFromFile();
++      if (installed && this.isConnected) {
++        const toastManager = getToastManager();
++        toastManager.duration = TOAST_DURATION_MS;
++        toastManager.show(this.i18n('toolbarInstallCrxDone'));
++      }
++    } catch (error) {
++      if (this.isConnected) {
++        this.installCrxError_ = error instanceof Error ? error.message : String(error);
++      }
++    } finally {
++      this.isInstallingCrx_ = false;
++      await this.updateComplete;
++      // Wait for the wrapped button to forward its enabled state before focus.
++      await (this.$.installCrx as CrLitElement).updateComplete;
++      const active = getDeepActiveElement();
++      if (this.isConnected && this.inDevMode && !this.isChildAccount &&
++          (!active || active === document.body || active === this.$.installCrx)) {
++        this.$.installCrx.focus();
++      }
++    }
++  }
++  // </if>
+ 
+   protected onPackClick_() {
++    // <if expr="not is_android">
+     chrome.metricsPrivate.recordUserAction('Options_PackExtension');
++    // </if>
+     this.showPackDialog_ = true;
+   }
+ 
+@@ -204,7 +341,62 @@
+     this.$.packExtensions.focus();
+   }
+ 
++  // <if expr="is_android">
++  override disconnectedCallback() {
++    super.disconnectedCallback();
++    this.finishAndroidUpdateToast_?.();
++  }
++
++  private async updateAllAndroid_() {
++    if (this.isUpdating_) {
++      return;
++    }
++    this.isUpdating_ = true;
++    const toastManager = getToastManager();
++    toastManager.duration = 0;
++    toastManager.show(this.i18n('toolbarUpdatingToast'));
++    // A comment has no layout or accessible text. Its presence prevents the
++    // single-text-child shortcut in textContent when a newer label is equal.
++    const content = toastManager.$.content;
++    const marker = document.createComment('extension-update');
++    content.appendChild(marker);
++    const finishToast = () => {
++      if (this.finishAndroidUpdateToast_ !== finishToast) {
++        return false;
++      }
++      this.finishAndroidUpdateToast_ = null;
++      if (marker.parentNode !== content) {
++        return false;
++      }
++      marker.remove();
++      toastManager.hide();
++      toastManager.duration = TOAST_DURATION_MS;
++      return true;
++    };
++    this.finishAndroidUpdateToast_ = finishToast;
++    try {
++      await this.delegate.updateAllExtensions(this.extensions);
++      if (this.isConnected && finishToast()) {
++        toastManager.show(this.i18n('toolbarUpdateDone'));
++      }
++    } catch (loadError) {
++      const current = this.finishAndroidUpdateToast_ === finishToast;
++      finishToast();
++      if (current && this.isConnected) {
++        this.fire('load-error', loadError);
++      }
++    } finally {
++      finishToast();
++      this.isUpdating_ = false;
++    }
++  }
++  // </if>
++
+   protected onUpdateNowClick_() {
++    // <if expr="is_android">
++    void this.updateAllAndroid_();
++    // </if>
++    // <if expr="not is_android">
+     // If already updating, do not initiate another update.
+     if (this.isUpdating_) {
+       return;
+@@ -229,6 +421,7 @@
+               toastManager.hide();
+               this.isUpdating_ = false;
+             });
++    // </if>
+   }
+ 
+   protected onNarrowChanged_(e: CustomEvent<{value: boolean}>) {

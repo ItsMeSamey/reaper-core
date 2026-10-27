@@ -1,0 +1,158 @@
+# Android generic MIME extension handling; legacy plugin and PDF flags stay disabled.
+substitutions:
+- description: Defer Android download cleanup until observer dispatch completes
+  regex:
+    re_pattern: \#include\ "base/strings/to_string\.h"
+    replace: '#include "base/strings/to_string.h"
+
+      #include "base/task/single_thread_task_runner.h"'
+- description: Use an inert document when native fallback downloads instead of commits
+  regex:
+    re_pattern: \#include\ "third_party/blink/public/common/frame/frame_owner_element_type\.h"
+    replace: '#include "third_party/blink/public/common/frame/frame_owner_element_type.h"
+
+      #include "url/url_constants.h"'
+- description: Capture native fallback ownership before starting its reload
+  regex:
+    re_pattern: '\ \ pending_native_fallback_frames_\[embedder_ftn\]\ =\ PendingNativeFallback\{\
+
+      \ \ \ \ \ \ original_url,\ CachedFallbackBody\{std::move\(body\),\ decoded_body_size\}\};'
+    replace: "  pending_native_fallback_frames_[embedder_ftn] = PendingNativeFallback{\n      original_url, CachedFallbackBody{std::move(body), decoded_body_size}};\n#if BUILDFLAG(IS_ANDROID)\n  auto& fallback = pending_native_fallback_frames_.at(embedder_ftn);\n  fallback.embedder_id = embedder_host->GetGlobalId();\n  fallback.stream_instance_id = stream_info->instance_id();\n#endif"
+- description: Bind fallback bypass to one navigation and preserve its redirects
+  regex:
+    re_pattern: 'void\ MimeHandlerStreamManager::DidStartNavigation\(\
+
+      \ \ \ \ content::NavigationHandle\*\ navigation_handle\)\ \{'
+    replace: "void MimeHandlerStreamManager::DidStartNavigation(\n    content::NavigationHandle* navigation_handle) {\n#if BUILDFLAG(IS_ANDROID)\n  auto fallback = pending_native_fallback_frames_.find(\n      navigation_handle->GetFrameTreeNodeId());\n  if (!navigation_handle->IsSameDocument() &&\n      fallback != pending_native_fallback_frames_.end()) {\n    if (fallback->second.navigation_id == 0 &&\n        navigation_handle->GetURL().EqualsIgnoringRef(fallback->second.original_url)) {\n      fallback->second.navigation_id = navigation_handle->GetNavigationId();\n    } else {\n      // A subsequent navigation is independent of this abort request. Never\n      // suppress a handler chosen for a later user navigation in the same frame.\n      pending_native_fallback_frames_.erase(fallback);\n    }\n  }\n#endif"
+- description: Schedule exact-instance cleanup when the native path does not commit
+  regex:
+    re_pattern: \ \ //\ Drop\ any\ native\-fallback\ mark\ for\ the\ navigating\ frame\.
+    replace: "#if BUILDFLAG(IS_ANDROID)\n  auto fallback = pending_native_fallback_frames_.find(\n      navigation_handle->GetFrameTreeNodeId());\n  if (fallback != pending_native_fallback_frames_.end() &&\n      fallback->second.navigation_id == navigation_handle->GetNavigationId() &&\n      !navigation_handle->HasCommitted()) {\n    // Downloads and canceled/error navigations can leave the old document\n    // alive. Retire only the exact handler instance that requested fallback.\n    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(\n        FROM_HERE,\n        base::BindOnce(&MimeHandlerStreamManager::FinishAndroidNativeFallback,\n                       weak_factory_.GetWeakPtr(), fallback->second.embedder_id,\n                       fallback->second.stream_instance_id));\n  }\n#endif\n  // Drop any native-fallback mark for the navigating frame."
+- description: Do not let a superseded navigation finish clear an active Android fallback
+  regex:
+    re_pattern: '\ \ pending_native_fallback_frames_\.erase\(\
+
+      \ \ \ \ \ \ navigation_handle\->GetFrameTreeNodeId\(\)\);'
+    replace: "#if BUILDFLAG(IS_ANDROID)\n  if (fallback != pending_native_fallback_frames_.end() &&\n      fallback->second.navigation_id == navigation_handle->GetNavigationId()) {\n    pending_native_fallback_frames_.erase(fallback);\n  }\n#else\n  pending_native_fallback_frames_.erase(\n      navigation_handle->GetFrameTreeNodeId());\n#endif"
+- description: Bypass only the active native reload and clear a surviving extension frame
+  regex:
+    re_pattern: bool\ MimeHandlerStreamManager::IsPendingNativeFallback\(
+    replace: "#if BUILDFLAG(IS_ANDROID)\nbool MimeHandlerStreamManager::ShouldBypassForNativeFallback(\n    content::FrameTreeNodeId frame_id) const {\n  auto found = pending_native_fallback_frames_.find(frame_id);\n  return found != pending_native_fallback_frames_.end() &&\n         found->second.navigation_id != 0;\n}\n\nvoid MimeHandlerStreamManager::FinishAndroidNativeFallback(\n    content::GlobalRenderFrameHostId embedder_id,\n    int32_t stream_instance_id) {\n  auto* embedder = content::RenderFrameHost::FromID(embedder_id);\n  if (!embedder || content::WebContents::FromRenderFrameHost(embedder) != web_contents()) {\n    return;\n  }\n  auto* stream = GetClaimedStreamInfo(embedder);\n  if (!stream || stream->instance_id() != stream_instance_id) {\n    return;\n  }\n  auto* extension_frame = web_contents()->UnsafeFindFrameByFrameTreeNodeId(\n      stream->extension_host_frame_tree_node_id());\n  if (extension_frame && extension_frame->GetParent() == embedder &&\n      IsExtensionHost(extension_frame)) {\n    // This lookup is checked against both the surviving RFH and stream\n    // identity; it cannot navigate another frame after a cross-process swap.\n    content::NavigationController::LoadURLParams params{GURL(url::kAboutBlankURL)};\n    params.frame_tree_node_id = extension_frame->GetFrameTreeNodeId();\n    params.should_replace_current_entry = true;\n    auto weak_this = weak_factory_.GetWeakPtr();\n    web_contents()->GetController().LoadURLWithParams(params);\n    embedder = content::RenderFrameHost::FromID(embedder_id);\n    if (!weak_this || !embedder) {\n      return;\n    }\n    stream = GetClaimedStreamInfo(embedder);\n    if (!stream || stream->instance_id() != stream_instance_id) {\n      return;\n    }\n  }\n  DeleteClaimedStreamInfo(embedder);\n  // No accesses below: removing the last stream deletes this manager.\n}\n#endif\n\nbool MimeHandlerStreamManager::IsPendingNativeFallback("
+- description: Format the modified MIME implementation with Chromium style
+  regex:
+    re_pattern: '\#include\ "base/functional/bind\.h"\
+
+      \#include\ "base/memory/ptr_util\.h"\
+
+      \#include\ "base/memory/weak_ptr\.h"\
+
+      \#include\ "base/strings/to_string\.h"\
+
+      \#include\ "base/task/single_thread_task_runner\.h"\
+
+      \#include\ "base/supports_user_data\.h"\
+
+      \#include\ "components/crash/core/common/crash_key\.h"\
+
+      \#include\ "content/public/browser/global_routing_id\.h"\
+
+      \#include\ "content/public/browser/navigation_controller\.h"\
+
+      \#include\ "content/public/browser/navigation_handle\.h"\
+
+      '
+    replace: '#include "base/functional/bind.h"
+
+      #include "base/memory/ptr_util.h"
+
+      #include "base/memory/weak_ptr.h"
+
+      #include "base/strings/to_string.h"
+
+      #include "base/supports_user_data.h"
+
+      #include "base/task/single_thread_task_runner.h"
+
+      #include "components/crash/core/common/crash_key.h"
+
+      #include "content/public/browser/global_routing_id.h"
+
+      #include "content/public/browser/navigation_controller.h"
+
+      #include "content/public/browser/navigation_handle.h"
+
+      '
+- description: Format the modified MIME implementation with Chromium style
+  regex:
+    re_pattern: 'void\ MimeHandlerStreamManager::FinishAndroidNativeFallback\(\
+
+      \ \ \ \ content::GlobalRenderFrameHostId\ embedder_id,\
+
+      \ \ \ \ int32_t\ stream_instance_id\)\ \{\
+
+      \ \ auto\*\ embedder\ =\ content::RenderFrameHost::FromID\(embedder_id\);\
+
+      \ \ if\ \(!embedder\ \|\|\ content::WebContents::FromRenderFrameHost\(embedder\)\ !=\ web_contents\(\)\)\ \{\
+
+      \ \ \ \ return;\
+
+      \ \ \}\
+
+      \ \ auto\*\ stream\ =\ GetClaimedStreamInfo\(embedder\);\
+
+      \ \ if\ \(!stream\ \|\|\ stream\->instance_id\(\)\ !=\ stream_instance_id\)\ \{\
+
+      '
+    replace: "void MimeHandlerStreamManager::FinishAndroidNativeFallback(\n    content::GlobalRenderFrameHostId embedder_id,\n    int32_t stream_instance_id) {\n  auto* embedder = content::RenderFrameHost::FromID(embedder_id);\n  if (!embedder ||\n      content::WebContents::FromRenderFrameHost(embedder) != web_contents()) {\n    return;\n  }\n  auto* stream = GetClaimedStreamInfo(embedder);\n  if (!stream || stream->instance_id() != stream_instance_id) {\n"
+- description: Format the modified MIME implementation with Chromium style
+  regex:
+    re_pattern: '\ \ if\ \(extension_frame\ \&\&\ extension_frame\->GetParent\(\)\ ==\ embedder\ \&\&\
+
+      \ \ \ \ \ \ IsExtensionHost\(extension_frame\)\)\ \{\
+
+      \ \ \ \ //\ This\ lookup\ is\ checked\ against\ both\ the\ surviving\ RFH\ and\ stream\
+
+      \ \ \ \ //\ identity;\ it\ cannot\ navigate\ another\ frame\ after\ a\ cross\-process\ swap\.\
+
+      \ \ \ \ content::NavigationController::LoadURLParams\ params\{GURL\(url::kAboutBlankURL\)\};\
+
+      \ \ \ \ params\.frame_tree_node_id\ =\ extension_frame\->GetFrameTreeNodeId\(\);\
+
+      \ \ \ \ params\.should_replace_current_entry\ =\ true;\
+
+      \ \ \ \ auto\ weak_this\ =\ weak_factory_\.GetWeakPtr\(\);\
+
+      \ \ \ \ web_contents\(\)\->GetController\(\)\.LoadURLWithParams\(params\);\
+
+      '
+    replace: "  if (extension_frame && extension_frame->GetParent() == embedder &&\n      IsExtensionHost(extension_frame)) {\n    // This lookup is checked against both the surviving RFH and stream\n    // identity; it cannot navigate another frame after a cross-process swap.\n    content::NavigationController::LoadURLParams params{\n        GURL(url::kAboutBlankURL)};\n    params.frame_tree_node_id = extension_frame->GetFrameTreeNodeId();\n    params.should_replace_current_entry = true;\n    auto weak_this = weak_factory_.GetWeakPtr();\n    web_contents()->GetController().LoadURLWithParams(params);\n"
+- description: Format the modified MIME implementation with Chromium style
+  regex:
+    re_pattern: '\ \ \ \ \ \ navigation_handle\->GetFrameTreeNodeId\(\)\);\
+
+      \ \ if\ \(!navigation_handle\->IsSameDocument\(\)\ \&\&\
+
+      \ \ \ \ \ \ fallback\ !=\ pending_native_fallback_frames_\.end\(\)\)\ \{\
+
+      \ \ \ \ if\ \(fallback\->second\.navigation_id\ ==\ 0\ \&\&\
+
+      \ \ \ \ \ \ \ \ navigation_handle\->GetURL\(\)\.EqualsIgnoringRef\(fallback\->second\.original_url\)\)\ \{\
+
+      \ \ \ \ \ \ fallback\->second\.navigation_id\ =\ navigation_handle\->GetNavigationId\(\);\
+
+      \ \ \ \ \}\ else\ \{\
+
+      \ \ \ \ \ \ //\ A\ subsequent\ navigation\ is\ independent\ of\ this\ abort\ request\.\ Never\
+
+      \ \ \ \ \ \ //\ suppress\ a\ handler\ chosen\ for\ a\ later\ user\ navigation\ in\ the\ same\ frame\.\
+
+      \ \ \ \ \ \ pending_native_fallback_frames_\.erase\(fallback\);\
+
+      \ \ \ \ \}\
+
+      \ \ \}\
+
+      \#endif\
+
+      '
+    replace: "      navigation_handle->GetFrameTreeNodeId());\n  if (!navigation_handle->IsSameDocument() &&\n      fallback != pending_native_fallback_frames_.end()) {\n    if (fallback->second.navigation_id == 0 &&\n        navigation_handle->GetURL().EqualsIgnoringRef(\n            fallback->second.original_url)) {\n      fallback->second.navigation_id = navigation_handle->GetNavigationId();\n    } else {\n      // A subsequent navigation is independent of this abort request. Never\n      // suppress a handler chosen for a later user navigation in the same\n      // frame.\n      pending_native_fallback_frames_.erase(fallback);\n    }\n  }\n#endif\n"

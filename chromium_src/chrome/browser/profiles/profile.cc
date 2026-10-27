@@ -5,6 +5,8 @@
 
 #include "brave/chromium_src/chrome/browser/profiles/profile.h"
 
+#include "build/build_config.h"
+
 #include "base/strings/string_util.h"
 #include "brave/components/ai_chat/core/common/buildflags/buildflags.h"
 #include "brave/components/constants/brave_constants.h"
@@ -79,6 +81,7 @@ const Profile::OTRProfileID Profile::OTRProfileID::AIChatCodeExecutionID() {
   return OTRProfileID(kAIChatCodeExecutionOTRProfileID);
 }
 
+#if !BUILDFLAG(IS_ANDROID)
 // This is to avoid a circular dep on chrome/browser in the Factory for
 // the brave_origin keyed service.
 namespace brave_origin {
@@ -89,3 +92,4 @@ policy::PolicyService* GetPolicyServiceFromProfile(Profile* profile) {
   return nullptr;
 }
 }  // namespace brave_origin
+#endif  // !BUILDFLAG(IS_ANDROID)

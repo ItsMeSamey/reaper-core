@@ -1,0 +1,220 @@
+diff --git a/components/embedder_support/android/java/src/org/chromium/components/embedder_support/view/ContentView.java b/components/embedder_support/android/java/src/org/chromium/components/embedder_support/view/ContentView.java
+--- a/components/embedder_support/android/java/src/org/chromium/components/embedder_support/view/ContentView.java
++++ b/components/embedder_support/android/java/src/org/chromium/components/embedder_support/view/ContentView.java
+@@ -10,6 +10,7 @@
+ import android.content.res.Configuration;
+ import android.graphics.Rect;
+ import android.os.Build;
++import android.os.Bundle;
+ import android.os.Handler;
+ import android.util.SparseArray;
+ import android.view.DragEvent;
+@@ -22,6 +23,7 @@
+ import android.view.View.OnSystemUiVisibilityChangeListener;
+ import android.view.ViewGroup.OnHierarchyChangeListener;
+ import android.view.ViewStructure;
++import android.view.accessibility.AccessibilityNodeInfo;
+ import android.view.accessibility.AccessibilityNodeProvider;
+ import android.view.autofill.AutofillValue;
+ import android.view.inputmethod.EditorInfo;
+@@ -54,16 +56,18 @@
+ import org.chromium.ui.dragdrop.DragEventDispatchHelper.DragEventDispatchDestination;
+ import org.chromium.ui.util.MotionEventUtils;
+ 
++import java.util.List;
++import java.util.function.BooleanSupplier;
+ import java.util.function.Supplier;
+ 
+ /**
+  * The containing view for {@link WebContents} that exists in the Android UI hierarchy and exposes
+  * the various {@link View} functionality to it.
+  *
+- * While ContentView is a ViewGroup, the only place that should add children is ViewAndroidDelegate,
+- * and only for cases that WebContentsAccessibility handles (such as anchoring popups). This is
+- * because the accessibility support provided by WebContentsAccessibility ignores all child views.
+- * In other words, any children added to this are *not* accessible.
++ * <p>While ContentView is a ViewGroup, the only place that should add children is
++ * ViewAndroidDelegate, and only for cases that WebContentsAccessibility handles (such as anchoring
++ * popups). This is because the accessibility support provided by WebContentsAccessibility ignores
++ * all child views. In other words, any children added to this are *not* accessible.
+  */
+ @NullUnmarked
+ public class ContentView extends FrameLayout
+@@ -78,6 +82,26 @@
+             MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED);
+ 
+     private @Nullable WebContents mWebContents;
++    private @Nullable BooleanSupplier mUserActivationDelegate;
++    private @Nullable BooleanSupplier mFocusAllowedDelegate;
++
++    /**
++     * A multi-content embedder can select the target before an accessibility user action.
++     * Programmatic focus only queries eligibility and must never activate a background page. Clear
++     * both callbacks before detaching this view from that embedder.
++     */
++    public void setUserActivationDelegate(
++            @Nullable BooleanSupplier activate, @Nullable BooleanSupplier focusAllowed) {
++        mUserActivationDelegate = activate;
++        mFocusAllowedDelegate = focusAllowed;
++    }
++
++    @Override
++    public boolean requestFocus(int direction, Rect previouslyFocusedRect) {
++        if (mFocusAllowedDelegate != null && !mFocusAllowedDelegate.getAsBoolean()) return false;
++        return super.requestFocus(direction, previouslyFocusedRect);
++    }
++
+     private boolean mIsObscuredForAccessibility;
+     private final ObserverList<OnHierarchyChangeListener> mHierarchyChangeListeners =
+             new ObserverList<>();
+@@ -213,9 +237,10 @@
+     }
+ 
+     /**
+-     * Set {@link EventOffsetHandler} used to handle drag event offsets. Offsets are
+-     * provided if the content view is has a different coordinate base than the physical screen
+-     * (e.g. top browser control).
++     * Set {@link EventOffsetHandler} used to handle drag event offsets. Offsets are provided if the
++     * content view is has a different coordinate base than the physical screen (e.g. top browser
++     * control).
++     *
+      * @param handler Handler used to adjust drag event offsets.
+      */
+     public void setEventOffsetHandlerForDragDrop(EventOffsetHandler handler) {
+@@ -251,6 +276,7 @@
+ 
+     /**
+      * Set the desired size of the view. The values are in {@link MeasureSpec}.
++     *
+      * @param width The width of the content view.
+      * @param height The height of the content view.
+      */
+@@ -285,6 +311,7 @@
+ 
+     /**
+      * Registers the given listener to receive state changes for the content view hierarchy.
++     *
+      * @param listener Listener to receive view hierarchy state changes.
+      */
+     public void addOnHierarchyChangeListener(OnHierarchyChangeListener listener) {
+@@ -293,6 +320,7 @@
+ 
+     /**
+      * Unregisters the given listener from receiving state changes for the content view hierarchy.
++     *
+      * @param listener Listener that doesn't want to receive view hierarchy state changes.
+      */
+     public void removeOnHierarchyChangeListener(OnHierarchyChangeListener listener) {
+@@ -307,6 +335,7 @@
+ 
+     /**
+      * Registers the given listener to receive system UI visibility state changes.
++     *
+      * @param listener Listener to receive system UI visibility state changes.
+      */
+     public void addOnSystemUiVisibilityChangeListener(OnSystemUiVisibilityChangeListener listener) {
+@@ -315,6 +344,7 @@
+ 
+     /**
+      * Unregisters the given listener from receiving system UI visibility state changes.
++     *
+      * @param listener Listener that doesn't want to receive state changes.
+      */
+     public void removeOnSystemUiVisibilityChangeListener(
+@@ -324,6 +354,7 @@
+ 
+     /**
+      * Registers the given listener to receive DragEvent updates on this view.
++     *
+      * @param listener Listener to receive DragEvent updates.
+      */
+     public void addOnDragListener(OnDragListener listener) {
+@@ -332,6 +363,7 @@
+ 
+     /**
+      * Unregisters the given listener to receive DragEvent updates on this view.
++     *
+      * @param listener Listener that doesn't want to receive DragEvent updates anymore.
+      */
+     public void removeOnDragListener(OnDragListener listener) {
+@@ -394,7 +426,54 @@
+     @Override
+     public AccessibilityNodeProvider getAccessibilityNodeProvider() {
+         WebContentsAccessibility wcax = getWebContentsAccessibility();
+-        return (wcax != null) ? wcax.getAccessibilityNodeProvider() : null;
++        AccessibilityNodeProvider provider =
++                wcax == null ? null : wcax.getAccessibilityNodeProvider();
++        if (provider == null || mUserActivationDelegate == null) return provider;
++        WebContents owner = mWebContents;
++        return new AccessibilityNodeProvider() {
++            private boolean valid() {
++                return owner != null
++                        && owner == mWebContents
++                        && !owner.isDestroyed()
++                        && isAttachedToWindow();
++            }
++
++            @Override
++            public AccessibilityNodeInfo createAccessibilityNodeInfo(int virtualViewId) {
++                return valid() ? provider.createAccessibilityNodeInfo(virtualViewId) : null;
++            }
++
++            @Override
++            public List<AccessibilityNodeInfo> findAccessibilityNodeInfosByText(
++                    String text, int id) {
++                return valid() ? provider.findAccessibilityNodeInfosByText(text, id) : List.of();
++            }
++
++            @Override
++            public AccessibilityNodeInfo findFocus(int focus) {
++                return valid() ? provider.findFocus(focus) : null;
++            }
++
++            @Override
++            public void addExtraDataToAccessibilityNodeInfo(
++                    int id, AccessibilityNodeInfo info, String key, Bundle arguments) {
++                if (valid()) provider.addExtraDataToAccessibilityNodeInfo(id, info, key, arguments);
++            }
++
++            @Override
++            public boolean performAction(int id, int action, Bundle arguments) {
++                if (!valid()) return false;
++                // Clearing a departed node's focus is cleanup, not an activation request.
++                boolean clear =
++                        action == AccessibilityNodeInfo.ACTION_CLEAR_ACCESSIBILITY_FOCUS
++                                || action == AccessibilityNodeInfo.ACTION_CLEAR_FOCUS;
++                if (!clear
++                        && mUserActivationDelegate != null
++                        && !mUserActivationDelegate.getAsBoolean()) return false;
++                // Selecting may synchronously close/reparent the page or replace its document.
++                return valid() && provider.performAction(id, action, arguments);
++            }
++        };
+     }
+ 
+     // Needed by ViewEventSink.InternalAccessDelegate
+@@ -406,7 +485,9 @@
+     @Override
+     public InputConnection onCreateInputConnection(EditorInfo outAttrs) {
+         // Calls may come while/after WebContents is destroyed. See https://crbug.com/821750#c8.
+-        if (!hasValidWebContents()) return null;
++        if (!hasValidWebContents()
++                || (mFocusAllowedDelegate != null && !mFocusAllowedDelegate.getAsBoolean()))
++            return null;
+ 
+         ImeAdapter adapter = assertNonNull(ImeAdapter.fromWebContents(mWebContents));
+ 
+@@ -621,10 +702,9 @@
+     }
+ 
+     /**
+-     * Currently the ContentView scrolling happens in the native side. In
+-     * the Java view system, it is always pinned at (0, 0). scrollBy() and scrollTo()
+-     * are overridden, so that View's mScrollX and mScrollY will be unchanged at
+-     * (0, 0). This is critical for drawing ContentView correctly.
++     * Currently the ContentView scrolling happens in the native side. In the Java view system, it
++     * is always pinned at (0, 0). scrollBy() and scrollTo() are overridden, so that View's mScrollX
++     * and mScrollY will be unchanged at (0, 0). This is critical for drawing ContentView correctly.
+      */
+     @Override
+     public void scrollBy(int x, int y) {

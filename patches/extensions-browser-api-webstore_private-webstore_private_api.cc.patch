@@ -1,0 +1,168 @@
+diff --git a/extensions/browser/api/webstore_private/webstore_private_api.cc b/extensions/browser/api/webstore_private/webstore_private_api.cc
+--- a/extensions/browser/api/webstore_private/webstore_private_api.cc
++++ b/extensions/browser/api/webstore_private/webstore_private_api.cc
+@@ -21,6 +21,7 @@
+ #include "base/json/json_reader.h"
+ #include "base/json/values_util.h"
+ #include "base/lazy_instance.h"
++#include "base/logging.h"
+ #include "base/memory/scoped_refptr.h"
+ #include "base/metrics/histogram_functions.h"
+ #include "base/no_destructor.h"
+@@ -338,6 +339,7 @@
+ // Requests extension by adding the id into the pending list in Profile Prefs if
+ // available. Returns |kRequestPending| if the request has been added
+ // successfully. Otherwise, returns the initial extension install status.
++#if !BUILDFLAG(IS_ANDROID)
+ ExtensionInstallStatus AddExtensionToPendingList(
+     const ExtensionId& id,
+     content::BrowserContext* browser_context,
+@@ -390,6 +392,7 @@
+ #endif  // DCHECK_IS_ON()
+   return new_status;
+ }
++#endif  // !BUILDFLAG(IS_ANDROID)
+ 
+ // Creates the URLLoaderFactory for fetching the install-confirmation icon whose
+ // `iconUrl` is supplied by the (web store) renderer.
+@@ -547,6 +550,17 @@
+   params_ = Params::Create(args());
+   EXTENSION_FUNCTION_VALIDATE(params_);
+ 
++#if BUILDFLAG(IS_ANDROID)
++  // completeInstall cannot run in either context. Reject before creating an
++  // approval or an active-install marker shared with the regular profile.
++  if (ExtensionsBrowserClient::Get()->IsGuestSession(browser_context()) ||
++      browser_context()->IsOffTheRecord()) {
++    return RespondNow(
++        BuildResponse(api::webstore_private::Result::kUnknownError,
++                      kIncognitoError));
++  }
++#endif
++
+   browser_context_ = browser_context();
+   if (!crx_file::id_util::IdIsValid(details().id)) {
+     return RespondNow(BuildResponse(api::webstore_private::Result::kInvalidId,
+@@ -585,6 +599,12 @@
+         CreateIconLoaderFactoryWithNetworkAccessChecks(browser_context());
+   }
+ 
++#if BUILDFLAG(IS_ANDROID)
++  if (auto* frame = render_frame_host()) {
++    requesting_document_ = frame->GetWeakDocumentPtr();
++  }
++#endif
++
+   ParseWebstoreData(
+       loader_factory, details().id, details().manifest, icon_url,
+       base::BindOnce(&WebstorePrivateBeginInstallWithManifest3Function::
+@@ -646,6 +666,15 @@
+ void WebstorePrivateBeginInstallWithManifest3Function::OnInstallStatusCheckDone(
+     ExtensionInstallStatus install_status,
+     std::u16string blocked_message) {
++#if BUILDFLAG(IS_ANDROID)
++  auto* frame = requesting_document_.AsRenderFrameHostIfValid();
++  if (!frame || frame != render_frame_host() || !frame->IsRenderFrameLive() ||
++      !frame->IsActive()) {
++    Respond(BuildResponse(api::webstore_private::Result::kUserCancelled,
++                          kWebstoreUserCancelledError));
++    return;
++  }
++#endif
+   content::WebContents* web_contents = GetSenderWebContents();
+   if (install_status == kBlockedByPolicy) {
+     blocked_by_policy_error_message_ = std::move(blocked_message);
+@@ -657,6 +686,7 @@
+     return;
+   }
+ 
++#if !BUILDFLAG(IS_ANDROID)
+   if (install_status == kCanRequest || install_status == kRequestPending) {
+     install_prompt_ = ExtensionsBrowserClient::Get()->CreateInstallPrompt(
+         web_contents,
+@@ -669,7 +699,9 @@
+                                 OnRequestPromptDone,
+                             this),
+         dummy_extension_.get(), &icon_);
+-  } else {
++  } else
++#endif  // !BUILDFLAG(IS_ANDROID)
++  {
+     ReportWebStoreInstallEsbAllowlistParameter(details().esb_allowlist);
+ #if BUILDFLAG(IS_ANDROID)
+     auto* supervised_user_extensions_delegate =
+@@ -948,6 +980,9 @@
+     case ExtensionInstallPromptClient::Result::ACCEPTED:
+     case ExtensionInstallPromptClient::Result::
+         ACCEPTED_WITH_WITHHELD_PERMISSIONS: {
++#if BUILDFLAG(IS_ANDROID)
++      LOG(INFO) << "WebstorePrivate install stage=consent_accepted";
++#endif
+       auto* supervised_user_extensions_delegate =
+           ManagementAPI::GetFactoryInstance()
+               ->Get(browser_context())
+@@ -986,6 +1021,11 @@
+ 
+ void WebstorePrivateBeginInstallWithManifest3Function::OnRequestPromptDone(
+     ExtensionInstallPromptClient::DoneCallbackPayload payload) {
++#if BUILDFLAG(IS_ANDROID)
++  // No enterprise reporting backend exists; never record or claim submission.
++  Respond(BuildResponse(api::webstore_private::Result::kBlockedByPolicy,
++                        kWebstoreBlockByPolicy));
++#else
+   switch (payload.result) {
+     case ExtensionInstallPromptClient::Result::ACCEPTED:
+       AddExtensionToPendingList(details().id, browser_context_,
+@@ -1001,6 +1041,7 @@
+ 
+   Respond(BuildResponse(api::webstore_private::Result::kUserCancelled,
+                         kWebstoreUserCancelledError));
++#endif  // BUILDFLAG(IS_ANDROID)
+ }
+ 
+ void WebstorePrivateBeginInstallWithManifest3Function::
+@@ -1242,6 +1283,9 @@
+ 
+ ExtensionFunction::ResponseAction
+ WebstorePrivateCompleteInstallFunction::Run() {
++#if BUILDFLAG(IS_ANDROID)
++  LOG(INFO) << "WebstorePrivate install stage=complete_install_entered";
++#endif
+   std::optional<CompleteInstall::Params> params =
+       CompleteInstall::Params::Create(args());
+   EXTENSION_FUNCTION_VALIDATE(params);
+@@ -1263,6 +1307,12 @@
+ 
+   content::WebContents* web_contents = GetSenderWebContents();
+   if (!web_contents) {
++#if BUILDFLAG(IS_ANDROID)
++    // The approval was consumed, but no installer can take over this marker.
++    ScopedActiveInstall scoped_active_install(
++        ExtensionsBrowserClient::Get()->GetInstallTracker(browser_context()),
++        params->expected_id);
++#endif
+     return RespondNow(
+         Error(function_constants::kCouldNotFindSenderWebContents));
+   }
+@@ -1290,6 +1340,10 @@
+ 
+ void WebstorePrivateCompleteInstallFunction::OnExtensionInstallSuccess(
+     const std::string& id) {
++#if BUILDFLAG(IS_ANDROID)
++  LOG(INFO)
++      << "WebstorePrivate install stage=complete_install_success_callback";
++#endif
+   OnInstallSuccess(id);
+   VLOG(1) << "Install success, sending response";
+   Respond(NoArguments());
+@@ -1299,6 +1353,10 @@
+     const std::string& id,
+     const std::string& error,
+     WebstoreInstaller::FailureReason reason) {
++#if BUILDFLAG(IS_ANDROID)
++  LOG(INFO) << "WebstorePrivate install stage=complete_install_failure_callback"
++            << " reason=" << static_cast<int>(reason);
++#endif
+   if (test_delegate) {
+     test_delegate->OnExtensionInstallFailure(id, error, reason);
+   }

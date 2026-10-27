@@ -21,9 +21,7 @@ import org.chromium.base.supplier.SettableMonotonicObservableSupplier;
 import org.chromium.base.task.PostTask;
 import org.chromium.base.task.TaskTraits;
 import org.chromium.brave.browser.custom_search_engines.settings.CustomSearchEnginesPreference;
-import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.R;
-import org.chromium.chrome.browser.BraveConfig;
 import org.chromium.chrome.browser.flags.ChromeFeatureList;
 import org.chromium.chrome.browser.incognito.IncognitoUtils;
 import org.chromium.chrome.browser.preferences.BravePref;
@@ -35,7 +33,6 @@ import org.chromium.components.browser_ui.settings.SettingsUtils;
 import org.chromium.components.browser_ui.settings.search.PreferenceParser;
 import org.chromium.components.browser_ui.settings.search.SettingsIndexData;
 import org.chromium.components.user_prefs.UserPrefs;
-import org.chromium.components.web_discovery.WebDiscoveryPrefs;
 
 public class BraveSearchEnginesPreferences extends BravePreferenceFragment
         implements Preference.OnPreferenceChangeListener {
@@ -45,7 +42,6 @@ public class BraveSearchEnginesPreferences extends BravePreferenceFragment
     private static final String PREF_SEARCH_SUGGESTIONS = "search_suggestions";
     private static final String PREF_SHOW_AUTOCOMPLETE_IN_ADDRESS_BAR =
             "show_autocomplete_in_address_bar";
-    private static final String PREF_SEND_WEB_DISCOVERY = "send_web_discovery";
 
     private static final String PREF_CUSTOM_SEARCH_ENGINES_CATEGORY =
             "custom_search_engines_category";
@@ -54,7 +50,6 @@ public class BraveSearchEnginesPreferences extends BravePreferenceFragment
 
     private ChromeSwitchPreference mShowAutocompleteInAddressBar;
     private ChromeSwitchPreference mSearchSuggestions;
-    private @Nullable ChromeSwitchPreference mSendWebDiscovery;
 
     private final SettableMonotonicObservableSupplier<String> mPageTitle =
             ObservableSuppliers.createMonotonic();
@@ -196,32 +191,6 @@ public class BraveSearchEnginesPreferences extends BravePreferenceFragment
                     UserPrefs.get(getProfile()).getBoolean(Pref.SEARCH_SUGGEST_ENABLED));
         }
 
-        if (BraveConfig.WEB_DISCOVERY_ENABLED) {
-            // Check if web discovery is managed by policy
-            boolean isWebDiscoveryManaged =
-                    UserPrefs.get(getProfile())
-                            .isManagedPreference(WebDiscoveryPrefs.WEB_DISCOVERY_ENABLED);
-            if (!isWebDiscoveryManaged) {
-                mSendWebDiscovery =
-                        (ChromeSwitchPreference) findPreference(PREF_SEND_WEB_DISCOVERY);
-                if (mSendWebDiscovery != null) {
-                    mSendWebDiscovery.setOnPreferenceChangeListener(this);
-                }
-            }
-        }
-
-        if (mSendWebDiscovery != null) {
-            mSendWebDiscovery.setTitle(
-                    activity.getResources().getString(R.string.send_web_discovery_title));
-            mSendWebDiscovery.setSummary(
-                    activity.getResources().getString(R.string.send_web_discovery_summary));
-            mSendWebDiscovery.setChecked(
-                    UserPrefs.get(getProfile())
-                            .getBoolean(WebDiscoveryPrefs.WEB_DISCOVERY_ENABLED));
-        } else {
-            removePreferenceIfPresent(PREF_SEND_WEB_DISCOVERY);
-        }
-
         Preference customSearchEnginesListPreference =
                 findPreference(PREF_CUSTOM_SEARCH_ENGINE_LIST);
         if (customSearchEnginesListPreference != null
@@ -266,16 +235,6 @@ public class BraveSearchEnginesPreferences extends BravePreferenceFragment
                         indexData.removeEntryForKey(frag, PREF_PRIVATE_SEARCH_ENGINE);
                     }
 
-                    if (!BraveConfig.WEB_DISCOVERY_ENABLED
-                            || UserPrefs.get(profile)
-                                    .isManagedPreference(WebDiscoveryPrefs.WEB_DISCOVERY_ENABLED)) {
-                        indexData.removeEntryForKey(frag, PREF_SEND_WEB_DISCOVERY);
-                    } else {
-                        indexData.updateEntryForKey(
-                                frag, PREF_SEND_WEB_DISCOVERY, R.string.send_web_discovery_title);
-                        indexData.updateEntrySummaryForKey(
-                                frag, PREF_SEND_WEB_DISCOVERY, R.string.send_web_discovery_summary);
-                    }
                     // PREF_CUSTOM_SEARCH_ENGINE_LIST and its "Add" footer are added via Java — not
                     // indexed for settings search.
                 }
@@ -291,9 +250,6 @@ public class BraveSearchEnginesPreferences extends BravePreferenceFragment
             mSearchSuggestions.setVisible(autocompleteEnabled);
             UserPrefs.get(getProfile())
                     .setBoolean(BravePref.AUTOCOMPLETE_ENABLED, autocompleteEnabled);
-        } else if (PREF_SEND_WEB_DISCOVERY.equals(key)) {
-            UserPrefs.get(getProfile())
-                    .setBoolean(WebDiscoveryPrefs.WEB_DISCOVERY_ENABLED, (boolean) newValue);
         }
         return true;
     }

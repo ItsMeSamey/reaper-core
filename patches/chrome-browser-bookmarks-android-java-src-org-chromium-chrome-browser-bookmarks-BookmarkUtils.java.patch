@@ -1,0 +1,227 @@
+diff --git a/chrome/browser/bookmarks/android/java/src/org/chromium/chrome/browser/bookmarks/BookmarkUtils.java b/chrome/browser/bookmarks/android/java/src/org/chromium/chrome/browser/bookmarks/BookmarkUtils.java
+--- a/chrome/browser/bookmarks/android/java/src/org/chromium/chrome/browser/bookmarks/BookmarkUtils.java
++++ b/chrome/browser/bookmarks/android/java/src/org/chromium/chrome/browser/bookmarks/BookmarkUtils.java
+@@ -8,9 +8,7 @@
+
+ import android.app.Activity;
+ import android.content.Context;
+-import android.os.Handler;
+ import android.os.LocaleList;
+-import android.os.Looper;
+ import android.view.View;
+ import android.view.ViewGroup;
+
+@@ -25,12 +23,10 @@
+ import org.chromium.base.shared_preferences.SharedPreferencesManager;
+ import org.chromium.build.annotations.NullMarked;
+ import org.chromium.build.annotations.Nullable;
+-import org.chromium.chrome.browser.commerce.ShoppingServiceFactory;
+ import org.chromium.chrome.browser.feature_engagement.TrackerFactory;
+ import org.chromium.chrome.browser.flags.ChromeFeatureList;
+ import org.chromium.chrome.browser.preferences.ChromePreferenceKeys;
+ import org.chromium.chrome.browser.preferences.ChromeSharedPreferences;
+-import org.chromium.chrome.browser.price_tracking.PriceDropNotificationManager;
+ import org.chromium.chrome.browser.profiles.Profile;
+ import org.chromium.chrome.browser.signin.services.IdentityServicesProvider;
+ import org.chromium.chrome.browser.tab.Tab;
+@@ -39,12 +35,10 @@
+ import org.chromium.chrome.browser.ui.messages.snackbar.SnackbarManager.SnackbarController;
+ import org.chromium.chrome.browser.url_constants.UrlConstantResolver;
+ import org.chromium.chrome.browser.url_constants.UrlConstantResolverFactory;
+-import org.chromium.chrome.browser.user_education.UserEducationHelper;
+ import org.chromium.components.bookmarks.BookmarkId;
+ import org.chromium.components.bookmarks.BookmarkItem;
+ import org.chromium.components.bookmarks.BookmarkType;
+ import org.chromium.components.browser_ui.bottomsheet.BottomSheetController;
+-import org.chromium.components.commerce.core.ShoppingService;
+ import org.chromium.components.embedder_support.util.UrlUtilities;
+ import org.chromium.components.feature_engagement.EventConstants;
+ import org.chromium.components.signin.identitymanager.IdentityManager;
+@@ -82,10 +76,7 @@
+      * @param activity Current activity.
+      * @param bookmarkType Type of the added bookmark.
+      * @param callback Invoked with the resulting bookmark ID, which could be null if unsuccessful.
+-     * @param fromExplicitTrackUi Whether the bookmark was added directly from a tracking ui (e.g.
+-     *     the shopping "track price" button).
+      * @param bookmarkManagerOpener Manages opening bookmarks.
+-     * @param priceDropNotificationManager Manages price drop notifications.
+      */
+     public static void addOrEditBookmark(
+             @Nullable List<@Nullable BookmarkItem> existingBookmarkItems,
+@@ -96,9 +87,7 @@
+             Activity activity,
+             @BookmarkType int bookmarkType,
+             Callback<List<@Nullable BookmarkId>> callback,
+-            boolean fromExplicitTrackUi,
+             BookmarkManagerOpener bookmarkManagerOpener,
+-            PriceDropNotificationManager priceDropNotificationManager,
+             boolean isBookmarkBarVisible) {
+         if (tabs.size() == 1) {
+             assert bottomSheetController != null;
+@@ -114,9 +103,7 @@
+                     activity,
+                     bookmarkType,
+                     callback,
+-                    fromExplicitTrackUi,
+                     bookmarkManagerOpener,
+-                    priceDropNotificationManager,
+                     isBookmarkBarVisible);
+         } else {
+             assert snackbarManager != null : "Snackbar manager should never be null";
+@@ -140,9 +127,7 @@
+             Activity activity,
+             @BookmarkType int bookmarkType,
+             Callback<List<@Nullable BookmarkId>> callback,
+-            boolean fromExplicitTrackUi,
+             BookmarkManagerOpener bookmarkManagerOpener,
+-            PriceDropNotificationManager priceDropNotificationManager,
+             boolean isBookmarkBarVisible) {
+         assert bookmarkModel.isBookmarkModelLoaded();
+         if (existingBookmarkItem != null) {
+@@ -152,26 +137,15 @@
+                         bottomSheetController,
+                         tab.getProfile(),
+                         existingBookmarkItem.getId(),
+-                        fromExplicitTrackUi,
+                         /* wasBookmarkMoved= */ false,
+                         /* isNewBookmark= */ false,
+-                        bookmarkManagerOpener,
+-                        priceDropNotificationManager);
++                        bookmarkManagerOpener);
+             } else {
+                 bookmarkManagerOpener.startEditActivity(
+                         activity, tab.getProfile(), existingBookmarkItem.getId());
+             }
+             callback.onResult(Collections.singletonList(existingBookmarkItem.getId()));
+             return;
+-        }
+-
+-        BookmarkId parent = null;
+-        if (fromExplicitTrackUi) {
+-            // If account bookmarks are enabled and active, they take precedence, otherwise fall
+-            // back to the local-or-syncable mobile folder, e.g. for users that have
+-            // sync-the-feature enabled.
+-
+-            parent = bookmarkModel.getDefaultBookmarkFolder();
+         }
+
+         BookmarkId newBookmarkId =
+@@ -181,7 +155,7 @@
+                         bookmarkModel,
+                         tab.getTitle(),
+                         tab.getOriginalUrl(),
+-                        parent,
++                        /* parent= */ null,
+                         bookmarkType,
+                         isBookmarkBarVisible);
+         showSaveFlow(
+@@ -189,11 +163,9 @@
+                 bottomSheetController,
+                 tab.getProfile(),
+                 newBookmarkId,
+-                fromExplicitTrackUi,
+                 /* wasBookmarkMoved= */ false,
+                 /* isNewBookmark= */ true,
+-                bookmarkManagerOpener,
+-                priceDropNotificationManager);
++                bookmarkManagerOpener);
+         callback.onResult(Collections.singletonList(newBookmarkId));
+     }
+
+@@ -284,29 +256,22 @@
+      * @param bookmarkId The BookmarkId to show the save flow for. Can be null in some cases (e.g. a
+      *     bookmark fails to be added) and in this case, the function writes to logcat and exits
+      *     without any action.
+-     * @param fromExplicitTrackUi Whether the bookmark was added from the explicit UI (e.g. the
+-     *     price-track menu item).
+      * @param wasBookmarkMoved Whether the save flow is shown as a result of a moved bookmark.
+      * @param isNewBookmark Whether the bookmark is newly created.
+      * @param bookmarkManagerOpener Manages opening bookmarks.
+-     * @param priceDropNotificationManager Manages price drop notifications.
+      */
+     static void showSaveFlow(
+             Activity activity,
+             BottomSheetController bottomSheetController,
+             Profile profile,
+             @Nullable BookmarkId bookmarkId,
+-            boolean fromExplicitTrackUi,
+             boolean wasBookmarkMoved,
+             boolean isNewBookmark,
+-            BookmarkManagerOpener bookmarkManagerOpener,
+-            PriceDropNotificationManager priceDropNotificationManager) {
++            BookmarkManagerOpener bookmarkManagerOpener) {
+         if (bookmarkId == null) {
+             Log.e(TAG, "Null bookmark found when showing the save flow, aborting.");
+             return;
+         }
+-
+-        ShoppingService shoppingService = ShoppingServiceFactory.getForProfile(profile);
+
+         if (ChromeFeatureList.isEnabled(ChromeFeatureList.ANDROID_DESKTOP_BOOKMARK_POPUP)) {
+             View decorView =
+@@ -331,15 +296,10 @@
+                             activity,
+                             profile,
+                             anchor,
+-                            bookmarkManagerOpener,
+-                            shoppingService,
+-                            priceDropNotificationManager);
++                            bookmarkManagerOpener);
+             popupCoordinator.show(bookmarkId, isNewBookmark);
+             return;
+         }
+-        UserEducationHelper userEducationHelper =
+-                new UserEducationHelper(
+-                        activity, profile, new Handler(assumeNonNull(Looper.myLooper())));
+         // Redirect the original profile when getting the identity manager, it's not done
+         // automatically in native.
+         IdentityManager identityManager =
+@@ -350,15 +310,12 @@
+                 new BookmarkSaveFlowCoordinator(
+                         activity,
+                         bottomSheetController,
+-                        shoppingService,
+-                        userEducationHelper,
+                         profile,
+                         identityManager,
+-                        bookmarkManagerOpener,
+-                        priceDropNotificationManager);
++                        bookmarkManagerOpener);
+
+         bookmarkSaveFlowCoordinator.show(
+-                bookmarkId, fromExplicitTrackUi, wasBookmarkMoved, isNewBookmark);
++                bookmarkId, wasBookmarkMoved);
+     }
+
+     // The legacy code path to add or edit bookmark without triggering the bookmark bottom sheet.
+@@ -465,7 +422,6 @@
+      * @param bottomSheetController The {@link BottomSheetController} which is used to show the
+      *     BookmarkSaveFlow.
+      * @param bookmarkManagerOpener Manages opening bookmarks.
+-     * @param priceDropNotificationManager Manages price drop notifications.
+      * @return The bookmark ID created after saving the article to the reading list.
+      * @deprecated Used only by feed, new users should rely on addOrEditBookmark (or the tab
+      *     bookmarker).
+@@ -479,8 +435,7 @@
+             SnackbarManager snackbarManager,
+             Profile profile,
+             BottomSheetController bottomSheetController,
+-            BookmarkManagerOpener bookmarkManagerOpener,
+-            PriceDropNotificationManager priceDropNotificationManager) {
++            BookmarkManagerOpener bookmarkManagerOpener) {
+         assert bookmarkModel.isBookmarkModelLoaded();
+         BookmarkId bookmarkId =
+                 addBookmarkInternal(
+@@ -503,11 +458,9 @@
+                     bottomSheetController,
+                     profile,
+                     bookmarkId,
+-                    /* fromExplicitTrackUi= */ false,
+                     /* wasBookmarkMoved= */ false,
+                     /* isNewBookmark= */ true,
+-                    bookmarkManagerOpener,
+-                    priceDropNotificationManager);
++                    bookmarkManagerOpener);
+         } else {
+             Snackbar snackbar =
+                     Snackbar.make(

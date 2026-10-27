@@ -1,0 +1,104 @@
+diff --git a/chrome/browser/extensions/system_cpu_apitest.cc b/chrome/browser/extensions/system_cpu_apitest.cc
+index 42883a04ea5ed1b33173ac9cdf7a8486f9bcfa8e..243b270f9c9f78faf6e3ec88dc2c0b2f414da964 100644
+--- a/chrome/browser/extensions/system_cpu_apitest.cc
++++ b/chrome/browser/extensions/system_cpu_apitest.cc
+@@ -3,6 +3,11 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/extensions/extension_apitest.h"
++
++#include <string>
++#include <vector>
++
++#include "build/build_config.h"
+ #include "content/public/test/browser_test.h"
+ #include "extensions/browser/api/system_cpu/cpu_info_provider.h"
+ #include "extensions/buildflags/buildflags.h"
+@@ -19,6 +24,15 @@ class MockCpuInfoProviderImpl : public CpuInfoProvider {
+   MockCpuInfoProviderImpl(const MockCpuInfoProviderImpl&) = delete;
+   MockCpuInfoProviderImpl& operator=(const MockCpuInfoProviderImpl&) = delete;
+ 
++#if BUILDFLAG(IS_ANDROID)
++  static bool ParseAndroidCpuTime(
++      const std::string& contents,
++      long ticks_per_second,
++      std::vector<api::system_cpu::ProcessorInfo>* infos) {
++    return ParseCpuTimeForAndroid(contents, ticks_per_second, infos);
++  }
++#endif
++
+   bool QueryInfo() override {
+     info_.num_of_processors = 4;
+     info_.arch_name = "x86";
+@@ -54,4 +68,71 @@ IN_PROC_BROWSER_TEST_F(SystemCpuApiTest, Cpu) {
+   ASSERT_TRUE(RunExtensionTest("system_cpu")) << message_;
+ }
+ 
++#if BUILDFLAG(IS_ANDROID)
++// These cases use the production parser, not the mock QueryInfo result above.
++IN_PROC_BROWSER_TEST_F(SystemCpuApiTest, AndroidCpuTimesAreMilliseconds) {
++  std::vector<api::system_cpu::ProcessorInfo> infos(1);
++  ASSERT_TRUE(MockCpuInfoProviderImpl::ParseAndroidCpuTime(
++      "cpu 123 7 20 70\ncpu0 123 7 20 70 0 0 0 0\nintr 123\n", 100,
++      &infos));
++  EXPECT_DOUBLE_EQ(1300.0, infos[0].usage.user);
++  EXPECT_DOUBLE_EQ(200.0, infos[0].usage.kernel);
++  EXPECT_DOUBLE_EQ(700.0, infos[0].usage.idle);
++  EXPECT_DOUBLE_EQ(2200.0, infos[0].usage.total);
++}
++
++IN_PROC_BROWSER_TEST_F(SystemCpuApiTest, AndroidCpuTimesUseActualClockFrequency) {
++  std::vector<api::system_cpu::ProcessorInfo> infos(1);
++  ASSERT_TRUE(MockCpuInfoProviderImpl::ParseAndroidCpuTime(
++      "cpu 16 16 128 864\ncpu0 16 16 128 864\n", 1024, &infos));
++  EXPECT_DOUBLE_EQ(31.25, infos[0].usage.user);
++  EXPECT_DOUBLE_EQ(125.0, infos[0].usage.kernel);
++  EXPECT_DOUBLE_EQ(843.75, infos[0].usage.idle);
++  EXPECT_DOUBLE_EQ(1000.0, infos[0].usage.total);
++}
++
++IN_PROC_BROWSER_TEST_F(SystemCpuApiTest, AndroidCpuTimesKeepOfflineProcessorsZero) {
++  std::vector<api::system_cpu::ProcessorInfo> infos(4);
++  ASSERT_TRUE(MockCpuInfoProviderImpl::ParseAndroidCpuTime(
++      "cpu 2 4 6 8\ncpu0 1 2 3 4\ncpu3 1 2 3 4\n", 100, &infos));
++  for (size_t index : {0u, 3u}) {
++    EXPECT_DOUBLE_EQ(30.0, infos[index].usage.user);
++    EXPECT_DOUBLE_EQ(30.0, infos[index].usage.kernel);
++    EXPECT_DOUBLE_EQ(40.0, infos[index].usage.idle);
++    EXPECT_DOUBLE_EQ(100.0, infos[index].usage.total);
++  }
++  for (size_t index : {1u, 2u}) {
++    EXPECT_DOUBLE_EQ(0.0, infos[index].usage.user);
++    EXPECT_DOUBLE_EQ(0.0, infos[index].usage.kernel);
++    EXPECT_DOUBLE_EQ(0.0, infos[index].usage.idle);
++    EXPECT_DOUBLE_EQ(0.0, infos[index].usage.total);
++  }
++}
++
++IN_PROC_BROWSER_TEST_F(SystemCpuApiTest, AndroidCpuTimesRejectInvalidFrequency) {
++  std::vector<api::system_cpu::ProcessorInfo> infos(1);
++  for (long frequency : {0L, -1L}) {
++    EXPECT_FALSE(MockCpuInfoProviderImpl::ParseAndroidCpuTime(
++        "cpu 1 2 3 4\ncpu0 1 2 3 4\n", frequency, &infos));
++    EXPECT_DOUBLE_EQ(0.0, infos[0].usage.total);
++  }
++}
++
++IN_PROC_BROWSER_TEST_F(SystemCpuApiTest, AndroidCpuTimesRejectMalformedRows) {
++  std::vector<api::system_cpu::ProcessorInfo> infos(1);
++  EXPECT_FALSE(MockCpuInfoProviderImpl::ParseAndroidCpuTime(
++      "cpu 1 2 3 4\ncpu0 1 2 bad 4\n", 100, &infos));
++  EXPECT_FALSE(MockCpuInfoProviderImpl::ParseAndroidCpuTime(
++      "cpu 1 2 3 4\ncpu1 1 2 3 4\n", 100, &infos));
++}
++
++IN_PROC_BROWSER_TEST_F(SystemCpuApiTest, AndroidCpuTimesDoNotWrapCounterSums) {
++  std::vector<api::system_cpu::ProcessorInfo> infos(1);
++  ASSERT_TRUE(MockCpuInfoProviderImpl::ParseAndroidCpuTime(
++      "cpu 0 0 0 0\ncpu0 18446744073709551615 1 0 0\n", 1000, &infos));
++  EXPECT_DOUBLE_EQ(18446744073709551616.0, infos[0].usage.user);
++  EXPECT_DOUBLE_EQ(18446744073709551616.0, infos[0].usage.total);
++}
++#endif  // BUILDFLAG(IS_ANDROID)
++
+ }  // namespace extensions

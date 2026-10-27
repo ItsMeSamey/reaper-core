@@ -1,0 +1,266 @@
+diff --git a/build/android/pylib/local/device/shared_device_state_test.py b/build/android/pylib/local/device/shared_device_state_test.py
+new file mode 100755
+--- /dev/null
++++ b/build/android/pylib/local/device/shared_device_state_test.py
+@@ -0,0 +1,261 @@
++"""Execute candidate AST methods with mocked devices; no device or runner import."""
++import argparse, ast, collections, logging, pathlib, posixpath, sys, types, unittest
++from unittest import mock
++ROOT = pathlib.Path(__file__).resolve().parents[5]
++RUN = 'build/android/pylib/local/device/local_device_instrumentation_test_run.py'
++INST = 'build/android/pylib/instrumentation/instrumentation_test_instance.py'
++def find(path, name):
++    nodes = [n for n in ast.walk(ast.parse((ROOT/path).read_text())) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name]
++    assert len(nodes) == 1, name
++    return nodes[0]
++def compile_nodes(nodes, ns):
++    exec(compile(ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[])), '<actual-source-extracted>', 'exec'), ns)
++def identity(*_a, **_k): return lambda f: f
++class CommandFailedError(Exception): pass
++class SharedStateTests(unittest.TestCase):
++    def setUp(self):
++        self.dev = mock.MagicMock(name='device')
++        self.dev.GetExternalStoragePath.return_value = '/sdcard'
++        self.dev.build_version_sdk = 36
++        self.dev.GetCurrentUser.return_value = 0
++        self.dev.is_desktop = False
++        self.dev.HasRoot.return_value = True
++        self.dev.product_name = 'ordinary-phone'
++        self.env = mock.MagicMock()
++        self.env.concurrent_adb = False
++        self.env.skip_clear_data = True
++        self.env.force_main_user = False
++        self.env.parallel_devices.pMap.side_effect = lambda fn, *args: fn(self.dev, *args)
++        self.ti = mock.MagicMock()
++        for k in ('preserve_shared_device_state','store_data_dependencies_in_temp','replace_system_package','system_packages_to_remove','test_apk_incremental_install_json','test_apk_as_instant','apk_under_test_incremental_install_json','use_webview_provider','use_voice_interaction_service','store_tombstones','wait_for_java_debugger','modules','fake_modules','additional_locales'):
++            setattr(self.ti,k,False)
++        self.ti.flags = ['--enable-test-intents']; self.ti.webview_flags = []; self.ti.additional_apexs = []
++        self.ti.variations_test_seed_path = None; self.ti.webview_variations_test_seed_path = None
++        self.ti.use_apk_under_test_flags_file = False
++        self.ti.run_setup_commands = []; self.ti.run_teardown_commands = []
++        self.ti.GetDataDependencies.return_value = []
++        self.ti.approve_app_links_package = None
++        self.ti.approve_app_links_domain = None
++        self.apks = [mock.MagicMock(name=n) for n in ('additional','test','under_test')]
++        for a in self.apks:
++            a.GetPackageName.return_value = 'task.test.'+a._mock_name
++            a.GetPermissions.return_value = []
++        self.ti.additional_apks = [self.apks[0]]
++        self.ti.test_apk,self.ti.apk_under_test=self.apks[1:]
++        self.ti.target_package='task.test.test'
++        self.steps=[]
++        def run_step(step, dev, **_kwargs):
++            self.steps.append(step.__name__)
++            if step.__name__ in ('install_helper_internal','_SetDefaultBrowserApp','set_debug_app','disable_system_modals','setup_soft_keyboard','approve_app_links','set_vega_permissions','create_flag_changer'):
++                return step(dev)
++        self.ns = dict(posixpath=posixpath, logging=logging,
++            _CHROMIUM_TESTS_ROOT='chromium_tests_root', _DEVICE_TEMP_DIR_DATA_ROOT='/data/local/tmp/chromium_tests_root',
++            local_device_environment=types.SimpleNamespace(handle_shard_failures_with=identity, GetSystemCrashRetryOptions=lambda env:{}),
++            measures=types.SimpleNamespace(timed_func=identity),
++            trace_event=types.SimpleNamespace(traced=lambda f:f),
++            instrumentation_tracing=types.SimpleNamespace(no_tracing=lambda f:f),
++            crash_handler=types.SimpleNamespace(RetryOnSystemCrash=run_step),
++            apk_helper=types.SimpleNamespace(GetPackageName=lambda a:a.GetPackageName()),
++            device_errors=types.SimpleNamespace(CommandFailedError=CommandFailedError, CommandTimeoutError=TimeoutError),
++            base_error=types.SimpleNamespace(BaseError=ValueError),
++            device_utils=types.SimpleNamespace(GBOARD_PKG='com.google.android.inputmethod.latin'),
++            version_codes=types.SimpleNamespace(TIRAMISU=33, S=31, BAKLAVA=36),
++            DismissCrashDialogs=mock.Mock(__name__='DismissCrashDialogs'), tempfile=mock.Mock(), gold_utils=mock.Mock(),
++            shutil=mock.Mock(), sys=sys)
++        methods=[find(RUN,n) for n in ('SetUp','TearDown','_CreateFlagChangersIfNeeded','_SetDefaultBrowserApp','_ClearDefaultBrowserApp','_ToggleAppLinks')]
++        cls=ast.ClassDef(name='ActualRun',bases=[],keywords=[],body=methods,decorator_list=[])
++        compile_nodes([cls],self.ns)
++        self.run=self.ns['ActualRun']();self.run._env=self.env;self.run._test_instance=self.ti
++        self.run._installed_packages=[];self.run._context_managers=collections.defaultdict(list)
++        self.run._flag_changers={};self.run._webview_flag_changers={str(self.dev):mock.Mock()}
++        self.run._webview_flag_changers[str(self.dev)].GetCurrentFlags.return_value=[]
++        self.run._received_sigterm=False
++        self.changers=collections.defaultdict(mock.Mock)
++        self.flag_factory=mock.Mock(side_effect=lambda device,name:self.changers[name])
++        self.ns['flag_changer']=types.SimpleNamespace(FlagChanger=self.flag_factory)
++        self.run._webview_flag_changers={}
++    def test_parser_default_false_and_explicit_true(self):
++        fn=find('build/android/test_runner.py','AddDeviceOptions')
++        statements=[n for n in fn.body if isinstance(n,ast.Expr) and isinstance(n.value,ast.Call) and n.value.args and isinstance(n.value.args[0],ast.Constant) and n.value.args[0].value=='--preserve-shared-device-state']
++        self.assertEqual(len(statements),1)
++        p=argparse.ArgumentParser();compile_nodes(statements,{'parser':p})
++        self.assertFalse(p.parse_args([]).preserve_shared_device_state)
++        self.assertTrue(p.parse_args(['--preserve-shared-device-state']).preserve_shared_device_state)
++    def test_instance_wires_both_values(self):
++        ns={};compile_nodes([ast.ClassDef(name='ActualInstance',bases=[],keywords=[],body=[find(INST,'_initializeSetupTeardownCommandAttributes'),find(INST,'preserve_shared_device_state'),find(INST,'shared_device_state_extras')],decorator_list=[])],ns)
++        for value in (False,True):
++            instance=ns['ActualInstance']();instance._initializeSetupTeardownCommandAttributes(types.SimpleNamespace(preserve_shared_device_state=value,run_setup_commands=[],run_teardown_commands=[]))
++            self.assertIs(instance.preserve_shared_device_state,value)
++            self.assertEqual(instance.shared_device_state_extras, {'org.chromium.base.test.util.TestAnimations.PreserveSharedDeviceState':'true'} if value else {})
++    def test_preserved_setup_keeps_install_and_test_work_without_global_commands(self):
++        self.ti.preserve_shared_device_state=True;self.run.SetUp()
++        self.assertEqual(self.dev.Install.call_count,3)
++        self.assertTrue(all(c.kwargs['reinstall'] is True for c in self.dev.Install.call_args_list))
++        self.assertIn('push_test_data',self.steps);self.assertIn('create_flag_changer',self.steps)
++        self.assertFalse(set(self.steps)&{'_SetDefaultBrowserApp','set_debug_app','disable_system_modals','setup_soft_keyboard','approve_app_links','set_vega_permissions','DismissCrashDialogs'})
++        self.dev.RunShellCommand.assert_not_called();self.dev.SetAppEnabled.assert_not_called();self.dev.GboardPreferences.assert_not_called()
++        self.assertNotIn('webview-command-line',[call.args[1] for call in self.flag_factory.call_args_list])
++        self.changers['webview-command-line'].AddFlags.assert_not_called()
++        self.changers['test-cmdline-file'].AddFlags.assert_called_once_with(['--enable-test-intents'])
++    def test_default_setup_retains_prior_global_behavior(self):
++        self.run.SetUp()
++        commands=[c.args[0] for c in self.dev.RunShellCommand.call_args_list]
++        self.assertIn(['cmd','role','set-bypassing-role-qualification','true'],commands)
++        self.assertIn(['am','set-debug-app','--persistent','task.test.test'],commands)
++        self.assertTrue(any(isinstance(c,str) and 'notification_permission_enabled 0' in c for c in commands))
++        self.dev.SetAppEnabled.assert_any_call('com.google.android.inputmethod.latin',True)
++        self.dev.GboardPreferences.assert_called_once()
++        self.changers['webview-command-line'].AddFlags.assert_called_once_with(['--webview-verbose-logging'])
++    def test_preserved_teardown_retains_flag_and_context_cleanup(self):
++        self.ti.preserve_shared_device_state=True;self.run._skia_gold_work_dir='mock';changer=mock.Mock();self.run._flag_changers[str(self.dev)]=changer
++        context=mock.MagicMock();self.run._context_managers[str(self.dev)]=[context]
++        self.run._webview_flag_changers[str(self.dev)]=self.changers['webview-command-line']
++        self.run.TearDown();changer.Restore.assert_called_once();context.__exit__.assert_called_once();self.dev.RunShellCommand.assert_not_called()
++        self.changers['webview-command-line'].Restore.assert_not_called()
++    def test_default_teardown_retains_prior_role_debug_cleanup(self):
++        self.run._skia_gold_work_dir='mock';self.run._webview_flag_changers[str(self.dev)]=self.changers['webview-command-line'];self.run.TearDown()
++        commands=[c.args[0] for c in self.dev.RunShellCommand.call_args_list]
++        self.assertIn(['am','clear-debug-app'],commands)
++        self.assertIn(['cmd','role','set-bypassing-role-qualification','false'],commands)
++        self.assertIn(['cmd','role','remove-role-holder','--user','0','android.app.role.BROWSER','task.test.test'],commands)
++    def test_preserved_install_failure_is_not_reported_as_success(self):
++        self.ti.preserve_shared_device_state=True;self.dev.Install.side_effect=RuntimeError('actual mocked install failure')
++        with self.assertRaisesRegex(RuntimeError,'install failure'):self.run.SetUp()
++    def test_preserved_mode_rejects_explicit_webview_flags_before_setup(self):
++        self.ti.preserve_shared_device_state=True;self.ti.webview_flags=['--requested']
++        with self.assertRaisesRegex(ValueError,'WebView flags'):self.run.SetUp()
++        self.env.parallel_devices.pMap.assert_not_called();self.dev.Install.assert_not_called()
++    def test_preserved_mode_rejects_explicit_webview_seed_before_setup(self):
++        self.ti.preserve_shared_device_state=True;self.ti.webview_variations_test_seed_path='/task/seed'
++        with self.assertRaisesRegex(ValueError,'WebView flags'):self.run.SetUp()
++        self.env.parallel_devices.pMap.assert_not_called();self.dev.Install.assert_not_called()
++    def _run_dialog_block(self, preserve, state, own):
++        method=find(RUN,'_RunTest')
++        blocks=[n for n in method.body if isinstance(n,ast.If) and isinstance(n.test,ast.UnaryOp) and isinstance(n.test.operand,ast.Attribute) and n.test.operand.attr=='preserve_shared_device_state' and any(isinstance(k,ast.Name) and k.id=='DismissCrashDialogs' for k in ast.walk(n))]
++        self.assertEqual(len(blocks),1)
++        self.ti.preserve_shared_device_state=preserve;self.ti.test_package='task.test.test'
++        r=mock.Mock();r.GetType.return_value=state
++        ns=dict(self.ns,self=self.run,device=self.dev,results=[r],base_test_result=types.SimpleNamespace(ResultType=types.SimpleNamespace(UNKNOWN='UNKNOWN',CRASH='CRASH',PASS='PASS')),_AppendToLogForResult=mock.Mock())
++        ns['DismissCrashDialogs']=mock.Mock(return_value={'task.test.test' if own else 'unrelated.app'})
++        compile_nodes(blocks,ns)
++        return r,ns['DismissCrashDialogs']
++    def test_preserved_dialog_path_never_changes_any_parsed_status(self):
++        for state in ('PASS','FAIL','CRASH','UNKNOWN','SKIP','NOTRUN'):
++            for own in (True,False):
++                with self.subTest(state=state,own=own):
++                    r,detector=self._run_dialog_block(True,state,own)
++                    detector.assert_not_called();r.SetType.assert_not_called()
++    def test_default_own_unknown_dialog_retains_crash_classification(self):
++        r,detector=self._run_dialog_block(False,'UNKNOWN',True)
++        detector.assert_called_once_with(self.dev);r.SetType.assert_called_once_with('CRASH')
++    def test_default_foreign_dialog_retains_failure_without_success(self):
++        r,detector=self._run_dialog_block(False,'FAIL',False)
++        detector.assert_called_once_with(self.dev);r.SetType.assert_not_called();r.SetFailureReason.assert_called_once()
++    def test_actual_instrumentation_serializer_uses_lowercase_string(self):
++        key='org.chromium.base.test.util.TestAnimations.PreserveSharedDeviceState'
++        source=ROOT/'third_party/catapult/devil/devil/android/device_utils.py'
++        method=next(n for n in ast.walk(ast.parse(source.read_text())) if isinstance(n,ast.FunctionDef) and n.name=='StartInstrumentation')
++        method.decorator_list=[]
++        ns={'cmd_helper':types.SimpleNamespace(ShrinkToSnippet=mock.Mock(return_value='mock snippet'))}
++        compile_nodes([ast.ClassDef(name='ActualDevice',bases=[],keywords=[],body=[method],decorator_list=[])],ns)
++        dev=ns['ActualDevice']();dev.target_user=None;dev.RunShellCommand=mock.Mock()
++        dev.StartInstrumentation('task.test/runner',extras={key:'true'})
++        argv=ns['cmd_helper'].ShrinkToSnippet.call_args.args[0]
++        self.assertIn(['-e',key,'true'],[argv[i:i+3] for i in range(len(argv)-2)])
++    def test_run_and_listing_paths_both_forward_exact_extra(self):
++        text=(ROOT/RUN).read_text()
++        for name in ('_RunTest','_GetTestsFromRunner'):
++            fn=find(RUN,name)
++            calls=[n for n in ast.walk(fn) if isinstance(n,ast.Call) and isinstance(n.func,ast.Attribute) and n.func.attr=='update' and n.args and isinstance(n.args[0],ast.Attribute) and n.args[0].attr=='shared_device_state_extras']
++            self.assertEqual(len(calls),1,name)
++    def test_environment_property_stores_parsed_boolean(self):
++        path='build/android/pylib/local/device/local_device_environment.py'
++        fn=find(path,'__init__')
++        assignments=[n for n in fn.body if isinstance(n,ast.Assign) and any(isinstance(t,ast.Attribute) and t.attr=='_preserve_shared_device_state' for t in n.targets)]
++        self.assertEqual(len(assignments),1)
++        for value in (False,True):
++            obj=types.SimpleNamespace();compile_nodes(assignments,{'self':obj,'args':types.SimpleNamespace(preserve_shared_device_state=value)})
++            self.assertIs(obj._preserve_shared_device_state,value)
++    def test_environment_logcat_retains_capture_without_clear(self):
++        tree=ast.parse((ROOT/'build/android/pylib/local/device/local_device_environment.py').read_text())
++        calls=[n for n in ast.walk(tree) if isinstance(n,ast.Call) and isinstance(n.func,ast.Attribute) and n.func.attr=='LogcatMonitor']
++        self.assertEqual(len(calls),1)
++        expr=ast.Expression(calls[0]);ast.fix_missing_locations(expr)
++        for preserve in (False,True):
++            monitor=mock.Mock();ns={'self':types.SimpleNamespace(preserve_shared_device_state=preserve),'d':self.dev,'logcat_file':'task.log','logcat_monitor':types.SimpleNamespace(LogcatMonitor=monitor)}
++            eval(compile(expr,'<actual-logcat-constructor>','eval'),ns)
++            self.assertIs(monitor.call_args.kwargs['clear'],not preserve)
++            self.assertEqual(monitor.call_args.kwargs['output_file'],'task.log')
++    def test_environment_preserves_rooted_keyboard_settings(self):
++        tree=ast.parse((ROOT/'build/android/pylib/local/device/local_device_environment.py').read_text())
++        blocks=[n for n in ast.walk(tree) if isinstance(n,ast.If) and isinstance(n.test,ast.BoolOp) and any(isinstance(k,ast.Attribute) and k.attr=='preserve_shared_device_state' for k in ast.walk(n.test)) and any(isinstance(k,ast.Attribute) and k.attr=='GboardPreferences' for k in ast.walk(n))]
++        self.assertEqual(len(blocks),1)
++        for preserve in (False,True):
++            self.dev.reset_mock();compile_nodes(blocks,{'self':types.SimpleNamespace(preserve_shared_device_state=preserve),'d':self.dev,'version_codes':types.SimpleNamespace(BAKLAVA=36),'device_utils':types.SimpleNamespace(GBOARD_PKG='gboard')})
++            self.assertEqual(self.dev.GboardPreferences.call_count,0 if preserve else 1)
++    def _set_generated_app_links(self):
++        ns={'logging':logging}
++        method=find(INST,'_initializeApproveAppLinksAttributes')
++        compile_nodes([method],ns)
++        parsed=types.SimpleNamespace()
++        ns['_initializeApproveAppLinksAttributes'](parsed,types.SimpleNamespace(
++            approve_app_links='org.chromium.chrome.tests.support:www.example.com'))
++        self.ti.approve_app_links_package=parsed._approve_app_links_package
++        self.ti.approve_app_links_domain=parsed._approve_app_links_domain
++    def test_preserved_generated_app_link_argument_never_overrides_verification(self):
++        self._set_generated_app_links();self.ti.preserve_shared_device_state=True
++        self.run.SetUp();self.run.TearDown()
++        self.dev.RunShellCommand.assert_not_called()
++        self.assertNotIn('approve_app_links',self.steps)
++        self.assertEqual(self.dev.Install.call_count,3)
++    def test_default_generated_app_link_argument_retains_both_original_calls(self):
++        self._set_generated_app_links();self.run.SetUp();self.run.TearDown()
++        commands=[c.args[0] for c in self.dev.RunShellCommand.call_args_list]
++        link_commands=[c for c in commands if isinstance(c,list) and c[:2]==['pm','set-app-links']]
++        self.assertEqual(link_commands,[
++            ['pm','set-app-links','--package','org.chromium.chrome.tests.support','STATE_APPROVED','www.example.com'],
++            ['pm','set-app-links','--package','org.chromium.chrome.tests.support','STATE_NO_RESPONSE','www.example.com']])
++    def test_instrumentation_logcat_preserves_capture_with_both_clear_modes(self):
++        import contextlib
++        ns = dict(
++            contextlib=contextlib, os=types.SimpleNamespace(path=types.SimpleNamespace(dirname=lambda path: path)),
++            time=types.SimpleNamespace(strftime=lambda *args: 'mock-time', gmtime=lambda: None),
++            output_manager=types.SimpleNamespace(Datatype=types.SimpleNamespace(TEXT='text')),
++            logging=logging,
++            local_device_environment=types.SimpleNamespace(LOGCAT_FILTERS=['mock-filter']),
++            contextlib_ext=types.SimpleNamespace(Optional=lambda ctx, enabled: ctx if enabled else contextlib.nullcontext()),
++            trace_event=types.SimpleNamespace(trace=lambda name: contextlib.nullcontext()),
++        )
++        compile_nodes([ast.ClassDef(name='ActualArchive', bases=[], keywords=[],
++            body=[find(RUN, '_ArchiveLogcat')], decorator_list=[])], ns)
++        for preserve in (False, True):
++            for test_name in ('list_tests', 'OwnedTest#method'):
++                with self.subTest(preserve=preserve, test_name=test_name):
++                    archive = ns['ActualArchive']()
++                    ti = mock.Mock(preserve_shared_device_state=preserve, external_shard_index=0, apk_under_test=None)
++                    ti.GetLogcatPackageNames.return_value = ['task.test']
++                    env = mock.Mock(trace_output=False)
++                    env.output_manager = mock.MagicMock()
++                    log_file = mock.Mock(name='archived-log')
++                    log_file.name = '/private/mock-log'
++                    log_file.Link.return_value = None
++                    env.output_manager.ArchivedTempfile.return_value.__enter__.return_value = log_file
++                    symbolizer = mock.MagicMock()
++                    monitor = mock.MagicMock()
++                    monitor.__enter__.return_value = monitor
++                    constructor = mock.Mock(return_value=monitor)
++                    ns['stack_symbolizer'] = types.SimpleNamespace(PassThroughSymbolizerPool=mock.Mock(return_value=symbolizer))
++                    ns['logcat_monitor'] = types.SimpleNamespace(LogcatMonitor=constructor)
++                    archive._env = env; archive._test_instance = ti
++                    with archive._ArchiveLogcat(self.dev, test_name) as actual_log:
++                        self.assertIs(actual_log, log_file)
++                    constructor.assert_called_once()
++                    self.assertIs(constructor.call_args.kwargs['clear'], not preserve)
++                    self.assertEqual(constructor.call_args.args, (self.dev.adb,))
++                    self.assertEqual(constructor.call_args.kwargs['output_file'], log_file.name)
++                    self.assertEqual(constructor.call_args.kwargs['filter_specs'], ['mock-filter'])
++                    self.assertFalse(constructor.call_args.kwargs['check_error'])
++                    self.assertTrue(callable(constructor.call_args.kwargs['transform_func']))
++                    monitor.__enter__.assert_called_once(); monitor.__exit__.assert_called_once()
++                    monitor.Close.assert_called_once(); env.output_manager.ArchivedTempfile.assert_called_once()
++if __name__=='__main__': unittest.main()

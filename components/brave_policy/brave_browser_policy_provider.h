@@ -6,11 +6,15 @@
 #ifndef BRAVE_COMPONENTS_BRAVE_POLICY_BRAVE_BROWSER_POLICY_PROVIDER_H_
 #define BRAVE_COMPONENTS_BRAVE_POLICY_BRAVE_BROWSER_POLICY_PROVIDER_H_
 
+#include "build/build_config.h"
+
 #include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/scoped_observation.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_origin/brave_origin_policy_info.h"
 #include "brave/components/brave_origin/brave_origin_policy_manager.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_policy/brave_policy_observer.h"
 #include "components/policy/core/common/configuration_policy_provider.h"
 
@@ -43,17 +47,21 @@ class BraveBrowserPolicyProvider : public policy::ConfigurationPolicyProvider,
   // Loads policies for browser scope preferences only.
   policy::PolicyBundle LoadPolicies();
 
+#if !BUILDFLAG(IS_ANDROID)
   // Helper to set BraveOrigin policy for a specific preference
   void LoadBraveOriginPolicies(policy::PolicyBundle& bundle);
   void LoadBraveOriginPolicy(policy::PolicyMap& policy_map,
                              std::string_view policy_key,
                              bool enabled);
+#endif  // !BUILDFLAG(IS_ANDROID)
 
   bool first_policies_loaded_ = false;
 
+#if !BUILDFLAG(IS_ANDROID)
   base::ScopedObservation<brave_origin::BraveOriginPolicyManager,
                           BravePolicyObserver>
       policy_manager_observation_{this};
+#endif  // !BUILDFLAG(IS_ANDROID)
 
   base::WeakPtrFactory<BraveBrowserPolicyProvider> weak_factory_{this};
 };

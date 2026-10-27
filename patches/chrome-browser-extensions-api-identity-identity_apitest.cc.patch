@@ -1,0 +1,348 @@
+diff --git a/chrome/browser/extensions/api/identity/identity_apitest.cc b/chrome/browser/extensions/api/identity/identity_apitest.cc
+index f1f3b691b5da44057b08a902e9bc666ad8a08cc7..0e4c36ed2e9b80926486f869c091b9fd39e86de3 100644
+--- a/chrome/browser/extensions/api/identity/identity_apitest.cc
++++ b/chrome/browser/extensions/api/identity/identity_apitest.cc
+@@ -2,6 +2,7 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
++#include <algorithm>
+ #include <memory>
+ #include <optional>
+ #include <set>
+@@ -113,6 +114,17 @@
+ #include "ui/gfx/geometry/rect.h"
+ #include "url/gurl.h"
+ 
++#if BUILDFLAG(IS_ANDROID)
++#include "base/memory/weak_ptr.h"
++#include "base/test/run_until.h"
++#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
++#include "chrome/browser/ui/browser_window/public/browser_window_interface_iterator.h"
++#include "extensions/browser/background_script_executor.h"
++#include "extensions/browser/extension_registry.h"
++#include "extensions/test/extension_background_page_waiter.h"
++#include "extensions/test/test_extension_dir.h"
++#endif
++
+ #if BUILDFLAG(ENABLE_EXTENSIONS)
+ #include "chrome/browser/ui/browser_window.h"
+ #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+@@ -4104,6 +4116,317 @@ class LaunchWebAuthFlowFunctionTestWithPopupWindow
+   }
+ };
+ 
++#if BUILDFLAG(IS_ANDROID)
++// Uses genuinely loaded MV3 extensions and the real Android WebAuthFlow popup.
++// The function-runner cases additionally retain completed functions so tracker
++// release cannot accidentally depend on destruction of the caller's reference.
++class LaunchWebAuthFlowAndroidUnloadTest
++    : public LaunchWebAuthFlowFunctionTestWithPopupWindow {
++ public:
++  void SetUpOnMainThread() override {
++    LaunchWebAuthFlowFunctionTestWithPopupWindow::SetUpOnMainThread();
++    for (auto* browser : GetAllBrowserWindowInterfaces()) {
++      initial_window_ids_.insert(browser->GetSessionID().id());
++    }
++    https_server_ = LaunchHttpsServer();
++    ASSERT_TRUE(https_server_);
++  }
++
++  void TearDownOnMainThread() override {
++    // Cancel pending flows even when an ASSERT exits a test body early.
++    for (const auto& id : loaded_ids_) {
++      if (extension_registry()->enabled_extensions().Contains(id)) {
++        DisableExtension(id);
++      }
++    }
++    base::RunLoop().RunUntilIdle();
++    std::vector<base::WeakPtr<BrowserWindowInterface>> popups;
++    for (auto* browser : GetAllBrowserWindowInterfaces()) {
++      if (!initial_window_ids_.contains(browser->GetSessionID().id())) {
++        popups.push_back(browser->GetWeakPtr());
++      }
++    }
++    for (const auto& browser : popups) {
++      if (browser) {
++        browser->GetWindow()->Close();
++      }
++    }
++    EXPECT_TRUE(base::test::RunUntil([&] {
++      return std::ranges::none_of(
++          popups, [](const auto& browser) { return !!browser; });
++    }));
++    LaunchWebAuthFlowFunctionTestWithPopupWindow::TearDownOnMainThread();
++  }
++
++ protected:
++  using ResultCapture = BackgroundScriptExecutor::ResultCapture;
++
++  const Extension* LoadFlowExtension() {
++    auto dir = std::make_unique<TestExtensionDir>();
++    dir->WriteManifest(R"({
++      "name": "Unload pending web auth flow",
++      "version": "1.0",
++      "manifest_version": 3,
++      "permissions": ["identity"],
++      "background": {"service_worker": "worker.js"}
++    })");
++    dir->WriteFile(FILE_PATH_LITERAL("worker.js"),
++                   "chrome.runtime.onInstalled.addListener(() => {});");
++    const Extension* extension = LoadExtension(dir->UnpackedPath());
++    if (extension) {
++      loaded_ids_.push_back(extension->id());
++    }
++    extension_dirs_.push_back(std::move(dir));
++    return extension;
++  }
++
++  GURL AuthUrl() { return https_server_->GetURL("/consent_page.html"); }
++
++  std::string Args() {
++    return base::StringPrintf(R"([{"interactive":true,"url":"%s"}])",
++                              AuthUrl().spec().c_str());
++  }
++
++  scoped_refptr<IdentityLaunchWebAuthFlowFunction> MakeFlow(
++      const Extension* extension) {
++    auto function = base::MakeRefCounted<IdentityLaunchWebAuthFlowFunction>();
++    function->set_extension(extension);
++    return function;
++  }
++
++  void ExpectVisiblePopup(content::WebContents* contents) {
++    ASSERT_TRUE(contents);
++    auto weak_contents = contents->GetWeakPtr();
++    ASSERT_TRUE(base::test::RunUntil([&] {
++      return weak_contents &&
++             GlobalBrowserCollection::GetInstance()->FindBrowserWithTab(
++                 weak_contents.get());
++    }));
++    ASSERT_TRUE(weak_contents);
++    auto* browser = GlobalBrowserCollection::GetInstance()->FindBrowserWithTab(
++        weak_contents.get());
++    ASSERT_TRUE(browser);
++    EXPECT_FALSE(initial_window_ids_.contains(browser->GetSessionID().id()));
++    EXPECT_EQ(profile(), browser->GetProfile());
++    EXPECT_EQ(profile(), weak_contents->GetBrowserContext());
++    ASSERT_TRUE(content::WaitForLoadStop(weak_contents.get()));
++    EXPECT_EQ(AuthUrl(), weak_contents->GetLastCommittedURL());
++  }
++
++  void StartFunctionFlow(IdentityLaunchWebAuthFlowFunction* function) {
++    RunFunctionAndWaitForNavigation(function, AuthUrl(), Args());
++    ASSERT_TRUE(function->GetWebAuthFlowForTesting());
++    ASSERT_NO_FATAL_FAILURE(ExpectVisiblePopup(
++        function->GetWebAuthFlowForTesting()->web_contents()));
++  }
++
++  void StartWorkerFlow(const Extension& extension,
++                       BackgroundScriptExecutor& executor,
++                       ResultCapture capture,
++                       content::WebContents** contents) {
++    ExtensionBackgroundPageWaiter(profile(), extension)
++        .WaitForBackgroundInitialized();
++    content::WebContentsAddedObserver added;
++    content::TestNavigationObserver navigation(AuthUrl());
++    navigation.StartWatchingNewWebContents();
++    std::string callback = "const error = chrome.runtime.lastError;";
++    if (capture == ResultCapture::kSendScriptResult) {
++      callback +=
++          "chrome.test.sendScriptResult(error ? error.message : result);";
++    }
++    // This is the real MV3 worker API dispatch, without a gesture bypass,
++    // function replacement, redirect override, or consent auto-accept hook.
++    const std::string script = content::JsReplace(
++        "chrome.identity.launchWebAuthFlow({interactive:true,url:$1},"
++        "result => {" +
++            callback + "});",
++        AuthUrl().spec());
++    ASSERT_TRUE(executor.ExecuteScriptAsync(extension.id(), script, capture));
++    *contents = added.GetWebContents();
++    ASSERT_TRUE(*contents);
++    navigation.Wait();
++    ASSERT_NO_FATAL_FAILURE(ExpectVisiblePopup(*contents));
++  }
++
++  void FinishFunctionFlow(IdentityLaunchWebAuthFlowFunction* function,
++                          const ExtensionId& id) {
++    ASSERT_TRUE(function->GetWebAuthFlowForTesting());
++    auto* contents = function->GetWebAuthFlowForTesting()->web_contents();
++    ASSERT_TRUE(contents);
++    content::WebContentsDestroyedWatcher destroyed(contents);
++    SimulateUrlRedirect(id, contents);
++    base::Value result;
++    WaitForOneResult(function, &result);
++    EXPECT_EQ("https://" + id + ".chromiumapp.org/#some_information",
++              result.GetString());
++    EXPECT_FALSE(function->GetWebAuthFlowForTesting());
++    destroyed.Wait();
++  }
++
++ private:
++  std::unique_ptr<net::EmbeddedTestServer> https_server_;
++  std::vector<std::unique_ptr<TestExtensionDir>> extension_dirs_;
++  std::vector<ExtensionId> loaded_ids_;
++  std::set<int> initial_window_ids_;
++};
++
++IN_PROC_BROWSER_TEST_F(LaunchWebAuthFlowAndroidUnloadTest,
++                       WorkerReloadClosesConsentAndReplacementSucceeds) {
++  scoped_refptr<const Extension> original = LoadFlowExtension();
++  ASSERT_TRUE(original);
++  const ExtensionId id = original->id();
++  BackgroundScriptExecutor first_worker(profile());
++  content::WebContents* first_consent = nullptr;
++  ASSERT_NO_FATAL_FAILURE(StartWorkerFlow(
++      *original, first_worker, ResultCapture::kNone, &first_consent));
++  content::WebContentsDestroyedWatcher first_destroyed(first_consent);
++  ReloadExtension(id);
++  const Extension* replacement =
++      extension_registry()->enabled_extensions().GetByID(id);
++  ASSERT_TRUE(replacement);
++  ASSERT_NE(original.get(), replacement);
++  first_destroyed.Wait();
++
++  BackgroundScriptExecutor replacement_worker(profile());
++  content::WebContents* replacement_consent = nullptr;
++  ASSERT_NO_FATAL_FAILURE(StartWorkerFlow(*replacement, replacement_worker,
++                                          ResultCapture::kSendScriptResult,
++                                          &replacement_consent));
++  content::WebContentsDestroyedWatcher replacement_destroyed(
++      replacement_consent);
++  SimulateUrlRedirect(id, replacement_consent);
++  const base::Value result = replacement_worker.WaitForResult();
++  ASSERT_TRUE(result.is_string());
++  EXPECT_EQ("https://" + id + ".chromiumapp.org/#some_information",
++            result.GetString());
++  replacement_destroyed.Wait();
++}
++
++IN_PROC_BROWSER_TEST_F(LaunchWebAuthFlowAndroidUnloadTest,
++                       DisableCancelsRetainedFunctionAndReenableCanStart) {
++  scoped_refptr<const Extension> extension = LoadFlowExtension();
++  ASSERT_TRUE(extension);
++  const ExtensionId id = extension->id();
++  auto retired = MakeFlow(extension.get());
++  ASSERT_NO_FATAL_FAILURE(StartFunctionFlow(retired.get()));
++  content::WebContentsDestroyedWatcher destroyed(
++      retired->GetWebAuthFlowForTesting()->web_contents());
++  DisableExtension(id);
++  EXPECT_EQ(errors::kUserRejected, WaitForError(retired.get()));
++  EXPECT_FALSE(retired->GetWebAuthFlowForTesting());
++  destroyed.Wait();
++  EnableExtension(id);
++  const Extension* enabled =
++      extension_registry()->enabled_extensions().GetByID(id);
++  ASSERT_TRUE(enabled);
++  auto replacement = MakeFlow(enabled);
++  ASSERT_NO_FATAL_FAILURE(StartFunctionFlow(replacement.get()));
++  // The old object remains alive after completion while the new flow starts.
++  EXPECT_TRUE(retired->did_respond());
++  retired.reset();
++  auto concurrent = MakeFlow(enabled);
++  RunFunctionAsync(concurrent.get(), Args());
++  EXPECT_EQ(errors::kWebAuthFlowInProgress, WaitForError(concurrent.get()));
++  ASSERT_NO_FATAL_FAILURE(FinishFunctionFlow(replacement.get(), id));
++  histogram_tester()->ExpectBucketCount(
++      kLaunchWebAuthFlowResultHistogramName,
++      IdentityLaunchWebAuthFlowFunction::Error::kUserRejected, 1);
++}
++
++IN_PROC_BROWSER_TEST_F(LaunchWebAuthFlowAndroidUnloadTest,
++                       UnloadingOneExtensionLeavesOtherConsentAlive) {
++  scoped_refptr<const Extension> first_extension = LoadFlowExtension();
++  scoped_refptr<const Extension> other_extension = LoadFlowExtension();
++  ASSERT_TRUE(first_extension);
++  ASSERT_TRUE(other_extension);
++  ASSERT_NE(first_extension->id(), other_extension->id());
++  auto first = MakeFlow(first_extension.get());
++  auto other = MakeFlow(other_extension.get());
++  ASSERT_NO_FATAL_FAILURE(StartFunctionFlow(first.get()));
++  ASSERT_NO_FATAL_FAILURE(StartFunctionFlow(other.get()));
++  content::WebContentsDestroyedWatcher first_destroyed(
++      first->GetWebAuthFlowForTesting()->web_contents());
++  auto other_contents =
++      other->GetWebAuthFlowForTesting()->web_contents()->GetWeakPtr();
++  DisableExtension(first_extension->id());
++  EXPECT_EQ(errors::kUserRejected, WaitForError(first.get()));
++  first_destroyed.Wait();
++  ASSERT_TRUE(other_contents);
++  EXPECT_FALSE(other->did_respond());
++  ASSERT_TRUE(other->GetWebAuthFlowForTesting());
++  EXPECT_EQ(other_contents.get(),
++            other->GetWebAuthFlowForTesting()->web_contents());
++  ASSERT_NO_FATAL_FAILURE(ExpectVisiblePopup(other_contents.get()));
++  ASSERT_NO_FATAL_FAILURE(
++      FinishFunctionFlow(other.get(), other_extension->id()));
++}
++
++// Delays only the existing optional-bounds delegate. The three tests above use
++// actual visible popup consent; this additional case covers the pre-popup async
++// callback arriving after unload while the completed function is retained.
++class HeldWebAuthBoundsDelegate : public LaunchWebAuthFlowDelegate {
++ public:
++  explicit HeldWebAuthBoundsDelegate(
++      base::OnceCallback<void(std::optional<gfx::Rect>)>* callback)
++      : callback_(callback) {}
++
++  void GetOptionalWindowBounds(
++      Profile* profile,
++      const std::string& extension_id,
++      base::OnceCallback<void(std::optional<gfx::Rect>)> callback) override {
++    *callback_ = std::move(callback);
++  }
++
++ private:
++  raw_ptr<base::OnceCallback<void(std::optional<gfx::Rect>)>> callback_;
++};
++
++IN_PROC_BROWSER_TEST_F(LaunchWebAuthFlowAndroidUnloadTest,
++                       LateBoundsCallbackCannotRestartRetiredFlow) {
++  scoped_refptr<const Extension> original = LoadFlowExtension();
++  ASSERT_TRUE(original);
++  const ExtensionId id = original->id();
++  base::OnceCallback<void(std::optional<gfx::Rect>)> late_bounds;
++  auto retired = MakeFlow(original.get());
++  retired->SetLaunchWebAuthFlowDelegateForTesting(
++      std::make_unique<HeldWebAuthBoundsDelegate>(&late_bounds));
++  RunFunctionAsync(retired.get(), Args());
++  ASSERT_TRUE(late_bounds);
++  EXPECT_FALSE(retired->GetWebAuthFlowForTesting());
++  EXPECT_FALSE(retired->did_respond());
++  ReloadExtension(id);
++  EXPECT_EQ(errors::kUserRejected, WaitForError(retired.get()));
++  const Extension* replacement_extension =
++      extension_registry()->enabled_extensions().GetByID(id);
++  ASSERT_TRUE(replacement_extension);
++  ASSERT_NE(original.get(), replacement_extension);
++  auto replacement = MakeFlow(replacement_extension);
++  ASSERT_NO_FATAL_FAILURE(StartFunctionFlow(replacement.get()));
++  auto replacement_contents =
++      replacement->GetWebAuthFlowForTesting()->web_contents()->GetWeakPtr();
++  const size_t windows_before = GetAllBrowserWindowInterfaces().size();
++  std::move(late_bounds).Run(std::nullopt);
++  base::RunLoop().RunUntilIdle();
++  EXPECT_FALSE(retired->GetWebAuthFlowForTesting());
++  EXPECT_TRUE(retired->did_respond());
++  EXPECT_EQ(windows_before, GetAllBrowserWindowInterfaces().size());
++  ASSERT_TRUE(replacement_contents);
++  EXPECT_FALSE(replacement->did_respond());
++  histogram_tester()->ExpectTotalCount(kLaunchWebAuthFlowResultHistogramName,
++                                       1);
++  histogram_tester()->ExpectBucketCount(
++      kLaunchWebAuthFlowResultHistogramName,
++      IdentityLaunchWebAuthFlowFunction::Error::kUserRejected, 1);
++  retired.reset();
++  auto concurrent = MakeFlow(replacement_extension);
++  RunFunctionAsync(concurrent.get(), Args());
++  EXPECT_EQ(errors::kWebAuthFlowInProgress, WaitForError(concurrent.get()));
++  ASSERT_NO_FATAL_FAILURE(FinishFunctionFlow(replacement.get(), id));
++  histogram_tester()->ExpectTotalCount(kLaunchWebAuthFlowResultHistogramName,
++                                       3);
++}
++#endif  // BUILDFLAG(IS_ANDROID)
++
+ IN_PROC_BROWSER_TEST_F(LaunchWebAuthFlowFunctionTestWithPopupWindow,
+                        PageNavigateFromInitURLToFinalURL) {
+   std::unique_ptr<net::EmbeddedTestServer> https_server = LaunchHttpsServer();

@@ -1,0 +1,261 @@
+# Android WebAuthn request activation and lifetime.
+substitutions:
+- description: Keep the native proxy lifetime within this renderer authenticator.
+  regex:
+    pattern: '    private @Nullable WebauthnRequestCallback mRequestCallback;'
+    replace: "    private @Nullable WebAuthenticationProxyBridge mRequestProxy;\n    private boolean mClosed;\n    private boolean mAwaitingProxyConfirmation;\n    private @Nullable WebauthnRequestCallback mRequestCallback;"
+- description: The renderer factory alone opts into extension request forwarding.
+  regex:
+    pattern: '    private Fido2CredentialRequest getFido2CredentialRequest() {'
+    replace: "    void enableRequestProxy() {\n        assert mRequestProxy == null && mRenderFrameHost != null;\n        mRequestProxy = new WebAuthenticationProxyBridge(assertNonNull(mRenderFrameHost));\n    }\n\n    private boolean hasRequestProxy() {\n        return !mClosed && mRequestProxy != null && mRequestProxy.isActive();\n    }\n\n    private void completeProxyRequest(WebauthnRequestCallback expected,\n            WebauthnRequestResponse response) {\n        if (!mClosed && mRequestCallback == expected) expected.onComplete(response);\n    }\n\n    private void cancelProxyConfirmation(WebauthnRequestCallback expected) {\n        if (mClosed || mRequestCallback != expected || !mAwaitingProxyConfirmation) return;\n        mRequestCallback = null;\n        mAwaitingProxyConfirmation = false;\n        if (mRequestProxy != null) mRequestProxy.clearConfirmation();\n        if (mCreateConfirmationUiDelegate != null) mCreateConfirmationUiDelegate.cancel();\n        expected.onComplete(WebauthnRequestResponse.forFailedMakeCredential(\n                AuthenticatorStatus.ABORT_ERROR, new RequestMetrics.Builder().build()));\n    }\n\n    private Fido2CredentialRequest getFido2CredentialRequest() {"
+- description: Do not make extension authentication depend on Play Services availability.
+  regex:
+    pattern: "        if (!GmsCoreUtils.isWebauthnSupported()\n                || (!isChrome(mWebContents) && !GmsCoreUtils.isResultReceiverSupported())) {\n            mRequestCallback.onComplete(\n                    WebauthnRequestResponse.forFailedMakeCredential(\n                            AuthenticatorStatus.NOT_IMPLEMENTED,\n                            new RequestMetrics.Builder()\n                                    .setMakeCredentialOutcome(MakeCredentialOutcome.OTHER_FAILURE)\n                                    .build()));\n            return;\n        }\n"
+    replace: "        if (!hasRequestProxy() && (!GmsCoreUtils.isWebauthnSupported()\n                || (!isChrome(mWebContents) && !GmsCoreUtils.isResultReceiverSupported()))) {\n            mRequestCallback.onComplete(\n                    WebauthnRequestResponse.forFailedMakeCredential(\n                            AuthenticatorStatus.NOT_IMPLEMENTED,\n                            new RequestMetrics.Builder()\n                                    .setMakeCredentialOutcome(MakeCredentialOutcome.OTHER_FAILURE)\n                                    .build()));\n            return;\n        }\n"
+- description: Correlate confirmation UI callbacks with the request that opened it.
+  regex:
+    pattern: '        if (mCreateConfirmationUiDelegate != null && !options.isConditional) {'
+    replace: "        WebauthnRequestCallback confirmationRequest = mRequestCallback;\n        if (mCreateConfirmationUiDelegate != null && !options.isConditional) {\n            mAwaitingProxyConfirmation = mRequestProxy != null;\n            if (mAwaitingProxyConfirmation && mRequestProxy != null) {\n                mRequestProxy.watchConfirmation(() -> cancelProxyConfirmation(confirmationRequest));\n            }"
+- description: A dismissed old confirmation must not dispatch or reject a replacement request.
+  regex:
+    pattern: '                    () -> continueMakeCredential(options),'
+    replace: "                    () -> {\n                        if (!mClosed && mRequestCallback == confirmationRequest) {\n                            continueMakeCredential(options);\n                        }\n                    },"
+- description: Ignore confirmation callbacks after cancellation or document disconnect.
+  regex:
+    pattern: '                        if (mRequestCallback == null) {'
+    replace: '                        if (mClosed || mRequestCallback != confirmationRequest) {'
+- description: Keep confirmation, focus and embedder checks before forwarding create requests.
+  regex:
+    pattern: "        log(TAG, \"continueMakeCredential\");\n        mPendingFido2CredentialRequest = getFido2CredentialRequest();"
+    replace: "        log(TAG, \"continueMakeCredential\");\n        if (mClosed || mRequestCallback == null) return;\n        if (mAwaitingProxyConfirmation\n                && (mRequestProxy == null || !mRequestProxy.finishConfirmation())) {\n            cancelProxyConfirmation(mRequestCallback);\n            return;\n        }\n        mAwaitingProxyConfirmation = false;\n        if (mRequestProxy != null) mRequestProxy.clearConfirmation();\n        WebauthnRequestCallback expected = mRequestCallback;\n        if (mRequestProxy != null && mRequestProxy.makeCredential(options,\n                response -> completeProxyRequest(expected, response))) return;\n        // A proxy may detach while create confirmation UI is open.\n        if (!GmsCoreUtils.isWebauthnSupported()\n                || (!isChrome(mWebContents) && !GmsCoreUtils.isResultReceiverSupported())) {\n            mRequestCallback.onComplete(\n                    WebauthnRequestResponse.forFailedMakeCredential(\n                            AuthenticatorStatus.NOT_IMPLEMENTED,\n                            new RequestMetrics.Builder()\n                                    .setMakeCredentialOutcome(MakeCredentialOutcome.OTHER_FAILURE)\n                                    .build()));\n            return;\n        }\n        mPendingFido2CredentialRequest = getFido2CredentialRequest();"
+- description: Defer local provider availability until after proxy selection.
+  regex:
+    pattern: "        boolean isPasswordOnlyFlux =\n                options.publicKey == null\n                        && options.password\n                        && options.mediation == Mediation.IMMEDIATE;\n        if (!GmsCoreUtils.isWebauthnSupported()\n                || (!isChrome(mWebContents) && !GmsCoreUtils.isResultReceiverSupported())\n                || (options.publicKey == null && !isPasswordOnlyFlux)) {\n            RequestMetrics metrics =\n                    new RequestMetrics.Builder()\n                            .setGetAssertionOutcome(GetAssertionOutcome.OTHER_FAILURE)\n                            .build();\n            mRequestCallback.onComplete(\n                    WebauthnRequestResponse.forFailedGetCredential(\n                            AuthenticatorStatus.NOT_IMPLEMENTED, metrics));\n            return;\n        }\n"
+    replace: ''
+- description: Forward get requests only after existing visibility and embedder policy checks.
+  regex:
+    pattern: "        mPendingFido2CredentialRequest = getFido2CredentialRequest();\n        mPendingFido2CredentialRequest.handleGetCredentialRequest("
+    replace: "        WebauthnRequestCallback expected = mRequestCallback;\n        if (mRequestProxy != null && mPayment == null\n                && mRequestProxy.getCredential(options,\n                        response -> completeProxyRequest(expected, response))) return;\n\n        boolean isPasswordOnlyFlux =\n                options.publicKey == null\n                        && options.password\n                        && options.mediation == Mediation.IMMEDIATE;\n        if (!GmsCoreUtils.isWebauthnSupported()\n                || (!isChrome(mWebContents) && !GmsCoreUtils.isResultReceiverSupported())\n                || (options.publicKey == null && !isPasswordOnlyFlux)) {\n            RequestMetrics metrics =\n                    new RequestMetrics.Builder()\n                            .setGetAssertionOutcome(GetAssertionOutcome.OTHER_FAILURE)\n                            .build();\n            mRequestCallback.onComplete(\n                    WebauthnRequestResponse.forFailedGetCredential(\n                            AuthenticatorStatus.NOT_IMPLEMENTED, metrics));\n            return;\n        }\n\n        mPendingFido2CredentialRequest = getFido2CredentialRequest();\n        mPendingFido2CredentialRequest.handleGetCredentialRequest("
+- description: The active proxy supplies UVPAA before platform provider probing.
+  regex:
+    pattern: "        if (!couldSupportUvpaa()) {\n            decoratedCallback.call(false);"
+    replace: "        if (mRequestProxy != null && mRequestProxy.isUvpaa(decoratedCallback::call)) return;\n        if (!couldSupportUvpaa()) {\n            decoratedCallback.call(false);"
+- description: Conditional mediation is not supported by a request proxy, matching desktop.
+  regex:
+    pattern: '        return GmsCoreUtils.isWebauthnSupported() && isChrome(mWebContents);'
+    replace: '        return !hasRequestProxy() && GmsCoreUtils.isWebauthnSupported() && isChrome(mWebContents);'
+- description: Report proxy capabilities independently from Android credential-provider availability.
+  regex:
+    pattern: '        log(TAG, "getClientCapabilities");'
+    replace: "        log(TAG, \"getClientCapabilities\");\n        // A proxy answers UVPAA independently of Android credential providers.\n        // Only advertise operations supported by the forwarding protocol.\n        if (mRequestProxy != null && mRequestProxy.isUvpaa(isUvpaa -> {\n            ArrayList<WebAuthnClientCapability> proxyCapabilities = new ArrayList<>();\n            proxyCapabilities.add(createWebAuthnClientCapability(\n                    AuthenticatorConstants.CAPABILITY_RELATED_ORIGINS, true));\n            proxyCapabilities.add(createWebAuthnClientCapability(\n                    AuthenticatorConstants.CAPABILITY_HYBRID_TRANSPORT, false));\n            proxyCapabilities.add(createWebAuthnClientCapability(\n                    AuthenticatorConstants.CAPABILITY_PPAA, isUvpaa));\n            proxyCapabilities.add(createWebAuthnClientCapability(\n                    AuthenticatorConstants.CAPABILITY_UVPAA, isUvpaa));\n            proxyCapabilities.add(createWebAuthnClientCapability(\n                    AuthenticatorConstants.CAPABILITY_CONDITIONAL_GET, false));\n            proxyCapabilities.add(createWebAuthnClientCapability(\n                    AuthenticatorConstants.CAPABILITY_CONDITIONAL_CREATE, true));\n            proxyCapabilities.add(createWebAuthnClientCapability(\n                    AuthenticatorConstants.CAPABILITY_IMMEDIATE_GET, true));\n            proxyCapabilities.add(createWebAuthnClientCapability(\n                    AuthenticatorConstants.CAPABILITY_SIGNAL_ALL_ACCEPTED_CREDENTIALS, false));\n            proxyCapabilities.add(createWebAuthnClientCapability(\n                    AuthenticatorConstants.CAPABILITY_SIGNAL_CURRENT_USER_DETAILS, false));\n            proxyCapabilities.add(createWebAuthnClientCapability(\n                    AuthenticatorConstants.CAPABILITY_SIGNAL_UNKNOWN_CREDENTIAL, false));\n            callback.call(proxyCapabilities.toArray(new WebAuthnClientCapability[0]));\n        })) return;\n"
+- description: Cancel either proxied operation before Android platform-specific cancellation.
+  regex:
+    pattern: '        log(TAG, "cancel");'
+    replace: "        log(TAG, \"cancel\");\n        if (mAwaitingProxyConfirmation && mRequestCallback != null) {\n            cancelProxyConfirmation(mRequestCallback);\n            return;\n        }\n        if (mRequestProxy != null && mRequestProxy.cancel()) return;"
+- description: Clear pending confirmation state at request completion.
+  regex:
+    pattern: '    private void cleanupRequest() {'
+    replace: "    private void cleanupRequest() {\n        mAwaitingProxyConfirmation = false;\n        if (mRequestProxy != null) mRequestProxy.clearConfirmation();"
+- description: Invalidate callbacks before disposing the native document observer.
+  regex:
+    pattern: '        log(TAG, "close");'
+    replace: "        log(TAG, \"close\");\n        mClosed = true;\n        mAwaitingProxyConfirmation = false;\n        if (mCreateConfirmationUiDelegate != null) mCreateConfirmationUiDelegate.cancel();\n        if (mRequestProxy != null) {\n            mRequestProxy.destroy();\n            mRequestProxy = null;\n        }"
+- description: Track the Java callback that owns the native activation guard
+  regex:
+    re_pattern: \ \ \ \ private\ @Nullable\ Fido2CredentialRequest\ mPendingFido2CredentialRequest;
+    replace: "    private @Nullable Fido2CredentialRequest mPendingFido2CredentialRequest;\n    private @Nullable WebauthnRequestCallback mGuardedRequest;"
+- description: Keep ordinary provider callbacks and actual UI dispatch bound to their initiating request
+  regex:
+    re_pattern: \ \ \ \ private\ Fido2CredentialRequest\ getFido2CredentialRequest\(\)\ \{
+    replace: "    private boolean isCurrentRequest(WebauthnRequestCallback expected) {\n        return !mClosed && mRequestCallback == expected;\n    }\n\n    private boolean beginGuardedRequest(WebauthnRequestCallback expected, boolean conditional) {\n        WebAuthenticationProxyBridge bridge = mRequestProxy;\n        if (bridge == null) return true;\n        mGuardedRequest = expected;\n        if (!bridge.startRequestGuard(conditional, () -> cancelForContextLoss(expected))) {\n            completeContextFailure(expected, AuthenticatorStatus.NOT_FOCUSED);\n            return false;\n        }\n        expected.setResponseValidator(\n                () -> isCurrentRequest(expected) && mRequestProxy == bridge\n                        && bridge.canCompleteRequest());\n        return true;\n    }\n\n    private void completeContextFailure(WebauthnRequestCallback expected, int status) {\n        expected.onComplete(expected.getCallbackType()\n                                == WebauthnRequestCallback.CallbackType.MAKE_CREDENTIAL\n                        ? WebauthnRequestResponse.forFailedMakeCredential(\n                                status, new RequestMetrics.Builder().build())\n                        : WebauthnRequestResponse.forFailedGetCredential(\n                                status, new RequestMetrics.Builder().build()));\n    }\n\n    private void cancelForContextLoss(WebauthnRequestCallback expected) {\n        if (!isCurrentRequest(expected)) return;\n        Fido2CredentialRequest pending = mPendingFido2CredentialRequest;\n        boolean confirmation = mAwaitingProxyConfirmation;\n        // Retire the old callback before canceling providers; cancellation can\n        // synchronously reply, and a later OS result must never target a new call.\n        cleanupRequest();\n        if (mRequestProxy != null) mRequestProxy.cancel();\n        if (confirmation && mCreateConfirmationUiDelegate != null) {\n            mCreateConfirmationUiDelegate.cancel();\n        }\n        if (pending != null) {\n            if (expected.getCallbackType() == WebauthnRequestCallback.CallbackType.GET_CREDENTIAL) {\n                pending.cancelGetAssertion();\n            }\n            pending.destroyBridge();\n        }\n        completeContextFailure(expected, AuthenticatorStatus.ABORT_ERROR);\n    }\n\n    private boolean beginRequestInteraction(WebauthnRequestCallback expected) {\n        if (!isCurrentRequest(expected)) return false;\n        return mGuardedRequest != expected || mRequestProxy == null\n                || mRequestProxy.beginRequestInteraction();\n    }\n\n    private AuthenticationContextProvider contextForRequest(\n            @Nullable WebauthnRequestCallback expected) {\n        return new AuthenticationContextProvider() {\n            @Override\n            public @Nullable Context getContext() { return mContext; }\n            @Override\n            public @Nullable RenderFrameHost getRenderFrameHost() { return mRenderFrameHost; }\n            @Override\n            public @Nullable WebContents getWebContents() { return mWebContents; }\n            @Override\n            public @Nullable WebauthnRequestCallback getRequestCallback() {\n                if (expected == null || !isCurrentRequest(expected)) return null;\n                if (mGuardedRequest == expected && mRequestProxy != null\n                        && !mRequestProxy.isRequestValid()) return null;\n                return expected;\n            }\n            @Override\n            public boolean shouldBlockUserInteraction() {\n                return expected != null && !beginRequestInteraction(expected);\n            }\n            @Override\n            public FidoIntentSender getIntentSender() {\n                FidoIntentSender sender = AuthenticatorImpl.this.getIntentSender();\n                return (PendingIntent intent, Callback<Pair<Integer, @Nullable Intent>> callback) -> {\n                    if (shouldBlockUserInteraction()) return false;\n                    return sender.showIntent(intent, result -> {\n                        if (expected == null || isCurrentRequest(expected)) callback.onResult(result);\n                    });\n                };\n            }\n        };\n    }\n\n    private Fido2CredentialRequest getFido2CredentialRequest() {\n        AuthenticationContextProvider provider = contextForRequest(mRequestCallback);"
+- description: Use request identity in the existing injected test provider too
+  regex:
+    re_pattern: sFido2CredentialRequestOverrideForTesting\.setAuthenticationContextProvider\(this\);
+    replace: sFido2CredentialRequestOverrideForTesting.setAuthenticationContextProvider(provider);
+- description: Never give late GMS or CredMan work a mutable replacement callback
+  regex:
+    re_pattern: new\ Fido2CredentialRequest\(this\);
+    replace: new Fido2CredentialRequest(provider);
+- description: Clean up only the request whose callback actually completed
+  regex:
+    re_pattern: mRequestCallback\.setCompletionCallback\(this::cleanupRequest\);
+    replace: mRequestCallback.setCompletionCallback(() -> cleanupRequest(requestCallback));
+  count: 3
+- description: Admit modal make credential only for the original active pane before confirmation
+  regex:
+    re_pattern: \ \ \ \ \ \ \ \ WebauthnRequestCallback\ confirmationRequest\ =\ mRequestCallback;
+    replace: "        if (!beginGuardedRequest(requestCallback, false)) return;\n        WebauthnRequestCallback confirmationRequest = mRequestCallback;"
+- description: Allow conditional waiting while guarding ordinary and proxied get request lifetime
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ WebauthnRequestCallback\ expected\ =\ mRequestCallback;\
+
+      \ \ \ \ \ \ \ \ if\ \(mRequestProxy\ !=\ null\ \&\&\ mPayment\ ==\ null'
+    replace: "        if (!beginGuardedRequest(requestCallback, options.mediation == Mediation.CONDITIONAL)) return;\n        WebauthnRequestCallback expected = mRequestCallback;\n        if (mRequestProxy != null && mPayment == null"
+- description: End generic request tracking when the incognito confirmation is cancelled
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ mRequestCallback\ =\ null;\
+
+      \ \ \ \ \ \ \ \ mAwaitingProxyConfirmation\ =\ false;\
+
+      \ \ \ \ \ \ \ \ if\ \(mRequestProxy\ !=\ null\)\ mRequestProxy\.clearConfirmation\(\);\
+
+      \ \ \ \ \ \ \ \ if\ \(mCreateConfirmationUiDelegate\ !=\ null\)\ mCreateConfirmationUiDelegate\.cancel\(\);\
+
+      \ \ \ \ \ \ \ \ expected\.onComplete'
+    replace: "        cleanupRequest(expected);\n        if (mCreateConfirmationUiDelegate != null) mCreateConfirmationUiDelegate.cancel();\n        expected.onComplete"
+- description: Release native request ownership on every ordinary or proxy completion
+  regex:
+    re_pattern: '\ \ \ \ private\ void\ cleanupRequest\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ mAwaitingProxyConfirmation\ =\ false;\
+
+      \ \ \ \ \ \ \ \ if\ \(mRequestProxy\ !=\ null\)\ mRequestProxy\.clearConfirmation\(\);\
+
+      \ \ \ \ \ \ \ \ mRequestCallback\ =\ null;\
+
+      \ \ \ \ \ \ \ \ mPendingFido2CredentialRequest\ =\ null;\
+
+      \ \ \ \ \}'
+    replace: "    private void cleanupRequest(WebauthnRequestCallback expected) {\n        if (mRequestCallback != expected) return;\n        // Provider cleanup is document-scoped. Finish it before admitting a new\n        // request in this document, and never lazily recreate a completed bridge.\n        if (mPendingFido2CredentialRequest != null) mPendingFido2CredentialRequest.destroyBridge();\n        cleanupRequest();\n    }\n\n    private void cleanupRequest() {\n        mAwaitingProxyConfirmation = false;\n        if (mRequestProxy != null) {\n            mRequestProxy.clearConfirmation();\n            if (mGuardedRequest != null) mRequestProxy.endRequestGuard();\n        }\n        mGuardedRequest = null;\n        mRequestCallback = null;\n        mPendingFido2CredentialRequest = null;\n    }"
+- description: Format changed Java with the pinned Chromium formatter
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ completeContextFailure\(expected,\ AuthenticatorStatus\.NOT_FOCUSED\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ return\ false;\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ expected\.setResponseValidator\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \(\)\ \->\ isCurrentRequest\(expected\)\ \&\&\ mRequestProxy\ ==\ bridge\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \&\&\ bridge\.canCompleteRequest\(\)\);\
+
+      \ \ \ \ \ \ \ \ return\ true;\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ private\ void\ completeContextFailure\(WebauthnRequestCallback\ expected,\ int\ status\)\ \{\
+
+      \ \ \ \ \ \ \ \ expected\.onComplete\(expected\.getCallbackType\(\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ ==\ WebauthnRequestCallback\.CallbackType\.MAKE_CREDENTIAL\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \?\ WebauthnRequestResponse\.forFailedMakeCredential\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ status,\ new\ RequestMetrics\.Builder\(\)\.build\(\)\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ :\ WebauthnRequestResponse\.forFailedGetCredential\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ status,\ new\ RequestMetrics\.Builder\(\)\.build\(\)\)\);\
+
+      '
+    replace: "            completeContextFailure(expected, AuthenticatorStatus.NOT_FOCUSED);\n            return false;\n        }\n        expected.setResponseValidator(\n                () ->\n                        isCurrentRequest(expected)\n                                && mRequestProxy == bridge\n                                && bridge.canCompleteRequest());\n        return true;\n    }\n\n    private void completeContextFailure(WebauthnRequestCallback expected, int status) {\n        expected.onComplete(\n                expected.getCallbackType() == WebauthnRequestCallback.CallbackType.MAKE_CREDENTIAL\n                        ? WebauthnRequestResponse.forFailedMakeCredential(\n                                status, new RequestMetrics.Builder().build())\n                        : WebauthnRequestResponse.forFailedGetCredential(\n                                status, new RequestMetrics.Builder().build()));\n"
+- description: Format changed Java with the pinned Chromium formatter
+  regex:
+    re_pattern: '\ \ \ \ \}\
+
+      \
+
+      \ \ \ \ private\ boolean\ beginRequestInteraction\(WebauthnRequestCallback\ expected\)\ \{\
+
+      \ \ \ \ \ \ \ \ if\ \(!isCurrentRequest\(expected\)\)\ return\ false;\
+
+      \ \ \ \ \ \ \ \ return\ mGuardedRequest\ !=\ expected\ \|\|\ mRequestProxy\ ==\ null\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \|\|\ mRequestProxy\.beginRequestInteraction\(\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ private\ AuthenticationContextProvider\ contextForRequest\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ @Nullable\ WebauthnRequestCallback\ expected\)\ \{\
+
+      \ \ \ \ \ \ \ \ return\ new\ AuthenticationContextProvider\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ @Override\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ public\ @Nullable\ Context\ getContext\(\)\ \{\ return\ mContext;\ \}\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ @Override\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ public\ @Nullable\ RenderFrameHost\ getRenderFrameHost\(\)\ \{\ return\ mRenderFrameHost;\ \}\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ @Override\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ public\ @Nullable\ WebContents\ getWebContents\(\)\ \{\ return\ mWebContents;\ \}\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ @Override\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ public\ @Nullable\ WebauthnRequestCallback\ getRequestCallback\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ if\ \(expected\ ==\ null\ \|\|\ !isCurrentRequest\(expected\)\)\ return\ null;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ if\ \(mGuardedRequest\ ==\ expected\ \&\&\ mRequestProxy\ !=\ null\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \&\&\ !mRequestProxy\.isRequestValid\(\)\)\ return\ null;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ return\ expected;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ @Override\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ public\ boolean\ shouldBlockUserInteraction\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ return\ expected\ !=\ null\ \&\&\ !beginRequestInteraction\(expected\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ @Override\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ public\ FidoIntentSender\ getIntentSender\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ FidoIntentSender\ sender\ =\ AuthenticatorImpl\.this\.getIntentSender\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ return\ \(PendingIntent\ intent,\ Callback<Pair<Integer,\ @Nullable\ Intent>>\ callback\)\ \->\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ if\ \(shouldBlockUserInteraction\(\)\)\ return\ false;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ return\ sender\.showIntent\(intent,\ result\ \->\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ if\ \(expected\ ==\ null\ \|\|\ isCurrentRequest\(expected\)\)\ callback\.onResult\(result\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \};\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \};\
+
+      \ \ \ \ \}\
+
+      '
+    replace: "    }\n\n    private boolean beginRequestInteraction(WebauthnRequestCallback expected) {\n        if (!isCurrentRequest(expected)) return false;\n        return mGuardedRequest != expected\n                || mRequestProxy == null\n                || mRequestProxy.beginRequestInteraction();\n    }\n\n    private AuthenticationContextProvider contextForRequest(\n            @Nullable WebauthnRequestCallback expected) {\n        return new AuthenticationContextProvider() {\n            @Override\n            public @Nullable Context getContext() {\n                return mContext;\n            }\n\n            @Override\n            public @Nullable RenderFrameHost getRenderFrameHost() {\n                return mRenderFrameHost;\n            }\n\n            @Override\n            public @Nullable WebContents getWebContents() {\n                return mWebContents;\n            }\n\n            @Override\n            public @Nullable WebauthnRequestCallback getRequestCallback() {\n                if (expected == null || !isCurrentRequest(expected)) return null;\n                if (mGuardedRequest == expected\n                        && mRequestProxy != null\n                        && !mRequestProxy.isRequestValid()) return null;\n                return expected;\n            }\n\n            @Override\n            public boolean shouldBlockUserInteraction() {\n                return expected != null && !beginRequestInteraction(expected);\n            }\n\n            @Override\n            public FidoIntentSender getIntentSender() {\n                FidoIntentSender sender = AuthenticatorImpl.this.getIntentSender();\n                return (PendingIntent intent,\n                        Callback<Pair<Integer, @Nullable Intent>> callback) -> {\n                    if (shouldBlockUserInteraction()) return false;\n                    return sender.showIntent(\n                            intent,\n                            result -> {\n                                if (expected == null || isCurrentRequest(expected))\n                                    callback.onResult(result);\n                            });\n                };\n            }\n        };\n    }\n"
+- description: Format changed Java with the pinned Chromium formatter
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ AuthenticatorStatus\.NOT_FOCUSED,\ new\ RequestMetrics\.Builder\(\)\.build\(\)\)\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ return;\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ if\ \(!beginGuardedRequest\(requestCallback,\ options\.mediation\ ==\ Mediation\.CONDITIONAL\)\)\ return;\
+
+      \ \ \ \ \ \ \ \ WebauthnRequestCallback\ expected\ =\ mRequestCallback;\
+
+      \ \ \ \ \ \ \ \ if\ \(mRequestProxy\ !=\ null\ \&\&\ mPayment\ ==\ null\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \&\&\ mRequestProxy\.getCredential\(options,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ response\ \->\ completeProxyRequest\(expected,\ response\)\)\)\ return;\
+
+      '
+    replace: "                            AuthenticatorStatus.NOT_FOCUSED, new RequestMetrics.Builder().build()));\n            return;\n        }\n\n        if (!beginGuardedRequest(requestCallback, options.mediation == Mediation.CONDITIONAL))\n            return;\n        WebauthnRequestCallback expected = mRequestCallback;\n        if (mRequestProxy != null && mPayment == null\n                && mRequestProxy.getCredential(options,\n                        response -> completeProxyRequest(expected, response))) return;\n"

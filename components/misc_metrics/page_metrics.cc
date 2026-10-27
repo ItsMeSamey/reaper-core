@@ -5,6 +5,8 @@
 
 #include "brave/components/misc_metrics/page_metrics.h"
 
+#include "brave/components/brave_rewards/core/buildflags/buildflags.h"
+
 #include <array>
 #include <string_view>
 #include <utility>
@@ -14,7 +16,9 @@
 #include "base/logging.h"
 #include "base/metrics/histogram_macros.h"
 #include "base/time/time.h"
+#if BUILDFLAG(ENABLE_BRAVE_REWARDS)
 #include "brave/components/brave_rewards/core/pref_names.h"
+#endif  // BUILDFLAG(ENABLE_BRAVE_REWARDS)
 #include "brave/components/brave_shields/core/browser/brave_shields_utils.h"
 #include "brave/components/misc_metrics/pref_names.h"
 #include "brave/components/p3a_utils/bucket.h"
@@ -130,6 +134,7 @@ PageMetrics::PageMetrics(PrefService* local_state,
                                 base::Unretained(this)));
   }
 
+#if BUILDFLAG(ENABLE_BRAVE_REWARDS)
   pref_change_registrar_.Init(profile_prefs_);
   pref_change_registrar_.Add(
       brave_rewards::prefs::kEnabled,
@@ -139,6 +144,7 @@ PageMetrics::PageMetrics(PrefService* local_state,
       brave_rewards::prefs::kExternalWalletType,
       base::BindRepeating(&PageMetrics::ReportPagesLoaded,
                           base::Unretained(this)));
+#endif  // BUILDFLAG(ENABLE_BRAVE_REWARDS)
 }
 
 PageMetrics::~PageMetrics() = default;
@@ -281,9 +287,9 @@ void PageMetrics::ReportPagesLoaded() {
   uint64_t pages_loaded_count = pages_loaded_storage_->GetWeeklySum();
   uint64_t pages_reloaded_count = pages_reloaded_storage_->GetWeeklySum();
 
-  // Report based on Rewards status
-  const char* pages_loaded_histogram_name = nullptr;
+  const char* pages_loaded_histogram_name = kPagesLoadedNonRewardsHistogramName;
 
+#if BUILDFLAG(ENABLE_BRAVE_REWARDS)
   if (profile_prefs_->GetBoolean(brave_rewards::prefs::kEnabled)) {
     if (profile_prefs_->GetString(brave_rewards::prefs::kExternalWalletType)
             .empty()) {
@@ -291,9 +297,8 @@ void PageMetrics::ReportPagesLoaded() {
     } else {
       pages_loaded_histogram_name = kPagesLoadedRewardsWalletHistogramName;
     }
-  } else {
-    pages_loaded_histogram_name = kPagesLoadedNonRewardsHistogramName;
   }
+#endif  // BUILDFLAG(ENABLE_BRAVE_REWARDS)
 
   for (const auto* histogram_name : kAllPagesLoadedHistogramNames) {
     if (pages_loaded_histogram_name == histogram_name) {

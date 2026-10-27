@@ -1,0 +1,94 @@
+diff --git a/extensions/browser/mime_handler/mime_handler_stream_manager_unittest.cc b/extensions/browser/mime_handler/mime_handler_stream_manager_unittest.cc
+--- a/extensions/browser/mime_handler/mime_handler_stream_manager_unittest.cc
++++ b/extensions/browser/mime_handler/mime_handler_stream_manager_unittest.cc
+@@ -8,6 +8,7 @@
+ 
+ #include "base/memory/weak_ptr.h"
+ #include "base/test/run_until.h"
++#include "build/build_config.h"
+ #include "components/keyed_service/content/browser_context_dependency_manager.h"
+ #include "content/public/browser/global_routing_id.h"
+ #include "content/public/browser/navigation_handle.h"
+@@ -30,6 +31,7 @@
+ #include "extensions/common/extension_builder.h"
+ #include "mojo/public/cpp/system/data_pipe.h"
+ #include "mojo/public/cpp/system/data_pipe_drainer.h"
++#include "net/base/net_errors.h"
+ #include "testing/gmock/include/gmock/gmock.h"
+ #include "testing/gtest/include/gtest/gtest.h"
+ #include "third_party/blink/public/mojom/loader/transferrable_url_loader.mojom.h"
+@@ -1145,9 +1147,15 @@
+ 
+   // `DidFinishNavigation` on the embedder FTN clears the mark --
+   // committed or errored, the re-fetch is over.
++#if BUILDFLAG(IS_ANDROID)
++  auto finish = content::NavigationSimulator::CreateFromPending(
++      web_contents()->GetController());
++  finish->Fail(net::ERR_ABORTED);
++#else
+   NiceMock<content::MockNavigationHandle> finish_handle(web_contents());
+   finish_handle.set_render_frame_host(embedder_host);
+   manager->DidFinishNavigation(&finish_handle);
++#endif
+   EXPECT_FALSE(manager->IsPendingNativeFallback(embedder_ftn, pdf_url));
+ }
+ 
+@@ -1542,4 +1550,58 @@
+   EXPECT_FALSE(mime_handler_stream_manager());
+ }
+ 
++#if BUILDFLAG(IS_ANDROID)
++TEST_F(MimeHandlerStreamManagerTest, AndroidFallbackRedirectAndCancellation) {
++  auto* embedder = NavigateAndCommit(main_rfh(), GURL(kOriginalUrl1));
++  SetUpSimpleStream(embedder, 1, false);
++  auto* manager = mime_handler_stream_manager();
++  manager->GetClaimedStreamInfoForTesting(embedder)
++      ->SetDidExtensionFinishNavigation();
++  const auto frame_id = embedder->GetFrameTreeNodeId();
++  manager->AbortAndFallbackToNativeHandler(embedder);
++  EXPECT_TRUE(manager->ShouldBypassForNativeFallback(frame_id));
++  EXPECT_FALSE(
++      manager->ShouldBypassForNativeFallback(content::FrameTreeNodeId()));
++
++  NiceMock<content::MockNavigationHandle> same_document(GURL(kOriginalUrl1),
++                                                        embedder);
++  same_document.set_is_same_document(true);
++  manager->DidStartNavigation(&same_document);
++  manager->DidFinishNavigation(&same_document);
++  EXPECT_TRUE(manager->ShouldBypassForNativeFallback(frame_id));
++
++  // A stale completion in the same frame must not consume this reload's mark.
++  NiceMock<content::MockNavigationHandle> stale(GURL(kOriginalUrl1), embedder);
++  manager->DidFinishNavigation(&stale);
++  EXPECT_TRUE(manager->ShouldBypassForNativeFallback(frame_id));
++
++  auto navigation = content::NavigationSimulator::CreateFromPending(
++      web_contents()->GetController());
++  navigation->Redirect(GURL(kOriginalUrl2));
++  EXPECT_TRUE(manager->ShouldBypassForNativeFallback(frame_id));
++  // Redirected responses are re-fetched, never served from a different URL's
++  // cache.
++  EXPECT_FALSE(manager->TakeCachedFallbackBody(frame_id, GURL(kOriginalUrl2)));
++  navigation->Fail(net::ERR_ABORTED);
++  task_environment()->RunUntilIdle();
++  EXPECT_FALSE(mime_handler_stream_manager());
++}
++
++TEST_F(MimeHandlerStreamManagerTest,
++       AndroidFallbackDoesNotClaimLaterNavigation) {
++  auto* embedder = NavigateAndCommit(main_rfh(), GURL(kOriginalUrl1));
++  SetUpSimpleStream(embedder, 1, false);
++  auto* manager = mime_handler_stream_manager();
++  manager->GetClaimedStreamInfoForTesting(embedder)
++      ->SetDidExtensionFinishNavigation();
++  const auto frame_id = embedder->GetFrameTreeNodeId();
++  manager->AbortAndFallbackToNativeHandler(embedder);
++  ASSERT_TRUE(manager->ShouldBypassForNativeFallback(frame_id));
++  NiceMock<content::MockNavigationHandle> later(GURL(kOriginalUrl2), embedder);
++  manager->DidStartNavigation(&later);
++  EXPECT_FALSE(manager->ShouldBypassForNativeFallback(frame_id));
++  EXPECT_TRUE(manager->GetStreamContainer(embedder));
++}
++#endif  // BUILDFLAG(IS_ANDROID)
++
+ }  // namespace extensions::mime_handler

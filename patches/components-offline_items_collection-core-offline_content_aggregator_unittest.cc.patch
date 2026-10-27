@@ -1,0 +1,189 @@
+diff --git a/components/offline_items_collection/core/offline_content_aggregator_unittest.cc b/components/offline_items_collection/core/offline_content_aggregator_unittest.cc
+index f12a578d23ed1da35499ffe2094a8da5bd3f12c2..5c6aee670c14a759442a9c986b034794edf690af 100644
+--- a/components/offline_items_collection/core/offline_content_aggregator_unittest.cc
++++ b/components/offline_items_collection/core/offline_content_aggregator_unittest.cc
+@@ -5,6 +5,8 @@
+ #include "components/offline_items_collection/core/offline_content_aggregator.h"
+ 
+ #include <map>
++#include <memory>
++#include <utility>
+ 
+ #include "base/functional/bind.h"
+ #include "base/task/single_thread_task_runner.h"
+@@ -93,6 +95,11 @@ class DelayedGetAllItemOfflineContentProvider
+     std::move(callback_).Run(items);
+   }
+ 
++#if BUILDFLAG(IS_ANDROID)
++  MultipleItemCallback TakeCallback() { return std::move(callback_); }
++  void UnregisterForTesting() { Unregister(); }
++#endif
++
+  private:
+   MultipleItemCallback callback_;
+ };
+@@ -382,6 +389,163 @@ TEST_F(OfflineContentAggregatorTest, SameProviderWithMultipleNamespaces) {
+   EXPECT_FALSE(provider.HasObserver(&aggregator_));
+ }
+ 
++#if BUILDFLAG(IS_ANDROID)
++TEST_F(OfflineContentAggregatorTest,
++       DestroyingLastPendingProviderCompletesQueuedQueries) {
++  ScopedMockOfflineContentProvider provider1("1", &aggregator_);
++  auto provider2 = std::make_unique<DelayedGetAllItemOfflineContentProvider>(
++      "2", &aggregator_);
++  const OfflineContentProvider::OfflineItemList items = {
++      OfflineItem(ContentId("1", "A"))};
++  provider1.SetItems(items);
++
++  int completions = 0;
++  auto on_items = [&](const OfflineContentProvider::OfflineItemList& actual) {
++    EXPECT_EQ(items, actual);
++    ++completions;
++  };
++  aggregator_.GetAllItems(base::BindLambdaForTesting(on_items));
++  aggregator_.GetAllItems(base::BindLambdaForTesting(on_items));
++  task_runner_->RunUntilIdle();
++  EXPECT_EQ(0, completions);
++
++  provider2.reset();
++  EXPECT_EQ(0, completions);  // Unregistration must not respond synchronously.
++  task_runner_->RunUntilIdle();
++  EXPECT_EQ(2, completions);
++
++  aggregator_.GetAllItems(base::BindLambdaForTesting(on_items));
++  task_runner_->RunUntilIdle();
++  EXPECT_EQ(3, completions);
++}
++
++TEST_F(OfflineContentAggregatorTest,
++       ItemRemovedAfterFinalUnregisterBeforeQueuedCompletion) {
++  ScopedMockOfflineContentProvider provider1("1", &aggregator_);
++  auto provider2 = std::make_unique<DelayedGetAllItemOfflineContentProvider>(
++      "2", &aggregator_);
++  const ContentId id("1", "A");
++  provider1.SetItems({OfflineItem(id)});
++  int completions = 0;
++  aggregator_.GetAllItems(base::BindLambdaForTesting(
++      [&](const OfflineContentProvider::OfflineItemList& items) {
++        EXPECT_TRUE(items.empty());
++        ++completions;
++      }));
++  task_runner_->RunUntilIdle();
++  EXPECT_EQ(0, completions);
++
++  provider2.reset();
++  provider1.NotifyOnItemRemoved(id);
++  EXPECT_EQ(0, completions);
++  task_runner_->RunUntilIdle();
++  EXPECT_EQ(1, completions);
++}
++
++TEST_F(OfflineContentAggregatorTest,
++       ItemUpdatedAfterFinalUnregisterBeforeQueuedCompletion) {
++  ScopedMockOfflineContentProvider provider1("1", &aggregator_);
++  auto provider2 = std::make_unique<DelayedGetAllItemOfflineContentProvider>(
++      "2", &aggregator_);
++  OfflineItem item(ContentId("1", "A"));
++  item.title = "before";
++  provider1.SetItems({item});
++  int completions = 0;
++  aggregator_.GetAllItems(base::BindLambdaForTesting(
++      [&](const OfflineContentProvider::OfflineItemList& items) {
++        ASSERT_EQ(1u, items.size());
++        EXPECT_EQ("after", items[0].title);
++        ++completions;
++      }));
++  task_runner_->RunUntilIdle();
++  EXPECT_EQ(0, completions);
++
++  provider2.reset();
++  item.title = "after";
++  provider1.NotifyOnItemUpdated(item, std::nullopt);
++  EXPECT_EQ(0, completions);
++  task_runner_->RunUntilIdle();
++  EXPECT_EQ(1, completions);
++}
++
++TEST_F(OfflineContentAggregatorTest,
++       RemovedProviderReplyDoesNotCompleteAnotherPendingProvider) {
++  DelayedGetAllItemOfflineContentProvider removed("1", &aggregator_);
++  DelayedGetAllItemOfflineContentProvider remaining("2", &aggregator_);
++  const OfflineContentProvider::OfflineItemList items = {
++      OfflineItem(ContentId("2", "B"))};
++  int completions = 0;
++  aggregator_.GetAllItems(base::BindLambdaForTesting(
++      [&](const OfflineContentProvider::OfflineItemList& actual) {
++        EXPECT_EQ(items, actual);
++        ++completions;
++      }));
++
++  removed.UnregisterForTesting();
++  removed.RunCallback({OfflineItem(ContentId("1", "removed"))});
++  task_runner_->RunUntilIdle();
++  EXPECT_EQ(0, completions);
++  remaining.RunCallback(items);
++  EXPECT_EQ(1, completions);
++}
++
++TEST_F(OfflineContentAggregatorTest,
++       RemovedProviderOldReplyCannotCompleteReregisteredProviderQuery) {
++  DelayedGetAllItemOfflineContentProvider provider("1", &aggregator_);
++  int completions = 0;
++  aggregator_.GetAllItems(base::BindLambdaForTesting(
++      [&](const OfflineContentProvider::OfflineItemList& items) {
++        EXPECT_TRUE(items.empty());
++        ++completions;
++      }));
++  auto old_callback = provider.TakeCallback();
++  provider.UnregisterForTesting();
++  task_runner_->RunUntilIdle();
++  EXPECT_EQ(1, completions);
++
++  aggregator_.RegisterProvider("1", &provider);
++  const OfflineContentProvider::OfflineItemList current = {
++      OfflineItem(ContentId("1", "current"))};
++  aggregator_.GetAllItems(base::BindLambdaForTesting(
++      [&](const OfflineContentProvider::OfflineItemList& items) {
++        EXPECT_EQ(current, items);
++        ++completions;
++      }));
++  std::move(old_callback).Run({OfflineItem(ContentId("1", "stale"))});
++  task_runner_->RunUntilIdle();
++  EXPECT_EQ(1, completions);
++  provider.RunCallback(current);
++  EXPECT_EQ(2, completions);
++  aggregator_.UnregisterProvider("1");
++}
++
++TEST_F(OfflineContentAggregatorTest,
++       RemovingOneNamespaceKeepsSharedProviderPending) {
++  DelayedGetAllItemOfflineContentProvider shared("1", &aggregator_);
++  DelayedGetAllItemOfflineContentProvider other("2", &aggregator_);
++  aggregator_.RegisterProvider("alias", &shared);
++  const OfflineContentProvider::OfflineItemList shared_items = {
++      OfflineItem(ContentId("1", "A"))};
++  const OfflineContentProvider::OfflineItemList other_items = {
++      OfflineItem(ContentId("2", "B"))};
++  const OfflineContentProvider::OfflineItemList expected = {other_items[0],
++                                                          shared_items[0]};
++  int completions = 0;
++  aggregator_.GetAllItems(base::BindLambdaForTesting(
++      [&](const OfflineContentProvider::OfflineItemList& items) {
++        EXPECT_EQ(expected, items);
++        ++completions;
++      }));
++
++  aggregator_.UnregisterProvider("alias");
++  other.RunCallback(other_items);
++  task_runner_->RunUntilIdle();
++  EXPECT_EQ(0, completions);
++  shared.RunCallback(shared_items);
++  EXPECT_EQ(1, completions);
++}
++#endif  // BUILDFLAG(IS_ANDROID)
++
+ // Tests that if the aggregator is in the mid of GetAllItems() call and is
+ // waiting from multiple providers, it will remove deleted items from its
+ // response when notified.

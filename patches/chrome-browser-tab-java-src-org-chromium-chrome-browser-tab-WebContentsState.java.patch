@@ -1,0 +1,113 @@
+diff --git a/chrome/browser/tab/java/src/org/chromium/chrome/browser/tab/WebContentsState.java b/chrome/browser/tab/java/src/org/chromium/chrome/browser/tab/WebContentsState.java
+--- a/chrome/browser/tab/java/src/org/chromium/chrome/browser/tab/WebContentsState.java
++++ b/chrome/browser/tab/java/src/org/chromium/chrome/browser/tab/WebContentsState.java
+@@ -175,6 +175,8 @@
+     // Cached metadata extracted from the buffer. Access is restricted to the UI thread.
+     private @Nullable WebContentsStateMetadata mMetadata;
+     private boolean mMetadataLoaded;
++    private @Nullable WebContentsStateMetadata mLastCommittedMetadata;
++    private boolean mLastCommittedMetadataLoaded;
+     private PackedData mPackedData;
+     private boolean mIsDestroyed;
+
+@@ -267,6 +269,10 @@
+             mMetadata = other.mMetadata;
+             mMetadataLoaded = true;
+         }
++        if (other.mLastCommittedMetadataLoaded) {
++            mLastCommittedMetadata = other.mLastCommittedMetadata;
++            mLastCommittedMetadataLoaded = true;
++        }
+     }
+
+     /** Destroys the {@link WebContentsState}. */
+@@ -315,6 +321,22 @@
+         return mMetadata;
+     }
+
++    /** Returns whether the current serialized entry is a deferred navigation. */
++    public boolean hasPendingNavigation() {
++        return mPackedData.lastEntryWasPending();
++    }
++
++    /** Returns committed metadata without inflating a deferred serialized navigation. */
++    public @Nullable WebContentsStateMetadata getLastCommittedMetadata() {
++        if (!hasPendingNavigation()) return getMetadata();
++        if (!mLastCommittedMetadataLoaded && version() != INVALID_BUFFER_VERSION) {
++            mLastCommittedMetadata = WebContentsStateJni.get().getLastCommittedMetadata(
++                    buffer(), version());
++            mLastCommittedMetadataLoaded = true;
++        }
++        return mLastCommittedMetadata;
++    }
++
+     /** Returns the title currently being displayed in the saved state's current entry. */
+     public @Nullable String getDisplayTitleFromState() {
+         WebContentsStateMetadata metadata = getMetadata();
+@@ -363,6 +385,25 @@
+             Profile profile, boolean isHidden, boolean noRenderer) {
+         return WebContentsStateJni.get()
+                 .restoreContentsFromByteBuffer(profile, buffer(), version(), isHidden, noRenderer);
++    }
++
++    /** Parse persisted partition keys without creating or retagging WebContents. */
++    public String @Nullable [] getSerializedContainerIds() {
++        return WebContentsStateJni.get().getSerializedContainerIds(buffer(), version());
++    }
++
++    /** Distinguishes a readable conflicting jar from ordinary corrupt navigation data. */
++    public boolean hasContainerIdentityConflict(Profile profile, String containerId) {
++        return WebContentsStateJni.get().hasContainerIdentityConflict(
++                profile, buffer(), version(), containerId);
++    }
++
++    /** Restores contents only in the tab's pre-admitted immutable partition. */
++    public @Nullable WebContents restoreWebContents(
++            Profile profile, boolean isHidden, boolean noRenderer, String containerId) {
++        return WebContentsStateJni.get()
++                .restoreContentsFromByteBufferForContainer(
++                        profile, buffer(), version(), isHidden, noRenderer, containerId);
+     }
+
+     /**
+@@ -426,6 +467,8 @@
+                         /* nativeStringPointer= */ 0);
+         mMetadata = null;
+         mMetadataLoaded = false;
++        mLastCommittedMetadata = null;
++        mLastCommittedMetadataLoaded = false;
+         return true;
+     }
+
+@@ -438,6 +481,22 @@
+     @NativeMethods
+     @VisibleForTesting(otherwise = VisibleForTesting.PACKAGE_PRIVATE)
+     public interface Natives {
++        String @Nullable [] getSerializedContainerIds(ByteBuffer buffer, int savedStateVersion);
++
++        boolean hasContainerIdentityConflict(
++                @JniType("Profile*") Profile profile, ByteBuffer buffer,
++                int savedStateVersion, @JniType("std::string") String containerId);
++
++        @Nullable
++        @JniType("content::WebContents*")
++        WebContents restoreContentsFromByteBufferForContainer(
++                @JniType("Profile*") Profile profile,
++                ByteBuffer buffer,
++                int savedStateVersion,
++                boolean isHidden,
++                boolean noRenderer,
++                @JniType("std::string") String containerId);
++
+         @Nullable
+         @JniType("content::WebContents*")
+         WebContents restoreContentsFromByteBuffer(
+@@ -474,6 +533,8 @@
+
+         @Nullable WebContentsStateMetadata getMetadata(ByteBuffer buffer, int version);
+
++        @Nullable WebContentsStateMetadata getLastCommittedMetadata(ByteBuffer buffer, int version);
++
+         void freeStringPointer(long stringPointer);
+     }
+ }

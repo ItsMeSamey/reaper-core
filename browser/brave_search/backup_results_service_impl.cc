@@ -3,6 +3,8 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at https://mozilla.org/MPL/2.0/.
 
+#include "build/build_config.h"
+
 #include "brave/browser/brave_search/backup_results_service_impl.h"
 
 #include <algorithm>
@@ -164,8 +166,11 @@ WEB_CONTENTS_USER_DATA_KEY_IMPL(BackupResultsWebContentsObserver);
 
 BackupResultsServiceImpl::BackupResultsServiceImpl(Profile* profile)
     : profile_(profile),
-      local_state_(g_browser_process->local_state()),
-      backup_results_metrics_(local_state_) {
+      local_state_(g_browser_process->local_state())
+#if !BUILDFLAG(IS_ANDROID)
+      , backup_results_metrics_(local_state_)
+#endif  // !BUILDFLAG(IS_ANDROID)
+{
   profile_->AddObserver(this);
 }
 BackupResultsServiceImpl::~BackupResultsServiceImpl() = default;
@@ -181,7 +186,9 @@ void BackupResultsServiceImpl::RegisterLocalStatePrefs(
   registry->RegisterIntegerPref(prefs::kBackupResultsLastWindowHeight, 0);
   registry->RegisterIntegerPref(prefs::kBackupResultsDailyRequestCount, 0);
   registry->RegisterTimePref(prefs::kBackupResultsDailyRequestWindowStart, {});
+#if !BUILDFLAG(IS_ANDROID)
   BackupResultsMetrics::RegisterPrefs(registry);
+#endif  // !BUILDFLAG(IS_ANDROID)
 }
 
 // static
@@ -672,7 +679,9 @@ void BackupResultsServiceImpl::CleanupAndDispatchResult(
     PendingRequestList::iterator pending_request,
     std::optional<BackupResults> result) {
   // Track query result (failure if result is nullopt, success otherwise)
+#if !BUILDFLAG(IS_ANDROID)
   backup_results_metrics_.RecordQuery(!result);
+#endif  // !BUILDFLAG(IS_ANDROID)
 
   std::move(pending_request->callback).Run(result);
   pending_requests_.erase(pending_request);

@@ -1,0 +1,291 @@
+diff --git a/chrome/browser/extensions/extension_service_unittest.cc b/chrome/browser/extensions/extension_service_unittest.cc
+index 53f2e74ea68670674490db6614743c47fd9d323a..25c09b1512557aa0c472152cc194bb96c72edaee 100644
+--- a/chrome/browser/extensions/extension_service_unittest.cc
++++ b/chrome/browser/extensions/extension_service_unittest.cc
+@@ -194,6 +194,18 @@
+ #include "content/public/browser/plugin_service.h"
+ #endif
+ 
++#if BUILDFLAG(IS_ANDROID)
++#include "base/scoped_observation.h"
++#include "chrome/browser/extensions/forced_extensions/install_stage_tracker_factory.h"
++#include "chrome/browser/extensions/install_tracker_factory.h"
++#include "extensions/browser/delayed_install_manager.h"
++#include "extensions/browser/forced_extensions/install_stage_tracker.h"
++#include "extensions/browser/install/crx_install_error.h"
++#include "extensions/browser/install_observer.h"
++#include "extensions/browser/install_stage.h"
++#include "extensions/browser/install_tracker.h"
++#endif
++
+ static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
+ 
+ // The blocklist tests rely on the safe-browsing database.
+@@ -1631,6 +1643,267 @@ TEST_F(ExtensionServiceTest, FailOnWrongVersion) {
+   ASSERT_TRUE(registry()->enabled_extensions().GetByID(kGoodCrx));
+ }
+ 
++#if BUILDFLAG(IS_ANDROID)
++namespace {
++
++// Intervene after the installed-ID lookup using the real install notification,
++// before the installer posts its unpack work. Move the action before running it
++// so a nested same-ID reinstall does not invoke it again.
++class InstalledUpdateBeginAction : public InstallObserver {
++ public:
++  InstalledUpdateBeginAction(InstallTracker* tracker,
++                             ExtensionId id,
++                             base::OnceClosure action)
++      : id_(std::move(id)), action_(std::move(action)) {
++    observation_.Observe(tracker);
++  }
++
++  void OnBeginCrxInstall(content::BrowserContext* context,
++                         const ExtensionId& id) override {
++    if (id == id_ && action_) {
++      std::move(action_).Run();
++    }
++  }
++
++ private:
++  const ExtensionId id_;
++  base::OnceClosure action_;
++  base::ScopedObservation<InstallTracker, InstallObserver> observation_{this};
++};
++
++// The finalizing notification is synchronous inside ConfirmInstall. Posting
++// the action lets its pre-assets check and file task scheduling finish first;
++// this UI task is ahead of the file task's later ReportSuccessFromUIThread.
++class InstalledUpdateFinalizingAction : public InstallStageTracker::Observer {
++ public:
++  InstalledUpdateFinalizingAction(InstallStageTracker* tracker,
++                                  ExtensionId id,
++                                  base::OnceClosure action)
++      : id_(std::move(id)), action_(std::move(action)) {
++    observation_.Observe(tracker);
++  }
++
++  void OnExtensionDataChangedForTesting(
++      const ExtensionId& id,
++      const content::BrowserContext* context,
++      const InstallStageTracker::InstallationData& data) override {
++    if (id == id_ && action_ &&
++        data.installation_stage == InstallationStage::kFinalizing) {
++      base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
++          FROM_HERE, std::move(action_));
++    }
++  }
++
++ private:
++  const ExtensionId id_;
++  base::OnceClosure action_;
++  base::ScopedObservation<InstallStageTracker, InstallStageTracker::Observer>
++      observation_{this};
++};
++
++}  // namespace
++
++class AndroidInstalledUpdateLifetimeTest : public ExtensionServiceTest {
++ protected:
++  void SetUp() override {
++    ExtensionServiceTest::SetUp();
++    InitializeEmptyExtensionService();
++    const Extension* installed =
++        InstallCRX(data_dir().AppendASCII("good.crx"), INSTALL_NEW);
++    ASSERT_TRUE(installed);
++    public_key_ = installed->public_key();
++    ASSERT_TRUE(update_root_.CreateUniqueTempDir());
++    update_dir_ = update_root_.GetPath().AppendASCII("update");
++    ASSERT_TRUE(base::CopyDirectory(installed->path(), update_dir_, true));
++    std::string error;
++    auto manifest = file_util::LoadManifest(update_dir_, &error);
++    ASSERT_TRUE(manifest) << error;
++    manifest->Set("version", "1.0.0.1");
++    JSONFileValueSerializer serializer(update_dir_.Append(kManifestFilename));
++    ASSERT_TRUE(serializer.Serialize(base::Value(std::move(*manifest))));
++  }
++
++  void TearDown() override {
++    // There is no held production callback or blocked task to release on an
++    // assertion failure. Drain before removing the installer's observation.
++    task_environment()->RunUntilIdle();
++    installer_.reset();
++    ExtensionServiceTest::TearDown();
++  }
++
++  void AddResultCallback() {
++    installer_->AddInstallerCallback(base::BindOnce(
++        [](std::shared_ptr<int> calls,
++           CrxInstaller::InstallerResultCallback done,
++           const std::optional<CrxInstallError>& error) {
++          ++*calls;
++          std::move(done).Run(error);
++        },
++        completions_,
++        result_.GetCallback<const std::optional<CrxInstallError>&>()));
++  }
++
++  void StartUnpackedUpdate() {
++    installer_ = CrxInstaller::CreateSilent(profile());
++    installer_->set_delete_source(true);
++    // Exercise the commit boundary without waiting for the idle update gate.
++    installer_->set_install_immediately(true);
++    AddResultCallback();
++    installer_->UpdateExtensionFromUnpackedCrx(kGoodCrx, public_key_,
++                                               update_dir_);
++  }
++
++  void ExpectUninstalledFailure() {
++    ASSERT_TRUE(result_.Wait());
++    const auto& error = result_.Get();
++    ASSERT_TRUE(error);
++    EXPECT_EQ(CrxInstallErrorType::OTHER, error->type());
++    EXPECT_EQ(CrxInstallErrorDetail::UPDATE_NON_EXISTING_EXTENSION,
++              error->detail());
++    task_environment()->RunUntilIdle();
++    EXPECT_EQ(1, *completions_);
++    EXPECT_FALSE(registry()->GetInstalledExtension(kGoodCrx));
++    EXPECT_FALSE(prefs()->GetInstalledExtensionInfo(kGoodCrx));
++    EXPECT_FALSE(prefs()->GetGrantedPermissions(kGoodCrx));
++    EXPECT_FALSE(
++        DelayedInstallManager::Get(profile())->GetPendingExtensionUpdate(
++            kGoodCrx));
++    EXPECT_FALSE(base::PathExists(update_dir_));
++  }
++
++  InstallTracker* tracker() {
++    return InstallTrackerFactory::GetForBrowserContext(profile());
++  }
++
++  base::ScopedTempDir update_root_;
++  base::FilePath update_dir_;
++  std::string public_key_;
++  scoped_refptr<CrxInstaller> installer_;
++  std::shared_ptr<int> completions_ = std::make_shared<int>(0);
++  base::test::TestFuture<std::optional<CrxInstallError>> result_;
++};
++
++TEST_F(AndroidInstalledUpdateLifetimeTest,
++       UninstallAtBeginRejectsUnpackedUpdate) {
++  InstalledUpdateBeginAction action(
++      tracker(), kGoodCrx,
++      base::BindLambdaForTesting([&] { UninstallExtension(kGoodCrx); }));
++  StartUnpackedUpdate();
++  ExpectUninstalledFailure();
++}
++
++TEST_F(AndroidInstalledUpdateLifetimeTest, UninstallAtBeginRejectsCrxUpdate) {
++  const base::FilePath crx_path =
++      temp_dir().GetPath().AppendASCII("update.crx");
++  ASSERT_TRUE(base::CopyFile(data_dir().AppendASCII("good2.crx"), crx_path));
++  CRXFileInfo crx_info(crx_path, GetTestVerifierFormat());
++  crx_info.extension_id = kGoodCrx;
++  ExtensionUpdater updater(profile());
++  updater.InitAndEnable(prefs(), prefs()->pref_service(), base::Minutes(10),
++                        nullptr, ExtensionDownloader::Factory());
++  installer_ = updater.CreateUpdateInstaller(crx_info, true);
++  ASSERT_TRUE(installer_);
++  installer_->set_install_immediately(true);
++  AddResultCallback();
++  InstalledUpdateBeginAction action(
++      tracker(), kGoodCrx,
++      base::BindLambdaForTesting([&] { UninstallExtension(kGoodCrx); }));
++  installer_->InstallCrxFile(crx_info);
++  ASSERT_TRUE(result_.Wait());
++  ASSERT_TRUE(result_.Get());
++  EXPECT_EQ(CrxInstallErrorDetail::UPDATE_NON_EXISTING_EXTENSION,
++            result_.Get()->detail());
++  task_environment()->RunUntilIdle();
++  EXPECT_EQ(1, *completions_);
++  EXPECT_FALSE(registry()->GetInstalledExtension(kGoodCrx));
++  EXPECT_FALSE(prefs()->GetInstalledExtensionInfo(kGoodCrx));
++  EXPECT_FALSE(DelayedInstallManager::Get(profile())->GetPendingExtensionUpdate(
++      kGoodCrx));
++  EXPECT_FALSE(base::PathExists(crx_path));
++}
++
++TEST_F(AndroidInstalledUpdateLifetimeTest,
++       UninstallAfterPreAssetsCheckRejectsCommit) {
++  auto uninstalled_after_finalizing = std::make_shared<bool>(false);
++  InstalledUpdateFinalizingAction action(
++      InstallStageTrackerFactory::GetForBrowserContext(profile()), kGoodCrx,
++      base::BindLambdaForTesting([this, uninstalled_after_finalizing] {
++        *uninstalled_after_finalizing = true;
++        EXPECT_TRUE(registrar()->UninstallExtension(
++            kGoodCrx, UNINSTALL_REASON_FOR_TESTING, nullptr));
++      }));
++  StartUnpackedUpdate();
++  ExpectUninstalledFailure();
++  EXPECT_TRUE(*uninstalled_after_finalizing);
++}
++
++TEST_F(AndroidInstalledUpdateLifetimeTest,
++       ReinstallDoesNotRevivePendingUpdate) {
++  base::FilePath replacement_path;
++  scoped_refptr<const Extension> replacement;
++  InstalledUpdateBeginAction action(
++      tracker(), kGoodCrx, base::BindLambdaForTesting([&] {
++        UninstallExtension(kGoodCrx);
++        replacement =
++            InstallCRX(data_dir().AppendASCII("good2.crx"), INSTALL_NEW);
++        ASSERT_TRUE(replacement);
++        replacement_path = replacement->path();
++      }));
++  StartUnpackedUpdate();
++  ASSERT_TRUE(result_.Wait());
++  ASSERT_TRUE(result_.Get());
++  EXPECT_EQ(CrxInstallErrorDetail::UPDATE_NON_EXISTING_EXTENSION,
++            result_.Get()->detail());
++  task_environment()->RunUntilIdle();
++  EXPECT_EQ(1, *completions_);
++  ASSERT_TRUE(replacement);
++  EXPECT_EQ(replacement.get(), registry()->GetInstalledExtension(kGoodCrx));
++  EXPECT_EQ("1.0.0.1", replacement->VersionString());
++  EXPECT_TRUE(prefs()->GetInstalledExtensionInfo(kGoodCrx));
++  EXPECT_TRUE(base::PathExists(replacement_path.Append(kManifestFilename)));
++  EXPECT_FALSE(base::PathExists(update_dir_));
++}
++
++TEST_F(AndroidInstalledUpdateLifetimeTest,
++       DisableDoesNotCancelInstalledUpdate) {
++  InstalledUpdateBeginAction action(
++      tracker(), kGoodCrx, base::BindLambdaForTesting([&] {
++        registrar()->DisableExtension(kGoodCrx,
++                                      {disable_reason::DISABLE_USER_ACTION});
++      }));
++  StartUnpackedUpdate();
++  ASSERT_TRUE(result_.Wait());
++  EXPECT_FALSE(result_.Get());
++  task_environment()->RunUntilIdle();
++  EXPECT_EQ(1, *completions_);
++  const Extension* updated =
++      registry()->disabled_extensions().GetByID(kGoodCrx);
++  ASSERT_TRUE(updated);
++  EXPECT_EQ("1.0.0.1", updated->VersionString());
++  EXPECT_TRUE(
++      prefs()->HasDisableReason(kGoodCrx, disable_reason::DISABLE_USER_ACTION));
++  EXPECT_FALSE(base::PathExists(update_dir_));
++}
++
++TEST_F(AndroidInstalledUpdateLifetimeTest, ReloadDoesNotCancelInstalledUpdate) {
++  InstalledUpdateBeginAction action(
++      tracker(), kGoodCrx, base::BindLambdaForTesting([&] {
++        TestExtensionRegistryObserver observer(registry(), kGoodCrx);
++        registrar()->ReloadExtension(kGoodCrx);
++        EXPECT_TRUE(observer.WaitForExtensionLoaded());
++      }));
++  StartUnpackedUpdate();
++  ASSERT_TRUE(result_.Wait());
++  EXPECT_FALSE(result_.Get());
++  task_environment()->RunUntilIdle();
++  EXPECT_EQ(1, *completions_);
++  const Extension* updated = registry()->enabled_extensions().GetByID(kGoodCrx);
++  ASSERT_TRUE(updated);
++  EXPECT_EQ("1.0.0.1", updated->VersionString());
++  EXPECT_FALSE(base::PathExists(update_dir_));
++}
++#endif  // BUILDFLAG(IS_ANDROID)
++
+ // Extensions don't install during shutdown.
+ TEST_F(ExtensionServiceTest, InstallExtensionDuringShutdown) {
+   InitializeEmptyExtensionService();

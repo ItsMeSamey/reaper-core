@@ -6,6 +6,8 @@
 #ifndef BRAVE_COMPONENTS_REQUEST_OTR_BROWSER_REQUEST_OTR_BLOCKING_PAGE_H_
 #define BRAVE_COMPONENTS_REQUEST_OTR_BROWSER_REQUEST_OTR_BLOCKING_PAGE_H_
 
+#include "build/build_config.h"
+
 #include <memory>
 #include <string>
 
@@ -63,8 +65,12 @@ class RequestOTRBlockingPage
   int GetHTMLTemplateId() override;
 
  private:
+#if !BUILDFLAG(IS_ANDROID)
   base::Time start_time_;
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
   raw_ptr<PrefService> profile_prefs_;
+#endif  // !BUILDFLAG(IS_ANDROID)
 };
 
 }  // namespace request_otr

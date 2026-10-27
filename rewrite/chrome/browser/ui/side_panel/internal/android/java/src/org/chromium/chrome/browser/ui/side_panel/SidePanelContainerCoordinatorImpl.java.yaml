@@ -1,0 +1,232 @@
+# Android extension side panel presentation and profile ownership.
+substitutions:
+  - description: Use Android window and dialog state for the independent phone overlay.
+    regex:
+      pattern: "import org.chromium.ui.base.ActivityWindowAndroid;"
+      replace: |2-
+        import org.chromium.ui.base.ActivityWindowAndroid;
+        import org.chromium.ui.base.DeviceFormFactor;
+  - description: Keep overlay presentation separate from the docked SideUiContainer view.
+    regex:
+      pattern: "    private final LinearLayout mContainerView;"
+      replace: |2-
+            private final LinearLayout mContainerView;
+            private final ActivityWindowAndroid mWindowAndroid;
+            private final boolean mIsPhone;
+            private @Nullable LinearLayout mOverlayContainerView;
+            private @Nullable ExtensionSidePanelOverlay mExtensionOverlay;
+            private @Nullable SidePanelCoordinatorAndroidBridge mOverlayOwner;
+            private int mOverlayWidth;
+  - description: Remember the activity without changing the docked container contract.
+    regex:
+      pattern: "        var activity = assertNonNull(windowAndroid.getActivity().get());\n        mContainerView ="
+      replace: |2-
+                var activity = assertNonNull(windowAndroid.getActivity().get());
+                mWindowAndroid = windowAndroid;
+                mIsPhone = !DeviceFormFactor.isNonMultiDisplayContextOnTablet(activity);
+                mContainerView =
+  - description: Allow only extension entries to fall back to a real Android modal host.
+    regex:
+      pattern: "    boolean canShow() {\n        ThreadUtils.assertOnUiThread();\n        boolean canShow = mSideUiCoordinator.canShowSideUi(SideUiId.SIDE_PANEL);"
+      replace: |2-
+            boolean canShow() {
+                return canShow(/* isExtension= */ false);
+            }
+
+            boolean canShow(boolean isExtension) {
+                ThreadUtils.assertOnUiThread();
+                boolean canShow = mSideUiCoordinator.canShowSideUi(SideUiId.SIDE_PANEL)
+                        || (isExtension && mWindowAndroid.getModalDialogManager() != null);
+  - description: Create a separate full-screen container for phone extension panels.
+    regex:
+      pattern: "        mCurrentContent = content;\n        ViewGroup contentContainer = getContentContainer();"
+      replace: |2-
+                if (content.mIsExtension
+                        && (mIsPhone || !mSideUiCoordinator.canShowSideUi(SideUiId.SIDE_PANEL))) {
+                    mOverlayContainerView =
+                            (LinearLayout) LayoutInflater.from(mContainerView.getContext())
+                                    .inflate(R.layout.side_panel_container, /* root= */ null);
+                    mOverlayContainerView.setLayoutParams(
+                            new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
+                    mOverlayOwner = assertNonNull(mNativeBridgeSelector.getCurrentCoordinatorBridge());
+                    var owner = assertNonNull(mOverlayOwner);
+                    mExtensionOverlay =
+                            new ExtensionSidePanelOverlay(
+                                    assertNonNull(mWindowAndroid.getModalDialogManager()),
+                                    mOverlayContainerView,
+                                    () -> owner.closePanel(/* suppressAnimations= */ true));
+                }
+                mCurrentContent = content;
+                ViewGroup contentContainer = getContentContainer();
+  - description: Complete native opening through the overlay without changing webpage insets.
+    regex:
+      pattern: "        assert !mIsPreparingForAutoClose;\n        if (!mIsPreparingForAutoRestore) {"
+      replace: |2-
+                if (mExtensionOverlay != null) {
+                    mOverlayWidth = Math.max(1, mContainerView.getResources().getDisplayMetrics().widthPixels);
+                    var overlay = mExtensionOverlay;
+                    assertNonNull(mOverlayOwner).onPanelContainerUpdated(0, mOverlayWidth);
+                    // Native caches this entry's view after returning from startOpeningPanel().
+                    // Present on the next UI turn so a synchronous dialog failure cannot close
+                    // and destroy an entry whose view has not been cached yet.
+                    mContainerView.post(() -> {
+                        if (mExtensionOverlay == overlay) overlay.show();
+                    });
+                    return;
+                }
+                assert !mIsPreparingForAutoClose;
+                if (!mIsPreparingForAutoRestore) {
+  - description: Complete native closing and detach the overlay content.
+    regex:
+      pattern: "        assert !mIsPreparingForAutoRestore;\n        if (!mIsPreparingForAutoClose) {"
+      replace: |2-
+                if (mExtensionOverlay != null) {
+                    closeExtensionOverlay(/* notifyNative= */ true);
+                    return;
+                }
+                assert !mIsPreparingForAutoRestore;
+                if (!mIsPreparingForAutoClose) {
+  - description: Dismiss the activity overlay before native profile-window teardown.
+    regex:
+      pattern: "        mSideUiCoordinator.unregisterSideUiContainer(this);"
+      replace: |2-
+                closeExtensionOverlay(/* notifyNative= */ false);
+                mSideUiCoordinator.unregisterSideUiContainer(this);
+  - description: Overlay width must never enter SideUiSpecs or resize the underlying webpage.
+    regex:
+      pattern: "        boolean hasContent = mNativeBridgeSelector.hasContentToShow(tab);"
+      replace: |2-
+                boolean hasContent = mExtensionOverlay == null
+                        && mNativeBridgeSelector.hasContentToShow(tab);
+  - description: Use the independent visible container for panel content.
+    regex:
+      pattern: "        return (ViewGroup) mContainerView.findViewById(R.id.side_panel_content_container);"
+      replace: |2-
+                return (ViewGroup) getPanelContainerView().findViewById(R.id.side_panel_content_container);
+  - description: Keep the native close affordance visible in the full-screen phone presentation.
+    regex:
+      pattern: "        if (!content.mShowHeader) {"
+      replace: |2-
+                if (!content.mShowHeader && mExtensionOverlay == null) {
+  - description: Find the title in the active presentation.
+    regex:
+      pattern: "            TextView titleView = mContainerView.findViewById(R.id.side_panel_title);"
+      replace: |2-
+                    TextView titleView = getPanelContainerView().findViewById(R.id.side_panel_title);
+  - description: Find the close button in the active presentation.
+    regex:
+      pattern: "            mContainerView\n                    .findViewById(R.id.side_panel_close_button)"
+      replace: |2-
+                    getPanelContainerView()
+                            .findViewById(R.id.side_panel_close_button)
+  - description: A docked layout change must never clear independent overlay content.
+    regex:
+      pattern: "        if (width == 0) {\n            getContentContainer().removeAllViews();"
+      replace: |2-
+                if (width == 0 && mExtensionOverlay == null) {
+                    getContentContainer().removeAllViews();
+  - description: Close the overlay through the native owner captured at opening.
+    regex:
+      pattern: "                            v ->\n                                    assertNonNull(\n                                                    mNativeBridgeSelector\n                                                            .getCurrentCoordinatorBridge())\n                                            .closePanel(/* suppressAnimations= */ false));"
+      replace: |2-
+                                    v -> {
+                                        var owner = mOverlayOwner != null
+                                                ? mOverlayOwner
+                                                : mNativeBridgeSelector.getCurrentCoordinatorBridge();
+                                        if (owner != null) owner.closePanel(/* suppressAnimations= */ false);
+                                    });
+  - description: Ignore docked-container completion while native panel state belongs to the overlay.
+    regex:
+      pattern: "        assertNonNull(mNativeBridgeSelector.getCurrentCoordinatorBridge())\n                .onPanelContainerUpdated(oldWidth, newWidth);"
+      replace: |2-
+                if (mExtensionOverlay != null) return;
+                assertNonNull(mNativeBridgeSelector.getCurrentCoordinatorBridge())
+                        .onPanelContainerUpdated(oldWidth, newWidth);
+  - description: Find the header in the active presentation.
+    regex:
+      pattern: "        View headerView = mContainerView.findViewById(R.id.side_panel_header);"
+      replace: |2-
+                View headerView = getPanelContainerView().findViewById(R.id.side_panel_header);
+  - description: Detach overlay content exactly once and notify its original native owner.
+    regex:
+      pattern: "    private void completePendingContentReplacementInternal() {"
+      replace: |2-
+            private LinearLayout getPanelContainerView() {
+                return mOverlayContainerView != null ? mOverlayContainerView : mContainerView;
+            }
+
+            private void closeExtensionOverlay(boolean notifyNative) {
+                if (mExtensionOverlay == null) return;
+                completePendingContentReplacementInternal();
+                var overlay = mExtensionOverlay;
+                var owner = mOverlayOwner;
+                int oldWidth = mOverlayWidth;
+                getContentContainer().removeAllViews();
+                mCurrentContent = null;
+                mExtensionOverlay = null;
+                mOverlayContainerView = null;
+                mOverlayOwner = null;
+                mOverlayWidth = 0;
+                overlay.dismiss();
+                if (notifyNative && owner != null) owner.onPanelContainerUpdated(oldWidth, 0);
+            }
+
+            private void completePendingContentReplacementInternal() {
+  - description: Present Android phone overlay on UI queue independent of detached tablet container
+    regex:
+      pattern: "            mContainerView.post(() -> {\n                if (mExtensionOverlay == overlay) overlay.show();\n            });"
+      replace: '            overlay.showDeferred();'
+  - description: Route extension overlay accessibility to actual container
+    regex:
+      re_pattern: '\ \ \ \ \ \ \ \ CharSequence\ oldTitle\ =\ ViewCompat\.getAccessibilityPaneTitle\(mContainerView\);\
+
+        \ \ \ \ \ \ \ \ ViewCompat\.setAccessibilityPaneTitle\(mContainerView,\ title\);'
+      replace: "        LinearLayout containerView = getPanelContainerView();\n        CharSequence oldTitle = ViewCompat.getAccessibilityPaneTitle(containerView);\n        ViewCompat.setAccessibilityPaneTitle(containerView, title);"
+  - description: Route extension overlay accessibility to actual container
+    regex:
+      re_pattern: \ \ \ \ \ \ \ \ event\.setSource\(mContainerView\);
+      replace: '        event.setSource(containerView);'
+  - description: Route extension overlay accessibility to actual container
+    regex:
+      re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ mContainerView\.post\(\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \(\)\ \->\ \{\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mContainerView\.performAccessibilityAction\('
+      replace: "            containerView.post(\n                    () -> {\n                        containerView.performAccessibilityAction("
+  - description: "Make terminal teardown visible before external completion."
+    regex:
+      pattern: "    private @Nullable Runnable mPendingReplaceRunnable;"
+      replace: "    private @Nullable Runnable mPendingReplaceRunnable;\n    private boolean mDestroyed;"
+  - description: "Do not revive the retired side-panel container."
+    regex:
+      pattern: "    void startOpeningPanel(SidePanelContent content, boolean suppressAnimations) {\n        log(TAG, \"startOpeningPanel\", content, suppressAnimations);\n        ThreadUtils.assertOnUiThread();\n"
+      replace: "    void startOpeningPanel(SidePanelContent content, boolean suppressAnimations) {\n        log(TAG, \"startOpeningPanel\", content, suppressAnimations);\n        ThreadUtils.assertOnUiThread();\n        if (mDestroyed) return;\n"
+  - description: "Do not revive the retired side-panel container."
+    regex:
+      pattern: "    void startClosingPanel(boolean suppressAnimations) {\n        log(TAG, \"startClosingPanel\", suppressAnimations);\n        ThreadUtils.assertOnUiThread();\n"
+      replace: "    void startClosingPanel(boolean suppressAnimations) {\n        log(TAG, \"startClosingPanel\", suppressAnimations);\n        ThreadUtils.assertOnUiThread();\n        if (mDestroyed) return;\n"
+  - description: "Do not revive the retired side-panel container."
+    regex:
+      pattern: "    void startReplacingPanelContent(SidePanelContent newContent) {\n        log(TAG, \"startReplacingPanelContent\", newContent);\n        ThreadUtils.assertOnUiThread();\n"
+      replace: "    void startReplacingPanelContent(SidePanelContent newContent) {\n        log(TAG, \"startReplacingPanelContent\", newContent);\n        ThreadUtils.assertOnUiThread();\n        if (mDestroyed) return;\n"
+  - description: "Keep replacement completion on its original profile coordinator."
+    regex:
+      pattern: "        View oldContentView = mCurrentContent.mView;\n        mCurrentContent = newContent;"
+      replace: "        View oldContentView = mCurrentContent.mView;\n        var replacementOwner =\n                assertNonNull(mNativeBridgeSelector.getCurrentCoordinatorBridge());\n        mCurrentContent = newContent;"
+  - description: "Retire exactly once before external completion and suppress stale accessibility work."
+    regex:
+      pattern: "                        // Immediately set mRan to true to prevent re-entrancy.\n                        mRan = true;\n\n                        contentContainer.removeView(oldContentView);\n                        assertNonNull(mNativeBridgeSelector.getCurrentCoordinatorBridge())\n                                .onPanelContentReplaced();\n\n                        notifyAccessibilityStateChanged(\n                                AccessibilityEvent.CONTENT_CHANGE_TYPE_PANE_TITLE,\n                                newContent.mTitle,\n                                /* requestFocus= */ true);\n\n                        // If the work is for the current runnable, clear the runnable.\n                        if (mPendingReplaceRunnable == this) {\n                            mPendingReplaceRunnable = null;\n                        }\n"
+      replace: "                        // Retire this owner before native completion can re-enter Java.\n                        mRan = true;\n                        if (mPendingReplaceRunnable == this) {\n                            mPendingReplaceRunnable = null;\n                        }\n\n                        contentContainer.removeView(oldContentView);\n                        replacementOwner.onPanelContentReplaced();\n\n                        if (!mDestroyed && mCurrentContent == newContent) {\n                            notifyAccessibilityStateChanged(\n                                    AccessibilityEvent.CONTENT_CHANGE_TYPE_PANE_TITLE,\n                                    newContent.mTitle,\n                                    /* requestFocus= */ true);\n                        }\n"
+  - description: "Drain normal and overlay replacement owners before clearing the selector."
+    regex:
+      pattern: "        ThreadUtils.assertOnUiThread();\n        closeExtensionOverlay(/* notifyNative= */ false);"
+      replace: "        ThreadUtils.assertOnUiThread();\n        if (mDestroyed) return;\n        mDestroyed = true;\n        completePendingContentReplacementInternal();\n        closeExtensionOverlay(/* notifyNative= */ false);"
+  - description: "Prevent previously queued focus work after container teardown."
+    regex:
+      pattern: "                    () -> {\n                        containerView.performAccessibilityAction(\n                                AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS, null);\n                    });"
+      replace: "                    () -> {\n                        if (!mDestroyed) {\n                            containerView.performAccessibilityAction(\n                                    AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS, null);\n                        }\n                    });"
+  - description: "Clear the captured request before native callbacks can queue a successor."
+    regex:
+      pattern: "        if (mPendingReplaceRunnable != null) {\n            mPendingReplaceRunnable.run();\n\n            // Explicitly set to null for readability, though it is also handled\n            // internally by the runnable's run() method.\n            mPendingReplaceRunnable = null;\n        }"
+      replace: "        var pending = mPendingReplaceRunnable;\n        mPendingReplaceRunnable = null;\n        if (pending != null) {\n            pending.run();\n        }"

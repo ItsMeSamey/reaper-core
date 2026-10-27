@@ -1,0 +1,142 @@
+diff --git a/chrome/android/junit/src/org/chromium/chrome/browser/RecentlyClosedEntriesManagerTrackerImplUnitTest.java b/chrome/android/junit/src/org/chromium/chrome/browser/RecentlyClosedEntriesManagerTrackerImplUnitTest.java
+--- a/chrome/android/junit/src/org/chromium/chrome/browser/RecentlyClosedEntriesManagerTrackerImplUnitTest.java
++++ b/chrome/android/junit/src/org/chromium/chrome/browser/RecentlyClosedEntriesManagerTrackerImplUnitTest.java
+@@ -7,7 +7,11 @@
+ import static org.junit.Assert.assertEquals;
+ import static org.junit.Assert.assertFalse;
+ import static org.junit.Assert.assertTrue;
++import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.never;
++import static org.mockito.Mockito.times;
+ import static org.mockito.Mockito.verify;
++import static org.mockito.Mockito.verifyNoMoreInteractions;
+ import static org.mockito.Mockito.when;
+
+ import org.junit.Before;
+@@ -18,6 +22,7 @@
+ import org.mockito.junit.MockitoJUnit;
+ import org.mockito.junit.MockitoRule;
+
++import org.chromium.base.JniRepeatingCallback;
+ import org.chromium.base.test.BaseRobolectricTestRunner;
+ import org.chromium.chrome.browser.multiwindow.InstanceInfo;
+ import org.chromium.chrome.browser.multiwindow.MultiInstanceManager;
+@@ -124,4 +129,118 @@
+         assertEquals(0, manager1.getRecentlyClosedEntries().size());
+         assertEquals(0, manager2.getRecentlyClosedEntries().size());
+     }
++
++    @Test
++    public void testNativeWindowUpdatesSurviveCallbackOwnerDestruction() {
++        when(mProfile.getNativeBrowserContextPointer()).thenReturn(11L);
++        JniRepeatingCallback<Long> callback = mock();
++        RecentlyClosedEntriesManager first =
++                mTracker.obtainManager(mMultiInstanceManager, mTabModelSelector);
++        RecentlyClosedEntriesManager.setNativeUpdatedCallback(mProfile, callback);
++        RecentlyClosedEntriesManager second =
++                mTracker.obtainManager(mMultiInstanceManager, mTabModelSelector);
++        try {
++            mTracker.onInstanceRestored(/* instanceId= */ 2);
++            verify(callback).onResult(11L);
++            mTracker.destroy(first);
++            verify(callback, never()).destroy();
++            mTracker.onInstanceRestored(/* instanceId= */ 3);
++            verify(callback, times(2)).onResult(11L);
++            mTracker.destroy(second);
++            verify(callback, never()).destroy();
++            RecentlyClosedEntriesManager replacement =
++                    mTracker.obtainManager(mMultiInstanceManager, mTabModelSelector);
++            try {
++                mTracker.onInstanceRestored(/* instanceId= */ 4);
++                verify(callback, times(3)).onResult(11L);
++                RecentlyClosedEntriesManager.clearNativeUpdatedCallback(mProfile);
++                verify(callback).destroy();
++                mTracker.onInstanceRestored(/* instanceId= */ 5);
++                verifyNoMoreInteractions(callback);
++            } finally {
++                mTracker.destroy(replacement);
++            }
++        } finally {
++            RecentlyClosedEntriesManager.clearNativeUpdatedCallback(mProfile);
++            mTracker.destroy(first);
++            mTracker.destroy(second);
++        }
++    }
++
++    @Test
++    public void testNativeWindowCallbackRegisteredBeforeManager() {
++        when(mProfile.getNativeBrowserContextPointer()).thenReturn(12L);
++        JniRepeatingCallback<Long> callback = mock();
++        RecentlyClosedEntriesManager.setNativeUpdatedCallback(mProfile, callback);
++        RecentlyClosedEntriesManager manager =
++                mTracker.obtainManager(mMultiInstanceManager, mTabModelSelector);
++        try {
++            mTracker.onInstanceRestored(/* instanceId= */ 2);
++            verify(callback).onResult(12L);
++            RecentlyClosedEntriesManager.clearNativeUpdatedCallback(mProfile);
++            verify(callback).destroy();
++            mTracker.onInstanceRestored(/* instanceId= */ 3);
++            verifyNoMoreInteractions(callback);
++        } finally {
++            RecentlyClosedEntriesManager.clearNativeUpdatedCallback(mProfile);
++            mTracker.destroy(manager);
++        }
++    }
++
++    @Test
++    public void testNativeWindowCallbacksAreProfileScoped() {
++        when(mProfile.getNativeBrowserContextPointer()).thenReturn(13L);
++        Profile otherProfile = mock();
++        when(otherProfile.getNativeBrowserContextPointer()).thenReturn(14L);
++        TabModel otherModel = mock();
++        when(otherModel.getProfile()).thenReturn(otherProfile);
++        TabModelSelector otherSelector = mock();
++        when(otherSelector.getModel(false)).thenReturn(otherModel);
++        RecentlyClosedEntriesManager first =
++                mTracker.obtainManager(mMultiInstanceManager, mTabModelSelector);
++        RecentlyClosedEntriesManager second =
++                mTracker.obtainManager(mMultiInstanceManager, otherSelector);
++        JniRepeatingCallback<Long> firstCallback = mock();
++        JniRepeatingCallback<Long> secondCallback = mock();
++        RecentlyClosedEntriesManager.setNativeUpdatedCallback(mProfile, firstCallback);
++        RecentlyClosedEntriesManager.setNativeUpdatedCallback(otherProfile, secondCallback);
++        try {
++            mTracker.onInstanceRestored(/* instanceId= */ 2);
++            verify(firstCallback).onResult(13L);
++            verify(secondCallback).onResult(14L);
++            RecentlyClosedEntriesManager.clearNativeUpdatedCallback(mProfile);
++            verify(firstCallback).destroy();
++            mTracker.destroy(first);
++            mTracker.onInstanceRestored(/* instanceId= */ 3);
++            verify(secondCallback, times(2)).onResult(14L);
++            verifyNoMoreInteractions(firstCallback, secondCallback);
++        } finally {
++            RecentlyClosedEntriesManager.clearNativeUpdatedCallback(mProfile);
++            RecentlyClosedEntriesManager.clearNativeUpdatedCallback(otherProfile);
++            mTracker.destroy(first);
++            mTracker.destroy(second);
++        }
++    }
++
++    @Test
++    public void testNativeWindowCallbackReplacementAndClearWithoutManagers() {
++        JniRepeatingCallback<Long> first = mock();
++        JniRepeatingCallback<Long> replacement = mock();
++        RecentlyClosedEntriesManager.setNativeUpdatedCallback(mProfile, first);
++        RecentlyClosedEntriesManager.setNativeUpdatedCallback(mProfile, replacement);
++        verify(first).destroy();
++        verify(replacement, never()).destroy();
++        RecentlyClosedEntriesManager.clearNativeUpdatedCallback(mProfile);
++        RecentlyClosedEntriesManager.clearNativeUpdatedCallback(mProfile);
++        verify(replacement).destroy();
++        RecentlyClosedEntriesManager manager =
++                mTracker.obtainManager(mMultiInstanceManager, mTabModelSelector);
++        try {
++            mTracker.onInstanceRestored(/* instanceId= */ 2);
++            verifyNoMoreInteractions(first, replacement);
++        } finally {
++            RecentlyClosedEntriesManager.clearNativeUpdatedCallback(mProfile);
++            mTracker.destroy(manager);
++        }
++    }
+ }

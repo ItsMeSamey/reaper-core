@@ -1,0 +1,691 @@
+diff --git a/chrome/browser/extensions/api/webstore_private/webstore_private_apitest.cc b/chrome/browser/extensions/api/webstore_private/webstore_private_apitest.cc
+index 80ca70f9cceb8e7aaee85a877b5dd8e0f35dfc05..da7d313d9f5232400a2b68d12258c71e32212c60 100644
+--- a/chrome/browser/extensions/api/webstore_private/webstore_private_apitest.cc
++++ b/chrome/browser/extensions/api/webstore_private/webstore_private_apitest.cc
+@@ -14,10 +14,12 @@
+ #include "base/strings/escape.h"
+ #include "base/strings/stringprintf.h"
+ #include "base/strings/utf_string_conversions.h"
++#include "base/test/bind.h"
+ #include "base/test/metrics/histogram_tester.h"
+ #include "base/test/metrics/user_action_tester.h"
+ #include "base/test/scoped_feature_list.h"
+ #include "base/threading/thread_restrictions.h"
++#include "base/values.h"
+ #include "build/build_config.h"
+ #include "build/chromeos_buildflags.h"
+ #include "chrome/browser/extensions/extension_allowlist_factory.h"
+@@ -76,6 +78,36 @@
+ #endif  // BUILDFLAG(IS_CHROMEOS)
+ 
+ #if BUILDFLAG(IS_ANDROID)
++#include <atomic>
++
++#include "base/check.h"
++#include "base/command_line.h"
++#include "base/functional/callback_helpers.h"
++#include "base/memory/weak_ptr.h"
++#include "base/test/run_until.h"
++#include "base/test/scoped_command_line.h"
++#include "components/component_updater/component_updater_switches.h"
++#include "components/download/public/common/download_interrupt_reasons.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/weak_document_ptr.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/test/back_forward_cache_util.h"
++#include "content/public/test/browser_test_utils.h"
++#include "content/public/test/test_utils.h"
++#include "extensions/browser/extension_function_registry.h"
++#include "extensions/browser/extension_registry.h"
++#include "extensions/common/verifier_formats.h"
++#include "extensions/test/test_extension_dir.h"
++#include "extensions/strings/grit/extensions_strings.h"
++#include "extensions/browser/extensions_browser_client.h"
++#include "extensions/browser/install_tracker.h"
++#include "extensions/common/extension_urls.h"
++#include "extensions/common/extensions_client.h"
++#include "net/http/http_status_code.h"
++#include "net/test/embedded_test_server/controllable_http_response.h"
++#include "net/test/embedded_test_server/http_request.h"
++#include "net/test/embedded_test_server/http_response.h"
++#include "ui/base/l10n/l10n_util.h"
+ #include "chrome/browser/supervised_user/supervised_user_extensions_metrics_recorder.h"
+ #include "extensions/browser/supervised_user_extensions_delegate.h"
+ #endif  // BUILDFLAG(IS_ANDROID)
+@@ -264,6 +296,636 @@
+ 
+   std::unique_ptr<ScopedTestDialogAutoConfirm> auto_confirm_install_;
+ };
++
++#if BUILDFLAG(IS_ANDROID)
++namespace {
++
++using BeginInstallFunction = WebstorePrivateBeginInstallWithManifest3Function;
++scoped_refptr<BeginInstallFunction>* g_observed_begin_install = nullptr;
++
++// Retain the real dispatched function without substituting Run, policy, prompt,
++// or the Mojo response callback. Preserve only a copy of its outgoing results.
++scoped_refptr<ExtensionFunction> ObserveBeginInstallFunction() {
++  CHECK(g_observed_begin_install);
++  CHECK(!*g_observed_begin_install);
++  auto function = base::MakeRefCounted<BeginInstallFunction>();
++  function->preserve_results_for_testing();
++  *g_observed_begin_install = function;
++  return function;
++}
++
++}  // namespace
++
++// Exercises the actual renderer callback and native active-install lifetime;
++// this deliberately does not emulate the remote Store page's DOM or spinner.
++class ExtensionWebstorePrivateDownloadFailureApiTest
++    : public ExtensionWebstorePrivateApiTest {
++ protected:
++  void RunDeniedDownload(net::HttpStatusCode status) {
++    auto* contents = chrome_test_utils::GetActiveWebContents(this);
++    ASSERT_TRUE(contents);
++    auto* tracker = ExtensionsBrowserClient::Get()->GetInstallTracker(profile());
++    ASSERT_FALSE(tracker->GetActiveInstall(kExtensionId));
++    const int initial_approvals =
++        WebstorePrivateApi::GetPendingApprovalsCountForTesting();
++    base::ScopedClosureRunner cleanup(base::BindLambdaForTesting([&] {
++      WebstorePrivateApi::PopApprovalForTesting(profile(), kExtensionId);
++      tracker->RemoveActiveInstall(kExtensionId);
++    }));
++
++    // A loopback response is sufficient: no CRX or signature/publisher
++    // exception is needed. Only the existing scoped test endpoint is changed.
++    std::atomic<bool> served_denial{false};
++    net::EmbeddedTestServer denied_server;
++    denied_server.RegisterRequestHandler(base::BindRepeating(
++        [](net::HttpStatusCode status, std::atomic<bool>* served_denial,
++           const net::test_server::HttpRequest& request)
++            -> std::unique_ptr<net::test_server::HttpResponse> {
++          if (request.relative_url != "/denied.crx") {
++            return nullptr;
++          }
++          served_denial->store(true, std::memory_order_relaxed);
++          auto response =
++              std::make_unique<net::test_server::BasicHttpResponse>();
++          response->set_code(status);
++          response->set_content_type("text/plain");
++          response->set_content("Synthetic download denial");
++          return response;
++        },
++        status, base::Unretained(&served_denial)));
++    ASSERT_TRUE(denied_server.Start());
++    const GURL denied_url = denied_server.GetURL("/denied.crx");
++    base::test::ScopedCommandLine scoped_command_line;
++    base::ScopedClosureRunner restore_store_urls(base::BindOnce(
++        [](base::CommandLine original_command_line) {
++          ExtensionsClient::Get()->InitializeWebStoreUrls(&original_command_line);
++        },
++        *scoped_command_line.GetProcessCommandLine()));
++    scoped_command_line.GetProcessCommandLine()->AppendSwitchASCII(
++        ::switches::kComponentUpdater, "url-source=" + denied_url.spec());
++    extension_test_util::SetGalleryUpdateURL(denied_url);
++    ASSERT_EQ(denied_url, extension_urls::GetWebstoreUpdateUrl());
++    // Use the existing scoped test hook to pin the actual download to this
++    // loopback server. No production/private URL builder access is required.
++    scoped_command_line.GetProcessCommandLine()->AppendSwitchASCII(
++        switches::kAppsGalleryDownloadURL, denied_url.spec());
++    ASSERT_TRUE(chrome_test_utils::NavigateToURL(
++        contents, embedded_test_server()->GetURL("www.example.com", "/title1.html")));
++
++    const std::string manifest = R"({
++      "name": "Loopback denial retry", "version": "1.0", "manifest_version": 3
++    })";
++    const std::string begin_script = content::JsReplace(R"(
++      new Promise(resolve => {
++        chrome.webstorePrivate.beginInstallWithManifest3({
++          id: $1, manifest: $2
++        }, result => resolve([result, chrome.runtime.lastError?.message || '']));
++      });
++    )", kExtensionId, manifest);
++    base::ListValue begin_expected;
++    begin_expected.Append("");
++    begin_expected.Append("");
++    ASSERT_EQ(begin_expected,
++              content::EvalJs(contents, begin_script));
++    ASSERT_TRUE(tracker->GetActiveInstall(kExtensionId));
++    ASSERT_EQ(initial_approvals + 1,
++              WebstorePrivateApi::GetPendingApprovalsCountForTesting());
++
++    // Use the real binding and dispatcher, including runtime.lastError. The
++    // following same-ID begin also proves that failure released pending state.
++    const auto callback_result = content::EvalJs(contents, content::JsReplace(R"(
++      window.denialCallbackCount = 0;
++      new Promise(resolve => {
++        chrome.webstorePrivate.completeInstall($1, () => {
++          ++window.denialCallbackCount;
++          resolve(chrome.runtime.lastError?.message || '');
++        });
++      });
++    )", kExtensionId));
++    ASSERT_TRUE(callback_result.is_string()) << callback_result;
++    const auto reason = status == net::HTTP_UNAUTHORIZED
++                            ? download::DOWNLOAD_INTERRUPT_REASON_SERVER_UNAUTHORIZED
++                            : download::DOWNLOAD_INTERRUPT_REASON_SERVER_FORBIDDEN;
++    const std::string& error = callback_result.ExtractString();
++    // The start callback reports the raw reason; an already observed item uses
++    // the localized denial message. Both must originate from our denial route.
++    EXPECT_TRUE(error == download::DownloadInterruptReasonToString(reason) ||
++                error == l10n_util::GetStringUTF8(
++                             IDS_WEBSTORE_DOWNLOAD_ACCESS_DENIED)) << error;
++    EXPECT_TRUE(served_denial.load(std::memory_order_relaxed));
++    EXPECT_FALSE(tracker->GetActiveInstall(kExtensionId));
++    EXPECT_EQ(initial_approvals,
++              WebstorePrivateApi::GetPendingApprovalsCountForTesting());
++    EXPECT_FALSE(ExtensionRegistry::Get(profile())->GetInstalledExtension(
++        kExtensionId));
++    EXPECT_EQ(1, content::EvalJs(contents, "window.denialCallbackCount"));
++
++    // Complete the same-ID retry through the real download/install pipeline.
++    // Reuse this fixture's signing key, not the neighboring legacy MV2 CRX.
++    TestExtensionDir extension_dir;
++    extension_dir.WriteManifest(manifest);
++    TestExtensionDir delivery_dir;
++    const base::FilePath delivery_path = delivery_dir.UnpackedPath();
++    const base::FilePath packed_crx = PackExtensionWithOptions(
++        extension_dir.UnpackedPath(),
++        delivery_path.AppendASCII("denial-retry.crx"),
++        test_data_dir_.AppendASCII("api_test/webstore_private/extension.pem"),
++        base::FilePath());
++    ASSERT_FALSE(packed_crx.empty());
++    net::EmbeddedTestServer retry_server;
++    retry_server.ServeFilesFromDirectory(delivery_path);
++    ASSERT_TRUE(retry_server.Start());
++    const GURL retry_url = retry_server.GetURL("/denial-retry.crx");
++    scoped_command_line.GetProcessCommandLine()->AppendSwitchASCII(
++        ::switches::kComponentUpdater, "url-source=" + retry_url.spec());
++    extension_test_util::SetGalleryUpdateURL(retry_url);
++    ASSERT_EQ(retry_url, extension_urls::GetWebstoreUpdateUrl());
++    scoped_command_line.GetProcessCommandLine()->AppendSwitchASCII(
++        switches::kAppsGalleryDownloadURL, retry_url.spec());
++
++    // The local packer signs the CRX with the fixture key, but cannot supply a
++    // Store publisher proof. Reuse the existing scoped test helper only for the
++    // success leg; normal signature, extension-ID and manifest checks still run.
++    auto publisher_verification = DisablePublisherKeyVerificationForTests();
++    ASSERT_EQ(begin_expected,
++              content::EvalJs(contents, begin_script));
++    EXPECT_TRUE(tracker->GetActiveInstall(kExtensionId));
++    EXPECT_EQ(initial_approvals + 1,
++              WebstorePrivateApi::GetPendingApprovalsCountForTesting());
++    ASSERT_EQ("", content::EvalJs(contents, content::JsReplace(R"(
++      window.retryCallbackCount = 0;
++      new Promise(resolve => {
++        chrome.webstorePrivate.completeInstall($1, () => {
++          ++window.retryCallbackCount;
++          resolve(chrome.runtime.lastError?.message || '');
++        });
++      });
++    )", kExtensionId)));
++    const Extension* installed =
++        ExtensionRegistry::Get(profile())->enabled_extensions().GetByID(
++            kExtensionId);
++    ASSERT_TRUE(installed);
++    EXPECT_EQ(3, installed->manifest_version());
++    EXPECT_EQ("Loopback denial retry", installed->name());
++    EXPECT_EQ("1.0", installed->version().GetString());
++    EXPECT_TRUE(installed->from_webstore());
++    EXPECT_FALSE(tracker->GetActiveInstall(kExtensionId));
++    EXPECT_EQ(initial_approvals,
++              WebstorePrivateApi::GetPendingApprovalsCountForTesting());
++    EXPECT_EQ(1, content::EvalJs(contents, "window.denialCallbackCount"));
++    EXPECT_EQ(1, content::EvalJs(contents, "window.retryCallbackCount"));
++  }
++
++  void TearDownOnMainThread() override {
++    WebstoreInstaller::SetDownloadDirectoryForTests(nullptr);
++    ExtensionWebstorePrivateApiTest::TearDownOnMainThread();
++  }
++};
++
++IN_PROC_BROWSER_TEST_F(ExtensionWebstorePrivateDownloadFailureApiTest,
++                       Http401RespondsAndAllowsSameIdRetry) {
++  RunDeniedDownload(net::HTTP_UNAUTHORIZED);
++}
++
++IN_PROC_BROWSER_TEST_F(ExtensionWebstorePrivateDownloadFailureApiTest,
++                       Http403RespondsAndAllowsSameIdRetry) {
++  RunDeniedDownload(net::HTTP_FORBIDDEN);
++}
++
++class ExtensionWebstorePrivateDocumentApiTest
++    : public ExtensionWebstorePrivateApiTest {
++ public:
++  ExtensionWebstorePrivateDocumentApiTest() {
++    features_.InitWithFeaturesAndParameters(
++        content::GetDefaultEnabledBackForwardCacheFeaturesForTesting(),
++        content::GetDefaultDisabledBackForwardCacheFeaturesForTesting());
++  }
++
++  void SetUpOnMainThread() override {
++    // The base fixture starts this server, so install the held route first.
++    icon_response_ =
++        std::make_unique<net::test_server::ControllableHttpResponse>(
++            embedded_test_server(), "/cws-held-icon.png");
++    ExtensionWebstorePrivateApiTest::SetUpOnMainThread();
++    ASSERT_FALSE(HasFatalFailure());
++    host_resolver()->AddRule("other.example.com", "127.0.0.1");
++
++    {
++      base::ScopedAllowBlockingForTesting allow_blocking;
++      ASSERT_TRUE(base::ReadFileToString(
++          test_data_dir_.AppendASCII(
++              "api_test/webstore_private/extension/icon.png"),
++          &icon_bytes_));
++    }
++    ASSERT_FALSE(icon_bytes_.empty());
++    ASSERT_FALSE(tracker()->GetActiveInstall(kExtensionId));
++
++    // Override the base ACCEPT scope: these tests require actual prompt entry
++    // and cancellation through the real owning tab.
++    no_auto_confirm_ = std::make_unique<ScopedTestDialogAutoConfirm>(
++        ScopedTestDialogAutoConfirm::NONE);
++    prompt_reset_ =
++        std::make_unique<base::AutoReset<InstallPromptData::PromptType>>(
++            &ExtensionInstallPrompt::g_last_prompt_type_for_tests,
++            InstallPromptData::UNSET_PROMPT_TYPE);
++    function_slot_reset_ =
++        std::make_unique<base::AutoReset<scoped_refptr<BeginInstallFunction>*>>(
++            &g_observed_begin_install, &function_);
++
++    auto& registry = ExtensionFunctionRegistry::GetInstance();
++    const auto original = registry.GetFactoriesForTesting().at(
++        BeginInstallFunction::static_function_name());
++    ASSERT_TRUE(registry.OverrideFunctionForTesting(
++        BeginInstallFunction::static_function_name(),
++        &ObserveBeginInstallFunction));
++    restore_factory_.ReplaceClosure(base::BindOnce(
++        [](ExtensionFunctionRegistry::FactoryEntry entry) {
++          ExtensionFunctionRegistry::GetInstance().Register(entry);
++        },
++        original));
++  }
++
++  void TearDownOnMainThread() override {
++    // A fatal assertion must not strand a held fetch or a native dialog that
++    // owns the production function across fixtures. A timeout here is a fatal
++    // harness quiescence failure, not permission to continue with live work.
++    if (request_sender_ && !request_sender_->IsDestroyed()) {
++      CHECK(request_contents_);
++      // ExecJs can fail after sending the API request. Retire its exact
++      // associated LocalFrameHost receiver before restoring the factory, even
++      // if no function was captured. Disabling BFCache also flushes cached A.
++      content::DisableBackForwardCacheForTesting(
++          request_contents_.get(),
++          content::BackForwardCache::DisableForTestingReason::
++              TEST_REQUIRES_NO_CACHING);
++      if (!request_sender_->IsDestroyed() &&
++          request_sender_->get() == request_contents_->GetPrimaryMainFrame()) {
++        CHECK(chrome_test_utils::NavigateToURL(
++            request_contents_.get(), OtherURL("/title2.html?sender-cleanup")));
++      }
++      CHECK(
++          base::test::RunUntil([&] { return request_sender_->IsDestroyed(); }));
++    }
++    if (function_) {
++      if (!icon_released_ && !function_->did_respond()) {
++        CHECK(base::test::RunUntil([&] {
++          return icon_response_->has_received_request() ||
++                 function_->did_respond();
++        }));
++      }
++      if (!icon_released_ && icon_response_->has_received_request()) {
++        ReleaseIcon();
++      }
++      if (!function_->did_respond()) {
++        CHECK(base::test::RunUntil(
++            [&] { return function_->did_respond() || PromptAdmitted(); }));
++        if (!function_->did_respond()) {
++          CHECK(request_contents_);
++          CHECK(chrome_test_utils::NavigateToURL(
++              request_contents_.get(), OtherURL("/title2.html?cleanup")));
++        }
++        CHECK(base::test::RunUntil([&] { return function_->did_respond(); }));
++      }
++      function_.reset();
++    }
++
++    // Pop only this test's approval if an earlier assertion found unexpected
++    // success. Never clear approvals belonging to other requests.
++    if (WebstorePrivateApi::PopApprovalForTesting(profile(), kExtensionId)) {
++      ADD_FAILURE() << "Unexpected approval from the delayed-prompt test";
++      tracker()->RemoveActiveInstall(kExtensionId);
++    }
++    if (request_sender_) {
++      EXPECT_FALSE(tracker()->GetActiveInstall(kExtensionId));
++      // Isolate subsequent tests even after an unexpected successful response
++      // transferred the active-install responsibility to completeInstall.
++      tracker()->RemoveActiveInstall(kExtensionId);
++    }
++    request_sender_.reset();
++    request_contents_.reset();
++    restore_factory_.RunAndReset();
++    function_slot_reset_.reset();
++    prompt_reset_.reset();
++    no_auto_confirm_.reset();
++    icon_response_.reset();
++    WebstoreInstaller::SetDownloadDirectoryForTests(nullptr);
++    ExtensionWebstorePrivateApiTest::TearDownOnMainThread();
++  }
++
++ protected:
++  content::WebContents* contents() {
++    return chrome_test_utils::GetActiveWebContents(this);
++  }
++
++  InstallTracker* tracker() {
++    return ExtensionsBrowserClient::Get()->GetInstallTracker(profile());
++  }
++
++  GURL SenderURL() {
++    return embedded_test_server()->GetURL("www.example.com", "/title1.html");
++  }
++
++  GURL OtherURL(const std::string& path) {
++    return embedded_test_server()->GetURL("other.example.com", path);
++  }
++
++  void BeginWithHeldIcon() {
++    ASSERT_TRUE(chrome_test_utils::NavigateToURL(contents(), SenderURL()));
++    request_contents_ = contents()->GetWeakPtr();
++    request_sender_ = std::make_unique<content::RenderFrameHostWrapper>(
++        request_contents_->GetPrimaryMainFrame());
++    ASSERT_TRUE(content::ExecJs(
++        request_contents_.get(),
++        content::JsReplace(R"(
++          chrome.webstorePrivate.beginInstallWithManifest3({
++            id: $1,
++            manifest: JSON.stringify({
++              name: 'Delayed prompt document',
++              version: '1.0',
++              manifest_version: 3
++            }),
++            iconUrl: $2
++          }, () => { void chrome.runtime.lastError; });
++        )",
++                           kExtensionId,
++                           embedded_test_server()->GetURL(
++                               "www.example.com", "/cws-held-icon.png"))));
++    ASSERT_TRUE(base::test::RunUntil([&] {
++      return icon_response_->has_received_request() ||
++             (function_ && function_->did_respond());
++    }));
++    ASSERT_TRUE(function_);
++    ASSERT_TRUE(icon_response_->has_received_request())
++        << function_->GetError();
++    ASSERT_FALSE(function_->did_respond());
++    ASSERT_TRUE(tracker()->GetActiveInstall(kExtensionId));
++    EXPECT_FALSE(PromptAdmitted());
++  }
++
++  void ReleaseIcon() {
++    CHECK(!icon_released_);
++    CHECK(icon_response_->has_received_request());
++    // has_received_request() alone does not transition the response to READY.
++    icon_response_->WaitForRequest();
++    icon_response_->Send(net::HTTP_OK, "image/png", icon_bytes_);
++    icon_response_->Done();
++    icon_released_ = true;
++  }
++
++  bool PromptAdmitted() const {
++    return ExtensionInstallPrompt::g_last_prompt_type_for_tests !=
++           InstallPromptData::UNSET_PROMPT_TYPE;
++  }
++
++  void WaitForResponseOrPrompt() {
++    ASSERT_TRUE(base::test::RunUntil(
++        [&] { return function_->did_respond() || PromptAdmitted(); }));
++    // Complete the native/Java dialog-creation turn, including an immediate
++    // failed-window abort. This is native admission evidence, not pixel proof.
++    base::RunLoop().RunUntilIdle();
++  }
++
++  void ExpectCancellationAndRelease() {
++    ASSERT_TRUE(function_);
++    ASSERT_TRUE(function_->did_respond());
++    EXPECT_EQ("User cancelled install", function_->GetError());
++    const base::ListValue* results = function_->GetResultListForTest();
++    ASSERT_TRUE(results);
++    ASSERT_EQ(1u, results->size());
++    ASSERT_TRUE((*results)[0].is_string());
++    EXPECT_EQ("user_cancelled", (*results)[0].GetString());
++    EXPECT_FALSE(
++        WebstorePrivateApi::PopApprovalForTesting(profile(), kExtensionId));
++
++    // The real function owns ScopedActiveInstall until its destructor; do not
++    // mistake this test's retained reference for a production install leak.
++    function_.reset();
++    EXPECT_TRUE(base::test::RunUntil(
++        [&] { return !tracker()->GetActiveInstall(kExtensionId); }));
++  }
++
++  void ExpectPromptThenCancel() {
++    ASSERT_NO_FATAL_FAILURE(WaitForResponseOrPrompt());
++    ASSERT_EQ(InstallPromptData::INSTALL_PROMPT,
++              ExtensionInstallPrompt::g_last_prompt_type_for_tests);
++    ASSERT_FALSE(function_->did_respond())
++        << "Native prompt admission immediately aborted";
++    ASSERT_TRUE(request_contents_);
++    ASSERT_TRUE(chrome_test_utils::NavigateToURL(request_contents_.get(),
++                                                 OtherURL("/title2.html")));
++    ASSERT_TRUE(base::test::RunUntil([&] { return function_->did_respond(); }));
++    ASSERT_NO_FATAL_FAILURE(ExpectCancellationAndRelease());
++  }
++
++  scoped_refptr<BeginInstallFunction> function_;
++
++ private:
++  base::test::ScopedFeatureList features_;
++  std::unique_ptr<net::test_server::ControllableHttpResponse> icon_response_;
++  std::string icon_bytes_;
++  base::WeakPtr<content::WebContents> request_contents_;
++  std::unique_ptr<content::RenderFrameHostWrapper> request_sender_;
++  bool icon_released_ = false;
++  std::unique_ptr<ScopedTestDialogAutoConfirm> no_auto_confirm_;
++  std::unique_ptr<base::AutoReset<InstallPromptData::PromptType>> prompt_reset_;
++  std::unique_ptr<base::AutoReset<scoped_refptr<BeginInstallFunction>*>>
++      function_slot_reset_;
++  base::ScopedClosureRunner restore_factory_;
++};
++
++IN_PROC_BROWSER_TEST_F(ExtensionWebstorePrivateDocumentApiTest,
++                       CachedSenderCancelsBeforePrompt) {
++  ASSERT_NO_FATAL_FAILURE(BeginWithHeldIcon());
++  content::RenderFrameHostWrapper sender(contents()->GetPrimaryMainFrame());
++  ASSERT_TRUE(
++      chrome_test_utils::NavigateToURL(contents(), OtherURL("/title2.html")));
++  ASSERT_TRUE(sender);
++  ASSERT_NE(sender.get(), contents()->GetPrimaryMainFrame());
++  ASSERT_EQ(content::RenderFrameHost::LifecycleState::kInBackForwardCache,
++            sender->GetLifecycleState());
++
++  ReleaseIcon();
++  // On the old code, native prompt admission also ends this wait, producing an
++  // immediate failure rather than hanging for a dialog no one has accepted.
++  ASSERT_NO_FATAL_FAILURE(WaitForResponseOrPrompt());
++  EXPECT_FALSE(PromptAdmitted());
++  ASSERT_NO_FATAL_FAILURE(ExpectCancellationAndRelease());
++}
++
++IN_PROC_BROWSER_TEST_F(ExtensionWebstorePrivateDocumentApiTest,
++                       LiveSenderAdmitsPrompt) {
++  ASSERT_NO_FATAL_FAILURE(BeginWithHeldIcon());
++  ReleaseIcon();
++  ASSERT_NO_FATAL_FAILURE(ExpectPromptThenCancel());
++}
++
++IN_PROC_BROWSER_TEST_F(ExtensionWebstorePrivateDocumentApiTest,
++                       SameDocumentNavigationPreservesPrompt) {
++  ASSERT_NO_FATAL_FAILURE(BeginWithHeldIcon());
++  content::WeakDocumentPtr sender =
++      contents()->GetPrimaryMainFrame()->GetWeakDocumentPtr();
++  ASSERT_TRUE(chrome_test_utils::NavigateToURL(
++      contents(), GURL(SenderURL().spec() + "#same-document")));
++  ASSERT_EQ(sender.AsRenderFrameHostIfValid(),
++            contents()->GetPrimaryMainFrame());
++  ASSERT_TRUE(contents()->GetPrimaryMainFrame()->IsActive());
++
++  ReleaseIcon();
++  ASSERT_NO_FATAL_FAILURE(ExpectPromptThenCancel());
++}
++
++IN_PROC_BROWSER_TEST_F(ExtensionWebstorePrivateDocumentApiTest,
++                       DeletedSenderCancelsWithoutPrompt) {
++  ASSERT_NO_FATAL_FAILURE(BeginWithHeldIcon());
++  content::RenderFrameHostWrapper sender(contents()->GetPrimaryMainFrame());
++  content::DisableBackForwardCacheForTesting(
++      contents(), content::BackForwardCache::DisableForTestingReason::
++                      TEST_REQUIRES_NO_CACHING);
++  ASSERT_TRUE(
++      chrome_test_utils::NavigateToURL(contents(), OtherURL("/title2.html")));
++  ASSERT_TRUE(sender.WaitUntilRenderFrameDeleted());
++  ASSERT_TRUE(base::test::RunUntil([&] { return sender.IsDestroyed(); }));
++
++  ReleaseIcon();
++  ASSERT_NO_FATAL_FAILURE(WaitForResponseOrPrompt());
++  EXPECT_FALSE(PromptAdmitted());
++  ASSERT_NO_FATAL_FAILURE(ExpectCancellationAndRelease());
++}
++
++IN_PROC_BROWSER_TEST_F(ExtensionWebstorePrivateApiTest,
++                       IncognitoBeginDoesNotBlockRegularInstall) {
++  Profile* const regular_profile = profile();
++  content::WebContents* regular_contents =
++      chrome_test_utils::GetActiveWebContents(this);
++  ASSERT_TRUE(regular_contents);
++  ASSERT_EQ(regular_profile, regular_contents->GetBrowserContext());
++  auto* tracker =
++      ExtensionsBrowserClient::Get()->GetInstallTracker(regular_profile);
++  ASSERT_FALSE(tracker->GetActiveInstall(kExtensionId));
++  const int initial_approvals =
++      WebstorePrivateApi::GetPendingApprovalsCountForTesting();
++
++  // Keep failures on the old code from stranding this test's approval/marker,
++  // and retire the base fixture's raw test download-directory pointer.
++  base::ScopedClosureRunner cleanup(base::BindLambdaForTesting([&] {
++    if (Profile* private_profile = regular_profile->GetPrimaryOTRProfile(
++            /*create_if_needed=*/false)) {
++      WebstorePrivateApi::PopApprovalForTesting(private_profile, kExtensionId);
++    }
++    WebstorePrivateApi::PopApprovalForTesting(regular_profile, kExtensionId);
++    tracker->RemoveActiveInstall(kExtensionId);
++    WebstoreInstaller::SetDownloadDirectoryForTests(nullptr);
++  }));
++
++  // The older extension.crx binary is MV2 even though its neighboring
++  // unpacked manifest is MV3. Pack an actual MV3 control with the same key/ID.
++  const std::string manifest = R"({
++    "name": "Incognito install retry",
++    "version": "1.0",
++    "manifest_version": 3,
++    "permissions": ["tabs"]
++  })";
++  TestExtensionDir extension_dir;
++  extension_dir.WriteManifest(manifest);
++  // TestExtensionDir permits blocking cleanup in its destructor; the browser
++  // test body disallows blocking, including ordinary ScopedTempDir teardown.
++  TestExtensionDir delivery_dir;
++  const base::FilePath delivery_path = delivery_dir.UnpackedPath();
++  const base::FilePath packed_crx = PackExtensionWithOptions(
++      extension_dir.UnpackedPath(),
++      delivery_path.AppendASCII("incognito-retry.crx"),
++      test_data_dir_.AppendASCII("api_test/webstore_private/extension.pem"),
++      base::FilePath());
++  ASSERT_FALSE(packed_crx.empty());
++
++  // The base server is already started. Keep this server and its served
++  // directory alive through the real completeInstall callback instead.
++  net::EmbeddedTestServer crx_server;
++  crx_server.ServeFilesFromDirectory(delivery_path);
++  ASSERT_TRUE(crx_server.Start());
++  // The generic test packer produces a signed CRX without a Store publisher
++  // proof. Bypass only that test requirement; signature, ID and manifest
++  // verification still execute, and production publisher checks are unchanged.
++  auto publisher_verification = DisablePublisherKeyVerificationForTests();
++  const GURL page_url =
++      embedded_test_server()->GetURL("www.example.com", "/title1.html");
++  content::WebContents* private_contents =
++      PlatformOpenURLOffTheRecord(regular_profile, page_url);
++  ASSERT_TRUE(private_contents);
++  ASSERT_TRUE(private_contents->GetBrowserContext()->IsOffTheRecord());
++  ASSERT_EQ(tracker, ExtensionsBrowserClient::Get()->GetInstallTracker(
++                         private_contents->GetBrowserContext()));
++
++  base::AutoReset<InstallPromptData::PromptType> reset_prompt(
++      &ExtensionInstallPrompt::g_last_prompt_type_for_tests,
++      InstallPromptData::UNSET_PROMPT_TYPE);
++  const std::string begin_script = content::JsReplace(R"(
++    new Promise(resolve => {
++      chrome.webstorePrivate.beginInstallWithManifest3({
++        id: $1, manifest: $2
++      }, result => {
++        resolve([result, chrome.runtime.lastError?.message || '']);
++      });
++    });
++  )", kExtensionId, manifest);
++  const std::string complete_script = content::JsReplace(R"(
++    new Promise(resolve => {
++      chrome.webstorePrivate.completeInstall($1, () => {
++        resolve(chrome.runtime.lastError?.message || '');
++      });
++    });
++  )", kExtensionId);
++
++  // Dispatch through the real renderer binding and function dispatcher. The
++  // regular install below uses the same ID, tracker and signed MV3 CRX.
++  const auto private_begin = content::EvalJs(private_contents, begin_script);
++  base::ListValue private_expected;
++  private_expected.Append("unknown_error");
++  private_expected.Append("Apps cannot be installed in guest/incognito mode");
++  EXPECT_EQ(private_expected, private_begin.ExtractList());
++  EXPECT_EQ(InstallPromptData::UNSET_PROMPT_TYPE,
++            ExtensionInstallPrompt::g_last_prompt_type_for_tests);
++  EXPECT_EQ(initial_approvals,
++            WebstorePrivateApi::GetPendingApprovalsCountForTesting());
++  EXPECT_FALSE(tracker->GetActiveInstall(kExtensionId));
++  EXPECT_EQ("Apps cannot be installed in guest/incognito mode",
++            content::EvalJs(private_contents, complete_script));
++  EXPECT_EQ(initial_approvals,
++            WebstorePrivateApi::GetPendingApprovalsCountForTesting());
++  EXPECT_FALSE(tracker->GetActiveInstall(kExtensionId));
++
++  ASSERT_TRUE(chrome_test_utils::NavigateToURL(regular_contents, page_url));
++  const GURL crx_url = crx_server.GetURL("/incognito-retry.crx");
++  // Brave owns a separate update URL, populated from --component-updater.
++  // Set both clients' overrides and assert that the real installer uses this
++  // server, rather than an updater endpoint left over from browser startup.
++  base::test::ScopedCommandLine scoped_command_line;
++  base::ScopedClosureRunner restore_store_urls(base::BindOnce(
++      [](base::CommandLine original_command_line) {
++        ExtensionsClient::Get()->InitializeWebStoreUrls(&original_command_line);
++      },
++      *scoped_command_line.GetProcessCommandLine()));
++  scoped_command_line.GetProcessCommandLine()->AppendSwitchASCII(
++      ::switches::kComponentUpdater, "url-source=" + crx_url.spec());
++  extension_test_util::SetGalleryUpdateURL(crx_url);
++  ASSERT_EQ(crx_url, extension_urls::GetWebstoreUpdateUrl());
++  const auto regular_begin = content::EvalJs(regular_contents, begin_script);
++  base::ListValue regular_expected;
++  regular_expected.Append("");
++  regular_expected.Append("");
++  ASSERT_EQ(regular_expected, regular_begin.ExtractList());
++  ASSERT_EQ("", content::EvalJs(regular_contents, complete_script));
++  const Extension* installed =
++      ExtensionRegistry::Get(regular_profile)->enabled_extensions().GetByID(
++          kExtensionId);
++  ASSERT_TRUE(installed);
++  EXPECT_EQ(3, installed->manifest_version());
++  EXPECT_TRUE(installed->from_webstore());
++  EXPECT_EQ(initial_approvals,
++            WebstorePrivateApi::GetPendingApprovalsCountForTesting());
++  EXPECT_FALSE(tracker->GetActiveInstall(kExtensionId));
++}
++#endif  // BUILDFLAG(IS_ANDROID)
+ 
+ // Test cases where the user accepts the install confirmation dialog.
+ IN_PROC_BROWSER_TEST_F(ExtensionWebstorePrivateApiTest, InstallAccepted) {

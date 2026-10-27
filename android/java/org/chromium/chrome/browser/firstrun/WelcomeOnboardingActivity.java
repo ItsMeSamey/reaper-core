@@ -15,7 +15,6 @@ import android.graphics.drawable.Animatable2;
 import android.graphics.drawable.AnimatedVectorDrawable;
 import android.graphics.drawable.Drawable;
 import android.os.Bundle;
-import android.text.SpannableString;
 import android.view.View;
 import android.view.ViewTreeObserver;
 import android.view.animation.OvershootInterpolator;
@@ -27,37 +26,18 @@ import androidx.constraintlayout.widget.ConstraintLayout;
 import androidx.constraintlayout.widget.Guideline;
 import androidx.viewpager2.widget.ViewPager2;
 
-import com.android.installreferrer.api.InstallReferrerClient;
-import com.android.installreferrer.api.InstallReferrerClient.InstallReferrerResponse;
-import com.android.installreferrer.api.InstallReferrerStateListener;
-import com.android.installreferrer.api.ReferrerDetails;
-
 import org.chromium.base.ActivityState;
 import org.chromium.base.ApplicationStatus;
 import org.chromium.base.ApplicationStatus.ActivityStateListener;
 import org.chromium.base.BravePreferenceKeys;
-import org.chromium.base.Log;
 import org.chromium.brave.browser.customize_menu.CustomizeBraveMenu;
 import org.chromium.build.annotations.NullMarked;
 import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.R;
-import org.chromium.chrome.browser.BraveConfig;
-import org.chromium.chrome.browser.BraveConstants;
-import org.chromium.chrome.browser.BraveLocalState;
-import org.chromium.chrome.browser.brave_origin.BraveOriginDeepLinkHandler;
-import org.chromium.chrome.browser.customtabs.CustomTabActivity;
-import org.chromium.chrome.browser.metrics.ChangeMetricsReportingStateCalledFrom;
-import org.chromium.chrome.browser.metrics.UmaSessionStats;
 import org.chromium.chrome.browser.onboarding.OnboardingPrefManager;
 import org.chromium.chrome.browser.preferences.BravePref;
 import org.chromium.chrome.browser.preferences.ChromeSharedPreferences;
-import org.chromium.chrome.browser.privacy.settings.PrivacyPreferencesManagerImpl;
 import org.chromium.chrome.browser.util.PackageUtils;
-import org.chromium.components.user_prefs.UserPrefs;
-import org.chromium.components.web_discovery.WebDiscoveryPrefs;
-import org.chromium.ui.text.ChromeClickableSpan;
-import org.chromium.ui.text.SpanApplier;
-import org.chromium.ui.text.SpanApplier.SpanInfo;
 
 /**
  * Activity responsible for handling the first-run onboarding experience for new Brave browser
@@ -68,7 +48,6 @@ import org.chromium.ui.text.SpanApplier.SpanInfo;
  *
  * <ul>
  *   <li>Setting Brave as the default browser
- *   <li>Configuring privacy and analytics preferences (P3A and crash reporting)
  *   <li>Accepting the Terms of Service
  * </ul>
  *
@@ -78,18 +57,10 @@ import org.chromium.ui.text.SpanApplier.SpanInfo;
 @NullMarked
 public class WelcomeOnboardingActivity extends FirstRunActivityBase
         implements OnboardingStepAdapter.OnboardingNavigationListener {
-    private static final String WDP_LINK =
-            "https://www.brave.com/browser/privacy/#web-discovery-project";
-
-    private static final String TAG = "WelcomeOnboarding";
 
     private static final String KEY_SPLASH_ANIMATION_FINISHED =
             "WelcomeOnboardingActivity.SplashAnimationFinished";
     private static final String KEY_PAGE_INDEX = "WelcomeOnboardingActivity.PageIndex";
-    private static final String KEY_CRASH_REPORTING_CHECKED =
-            "WelcomeOnboardingActivity.CrashReportingChecked";
-    private static final String KEY_P3A_CHECKED = "WelcomeOnboardingActivity.P3aChecked";
-
     private static final float REDUCED_TENSION_OVERSHOOT_INTERPOLATOR = 1f;
     private static final float BRAVE_SPLASH_SCALE_ANIMATION = 0.4f;
     // Bottom 16.8% of the drawable is transparent.
@@ -108,80 +79,10 @@ public class WelcomeOnboardingActivity extends FirstRunActivityBase
     private OnboardingStepAdapter mStepAdapter;
     private PageBounceAnimator mPageBounceAnimator;
 
-    private boolean mIsP3aManaged;
-    private boolean mIsCrashReportingManaged;
-    private boolean mHasRestoredState;
-    private boolean mCrashReportingChecked;
-    private boolean mP3aChecked;
-
-    private void checkReferral() {
-        InstallReferrerClient referrerClient = InstallReferrerClient.newBuilder(this).build();
-        referrerClient.startConnection(
-                new InstallReferrerStateListener() {
-                    @Override
-                    public void onInstallReferrerSetupFinished(int responseCode) {
-                        switch (responseCode) {
-                            case InstallReferrerResponse.OK:
-                                try {
-                                    ReferrerDetails response = referrerClient.getInstallReferrer();
-                                    String referrerUrl = response.getInstallReferrer();
-                                    if (referrerUrl == null) return;
-
-                                    if (referrerUrl.equals(
-                                            BraveConstants.DEEPLINK_ANDROID_PLAYLIST)) {
-                                        ChromeSharedPreferences.getInstance()
-                                                .writeBoolean(
-                                                        BravePreferenceKeys
-                                                                .BRAVE_DEFERRED_DEEPLINK_PLAYLIST,
-                                                        true);
-                                    } else if (referrerUrl.equals(
-                                            BraveConstants.DEEPLINK_ANDROID_VPN)) {
-                                        ChromeSharedPreferences.getInstance()
-                                                .writeBoolean(
-                                                        BravePreferenceKeys
-                                                                .BRAVE_DEFERRED_DEEPLINK_VPN,
-                                                        true);
-                                    } else if (referrerUrl.equals(
-                                            BraveOriginDeepLinkHandler.PATH_TOKEN)) {
-                                        ChromeSharedPreferences.getInstance()
-                                                .writeBoolean(
-                                                        BravePreferenceKeys
-                                                                .BRAVE_DEFERRED_DEEPLINK_ORIGIN_PROMO, // presubmit: ignore-long-line
-                                                        true);
-                                    }
-                                } catch (Exception e) {
-                                    // Play Store may return a null bundle alongside an OK
-                                    // response code, which makes ReferrerDetails throw.
-                                    Log.e(TAG, "Could not get referral", e);
-                                }
-                                // Connection established.
-                                break;
-                            case InstallReferrerResponse.FEATURE_NOT_SUPPORTED:
-                                // API not available on the current Play Store app.
-                                Log.e(TAG, "InstallReferrerResponse.FEATURE_NOT_SUPPORTED");
-                                break;
-                            case InstallReferrerResponse.SERVICE_UNAVAILABLE:
-                                // Connection couldn't be established.
-                                Log.e(TAG, "InstallReferrerResponse.SERVICE_UNAVAILABLE");
-                                break;
-                        }
-                    }
-
-                    @Override
-                    public void onInstallReferrerServiceDisconnected() {}
-                });
-    }
-
-    private void enableWebDiscoverPreference() {
-        UserPrefs.get(assumeNonNull(getProfileProviderSupplier().get()).getOriginalProfile())
-                .setBoolean(BravePref.WEB_DISCOVERY_ENABLED, true);
-    }
-
     private void finalStep() {
         ChromeSharedPreferences.getInstance()
                 .writeBoolean(OnboardingPrefManager.SHOULD_SHOW_SEARCH_WIDGET_PROMO, true);
         CustomizeBraveMenu.initDefaultInvisibleItems(getResources());
-        OnboardingPrefManager.getInstance().setP3aOnboardingShown(true);
 
         FirstRunStatus.setFirstRunFlowComplete(true);
 
@@ -226,39 +127,6 @@ public class WelcomeOnboardingActivity extends FirstRunActivityBase
         }
     }
 
-    private boolean isWDPSettingAvailable() {
-        if (!BraveConfig.WEB_DISCOVERY_ENABLED) {
-            return false;
-        }
-        return !UserPrefs.get(
-                        assumeNonNull(getProfileProviderSupplier().get()).getOriginalProfile())
-                .isManagedPreference(WebDiscoveryPrefs.WEB_DISCOVERY_ENABLED);
-    }
-
-    private void setMetricsReportingConsent(final boolean enabled, final boolean markAsShown) {
-        try {
-            // Updates reporting consent for first run.
-            UmaSessionStats.changeMetricsReportingState(
-                    enabled, ChangeMetricsReportingStateCalledFrom.UI_FIRST_RUN);
-        } catch (Exception e) {
-            Log.e(TAG, "CrashReportingOnboarding", e);
-        }
-        if (markAsShown) {
-            // Marks crash reporting message as shown.
-            OnboardingPrefManager.getInstance().setP3aCrashReportingMessageShown(true);
-        }
-    }
-
-    private void setP3aConsent(final boolean consent) {
-        try {
-            BraveLocalState.get().setBoolean(BravePref.P3A_ENABLED, consent);
-            BraveLocalState.get().setBoolean(BravePref.P3A_NOTICE_ACKNOWLEDGED, true);
-            BraveLocalState.commitPendingWrite();
-        } catch (Exception e) {
-            Log.e(TAG, "P3aOnboarding", e);
-        }
-    }
-
     @Override
     public void triggerLayoutInflation() {
         super.triggerLayoutInflation();
@@ -267,20 +135,9 @@ public class WelcomeOnboardingActivity extends FirstRunActivityBase
         mSplashGuideline = findViewById(R.id.splash_anchor);
         mOnboardingPager = findViewById(R.id.onboarding_steps_pager);
 
-        final ChromeClickableSpan wdpLearnMoreClickableSpan =
-                new ChromeClickableSpan(
-                        getColor(R.color.brave_blue_tint_color),
-                        (textView) -> CustomTabActivity.showInfoPage(this, WDP_LINK));
-        final String wdpText = getResources().getString(R.string.wdp_text);
-
-        final SpannableString wdpLearnMore =
-                SpanApplier.applySpans(
-                        wdpText,
-                        new SpanInfo("<learn_more>", "</learn_more>", wdpLearnMoreClickableSpan));
-
         mOnboardingPager.setUserInputEnabled(false);
         mPageBounceAnimator = new PageBounceAnimator(mOnboardingPager);
-        mStepAdapter = new OnboardingStepAdapter(wdpLearnMore, this);
+        mStepAdapter = new OnboardingStepAdapter(this);
         mOnboardingPager.setAdapter(mStepAdapter);
 
         mBraveSplash = findViewById(R.id.brave_splash);
@@ -288,7 +145,6 @@ public class WelcomeOnboardingActivity extends FirstRunActivityBase
         // splash container, and it is what tells the two splash treatments apart.
         mBraveSplashContainer = findViewById(R.id.brave_splash_container);
 
-        checkReferral();
         if (PackageUtils.isFirstInstall(this)) {
             ChromeSharedPreferences.getInstance()
                     .writeBoolean(
@@ -301,28 +157,6 @@ public class WelcomeOnboardingActivity extends FirstRunActivityBase
     public void finishNativeInitialization() {
         super.finishNativeInitialization();
 
-        mIsP3aManaged = BraveLocalState.get().isManagedPreference(BravePref.P3A_ENABLED);
-        mIsCrashReportingManaged =
-                !PrivacyPreferencesManagerImpl.getInstance()
-                        .isUsageAndCrashReportingPermittedByPolicy();
-
-        if (!mIsCrashReportingManaged) {
-            if (!mHasRestoredState) {
-                mCrashReportingChecked = getCrashReportingPreference();
-            }
-            mStepAdapter.setCrashReportingChecked(mCrashReportingChecked);
-        } else {
-            mStepAdapter.setCrashReportingManaged(true);
-        }
-
-        if (!mIsP3aManaged) {
-            if (!mHasRestoredState) {
-                mP3aChecked = getP3aPreference();
-            }
-            mStepAdapter.setP3aChecked(mP3aChecked);
-        } else {
-            mStepAdapter.setP3aManaged(true);
-        }
         if (mSplashAnimationFinished) {
             if (mBraveSplashContainer != null) {
                 mBraveSplashContainer.setVisibility(View.GONE);
@@ -343,8 +177,6 @@ public class WelcomeOnboardingActivity extends FirstRunActivityBase
         super.onSaveInstanceState(outState);
         outState.putBoolean(KEY_SPLASH_ANIMATION_FINISHED, mSplashAnimationFinished);
         outState.putInt(KEY_PAGE_INDEX, mOnboardingPager.getCurrentItem());
-        outState.putBoolean(KEY_CRASH_REPORTING_CHECKED, mCrashReportingChecked);
-        outState.putBoolean(KEY_P3A_CHECKED, mP3aChecked);
     }
 
     @Override
@@ -352,9 +184,6 @@ public class WelcomeOnboardingActivity extends FirstRunActivityBase
         super.onRestoreInstanceState(state);
         mSplashAnimationFinished = state.getBoolean(KEY_SPLASH_ANIMATION_FINISHED, false);
         mRestoredPageIndex = state.getInt(KEY_PAGE_INDEX, 0);
-        mCrashReportingChecked = state.getBoolean(KEY_CRASH_REPORTING_CHECKED);
-        mP3aChecked = state.getBoolean(KEY_P3A_CHECKED);
-        mHasRestoredState = true;
     }
 
     private void playAnimatedVectorDrawable() {
@@ -384,36 +213,8 @@ public class WelcomeOnboardingActivity extends FirstRunActivityBase
         vectorDrawable.start();
     }
 
-    private boolean getCrashReportingPreference() {
-        if (PackageUtils.isFirstInstall(this)
-                && !OnboardingPrefManager.getInstance().isP3aCrashReportingMessageShown()) {
-            setMetricsReportingConsent(true, true);
-            return true;
-        }
-
-        boolean isCrashReporting = false;
-        try {
-            isCrashReporting =
-                    PrivacyPreferencesManagerImpl.getInstance()
-                            .isUsageAndCrashReportingPermittedByUser();
-        } catch (Exception e) {
-            Log.e(TAG, "CrashReportingOnboarding", e);
-        }
-        return isCrashReporting;
-    }
-
-    private boolean getP3aPreference() {
-        boolean isP3aEnabled = true;
-        try {
-            isP3aEnabled = BraveLocalState.get().getBoolean(BravePref.P3A_ENABLED);
-        } catch (Exception e) {
-            Log.e(TAG, "P3aOnboarding", e);
-        }
-        return isP3aEnabled;
-    }
-
     private void showPagerAfterSplash() {
-        mOnboardingPager.setCurrentItem(isWDPSettingAvailable() ? 0 : 1, false);
+        mOnboardingPager.setCurrentItem(0, false);
         mOnboardingPager.setVisibility(View.VISIBLE);
         mSplashAnimationFinished = true;
         maybeRequestDefaultBrowser();
@@ -566,13 +367,6 @@ public class WelcomeOnboardingActivity extends FirstRunActivityBase
 
     @Override
     public void onRequestPageChange(final int position) {
-        if (position == 2) {
-            // If both settings are managed by policy, skip this page entirely
-            if (mIsP3aManaged && mIsCrashReportingManaged) {
-                finalStep();
-                return;
-            }
-        }
         mPageBounceAnimator.animateToPosition(position);
     }
 
@@ -581,20 +375,4 @@ public class WelcomeOnboardingActivity extends FirstRunActivityBase
         finalStep();
     }
 
-    @Override
-    public void onWebDiscoverPreferenceEnabled() {
-        enableWebDiscoverPreference();
-    }
-
-    @Override
-    public void onCrashReportingPreferenceChanged(final boolean enabled) {
-        mCrashReportingChecked = enabled;
-        setMetricsReportingConsent(enabled, false);
-    }
-
-    @Override
-    public void onP3aPreferenceChanged(final boolean enabled) {
-        mP3aChecked = enabled;
-        setP3aConsent(enabled);
-    }
 }

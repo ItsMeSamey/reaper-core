@@ -10,7 +10,11 @@
 
 #include "base/functional/callback.h"
 #include "base/memory/weak_ptr.h"
+#include "build/build_config.h"
+
+#if !BUILDFLAG(IS_ANDROID)
 #include "base/trace_event/trace_event.h"
+#endif
 #include "brave/components/brave_component_updater/browser/dat_file_util.h"
 #include "brave/components/brave_shields/core/browser/ad_block_filters_provider.h"
 #include "brave/components/brave_shields/core/browser/ad_block_filters_provider_manager.h"
@@ -48,7 +52,9 @@ class AdBlockSubscriptionFiltersProvider : public AdBlockFiltersProvider {
   void OnDATFileDataReady(
       base::OnceCallback<
           void(base::OnceCallback<void(rust::Box<adblock::FilterSet>*)>)> cb,
+#if !BUILDFLAG(IS_ANDROID)
       const perfetto::Flow& flow,
+#endif
       const DATFileDataBuffer& dat_buf);
 
   std::string GetNameForDebugging() override;

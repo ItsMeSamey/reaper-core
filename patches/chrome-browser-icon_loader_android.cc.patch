@@ -1,0 +1,91 @@
+diff --git a/chrome/browser/icon_loader_android.cc b/chrome/browser/icon_loader_android.cc
+--- a/chrome/browser/icon_loader_android.cc
++++ b/chrome/browser/icon_loader_android.cc
+@@ -4,22 +4,81 @@
+ 
+ #include "chrome/browser/icon_loader.h"
+ 
+-#include "base/notimplemented.h"
++#include <cmath>
++#include <utility>
++
++#include "base/android/jni_android.h"
++#include "base/android/jni_string.h"
++#include "base/functional/bind.h"
++#include "base/strings/string_util.h"
++#include "content/public/browser/browser_task_traits.h"
++#include "content/public/browser/browser_thread.h"
++#include "ui/gfx/android/java_bitmap.h"
++#include "ui/gfx/image/image_skia.h"
++#include "ui/gfx/image/image_skia_rep.h"
++
++// Must follow headers specializing FromJniType() / ToJniType().
++#include "brave/browser/extensions/android/download_icons/jni_headers/ReaperDownloadFileIcon_jni.h"
+ 
+ // static
+ IconLoader::IconGroup IconLoader::GroupForFilepath(
+     const base::FilePath& file_path) {
+-  NOTIMPLEMENTED();
+-  return IconLoader::IconGroup();
++  // MIME icons depend only on the suffix; do not open the downloaded file.
++  return base::ToLowerASCII(file_path.FinalExtension());
+ }
+ 
+ // static
+ scoped_refptr<base::TaskRunner> IconLoader::GetReadIconTaskRunner() {
+-  NOTIMPLEMENTED();
+-  return nullptr;
++  return content::GetUIThreadTaskRunner({});
+ }
+ 
+ void IconLoader::ReadIcon() {
+-  NOTIMPLEMENTED();
++  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
++  int dip_size = 32;
++  switch (icon_size_) {
++    case SMALL:
++      dip_size = 16;
++      break;
++    case LARGE:
++      dip_size = 48;
++      break;
++    case NORMAL:
++    case ALL:
++      break;
++  }
++
++  // Bound allocation before converting to int. Reject subpixel/invalid sizes
++  // rather than producing an image with an invalid scale or huge DIP
++  // dimensions.
++  constexpr int kMaxIconPixels = 256;
++  const double scaled_size = dip_size * static_cast<double>(scale_);
++  gfx::Image image;
++  if (std::isfinite(scaled_size) && scaled_size >= 1 &&
++      scaled_size <= kMaxIconPixels) {
++    const int size_pixels = static_cast<int>(std::ceil(scaled_size));
++    auto java_icon = Java_ReaperDownloadFileIcon_loadIcon(
++        base::android::AttachCurrentThread(), group_, size_pixels);
++    if (!java_icon.is_null()) {
++      gfx::JavaBitmap bitmap(java_icon);
++      if (bitmap.size().width() == size_pixels &&
++          bitmap.size().height() == size_pixels &&
++          bitmap.format() == gfx::BITMAP_FORMAT_ARGB_8888 && bitmap.pixels()) {
++        SkBitmap sk_bitmap = gfx::CreateSkBitmapFromJavaBitmap(bitmap);
++        if (!sk_bitmap.drawsNothing()) {
++          gfx::ImageSkia icon{gfx::ImageSkiaRep(sk_bitmap, scale_)};
++          icon.MakeThreadSafe();
++          image = gfx::Image(icon);
++        }
++      }
++    }
++  }
++
++  // Match the platform loaders: success and failure both complete on the
++  // requesting sequence, with an empty image representing failure.
++  target_task_runner_->PostTask(
++      FROM_HERE,
++      base::BindOnce(std::move(callback_), std::move(image), group_));
+   delete this;
+ }
++
++DEFINE_JNI(ReaperDownloadFileIcon)

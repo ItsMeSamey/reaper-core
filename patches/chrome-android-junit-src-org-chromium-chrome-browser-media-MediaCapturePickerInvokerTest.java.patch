@@ -1,0 +1,391 @@
+diff --git a/chrome/android/junit/src/org/chromium/chrome/browser/media/MediaCapturePickerInvokerTest.java b/chrome/android/junit/src/org/chromium/chrome/browser/media/MediaCapturePickerInvokerTest.java
+--- a/chrome/android/junit/src/org/chromium/chrome/browser/media/MediaCapturePickerInvokerTest.java
++++ b/chrome/android/junit/src/org/chromium/chrome/browser/media/MediaCapturePickerInvokerTest.java
+@@ -5,19 +5,39 @@
+ package org.chromium.chrome.browser.media;
+ 
+ import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertNotNull;
++import static org.junit.Assert.assertTrue;
+ import static org.mockito.Mockito.doReturn;
+ import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.never;
+ import static org.mockito.Mockito.verify;
++import static org.mockito.Mockito.verifyNoInteractions;
+ 
+ import android.app.Activity;
+-import android.content.Context;
++import android.app.AlertDialog;
+ import android.content.Intent;
+-
+-import androidx.activity.result.ActivityResult;
++import android.view.View;
++import android.view.ViewGroup;
++import android.widget.CheckBox;
++import android.widget.ListView;
++
+ import androidx.fragment.app.FragmentActivity;
+ import androidx.test.ext.junit.rules.ActivityScenarioRule;
+ import androidx.test.filters.SmallTest;
+ 
++import org.chromium.base.CallbackUtils;
++import org.chromium.base.test.BaseRobolectricTestRunner;
++import org.chromium.chrome.browser.app.tabmodel.AllTabObserver;
++import org.chromium.chrome.browser.app.tabwindow.TabWindowManagerSingleton;
++import org.chromium.chrome.browser.media.MediaCapturePickerManager.Delegate;
++import org.chromium.chrome.browser.media.MediaCapturePickerManager.Params;
++import org.chromium.chrome.browser.tab.Tab;
++import org.chromium.chrome.browser.tabwindow.TabWindowManager;
++import org.chromium.content_public.browser.WebContents;
++import org.chromium.ui.base.TestActivity;
++import org.chromium.ui.base.WindowAndroid;
++import org.chromium.url.GURL;
+ import org.junit.After;
+ import org.junit.Before;
+ import org.junit.Rule;
+@@ -26,19 +46,13 @@
+ import org.mockito.Mock;
+ import org.mockito.junit.MockitoJUnit;
+ import org.mockito.junit.MockitoRule;
+-
+-import org.chromium.base.CallbackUtils;
+-import org.chromium.base.ServiceLoaderUtil;
+-import org.chromium.base.test.BaseRobolectricTestRunner;
+-import org.chromium.chrome.browser.media.MediaCapturePickerHeadlessFragment.CaptureAction;
+-import org.chromium.chrome.browser.media.MediaCapturePickerManager.Delegate;
+-import org.chromium.chrome.browser.media.MediaCapturePickerManager.Params;
+-import org.chromium.chrome.browser.tab.Tab;
+-import org.chromium.content_public.browser.WebContents;
+-import org.chromium.content_public.browser.media.capture.ScreenCapture;
+-import org.chromium.ui.base.TestActivity;
+-
+-/** Tests for MediaCapturePickerInvoker. */
++import org.robolectric.Shadows;
++import org.robolectric.shadows.ShadowAlertDialog;
++
++import java.lang.ref.WeakReference;
++import java.util.List;
++
++/** Exercises the actual chooser rather than an absent ServiceLoader delegate. */
+ @RunWith(BaseRobolectricTestRunner.class)
+ public class MediaCapturePickerInvokerTest {
+     @Rule
+@@ -46,159 +60,179 @@
+             new ActivityScenarioRule<>(TestActivity.class);
+ 
+     @Rule public MockitoRule mMockitoRule = MockitoJUnit.rule();
+-
+     @Mock private Delegate mDelegate;
+     @Mock private WebContents mTabWebContents;
+-
+     private Activity mActivity;
+-    private FakeMediaCapturePickerDelegate mPickerDelegate;
+-
+-    private static class FakeMediaCapturePickerDelegate implements MediaCapturePickerDelegate {
+-        private Intent mIntent;
+-        private Tab mTab;
+-        private boolean mShouldShareAudio;
+-        private WebContents mStoppedWebContents;
+-
+-        @Override
+-        public Intent createScreenCaptureIntent(Context context, Params params, Delegate delegate) {
+-            return mIntent;
+-        }
+-
+-        @Override
+-        public Tab getPickedTab() {
+-            return mTab;
+-        }
+-
+-        @Override
+-        public boolean shouldShareAudio() {
+-            return mShouldShareAudio;
+-        }
+-
+-        @Override
+-        public void stopAppContentMediaProjection(WebContents webContents) {
+-            mStoppedWebContents = webContents;
+-        }
+-
+-        private WebContents getStoppedWebContents() {
+-            return mStoppedWebContents;
+-        }
+-
+-        private void setIntent(Intent intent) {
+-            mIntent = intent;
+-        }
+-
+-        private void setPickedTab(Tab tab) {
+-            mTab = tab;
+-        }
+-
+-        public void setShouldShareAudio(boolean shouldShareAudio) {
+-            mShouldShareAudio = shouldShareAudio;
+-        }
+-    }
+-
+-    private static MediaCapturePickerManager.Params mediaCaptureParams() {
+-        return new MediaCapturePickerManager.Params(
+-                mock(WebContents.class),
+-                "",
+-                "",
+-                /* requestAudio= */ false,
+-                /* excludeSystemAudio= */ false,
+-                /* windowAudioPreference= */ 0,
+-                /* preferredDisplaySurface= */ 0,
+-                true,
+-                /* excludeSelfBrowserSurface= */ false,
+-                /* excludeMonitorTypeSurfaces= */ false,
+-                AllowedScreenCaptureLevel.DESKTOP);
++    private Runnable mDismiss = () -> {};
++
++    private Params params(boolean audio) {
++        Params params =
++                new Params(
++                        mock(WebContents.class),
++                        "Extension",
++                        "Extension",
++                        audio,
++                        false,
++                        0,
++                        0,
++                        false,
++                        false,
++                        false,
++                        AllowedScreenCaptureLevel.DESKTOP);
++        params.allowedSourceTypes = 1;
++        params.captureId = 42;
++        return params;
+     }
+ 
+     @Before
+     public void setUp() {
+         mActivityScenarioRule.getScenario().onActivity(activity -> mActivity = activity);
+-        mPickerDelegate = new FakeMediaCapturePickerDelegate();
+-        ServiceLoaderUtil.setInstanceForTesting(MediaCapturePickerDelegate.class, mPickerDelegate);
++        TabWindowManager manager = mock(TabWindowManager.class);
++        doReturn(List.of()).when(manager).getAllTabModelSelectors();
++        TabWindowManagerSingleton.setTabWindowManagerForTesting(manager);
+         MediaCapturePickerManager.setBringTabToFrontCallbackForTesting(
+                 CallbackUtils.emptyCallback());
+     }
+ 
+     @After
+     public void tearDown() {
+-        ScreenCapture.resetStaticStateForTesting();
+-    }
+-
+-    @Test
+-    @SmallTest
+-    public void testShow_cancel() {
+-        mPickerDelegate.setIntent(new Intent());
+-        MediaCapturePickerInvoker.show(mActivity, mediaCaptureParams(), mDelegate);
++        mDismiss.run();
++        AllTabObserver.resetForTesting();
++    }
++
++    private Tab addTab() {
++        Tab tab = mock(Tab.class);
++        doReturn(mTabWebContents).when(tab).getWebContents();
++        doReturn(new GURL("https://example.test/")).when(tab).getUrl();
++        doReturn("Example").when(tab).getTitle();
++        AllTabObserver.addCustomTab(tab);
++        return tab;
++    }
++
++    private static <T extends View> T find(View root, Class<T> type) {
++        if (type.isInstance(root)) return type.cast(root);
++        if (root instanceof ViewGroup group) {
++            for (int i = 0; i < group.getChildCount(); i++) {
++                T result = find(group.getChildAt(i), type);
++                if (result != null) return result;
++            }
++        }
++        return null;
++    }
++
++    private AlertDialog show(boolean audio) {
++        mDismiss = MediaCapturePickerInvoker.show(mActivity, params(audio), mDelegate);
++        AlertDialog dialog = ShadowAlertDialog.getLatestAlertDialog();
++        assertNotNull(dialog);
++        return dialog;
++    }
++
++    private void select(AlertDialog dialog) {
++        ListView list = find(dialog.getWindow().getDecorView(), ListView.class);
++        assertEquals(1, list.getCount());
++        list.performItemClick(null, 0, 0);
++    }
++
++    @Test
++    @SmallTest
++    public void selectingTabRequiresExplicitShareAndAudioOptIn() {
++        addTab();
++        AlertDialog dialog = show(true);
++        assertFalse(dialog.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled());
++        select(dialog);
++        verify(mDelegate, never()).onPickTab(mTabWebContents, false);
++        CheckBox audio = find(dialog.getWindow().getDecorView(), CheckBox.class);
++        assertFalse(audio.isChecked());
++        dialog.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
++        verify(mDelegate).onPickTab(mTabWebContents, false);
++        verify(mDelegate, never()).onPickScreen();
++        verify(mDelegate, never()).onPickWindow();
++    }
++
++    @Test
++    @SmallTest
++    public void userMayOptInToRequestedTabAudio() {
++        addTab();
++        AlertDialog dialog = show(true);
++        select(dialog);
++        find(dialog.getWindow().getDecorView(), CheckBox.class).setChecked(true);
++        dialog.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
++        verify(mDelegate).onPickTab(mTabWebContents, true);
++    }
++
++    @Test
++    @SmallTest
++    public void filterIsRecheckedAtConfirmation() {
++        addTab();
++        AlertDialog dialog = show(false);
++        select(dialog);
++        doReturn(true).when(mDelegate).shouldFilterWebContents(mTabWebContents);
++        dialog.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
++        verify(mDelegate).onCancel();
++        verify(mDelegate, never()).onPickTab(mTabWebContents, false);
++    }
++
++    @Test
++    @SmallTest
++    public void removedTabCannotRemainSelected() {
++        Tab tab = addTab();
++        AlertDialog dialog = show(false);
++        select(dialog);
++        AllTabObserver.removeCustomTab(tab);
++        assertFalse(dialog.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled());
++    }
++
++    @Test
++    @SmallTest
++    public void nativeDismissalIsNotASecondResult() {
++        AlertDialog dialog = show(false);
++        mDismiss.run();
++        assertFalse(dialog.isShowing());
++        verifyNoInteractions(mDelegate);
++    }
++
++    @Test
++    @SmallTest
++    public void extensionWithoutOwnWindowUsesAuthorizedParent() {
++        Params params = params(false);
++        WindowAndroid parent = mock(WindowAndroid.class);
++        doReturn(new WeakReference<>(mActivity)).when(parent).getContext();
++        params.parentWindow = parent;
++        // The mocked extension WebContents has no top-level native window.
++        mDismiss = MediaCapturePickerManager.showDialog(params, mDelegate);
++        AlertDialog dialog = ShadowAlertDialog.getLatestAlertDialog();
++        assertNotNull(dialog);
++        assertTrue(dialog.isShowing());
++        verifyNoInteractions(mDelegate);
++    }
++
++    @Test
++    @SmallTest
++    public void noAuthorizedSurfaceFailsClosed() {
++        Params params = params(false);
++        params.allowedSourceTypes = 0;
++        mDismiss = MediaCapturePickerInvoker.show(mActivity, params, mDelegate);
++        verify(mDelegate).onCancel();
++        verify(mDelegate, never()).onPickScreen();
++        verify(mDelegate, never()).onPickWindow();
++    }
++
++    @Test
++    @SmallTest
++    public void cancelledPromptCannotAuthorizeOverlappingRequest() {
+         MediaCapturePickerHeadlessFragment fragment =
+                 MediaCapturePickerHeadlessFragment.getInstance((FragmentActivity) mActivity);
+-        fragment.mNextDelegate.onPicked(
+-                CaptureAction.CAPTURE_CANCELLED,
+-                new ActivityResult(Activity.RESULT_CANCELED, null));
+-        verify(mDelegate).onCancel();
+-    }
+-
+-    @Test
+-    @SmallTest
+-    public void testShow_tabWithAudio() {
+-        Tab tab = mock(Tab.class);
+-        doReturn(mTabWebContents).when(tab).getWebContents();
+-
+-        mPickerDelegate.setIntent(new Intent());
+-        mPickerDelegate.setPickedTab(tab);
+-        mPickerDelegate.setShouldShareAudio(true);
+-        MediaCapturePickerInvoker.show(mActivity, mediaCaptureParams(), mDelegate);
+-        MediaCapturePickerHeadlessFragment fragment =
+-                MediaCapturePickerHeadlessFragment.getInstance((FragmentActivity) mActivity);
+-        fragment.mNextDelegate.onPicked(
+-                CaptureAction.CAPTURE_WINDOW, new ActivityResult(Activity.RESULT_OK, new Intent()));
+-        verify(tab).loadIfNeeded(/* forceBackingSize= */ true);
+-        verify(mDelegate).onPickTab(mTabWebContents, true);
+-    }
+-
+-    @Test
+-    @SmallTest
+-    public void testShow_tabWithoutAudio() {
+-        Tab tab = mock(Tab.class);
+-        doReturn(mTabWebContents).when(tab).getWebContents();
+-
+-        mPickerDelegate.setIntent(new Intent());
+-        mPickerDelegate.setPickedTab(tab);
+-        mPickerDelegate.setShouldShareAudio(false);
+-        MediaCapturePickerInvoker.show(mActivity, mediaCaptureParams(), mDelegate);
+-        MediaCapturePickerHeadlessFragment fragment =
+-                MediaCapturePickerHeadlessFragment.getInstance((FragmentActivity) mActivity);
+-        fragment.mNextDelegate.onPicked(
+-                CaptureAction.CAPTURE_WINDOW, new ActivityResult(Activity.RESULT_OK, new Intent()));
+-        verify(tab).loadIfNeeded(/* forceBackingSize= */ true);
+-        verify(mDelegate).onPickTab(mTabWebContents, false);
+-    }
+-
+-    @Test
+-    @SmallTest
+-    public void testShow_window() {
+-        mPickerDelegate.setIntent(new Intent());
+-        Params params = mediaCaptureParams();
+-        MediaCapturePickerInvoker.show(mActivity, params, mDelegate);
+-        MediaCapturePickerHeadlessFragment fragment =
+-                MediaCapturePickerHeadlessFragment.getInstance((FragmentActivity) mActivity);
+-        fragment.mNextDelegate.onPicked(
+-                CaptureAction.CAPTURE_WINDOW, new ActivityResult(Activity.RESULT_OK, new Intent()));
+-        verify(mDelegate).onPickWindow();
+-        assertEquals(params.webContents, mPickerDelegate.getStoppedWebContents());
+-    }
+-
+-    @Test
+-    @SmallTest
+-    public void testShow_screen() {
+-        mPickerDelegate.setIntent(new Intent());
+-        Params params = mediaCaptureParams();
+-        MediaCapturePickerInvoker.show(mActivity, params, mDelegate);
+-        MediaCapturePickerHeadlessFragment fragment =
+-                MediaCapturePickerHeadlessFragment.getInstance((FragmentActivity) mActivity);
+-        fragment.mNextDelegate.onPicked(
+-                CaptureAction.CAPTURE_SCREEN, new ActivityResult(Activity.RESULT_OK, new Intent()));
+-        verify(mDelegate).onPickScreen();
+-        assertEquals(params.webContents, mPickerDelegate.getStoppedWebContents());
++        MediaCapturePickerHeadlessFragment.Delegate first =
++                mock(MediaCapturePickerHeadlessFragment.Delegate.class);
++        MediaCapturePickerHeadlessFragment.Delegate second =
++                mock(MediaCapturePickerHeadlessFragment.Delegate.class);
++        Intent prompt = new Intent("capture.test.PROMPT");
++        assertTrue(fragment.startAndroidCapturePrompt(first, prompt));
++        fragment.cancelPrompt(first);
++        assertFalse(fragment.startAndroidCapturePrompt(second, prompt));
++        Shadows.shadowOf(mActivity).receiveResult(prompt, Activity.RESULT_OK, new Intent());
++        verifyNoInteractions(first, second);
++        assertTrue(fragment.startAndroidCapturePrompt(second, prompt));
++        fragment.cancelPrompt(second);
+     }
+ }

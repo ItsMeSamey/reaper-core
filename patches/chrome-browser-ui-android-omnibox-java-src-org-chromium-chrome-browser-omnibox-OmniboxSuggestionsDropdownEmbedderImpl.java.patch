@@ -1,0 +1,172 @@
+diff --git a/chrome/browser/ui/android/omnibox/java/src/org/chromium/chrome/browser/omnibox/OmniboxSuggestionsDropdownEmbedderImpl.java b/chrome/browser/ui/android/omnibox/java/src/org/chromium/chrome/browser/omnibox/OmniboxSuggestionsDropdownEmbedderImpl.java
+--- a/chrome/browser/ui/android/omnibox/java/src/org/chromium/chrome/browser/omnibox/OmniboxSuggestionsDropdownEmbedderImpl.java
++++ b/chrome/browser/ui/android/omnibox/java/src/org/chromium/chrome/browser/omnibox/OmniboxSuggestionsDropdownEmbedderImpl.java
+@@ -27,8 +27,6 @@
+ import org.chromium.chrome.browser.browser_controls.BrowserControlsStateProvider.ControlsPosition;
+ import org.chromium.chrome.browser.flags.ChromeFeatureList;
+ import org.chromium.chrome.browser.layouts.LayoutType;
+-import org.chromium.chrome.browser.omnibox.fusebox.FuseboxCoordinator.FuseboxLayoutMode;
+-import org.chromium.chrome.browser.omnibox.fusebox.FuseboxCoordinator.FuseboxState;
+ import org.chromium.chrome.browser.omnibox.styles.OmniboxResourceProvider;
+ import org.chromium.chrome.browser.omnibox.suggestions.OmniboxSuggestionsDropdownEmbedder;
+ import org.chromium.chrome.browser.ui.edge_to_edge.TopInsetProvider;
+@@ -36,7 +34,6 @@
+ import org.chromium.ui.base.ViewUtils;
+ import org.chromium.ui.base.WindowAndroid;
+ 
+-import java.util.function.BooleanSupplier;
+ import java.util.function.Supplier;
+ 
+ /**
+@@ -74,9 +71,6 @@
+     private int mTopPaddingForEdgeToEdge;
+     private @Nullable WindowInsetsCompat mWindowInsetsCompat;
+     private final @Nullable View mBaseChromeLayout;
+-    private final Supplier<@FuseboxState Integer> mFuseboxStateSupplier;
+-    private final Supplier<@FuseboxLayoutMode Integer> mFuseboxLayoutModeSupplier;
+-    private final BooleanSupplier mIsFullWidthExpansionAllowedSupplier;
+ 
+     /**
+      * @param resourceProvider Resource cache for fast resource lookup.
+@@ -88,10 +82,10 @@
+      *     its width is smaller than the anchor view. 2. The dropdown should vertically align to
+      *     during animations. This must be a descendant of the anchor view.
+      * @param alignmentViewTargetWidthSupplier Supplier of the target width for the alignment view,
+-     *     allowing popover mode to publish target width without mutating layout parameters on the
+-     *     alignment view directly (which would cause double margin counting on focus).
++     *     allowing target width to update without mutating layout parameters on the alignment view
++     *     directly (which would cause double margin counting on focus).
+      * @param alignmentViewLeftOffsetSupplier Supplier of the left offset for the alignment view,
+-     *     allowing popover mode to publish horizontal shifts.
++     *     allowing alignment to publish horizontal shifts.
+      * @param forcePhoneStyleOmnibox Whether to force phone layout styling for suggestions.
+      * @param baseChromeLayout The base view hosting Chrome that certain views (e.g. the omnibox
+      *     suggestion list) will position themselves relative to. If null, the content view will be
+@@ -105,11 +99,7 @@
+      *     out of this region to be fully visible and interactable. This is used to ensure the
+      *     suggestions list draws edge to edge when appropriate. This should only be used when the
+      *     soft keyboard is not visible.
+-     * @param fuseboxStateSupplier Supplier of the current FuseboxState.
+-     * @param fuseboxLayoutModeSupplier Supplier of the current FuseboxLayoutMode.
+      * @param topInsetProvider Provider for edge-to-edge top inset changes.
+-     * @param isFullWidthExpansionAllowedSupplier Supplier returning true if full-width expansion is
+-     *     permitted for narrow windows.
+      */
+     OmniboxSuggestionsDropdownEmbedderImpl(
+             OmniboxResourceProvider resourceProvider,
+@@ -123,10 +113,7 @@
+             Supplier<@ControlsPosition Integer> controlsPositionSupplier,
+             Supplier<Integer> keyboardHeightSupplier,
+             Supplier<Integer> bottomWindowPaddingSupplier,
+-            Supplier<@FuseboxState Integer> fuseboxStateSupplier,
+-            Supplier<@FuseboxLayoutMode Integer> fuseboxLayoutModeSupplier,
+-            TopInsetProvider topInsetProvider,
+-            BooleanSupplier isFullWidthExpansionAllowedSupplier) {
++            TopInsetProvider topInsetProvider) {
+         mResourceProvider = resourceProvider;
+         mWindowAndroid = windowAndroid;
+         mAnchorView = anchorView;
+@@ -143,10 +130,7 @@
+         mWindowWidthDp = configuration.smallestScreenWidthDp;
+         mWindowHeightDp = configuration.screenHeightDp;
+         mBaseChromeLayout = baseChromeLayout;
+-        mFuseboxStateSupplier = fuseboxStateSupplier;
+-        mFuseboxLayoutModeSupplier = fuseboxLayoutModeSupplier;
+         mTopInsetProvider = topInsetProvider;
+-        mIsFullWidthExpansionAllowedSupplier = isFullWidthExpansionAllowedSupplier;
+         recalculateOmniboxAlignment();
+ 
+         // Set up observer to handle edge-to-edge changes.
+@@ -179,8 +163,7 @@
+     @Override
+     public boolean isPhoneStyleWindow() {
+         if (mForcePhoneStyleOmnibox) return true;
+-        return !isWideWindow()
+-                && mFuseboxLayoutModeSupplier.get() != FuseboxLayoutMode.SUGGESTIONS_POPOVER;
++        return !isWideWindow();
+     }
+ 
+     @Override
+@@ -259,22 +242,14 @@
+      * during layout and should avoid memory allocations other than the necessary new
+      * OmniboxAlignment(). The method aligns the omnibox dropdown as follows:
+      *
+-     * <p>Case 1: Omnibox without fusebox on tablet window.
++     * <p>Case 1: Omnibox on tablet window.
+      *
+      * <pre>
+      *  | anchor  [  alignment  ]       |
+      *            |  dropdown   |
+      * </pre>
+      *
+-     * <p>Case 2: Omnibox with Fusebox on tablet window.
+-     *
+-     * <pre>
+-     *  | anchor    [alignment]         |
+-     *  |           [alignment]         |
+-     *  |            dropdown           |
+-     * </pre>
+-     *
+-     * <p>Case 3: Phone window. Full width and no padding.
++     * <p>Case 2: Phone window. Full width and no padding.
+      *
+      * <pre>
+      *  | anchor     [alignment]        |
+@@ -310,36 +285,14 @@
+             left = 0;
+             width = mAnchorView.getMeasuredWidth();
+         } else {
+-            int sideSpacing;
+-            if (mFuseboxLayoutModeSupplier.get() == FuseboxLayoutMode.SUGGESTIONS_POPOVER) {
+-                // Case 2: Popover layout. The suggestions list starts directly at the top of the
+-                // anchor view (or shifted by the popover inset if expanded/compact).
+-                ViewUtils.getRelativeLayoutPosition(contentView, mAnchorView, mPositionArray);
+-                top = mPositionArray[1] - contentView.getPaddingTop();
+-                sideSpacing = 0;
+-            } else if (mFuseboxStateSupplier.get() == FuseboxState.DISABLED) {
+-                // Case 3: No fusebox on tablet. Width equal to alignment view and left equivalent
+-                // to left of alignment view. Top minus a small overlap.
+-                if (!ChromeFeatureList.sToolbarProgressBarRefactor.isEnabled()) {
+-                    top -=
+-                            mContext.getResources()
+-                                    .getDimensionPixelSize(
+-                                            R.dimen.omnibox_suggestion_list_toolbar_overlap);
+-                }
+-                sideSpacing = mResourceProvider.getDropdownSideSpacing();
+-            } else {
+-                // Case 4: Fusebox on tablet. The width of the dropdown should match the alignment
+-                // view's width exactly (0 side spacing), and its top should be exactly below the
+-                //  bottom of the alignment view.
+-                ViewUtils.getRelativeLayoutPosition(contentView, mAlignmentView, mPositionArray);
+-                top =
+-                        mPositionArray[1]
+-                                + mAlignmentView.getMeasuredHeight()
+-                                - contentView.getPaddingTop();
+-                sideSpacing = 0;
++            // Tablet width and offset follow the ordinary alignment view.
++            if (!ChromeFeatureList.sToolbarProgressBarRefactor.isEnabled()) {
++                top -=
++                        mContext.getResources()
++                                .getDimensionPixelSize(
++                                        R.dimen.omnibox_suggestion_list_toolbar_overlap);
+             }
+-
+-            // Tablet positioning logic common between fusebox and non-fusebox cases.
++            int sideSpacing = mResourceProvider.getDropdownSideSpacing();
+             ViewUtils.getRelativeLayoutPosition(mAnchorView, mAlignmentView, mPositionArray);
+             int targetWidth = mAlignmentViewTargetWidthSupplier.get();
+             width = targetWidth + 2 * sideSpacing;
+@@ -354,13 +307,6 @@
+                                 - leftOffset);
+             } else {
+                 left = mPositionArray[0] - sideSpacing + leftOffset;
+-            }
+-            // Ensures full-width dropdown on narrow windows with popover suggestions.
+-            if (mFuseboxLayoutModeSupplier.get() == FuseboxLayoutMode.SUGGESTIONS_POPOVER
+-                    && !isWideWindow()
+-                    && mIsFullWidthExpansionAllowedSupplier.getAsBoolean()) {
+-                left = mAnchorView.getLeft();
+-                width = mAnchorView.getWidth();
+             }
+         }
+ 

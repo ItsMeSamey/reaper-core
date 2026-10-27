@@ -1,8 +1,99 @@
 diff --git a/chrome/android/java/src/org/chromium/chrome/browser/app/ChromeActivity.java b/chrome/android/java/src/org/chromium/chrome/browser/app/ChromeActivity.java
-index 2c3968a272a3cdc46763ea403432979b5260b665..f6617457d5d74c4e9d5a17c6e8d654eb980592ef 100644
 --- a/chrome/android/java/src/org/chromium/chrome/browser/app/ChromeActivity.java
 +++ b/chrome/android/java/src/org/chromium/chrome/browser/app/ChromeActivity.java
-@@ -705,7 +705,7 @@ public abstract class ChromeActivity extends AsyncInitializationActivity
+@@ -30,7 +30,6 @@
+ import android.os.SystemClock;
+ import android.text.format.DateUtils;
+ import android.util.Pair;
+-import android.util.Size;
+ import android.util.TypedValue;
+ import android.view.Display.Mode;
+ import android.view.KeyEvent;
+@@ -46,6 +45,7 @@
+ import androidx.annotation.CallSuper;
+ import androidx.annotation.VisibleForTesting;
+ 
++import org.chromium.base.supplier.NonNullObservableSupplier;
+ import org.chromium.base.ActivityState;
+ import org.chromium.base.ApplicationStatus;
+ import org.chromium.base.Callback;
+@@ -54,7 +54,6 @@
+ import org.chromium.base.ContextUtils;
+ import org.chromium.base.DeviceInfo;
+ import org.chromium.base.InputHintChecker;
+-import org.chromium.base.IntentUtils;
+ import org.chromium.base.Log;
+ import org.chromium.base.PowerMonitor;
+ import org.chromium.base.TraceEvent;
+@@ -87,9 +86,6 @@
+ import org.chromium.chrome.browser.TabStateThemeResourceProvider;
+ import org.chromium.chrome.browser.WarmupManager;
+ import org.chromium.chrome.browser.about_settings.AboutChromeSettings;
+-import org.chromium.chrome.browser.actor.ActorMetrics;
+-import org.chromium.chrome.browser.actor.ActorPictureInPictureController;
+-import org.chromium.chrome.browser.actor.ActorUtils;
+ import org.chromium.chrome.browser.app.appmenu.AppMenuPropertiesDelegateImpl;
+ import org.chromium.chrome.browser.app.download.DownloadMessageUiDelegate;
+ import org.chromium.chrome.browser.app.metrics.LaunchCauseMetrics;
+@@ -105,7 +101,6 @@
+ import org.chromium.chrome.browser.bookmarks.BookmarkModel;
+ import org.chromium.chrome.browser.bookmarks.BookmarkOpener;
+ import org.chromium.chrome.browser.bookmarks.BookmarkOpenerImpl;
+-import org.chromium.chrome.browser.bookmarks.PowerBookmarkUtils;
+ import org.chromium.chrome.browser.bookmarks.TabBookmarker;
+ import org.chromium.chrome.browser.bookmarks.bar.BookmarkBarUtils;
+ import org.chromium.chrome.browser.browser_controls.BrowserControlsStateProvider;
+@@ -136,7 +131,6 @@
+ import org.chromium.chrome.browser.fullscreen.BrowserControlsManager;
+ import org.chromium.chrome.browser.fullscreen.BrowserControlsManagerSupplier;
+ import org.chromium.chrome.browser.fullscreen.FullscreenManager;
+-import org.chromium.chrome.browser.glic.GlicEnabling;
+ import org.chromium.chrome.browser.history.HistoryManagerUtils;
+ import org.chromium.chrome.browser.hub.HubUtils;
+ import org.chromium.chrome.browser.init.AsyncInitializationActivity;
+@@ -147,9 +141,7 @@
+ import org.chromium.chrome.browser.keyboard_accessory.ManualFillingComponentSupplier;
+ import org.chromium.chrome.browser.layouts.LayoutManagerAppUtils;
+ import org.chromium.chrome.browser.layouts.LayoutStateProvider;
+-import org.chromium.chrome.browser.layouts.LayoutType;
+ import org.chromium.chrome.browser.media.FullscreenVideoPictureInPictureController;
+-import org.chromium.chrome.browser.merchant_viewer.PageInfoStoreInfoController.StoreInfoActionHandler;
+ import org.chromium.chrome.browser.metrics.LaunchMetrics;
+ import org.chromium.chrome.browser.metrics.SimpleStartupForegroundSessionDetector;
+ import org.chromium.chrome.browser.metrics.StartupMetricsTracker;
+@@ -171,7 +163,6 @@
+ import org.chromium.chrome.browser.pdf.PdfPage;
+ import org.chromium.chrome.browser.preferences.ChromePreferenceKeys;
+ import org.chromium.chrome.browser.preferences.ChromeSharedPreferences;
+-import org.chromium.chrome.browser.price_tracking.PriceDropNotificationManagerFactory;
+ import org.chromium.chrome.browser.printing.PrintHelper;
+ import org.chromium.chrome.browser.profiles.Profile;
+ import org.chromium.chrome.browser.profiles.ProfileManager;
+@@ -415,8 +406,6 @@
+     private FullscreenVideoPictureInPictureController mFullscreenVideoPictureInPictureController;
+     private StartupSigninStateCheckController mStartupSigninStateCheckController;
+ 
+-    private ActorPictureInPictureController mActorPipController;
+-
+     private final SettableMonotonicObservableSupplier<SnackbarManager> mSnackbarManagerSupplier =
+             ObservableSuppliers.createMonotonic();
+     private @Nullable ChromeActivitySnackbarHelper mChromeActivitySnackbarHelper;
+@@ -538,7 +527,13 @@
+ 
+     @Override
+     public boolean onIntentCallbackNotFoundError(String error) {
+-        createWindowErrorSnackbar(error, mSnackbarManagerSupplier.get());
++        SnackbarManager snackbarManager = mSnackbarManagerSupplier.get();
++        if (snackbarManager == null) {
++            // Let IntentRequestTracker show its existing error fallback when
++            // this activity cannot display a snackbar yet.
++            return false;
++        }
++        createWindowErrorSnackbar(error, snackbarManager);
+         return true;
+     }
+ 
+@@ -705,7 +700,7 @@
              var modalDialogManager = getModalDialogManager();
              assert modalDialogManager != null;
              SnackbarManager snackbarManager =
@@ -11,7 +102,330 @@ index 2c3968a272a3cdc46763ea403432979b5260b665..f6617457d5d74c4e9d5a17c6e8d654eb
                              this,
                              mBottomContainer,
                              windowAndroid,
-@@ -3443,6 +3443,7 @@ public abstract class ChromeActivity extends AsyncInitializationActivity
+@@ -778,9 +773,6 @@
+                             mRootUiCoordinator.getBottomSheetControllerSupplier(),
+                             this::getSnackbarManager,
+                             new BookmarkManagerOpenerImpl(),
+-                            () ->
+-                                    PriceDropNotificationManagerFactory.create(
+-                                            mTabModelProfileSupplier.get()),
+                             mRootUiCoordinator::getBookmarkBarVisibility,
+                             OfflinePageUtils::saveBookmarkOffline);
+             mTabBookmarkerSupplier.set(tabBookmarker);
+@@ -1108,7 +1100,7 @@
+      * @param supportedProfileType The supported profile type for this {@code Activity}.
+      * @param multiInstanceManager The {@link MultiInstanceManager} for this {@code Activity}.
+      */
+-    protected final void initializeChromeAndroidTask(
++    protected final boolean initializeChromeAndroidTask(
+             @BrowserWindowType int browserWindowType,
+             TabModelSelector tabModelSelector,
+             @SupportedProfileType int supportedProfileType,
+@@ -1125,12 +1117,7 @@
+                     : "ChromeAndroidTask must be initialized after RootUiCoordinator";
+             var desktopWindowStateManager = mRootUiCoordinator.getDesktopWindowStateManager();
+ 
+-            int pendingIdExtraValue =
+-                    IntentUtils.safeGetIntExtra(
+-                            getIntent(),
+-                            ChromeAndroidTaskTracker.EXTRA_PENDING_BROWSER_WINDOW_TASK_ID,
+-                            /* defaultValue= */ -1);
+-            Integer pendingId = pendingIdExtraValue == -1 ? null : pendingIdExtraValue;
++            Integer pendingId = ChromeAndroidTaskTracker.getPendingTaskIdFromIntent(getIntent());
+ 
+             // 2. Obtain a ChromeAndroidTask that represents the Task (window) for this Activity.
+             var chromeAndroidTask =
+@@ -1141,11 +1128,16 @@
+                                     tabModelSelector,
+                                     browserWindowType,
+                                     supportedProfileType,
+-                                    desktopWindowStateManager),
++                                    desktopWindowStateManager,
++                                    createBrowserFullscreenDelegate()),
+                             pendingId);
+ 
++            if (chromeAndroidTask == null) {
++                finish();
++                return false;
++            }
++
+             // 3. Add windowing features.
+-            // TODO(crbug.com/491791326): Handle multiple profiles for mobile.
+             Profile profile = tabModelSelector.getCurrentModel().getProfile();
+             assert profile != null;
+             addWindowingFeatures(chromeAndroidTask, profile, activityWindowAndroid);
+@@ -1153,6 +1145,7 @@
+             // 4. Make the ChromeAndroidTask available via OneshotSupplier.
+             mChromeAndroidTaskSupplier.set(chromeAndroidTask);
+         }
++        return true;
+     }
+ 
+     /** Returns an {@link OneshotSupplier} for {@link ChromeAndroidTask}. */
+@@ -1168,10 +1161,16 @@
+             ChromeAndroidTask chromeAndroidTask,
+             Profile profile,
+             ActivityWindowAndroid activityWindowAndroid) {
+-        chromeAndroidTask.addFeature(
+-                new ChromeAndroidTaskFeatureKey(
+-                        ExtensionWindowControllerBridge.class, profile, activityWindowAndroid),
+-                ExtensionWindowControllerBridgeFactory::create);
++        if (getActivityType() == ActivityType.TABBED) {
++            chromeAndroidTask.addTabModelScopedFeatureFactory(
++                    activityWindowAndroid, ExtensionWindowControllerBridge.class,
++                    ExtensionWindowControllerBridgeFactory::create);
++        } else {
++            chromeAndroidTask.addFeature(
++                    new ChromeAndroidTaskFeatureKey(
++                            ExtensionWindowControllerBridge.class, profile, activityWindowAndroid),
++                    ExtensionWindowControllerBridgeFactory::create);
++        }
+     }
+ 
+     @Override
+@@ -1375,9 +1374,6 @@
+         getManualFillingComponent().onResume();
+         checkForDeviceLockOnAutomotive();
+ 
+-        // Log task state if the activity was launched or brought to front via an actor notification
+-        // click.
+-        ActorMetrics.maybeRecordMetricsFromIntent(getIntent(), mTabModelProfileSupplier.get());
+     }
+ 
+     @Override
+@@ -1438,79 +1434,6 @@
+         return mFullscreenVideoPictureInPictureController;
+     }
+ 
+-    @VisibleForTesting
+-    public void exitOverviewModeOnActorPiPExpand() {
+-        if (isInOverviewMode() && mLayoutManagerSupplier.get() != null) {
+-            mLayoutManagerSupplier.get().showLayout(LayoutType.BROWSING, /* animate= */ false);
+-        }
+-    }
+-
+-    /**
+-     * Toggles the Glic UI.
+-     *
+-     * @param preventClose whether to prevent closing the Glic UI if it's already open.
+-     */
+-    public void toggleGlic(boolean preventClose) {
+-        if (!GlicEnabling.isEnabledByFlags()) return;
+-        if (mRootUiCoordinator != null) {
+-            mRootUiCoordinator.toggleGlic(preventClose);
+-        }
+-    }
+-
+-    @VisibleForTesting
+-    public void maybeCreateActorPipController() {
+-        if (getProfileProviderSupplier().get() == null
+-                || !GlicEnabling.isProfileEligible(
+-                        getProfileProviderSupplier().get().getOriginalProfile())
+-                || DeviceFormFactor.isNonMultiDisplayContextOnTablet(this)
+-                || ActorUtils.isBackgroundActuationEnabled()) {
+-            return;
+-        }
+-
+-        if (mActorPipController != null) {
+-            return;
+-        }
+-
+-        try {
+-            mActorPipController =
+-                    new ActorPictureInPictureController(
+-                            this,
+-                            mTabModelProfileSupplier,
+-                            () -> findViewById(android.R.id.content),
+-                            getTabModelSelectorSupplier(),
+-                            this::exitOverviewModeOnActorPiPExpand,
+-                            this::toggleGlic,
+-                            getLastNormalSizeBeforeEnteringActorPiP(),
+-                            this::onActorPictureInPictureChanged);
+-        } catch (RuntimeException e) {
+-            Log.w(TAG, "Activity does not support Picture-in-Picture", e);
+-        }
+-    }
+-
+-    // Gets the last normal size of the activity before entering Actor Picture-in-Picture mode. This
+-    // is used to restore the activity to the correct size when exiting Actor Picture-in-Picture
+-    // mode.
+-    private Size getLastNormalSizeBeforeEnteringActorPiP() {
+-        var compositorViewHolder = mCompositorViewHolderSupplier.get();
+-        assumeNonNull(compositorViewHolder);
+-        return compositorViewHolder.getLastNormalSize();
+-    }
+-
+-    // When the Actor Picture-in-Picture mode changes, update the CompositorViewHolder's tab
+-    // accordingly to make sure the CompositorViewHolder doesn't know about actuating tab when in
+-    // PiP mode, and can update to the correct tab when exiting PiP mode.
+-    private void onActorPictureInPictureChanged(boolean inPiP) {
+-        Tab tab = getActivityTab();
+-        CompositorViewHolder compositorViewHolder = mCompositorViewHolderSupplier.get();
+-        if (tab == null || compositorViewHolder == null) return;
+-        if (inPiP) {
+-            compositorViewHolder.overrideTab(null);
+-        } else {
+-            assert !tab.getIsOffscreenRenderingSupplier().get();
+-            compositorViewHolder.overrideTab(tab);
+-        }
+-    }
+-
+     @Override
+     protected void onUserLeaveHint() {
+         super.onUserLeaveHint();
+@@ -1520,12 +1443,6 @@
+         // Can be in finishing state. No need to attempt PIP.
+         if (isActivityFinishingOrDestroyed()) {
+             Log.i(TAG, "onUserLeaveHint: skipping PiP during shutdown");
+-            return;
+-        }
+-
+-        maybeCreateActorPipController();
+-        if (mActorPipController != null && mActorPipController.shouldEnterPip()) {
+-            mActorPipController.attemptPictureInPicture();
+             return;
+         }
+ 
+@@ -1566,8 +1483,6 @@
+         if (wasInPictureInPictureForMinimizedCustomTabs()) return;
+         if (inPicture) {
+             mLastPictureInPictureModeForTesting = true;
+-            maybeCreateActorPipController();
+-            if (mActorPipController != null && mActorPipController.shouldEnterPip()) return;
+ 
+             FullscreenVideoPictureInPictureController controller =
+                     ensureFullscreenVideoPictureInPictureController();
+@@ -1575,9 +1490,7 @@
+                 controller.onEnteredPictureInPictureMode();
+             }
+         } else {
+-            if (mActorPipController != null) {
+-                mActorPipController.onFrameworkExitedPictureInPicture();
+-            }
++
+             if (mFullscreenVideoPictureInPictureController != null) {
+                 mFullscreenVideoPictureInPictureController.onFrameworkExitedPictureInPicture();
+             }
+@@ -1654,15 +1567,9 @@
+             mFullscreenVideoPictureInPictureController.onFrameworkExitedPictureInPicture();
+         }
+ 
+-        if (mActorPipController != null) {
+-            mActorPipController.onNewIntent(intent);
+-        }
+-
+         super.onNewIntentWithNative(intent);
+         getLaunchCauseMetrics().onReceivedIntent();
+ 
+-        // Log task state if a new intent from an actor notification click is received.
+-        ActorMetrics.maybeRecordMetricsFromIntent(intent, mTabModelProfileSupplier.get());
+     }
+ 
+     /**
+@@ -1994,11 +1901,6 @@
+         if (mFullscreenVideoPictureInPictureController != null) {
+             mFullscreenVideoPictureInPictureController.onDestroy();
+             mFullscreenVideoPictureInPictureController = null;
+-        }
+-
+-        if (mActorPipController != null) {
+-            mActorPipController.destroy();
+-            mActorPipController = null;
+         }
+ 
+         if (mStartupSigninStateCheckController != null) {
+@@ -2629,6 +2531,42 @@
+     /**
+      * @return Fullscreen manager object.
+      */
++    private ChromeAndroidTask.BrowserFullscreenDelegate createBrowserFullscreenDelegate() {
++        FullscreenManager manager = getFullscreenManager();
++        return new ChromeAndroidTask.BrowserFullscreenDelegate() {
++            @Override
++            public void setBrowserFullscreenMode(boolean fullscreen) {
++                manager.setBrowserFullscreenMode(fullscreen);
++            }
++
++            @Override
++            public void setBrowserFullscreenExtensionInfo(
++                    String extensionUrl, String extensionName) {
++                manager.setBrowserFullscreenExtensionInfo(extensionUrl, extensionName);
++            }
++
++            @Override
++            public NonNullObservableSupplier<Boolean> getBrowserFullscreenModeSupplier() {
++                return manager.getBrowserFullscreenModeSupplier();
++            }
++
++            @Override
++            public NonNullObservableSupplier<Boolean> getFullscreenUiModeSupplier() {
++                return manager.getFullscreenUiModeSupplier();
++            }
++
++            @Override
++            public void exitTabFullscreen() {
++                manager.exitPersistentFullscreenMode();
++            }
++
++            @Override
++            public void onWindowInsetsChanged() {
++                manager.onBrowserFullscreenInsetsChanged();
++            }
++        };
++    }
++
+     public FullscreenManager getFullscreenManager() {
+         return getBrowserControlsManager().getFullscreenManager();
+     }
+@@ -2640,7 +2578,8 @@
+      */
+     public boolean exitFullscreenIfShowing() {
+         FullscreenManager fullscreenManager = getFullscreenManager();
+-        if (fullscreenManager.getPersistentFullscreenMode()) {
++        if (fullscreenManager.getFullscreenUiModeSupplier().get()) {
++            fullscreenManager.setBrowserFullscreenMode(false);
+             fullscreenManager.exitPersistentFullscreenMode();
+             return true;
+         }
+@@ -3157,27 +3096,6 @@
+             return true;
+         }
+ 
+-        if (id == R.id.enable_price_tracking_menu_id) {
+-            mTabBookmarkerSupplier.get().startOrModifyPriceTracking(currentTab);
+-            RecordUserAction.record("MobileMenuEnablePriceTracking");
+-            TrackerFactory.getTrackerForProfile(currentTab.getProfile())
+-                    .notifyEvent(EventConstants.SHOPPING_LIST_PRICE_TRACK_FROM_MENU);
+-            return true;
+-        }
+-
+-        if (id == R.id.disable_price_tracking_menu_id) {
+-            PowerBookmarkUtils.setPriceTrackingEnabledWithSnackbars(
+-                    mBookmarkModelSupplier.get().getUserBookmarkIdForTab(currentTab),
+-                    /* enabled= */ false,
+-                    mSnackbarManagerSupplier.get(),
+-                    getResources(),
+-                    currentTab.getProfile(),
+-                    CallbackUtils.emptyCallback(),
+-                    PriceDropNotificationManagerFactory.create(currentTab.getProfile()));
+-            RecordUserAction.record("MobileMenuDisablePriceTracking");
+-            return true;
+-        }
+-
+         if (id == R.id.offline_page_id) {
+             RecordUserAction.record("MobileMenuDownloadPage");
+             if (DownloadUtils.isAllowedToDownloadPage(currentTab)) {
+@@ -3213,9 +3131,6 @@
+                             getModalDialogManagerSupplier(),
+                             null,
+                             OpenedFromSource.MENU,
+-                            SupplierUtils.upcast(
+-                                    mRootUiCoordinator.getMerchantTrustSignalsCoordinatorSupplier(),
+-                                    StoreInfoActionHandler.class),
+                             getEphemeralTabCoordinatorSupplier(),
+                             getTabCreator(currentTab.isIncognito()));
+             pageInfo.show(currentTab, ChromePageInfoHighlight.noHighlight());
+@@ -3443,6 +3358,7 @@
       */
      public void onExitVr() {}
  

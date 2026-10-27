@@ -12,7 +12,10 @@
 #include "base/strings/string_split.h"
 #include "base/strings/string_util.h"
 #include "brave/components/containers/core/mojom/containers.mojom.h"
+#include "build/build_config.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/ui/color/nala/nala_color_id.h"
+#endif
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/skia/include/core/SkColor.h"
 #include "ui/color/color_provider.h"
@@ -52,12 +55,27 @@ TEST_F(TemporaryContainerTest, CreateTemporaryContainer) {
       container->name, " ", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
   ASSERT_EQ(name_parts.size(), 2u);
   EXPECT_TRUE(base::IsAsciiAlpha(name_parts[0][0]));
+#if BUILDFLAG(IS_ANDROID)
+  EXPECT_EQ(name_parts[0], "Temporary");
+  EXPECT_EQ(name_parts[1].size(), 8u);
+  EXPECT_TRUE(std::ranges::all_of(name_parts[1],
+                                [](char c) { return base::IsHexDigit(c); }));
+#else
   EXPECT_TRUE(base::IsAsciiAlpha(name_parts[1][0]));
+#endif
   EXPECT_EQ(name_parts[0][0], base::ToUpperASCII(name_parts[0][0]));
 
   EXPECT_GE(container->icon, mojom::Icon::kMinValue);
   EXPECT_LE(container->icon, mojom::Icon::kMaxValue);
 
+#if BUILDFLAG(IS_ANDROID)
+  const SkColor expected_backgrounds[] = {
+      SkColorSetRGB(0xd9, 0x30, 0x25), SkColorSetRGB(0xf2, 0x99, 0x00),
+      SkColorSetRGB(0xf9, 0xab, 0x00), SkColorSetRGB(0x18, 0x80, 0x38),
+      SkColorSetRGB(0x00, 0x80, 0x80), SkColorSetRGB(0x1a, 0x73, 0xe8),
+      SkColorSetRGB(0x93, 0x34, 0xe6), SkColorSetRGB(0xd0, 0x18, 0x84),
+  };
+#else
   const auto* color_provider =
       ui::ColorProviderManager::Get().GetColorProviderFor(
           ui::ColorProviderKey());
@@ -72,6 +90,7 @@ TEST_F(TemporaryContainerTest, CreateTemporaryContainer) {
       color_provider->GetColor(nala::kColorPrimitivePurple60),
       color_provider->GetColor(nala::kColorPrimitivePink60),
   };
+#endif
   EXPECT_TRUE(
       std::ranges::contains(expected_backgrounds, container->background_color));
 }

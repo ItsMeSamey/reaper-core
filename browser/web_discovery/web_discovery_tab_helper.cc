@@ -9,8 +9,10 @@
 #include <utility>
 
 #include "base/time/time.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/web_discovery/web_discovery_cta_util.h"
 #include "brave/browser/web_discovery/web_discovery_infobar_delegate.h"
+#endif
 #include "brave/components/constants/url_constants.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/search_engines/template_url_service_factory.h"
@@ -62,6 +64,7 @@ void WebDiscoveryTabHelper::DidFinishLoad(
   MaybeExtractFromPage(render_frame_host, validated_url);
 #endif
 
+#if !BUILDFLAG(IS_ANDROID)
   if (validated_url.host() != kBraveSearchHost) {
     return;
   }
@@ -90,8 +93,10 @@ void WebDiscoveryTabHelper::DidFinishLoad(
   state.last_displayed = base::Time::Now();
   SetWebDiscoveryCTAStateToPrefs(prefs, state);
   ShowInfoBar(prefs);
+#endif
 }
 
+#if !BUILDFLAG(IS_ANDROID)
 void WebDiscoveryTabHelper::ShowInfoBar(PrefService* prefs) {
   // Only support view toolkit based WebDiscovery InfoBar.
 #if defined(TOOLKIT_VIEWS)
@@ -100,6 +105,7 @@ void WebDiscoveryTabHelper::ShowInfoBar(PrefService* prefs) {
           std::make_unique<WebDiscoveryInfoBarDelegate>(prefs)));
 #endif
 }
+#endif
 
 #if BUILDFLAG(ENABLE_WEB_DISCOVERY_NATIVE)
 void WebDiscoveryTabHelper::MaybeExtractFromPage(

@@ -10,13 +10,10 @@ import android.util.AttributeSet;
 import android.view.View;
 import android.widget.RadioGroup;
 
-import androidx.annotation.VisibleForTesting;
 import androidx.preference.PreferenceViewHolder;
 
-import org.chromium.base.BraveFeatureList;
 import org.chromium.build.annotations.NullMarked;
 import org.chromium.build.annotations.Nullable;
-import org.chromium.chrome.browser.flags.ChromeFeatureList;
 import org.chromium.chrome.browser.toolbar.R;
 import org.chromium.chrome.browser.toolbar.adaptive.AdaptiveToolbarButtonVariant;
 import org.chromium.chrome.browser.toolbar.adaptive.AdaptiveToolbarStatePredictor.UiState;
@@ -29,14 +26,6 @@ import java.util.ArrayList;
 @NullMarked
 public class BraveRadioButtonGroupAdaptiveToolbarPreference
         extends RadioButtonGroupAdaptiveToolbarPreference {
-    private static boolean sIsJunitTesting;
-    private static boolean sLeoDisabledByPolicy;
-
-    /** Set by AppearancePreferences when Leo is disabled by Brave Origin policy. */
-    public static void setLeoDisabledByPolicy(boolean disabled) {
-        sLeoDisabledByPolicy = disabled;
-    }
-
     // Variables below are to be removed in the bytecode, variables from the parent class will be
     // used instead.
     private @AdaptiveToolbarButtonVariant int mSelected;
@@ -50,8 +39,6 @@ public class BraveRadioButtonGroupAdaptiveToolbarPreference
     private @Nullable RadioButtonWithDescription mBookmarksButton;
     private @Nullable RadioButtonWithDescription mHistoryButton;
     private @Nullable RadioButtonWithDescription mDownloadsButton;
-    private @Nullable RadioButtonWithDescription mBraveLeoButton;
-    private @Nullable RadioButtonWithDescription mBraveWalletButton;
 
     public BraveRadioButtonGroupAdaptiveToolbarPreference(Context context, AttributeSet attrs) {
         super(context, attrs);
@@ -69,17 +56,6 @@ public class BraveRadioButtonGroupAdaptiveToolbarPreference
                 (RadioButtonWithDescription) holder.findViewById(R.id.adaptive_option_history);
         mDownloadsButton =
                 (RadioButtonWithDescription) holder.findViewById(R.id.adaptive_option_downloads);
-        mBraveLeoButton =
-                (RadioButtonWithDescription) holder.findViewById(R.id.adaptive_option_brave_leo);
-        if (!sIsJunitTesting
-                && mBraveLeoButton != null
-                && (!ChromeFeatureList.isEnabled(BraveFeatureList.AI_CHAT)
-                        || sLeoDisabledByPolicy)) {
-            mBraveLeoButton.setVisibility(View.GONE);
-        }
-        mBraveWalletButton =
-                (RadioButtonWithDescription) holder.findViewById(R.id.adaptive_option_brave_wallet);
-
         super.onBindViewHolder(holder);
 
         // We don't have Auto option in Brave, so we hide it.
@@ -113,12 +89,6 @@ public class BraveRadioButtonGroupAdaptiveToolbarPreference
         } else if (mDownloadsButton != null && mDownloadsButton.isChecked()) {
             mSelected = AdaptiveToolbarButtonVariant.DOWNLOADS;
             isOnCheckedChangedHandled = true;
-        } else if (mBraveLeoButton != null && mBraveLeoButton.isChecked()) {
-            mSelected = AdaptiveToolbarButtonVariant.LEO;
-            isOnCheckedChangedHandled = true;
-        } else if (mBraveWalletButton != null && mBraveWalletButton.isChecked()) {
-            mSelected = AdaptiveToolbarButtonVariant.WALLET;
-            isOnCheckedChangedHandled = true;
         }
         if (isOnCheckedChangedHandled) {
             callChangeListener(mSelected);
@@ -137,10 +107,6 @@ public class BraveRadioButtonGroupAdaptiveToolbarPreference
                 return mHistoryButton;
             case AdaptiveToolbarButtonVariant.DOWNLOADS:
                 return mDownloadsButton;
-            case AdaptiveToolbarButtonVariant.LEO:
-                return mBraveLeoButton;
-            case AdaptiveToolbarButtonVariant.WALLET:
-                return mBraveWalletButton;
         }
 
         return super.getButton(variant);
@@ -155,10 +121,5 @@ public class BraveRadioButtonGroupAdaptiveToolbarPreference
                 buttonList,
                 AdaptiveToolbarButtonVariant.NEW_TAB,
                 AdaptiveToolbarButtonVariant.NEW_TAB);
-    }
-
-    @VisibleForTesting
-    public static void setIsJunitTesting(boolean isJunitTesting) {
-        sIsJunitTesting = isJunitTesting;
     }
 }

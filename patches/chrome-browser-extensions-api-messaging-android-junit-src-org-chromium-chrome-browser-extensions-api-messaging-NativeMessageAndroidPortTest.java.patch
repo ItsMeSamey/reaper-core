@@ -1,0 +1,446 @@
+diff --git a/chrome/browser/extensions/api/messaging/android/junit/src/org/chromium/chrome/browser/extensions/api/messaging/NativeMessageAndroidPortTest.java b/chrome/browser/extensions/api/messaging/android/junit/src/org/chromium/chrome/browser/extensions/api/messaging/NativeMessageAndroidPortTest.java
+--- a/chrome/browser/extensions/api/messaging/android/junit/src/org/chromium/chrome/browser/extensions/api/messaging/NativeMessageAndroidPortTest.java
++++ b/chrome/browser/extensions/api/messaging/android/junit/src/org/chromium/chrome/browser/extensions/api/messaging/NativeMessageAndroidPortTest.java
+@@ -9,11 +9,17 @@
+ import android.content.ContextWrapper;
+ import android.content.Intent;
+ import android.content.ServiceConnection;
++import android.os.Binder;
+ import android.os.Bundle;
+ import android.os.DeadObjectException;
+ import android.os.IBinder;
++import android.os.IInterface;
++import android.os.Parcel;
+ import android.os.RemoteException;
++import android.os.SharedMemory;
+ import android.os.TransactionTooLargeException;
++import android.system.ErrnoException;
++import android.system.OsConstants;
+ 
+ import androidx.annotation.Nullable;
+ 
+@@ -28,7 +34,14 @@
+ import org.mockito.junit.MockitoJUnit;
+ import org.mockito.junit.MockitoRule;
+ import org.robolectric.RuntimeEnvironment;
++import org.robolectric.annotation.Config;
++import org.robolectric.annotation.Implementation;
++import org.robolectric.annotation.Implements;
++import org.robolectric.annotation.RealObject;
++import org.robolectric.shadow.api.Shadow;
+ import org.robolectric.shadows.ShadowLooper;
++import org.robolectric.shadows.ShadowSharedMemory;
++import org.robolectric.util.ReflectionHelpers.ClassParameter;
+ 
+ import org.chromium.base.ContextUtils;
+ import org.chromium.base.test.BaseRobolectricTestRunner;
+@@ -36,6 +49,8 @@
+ import org.chromium.base.test.util.HistogramWatcher;
+ import org.chromium.chrome.browser.profiles.Profile;
+ 
++import java.io.IOException;
++import java.nio.ByteBuffer;
+ import java.nio.charset.StandardCharsets;
+ import java.util.ArrayList;
+ import java.util.List;
+@@ -43,6 +58,7 @@
+ 
+ /** Unit tests for {@link NativeMessageAndroidPort}. */
+ @RunWith(BaseRobolectricTestRunner.class)
++@Config(shadows = NativeMessageAndroidPortTest.RecordingSharedMemory.class)
+ public class NativeMessageAndroidPortTest {
+     private static final String TARGET_PACKAGE = "com.example.extensionreceiver";
+     private static final String EXTENSION_ID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+@@ -57,6 +73,54 @@
+ 
+     private TestContext mTestContext;
+     private IBrowserNativeMessageService mFakeBrowserService;
++
++    /**
++     * Records real close/protection requests missing from the host SharedMemory shadow.
++     * Backing-file bytes and Parcel ownership still use Robolectric; this is not kernel proof.
++     */
++    @Implements(SharedMemory.class)
++    public static class RecordingSharedMemory extends ShadowSharedMemory {
++        private static final int ALL_PROTECTIONS =
++                OsConstants.PROT_READ | OsConstants.PROT_WRITE | OsConstants.PROT_EXEC;
++
++        @RealObject private SharedMemory mSharedMemory;
++        private boolean mClosed;
++        private int mProtection = ALL_PROTECTIONS;
++
++        @Implementation
++        protected boolean setProtect(int prot) {
++            if (mClosed) throw new IllegalStateException("SharedMemory is closed");
++            if ((prot & ~ALL_PROTECTIONS) != 0) {
++                throw new IllegalArgumentException("Invalid protection flags");
++            }
++            if ((prot & ~mProtection) != 0) return false;
++            boolean accepted =
++                    Shadow.directlyOn(
++                            mSharedMemory,
++                            SharedMemory.class,
++                            "setProtect",
++                            ClassParameter.from(int.class, prot));
++            if (accepted) mProtection = prot;
++            return accepted;
++        }
++
++        @Implementation
++        protected void close() {
++            if (mClosed) return;
++            Shadow.directlyOn(mSharedMemory, SharedMemory.class, "close");
++            mClosed = true;
++        }
++
++        @Override
++        @Implementation
++        protected ByteBuffer map(int prot, int offset, int length) throws ErrnoException {
++            if (mClosed) throw new IllegalStateException("SharedMemory is closed");
++            if ((prot & ~mProtection) != 0) {
++                throw new ErrnoException("mmap", OsConstants.EACCES);
++            }
++            return super.map(prot, offset, length);
++        }
++    }
+ 
+     private static class TestContext extends ContextWrapper {
+         private ServiceConnection mServiceConnection;
+@@ -146,6 +210,13 @@
+ 
+         mFakeBrowserService =
+                 new IBrowserNativeMessageService.Stub() {
++                    @Override
++                    public void connectAuthorizedExtension(
++                            String id, android.os.Bundle info, IConnectExtensionCallback callback)
++                            throws RemoteException {
++                        callback.onError("Authenticated entry point unsupported by legacy fixture");
++                    }
++
+                     @Override
+                     public void connectExtension(
+                             String extensionId, Bundle info, IConnectExtensionCallback callback)
+@@ -169,7 +240,7 @@
+                 mProfile,
+                 TARGET_PACKAGE,
+                 EXTENSION_ID,
+-                /* isVerifiedExtension= */ true,
++                /* isVerifiedExtension= */ true, /* requireAuthorizedCompanion= */ false,
+                 NO_CERTIFICATES);
+     }
+ 
+@@ -798,4 +869,314 @@
+                 "Error when communicating with the native messaging host.",
+                 portObserver.closedError);
+     }
++    private static SharedMemory memoryWithUtf8(String message) throws Exception {
++        byte[] bytes = message.getBytes(StandardCharsets.UTF_8);
++        SharedMemory memory = SharedMemory.create("native-message-test", bytes.length);
++        ByteBuffer mapped = memory.mapReadWrite();
++        try {
++            mapped.put(bytes);
++        } finally {
++            SharedMemory.unmap(mapped);
++        }
++        return memory;
++    }
++
++    @Test
++    public void testLargeOutboundUsesSharedMemoryWithExactUtf8Body() throws Exception {
++        NativeMessageAndroidPort port = new NativeMessageAndroidPort();
++        String body = "\"" + "x".repeat(70_000) + "\ud83d\ude00" + "\"";
++        List<String> received = new ArrayList<>();
++        IExtensionNativeMessagePort remote = new IExtensionNativeMessagePort.Stub() {
++            @Override
++            public void postMessage(MessagePayload payload, Bundle extras) {
++                Assert.assertEquals(MessagePayload.sharedMemory, payload.getTag());
++                SharedMemory memory = payload.getSharedMemory();
++                try {
++                    Assert.assertEquals(body.getBytes(StandardCharsets.UTF_8).length, memory.getSize());
++                    ByteBuffer mapped = memory.mapReadOnly();
++                    try {
++                        byte[] bytes = new byte[mapped.remaining()];
++                        mapped.get(bytes);
++                        received.add(new String(bytes, StandardCharsets.UTF_8));
++                    } finally {
++                        SharedMemory.unmap(mapped);
++                    }
++                } catch (Exception e) {
++                    throw new AssertionError(e);
++                } finally {
++                    memory.close();
++                }
++            }
++            @Override
++            public void disconnect() {}
++        };
++        port.onConnected(remote);
++        port.forwardMessageToApp(body);
++        Assert.assertEquals(List.of(body), received);
++    }
++
++    @Test
++    public void testSharedMemoryHostReplyPreservesUtf8AndClosesDescriptor() throws Exception {
++        NativeMessageAndroidPort port = new NativeMessageAndroidPort();
++        TestPortObserver observer = new TestPortObserver();
++        port.setTestObserver(observer);
++        NativeMessageAndroidPort.Callback callback = new NativeMessageAndroidPort.Callback(port);
++        String body = "\"" + "x".repeat(70_000) + "\ud83d\ude00" + "\"";
++        SharedMemory memory = memoryWithUtf8(body);
++        MessagePayload payload = new MessagePayload();
++        payload.setSharedMemory(memory);
++        callback.onMessage(payload, new Bundle());
++        RobolectricUtil.runAllBackgroundAndUi();
++        Assert.assertEquals(List.of(body), observer.receivedMessages);
++        Assert.assertNull(observer.closedError);
++        Assert.assertThrows(IllegalStateException.class, memory::mapReadOnly);
++    }
++
++    @Test
++    public void testOversizedSharedMemoryReplyClosesAndRejectsLateMessage() throws Exception {
++        NativeMessageAndroidPort port = new NativeMessageAndroidPort();
++        TestPortObserver observer = new TestPortObserver();
++        port.setTestObserver(observer);
++        NativeMessageAndroidPort.Callback callback = new NativeMessageAndroidPort.Callback(port);
++        SharedMemory memory = SharedMemory.create(
++                "oversized-native-message", NativeMessagePayloadCodec.MAX_FROM_HOST_BYTES + 1);
++        MessagePayload payload = new MessagePayload();
++        payload.setSharedMemory(memory);
++        callback.onMessage(payload, new Bundle());
++        callback.onMessage(createPayload("{\"late\":true}"), new Bundle());
++        RobolectricUtil.runAllBackgroundAndUi();
++        Assert.assertTrue(observer.receivedMessages.isEmpty());
++        Assert.assertNotNull(observer.closedError);
++        Assert.assertThrows(IllegalStateException.class, memory::mapReadOnly);
++    }
++
++    @Test
++    public void testMalformedInlineUtf8ClosesWithoutReplacement() {
++        NativeMessageAndroidPort port = new NativeMessageAndroidPort();
++        TestPortObserver observer = new TestPortObserver();
++        port.setTestObserver(observer);
++        NativeMessageAndroidPort.Callback callback = new NativeMessageAndroidPort.Callback(port);
++        MessagePayload payload = new MessagePayload();
++        payload.setInlineBytes(new byte[] {'"', (byte) 0xc3, '(', '"'});
++        callback.onMessage(payload, new Bundle());
++        callback.onMessage(createPayload("{\"late\":true}"), new Bundle());
++        RobolectricUtil.runAllBackgroundAndUi();
++        Assert.assertTrue(observer.receivedMessages.isEmpty());
++        Assert.assertNotNull(observer.closedError);
++    }
++
++    @Test
++    public void testExactlyMaximumHostInlineReplyAndOversizedControl() {
++        String body = "\"" + "x".repeat(NativeMessagePayloadCodec.MAX_FROM_HOST_BYTES - 2) + "\"";
++        NativeMessageAndroidPort port = new NativeMessageAndroidPort();
++        TestPortObserver observer = new TestPortObserver();
++        port.setTestObserver(observer);
++        NativeMessageAndroidPort.Callback callback = new NativeMessageAndroidPort.Callback(port);
++        callback.onMessage(createPayload(body), new Bundle());
++        RobolectricUtil.runAllBackgroundAndUi();
++        Assert.assertEquals(List.of(body), observer.receivedMessages);
++        Assert.assertNull(observer.closedError);
++        callback.onMessage(createPayload(body + " "), new Bundle());
++        RobolectricUtil.runAllBackgroundAndUi();
++        Assert.assertEquals(List.of(body), observer.receivedMessages);
++        Assert.assertNotNull(observer.closedError);
++    }
++
++    @Test
++    public void testHostEncoderRejectsUtf8ByteOverflowAndRawUnpairedSurrogate() {
++        // UTF-16 character count is below 1MiB while encoded bytes exceed it.
++        String oversized = "\"" + "\u00e9".repeat(524_288) + "\"";
++        Assert.assertThrows(IOException.class,
++                () -> NativeMessagePayloadCodec.encodeToBrowser(oversized));
++        Assert.assertThrows(IOException.class,
++                () -> NativeMessagePayloadCodec.encodeToBrowser("\ud800"));
++    }
++
++    @Test
++    public void testClosedAndMissingSharedMemoryVariantsAreRejected() throws Exception {
++        SharedMemory closed = SharedMemory.create("closed-native-message", 8);
++        closed.close();
++        MessagePayload closedPayload = new MessagePayload();
++        closedPayload.setSharedMemory(closed);
++        Assert.assertThrows(IOException.class,
++                () -> NativeMessagePayloadCodec.decodeFromHost(closedPayload));
++        MessagePayload nullMemory = new MessagePayload();
++        nullMemory.setSharedMemory(null);
++        Assert.assertThrows(IOException.class,
++                () -> NativeMessagePayloadCodec.decodeFromHost(nullMemory));
++        Assert.assertThrows(IOException.class,
++                () -> NativeMessagePayloadCodec.decodeFromHost(null));
++    }
++
++    @Test
++    public void testSharedMemoryReplyAfterDestroyIsNotDeliveredAndDescriptorCloses()
++            throws Exception {
++        NativeMessageAndroidPort port = new NativeMessageAndroidPort();
++        TestPortObserver observer = new TestPortObserver();
++        port.setTestObserver(observer);
++        NativeMessageAndroidPort.Callback callback = new NativeMessageAndroidPort.Callback(port);
++        port.destroy();
++        SharedMemory memory = memoryWithUtf8("{\"late\":true}");
++        MessagePayload payload = new MessagePayload();
++        payload.setSharedMemory(memory);
++        callback.onMessage(payload, new Bundle());
++        RobolectricUtil.runAllBackgroundAndUi();
++        Assert.assertTrue(observer.receivedMessages.isEmpty());
++        Assert.assertThrows(IllegalStateException.class, memory::mapReadOnly);
++    }
++    @Test
++    public void testBrowserEncoderExactlyMaximumSharedMemoryBodyAndOversizedControl()
++            throws Exception {
++        String body = "\"" + "x".repeat(NativeMessagePayloadCodec.MAX_TO_HOST_BYTES - 2) + "\"";
++        try (NativeMessagePayloadCodec.Encoded encoded =
++                NativeMessagePayloadCodec.encodeToHost(body)) {
++            Assert.assertEquals(MessagePayload.sharedMemory, encoded.payload.getTag());
++            Assert.assertEquals(NativeMessagePayloadCodec.MAX_TO_HOST_BYTES, encoded.byteLength);
++            SharedMemory memory = encoded.payload.getSharedMemory();
++            Assert.assertEquals(NativeMessagePayloadCodec.MAX_TO_HOST_BYTES, memory.getSize());
++            // The codec requested read-only protection; the host shadow models that restriction.
++            Assert.assertThrows(ErrnoException.class, memory::mapReadWrite);
++        }
++        Assert.assertThrows(IOException.class,
++                () -> NativeMessagePayloadCodec.encodeToHost(body + " "));
++    }
++
++    private static void disposeOwnedPayload(@Nullable MessagePayload payload) {
++        if (payload != null && payload.getTag() == MessagePayload.sharedMemory
++                && payload.getSharedMemory() != null) payload.getSharedMemory().close();
++    }
++
++    @Test
++    public void testLocalDelegateCanDecodeLargeFrameAfterBrowserSendReturns() throws Exception {
++        String body = "\"" + "x".repeat(70_000) + "\"";
++        MessagePayload[] received = new MessagePayload[1];
++        IExtensionNativeMessagePort local = new IExtensionNativeMessagePort.Stub() {
++            @Override
++            public void postMessage(MessagePayload payload, Bundle extras) {
++                received[0] = payload;
++            }
++            @Override
++            public void disconnect() {}
++        };
++        NativeMessageAndroidPort port = new NativeMessageAndroidPort();
++        port.onConnected(local);
++        try {
++            port.forwardMessageToApp(body);
++            Assert.assertNotNull(received[0]);
++            Assert.assertEquals(MessagePayload.sharedMemory, received[0].getTag());
++            // The browser's Encoded sender has already closed before delayed decoding.
++            Assert.assertEquals(body, NativeMessagePayloadCodec.decodeFromBrowser(received[0]));
++            Assert.assertThrows(
++                    IllegalStateException.class, received[0].getSharedMemory()::mapReadOnly);
++        } finally {
++            disposeOwnedPayload(received[0]);
++        }
++    }
++
++    @Test
++    public void testLocalDelegateOwnsRetainedFrameAfterPostMessageThrows() throws Exception {
++        String body = "\"" + "x".repeat(70_000) + "\"";
++        MessagePayload[] received = new MessagePayload[1];
++        IExtensionNativeMessagePort local = new IExtensionNativeMessagePort.Stub() {
++            @Override
++            public void postMessage(MessagePayload payload, Bundle extras) throws RemoteException {
++                received[0] = payload;
++                throw new RemoteException("Admitted before failure");
++            }
++            @Override
++            public void disconnect() {}
++        };
++        NativeMessageAndroidPort port = new NativeMessageAndroidPort();
++        TestPortObserver observer = new TestPortObserver();
++        port.setTestObserver(observer);
++        port.onConnected(local);
++        try {
++            port.forwardMessageToApp(body);
++            Assert.assertNotNull(observer.closedError);
++            Assert.assertNotNull(received[0]);
++            Assert.assertEquals(body, NativeMessagePayloadCodec.decodeFromBrowser(received[0]));
++        } finally {
++            disposeOwnedPayload(received[0]);
++        }
++    }
++
++    @Test
++    public void testRejectedLocalFrameIsConsumedAndClosesChannel() throws Exception {
++        String body = "\"" + "x".repeat(70_000) + "\"";
++        MessagePayload[] rejected = new MessagePayload[1];
++        IExtensionNativeMessagePort local = new IExtensionNativeMessagePort.Stub() {
++            @Override
++            public void postMessage(MessagePayload payload, Bundle extras) {
++                rejected[0] = payload;
++                try {
++                    throw new SecurityException("Local SDK authorization/session rejected");
++                } finally {
++                    // This models the SDK's fresh-owned-frame rejection contract.
++                    disposeOwnedPayload(payload);
++                }
++            }
++            @Override
++            public void disconnect() {
++                throw new SecurityException("The same local SDK grant is still rejected");
++            }
++        };
++        NativeMessageAndroidPort port = new NativeMessageAndroidPort();
++        TestPortObserver observer = new TestPortObserver() {
++            @Override
++            public void onChannelClosed(String errorMessage) {
++                super.onChannelClosed(errorMessage);
++                // Model the native channel teardown, which invokes Java destroy().
++                port.destroy();
++            }
++        };
++        port.setObserver(observer);
++        port.setTestObserver(observer);
++        port.onConnected(local);
++        try {
++            port.forwardMessageToApp(body);
++            Assert.assertNotNull(observer.closedError);
++            Assert.assertTrue(observer.isPortDestroyed);
++            Assert.assertNotNull(rejected[0]);
++            Assert.assertThrows(
++                    IllegalStateException.class, rejected[0].getSharedMemory()::mapReadOnly);
++        } finally {
++            disposeOwnedPayload(rejected[0]);
++        }
++    }
++
++    @Test
++    public void testGeneratedProxyRetainsMarshalledFrameAfterBrowserSenderClose() throws Exception {
++        String body = "\"" + "x".repeat(70_000) + "\"";
++        MessagePayload[] received = new MessagePayload[1];
++        IExtensionNativeMessagePort recipient = new IExtensionNativeMessagePort.Stub() {
++            @Override
++            public void postMessage(MessagePayload payload, Bundle extras) {
++                received[0] = payload;
++            }
++            @Override
++            public void disconnect() {}
++        };
++        // Force the generated Proxy/Stub Parcel route; this is not real cross-process IPC.
++        IBinder remoteFacade = new Binder() {
++            @Override
++            public IInterface queryLocalInterface(String descriptor) { return null; }
++            @Override
++            protected boolean onTransact(int code, Parcel data, Parcel reply, int flags)
++                    throws RemoteException {
++                return recipient.asBinder().transact(code, data, reply, flags);
++            }
++        };
++        NativeMessageAndroidPort port = new NativeMessageAndroidPort();
++        port.onConnected(IExtensionNativeMessagePort.Stub.asInterface(remoteFacade));
++        try {
++            port.forwardMessageToApp(body);
++            Assert.assertNotNull(received[0]);
++            Assert.assertEquals(body, NativeMessagePayloadCodec.decodeFromBrowser(received[0]));
++            Assert.assertThrows(
++                    IllegalStateException.class, received[0].getSharedMemory()::mapReadOnly);
++        } finally {
++            disposeOwnedPayload(received[0]);
++        }
++    }
++
+ }

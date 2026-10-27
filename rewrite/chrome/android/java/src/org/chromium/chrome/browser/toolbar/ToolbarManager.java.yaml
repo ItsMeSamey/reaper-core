@@ -11,3 +11,585 @@ substitutions:
         private (boolean shouldSuppressToolbarLongPress\(\))
       replace: |-
         protected \1
+  - description: Track the extension toolbar profile and its recreation dependencies.
+    regex:
+      re_pattern: |2-
+            private @Nullable ExtensionsToolbarCoordinator mExtensionsToolbarCoordinator;
+      replace: |2-
+            private @Nullable ExtensionsToolbarCoordinator mExtensionsToolbarCoordinator;
+            private @Nullable ChromeAndroidTaskFeatureKey mExtensionsToolbarFeatureKey;
+            private @Nullable Runnable mUpdateExtensionsToolbar;
+  - description: Initialize the extension toolbar through its profile-aware lifecycle.
+    regex:
+      re_pattern: |2-
+                ViewStub extensionsToolbarStub =
+                        mControlContainer\.findViewById\(R\.id\.extensions_toolbar_container_stub\);
+                if \(extensionsToolbarStub != null\) \{
+                    ChromeAndroidTask task = mChromeAndroidTaskSupplier\.get\(\);
+                    // ChromeAndroidTask is available only on Desktop Android\.
+                    if \(task != null\) \{
+                        Profile tabModelProfile =
+                                assertNonNull\(mTabModelSelector\.getCurrentModel\(\)\.getProfile\(\)\);
+                        // Register as an Activity\-scoped feature of \{@link ChromeAndroidTask\}\. This ensures
+                        // its C\+\+ UnownedUserData objects are destroyed prior to the host \(BWI\) when a
+                        // Profile is destroyed on mobile Android\. Explicit destruction in
+                        // ToolbarManager\.destroy\(\) is also preserved for standard Activity teardown\.
+                        Runnable cleanup =
+                                \(\) \-> \{
+                                    if \(mToolbar != null\) \{
+                                        mToolbar\.setExtensionsToolbarCoordinator\(null\);
+                                    \}
+                                    mExtensionsToolbarCoordinator = null;
+                                \};
+                        mExtensionsToolbarCoordinator =
+                                \(ExtensionsToolbarCoordinator\)
+                                        task\.addFeature\(
+                                                new ChromeAndroidTaskFeatureKey\(
+                                                        ExtensionsToolbarCoordinator\.class,
+                                                        tabModelProfile,
+                                                        \(ActivityWindowAndroid\) mWindowAndroid\),
+                                                \(\) \->
+                                                        ExtensionsToolbarCoordinator\.maybeCreate\(
+                                                                mActivity,
+                                                                extensionsToolbarStub,
+                                                                mWindowAndroid,
+                                                                task,
+                                                                tabModelProfile,
+                                                                mActivityTabProvider\.asObservable\(\),
+                                                                mTabCreatorManager\.getTabCreator\(false\),
+                                                                getBrowsingModeThemeColorProvider\(\),
+                                                                \(ToolbarTablet\) mToolbarLayout,
+                                                                contextMenuPopulatorFactory,
+                                                                selectionDropdownMenuDelegate,
+                                                                mTabModelSelector,
+                                                                mModalDialogManagerSupplier\.get\(\),
+                                                                cleanup,
+                                                                /\* isWebApp= \*/ false\)\);
+                        if \(mExtensionsToolbarCoordinator != null\) \{
+                            mToolbar\.setExtensionsToolbarCoordinator\(mExtensionsToolbarCoordinator\);
+                        \}
+                    \}
+                \}\n\n
+      replace: |2-
+                mUpdateExtensionsToolbar =
+                        () ->
+                                updateExtensionsToolbarCoordinator(
+                                        contextMenuPopulatorFactory, selectionDropdownMenuDelegate);
+                mUpdateExtensionsToolbar.run();\n\n
+  - description: Release extension recreation dependencies when the toolbar is destroyed.
+    regex:
+      re_pattern: |2-
+                mIsDestroyed = true;
+
+                if \(mAppInstalledDelegate != null\)
+      replace: |2-
+                mIsDestroyed = true;
+                mUpdateExtensionsToolbar = null;
+
+                if (mAppInstalledDelegate != null)
+  - description: Remove the extension toolbar through its owning task during teardown.
+    regex:
+      re_pattern: |2-
+                if \(mExtensionsToolbarCoordinator != null\) \{
+                    mExtensionsToolbarCoordinator\.destroy\(\);
+                    mExtensionsToolbarCoordinator = null;
+                \}\n
+      replace: |2-
+                ChromeAndroidTask task = mChromeAndroidTaskSupplier.get();
+                if (task != null && mExtensionsToolbarFeatureKey != null) {
+                    task.removeFeature(mExtensionsToolbarFeatureKey);
+                }\n
+  - description: Rebind extensions when the selected tab or normal/incognito model changes.
+    regex:
+      re_pattern: |2-
+            private void refreshSelectedTab\(@Nullable Tab tab\) \{
+                boolean wasIncognitoBranded
+      replace: |2-
+            private void refreshSelectedTab(@Nullable Tab tab) {
+                if (mUpdateExtensionsToolbar != null) {
+                    mUpdateExtensionsToolbar.run();
+                }
+                boolean wasIncognitoBranded
+  - description: Recreate extension native state for the selected profile and restore its consumed ViewStub.
+    regex:
+      re_pattern: |2-
+            public @Nullable ExtensionsToolbarCoordinator getExtensionsToolbarCoordinator\(\) \{
+                return mExtensionsToolbarCoordinator;
+            \}\n
+      replace: |2-
+            public @Nullable ExtensionsToolbarCoordinator getExtensionsToolbarCoordinator() {
+                if (mUpdateExtensionsToolbar != null) {
+                    mUpdateExtensionsToolbar.run();
+                }
+                return mExtensionsToolbarCoordinator;
+            }
+
+            private void updateExtensionsToolbarCoordinator(
+                    @Nullable ContextMenuPopulatorFactory contextMenuPopulatorFactory,
+                    @Nullable SelectionDropdownMenuDelegate selectionDropdownMenuDelegate) {
+                if (mIsDestroyed || mTabModelSelector == null) return;
+                ChromeAndroidTask task = mChromeAndroidTaskSupplier.get();
+                if (task == null || task.isDestroyed()) return;
+
+                TabModel tabModel = mTabModelSelector.getCurrentModel();
+                Profile profile = tabModel.getProfile();
+                Tab activeTab = mActivityTabProvider.get();
+                ActivityWindowAndroid activityWindow = (ActivityWindowAndroid) mWindowAndroid;
+                boolean hasBrowserWindow =
+                        profile != null
+                                && !profile.shutdownStarted()
+                                // Tab and model suppliers notify separately during a profile switch.
+                                // Wait until both agree before binding native UI to the active tab.
+                                && (activeTab == null || activeTab.getProfile() == profile)
+                                && task.getValidProfilesForActivity(activityWindow).contains(profile);
+                ChromeAndroidTaskFeatureKey key =
+                        hasBrowserWindow
+                                ? new ChromeAndroidTaskFeatureKey(
+                                        ExtensionsToolbarCoordinator.class,
+                                        profile,
+                                        activityWindow,
+                                        tabModel.isIncognito() ? tabModel : null)
+                                : null;
+                if (key != null && key.equals(mExtensionsToolbarFeatureKey)) return;
+                if (mExtensionsToolbarFeatureKey != null) {
+                    task.removeFeature(mExtensionsToolbarFeatureKey);
+                }
+                if (key == null || profile == null) return;
+
+                ViewStub stub = mControlContainer.findViewById(R.id.extensions_toolbar_container_stub);
+                if (stub == null || !(stub.getParent() instanceof ViewGroup parent)) return;
+                int index = parent.indexOfChild(stub);
+                ViewGroup.LayoutParams layoutParams = stub.getLayoutParams();
+                mExtensionsToolbarFeatureKey = key;
+                Runnable cleanup =
+                        () -> {
+                            if (!key.equals(mExtensionsToolbarFeatureKey)) return;
+                            mExtensionsToolbarFeatureKey = null;
+                            mExtensionsToolbarCoordinator = null;
+                            mToolbar.setExtensionsToolbarCoordinator(null);
+                            // ViewStub.inflate() consumes the stub. Restore one for the next profile.
+                            View container = parent.findViewById(R.id.extensions_toolbar_container);
+                            if (container != null) {
+                                parent.removeView(container);
+                                ViewStub replacement = new ViewStub(stub.getContext());
+                                replacement.setId(R.id.extensions_toolbar_container_stub);
+                                replacement.setInflatedId(R.id.extensions_toolbar_container);
+                                parent.addView(
+                                        replacement, Math.min(index, parent.getChildCount()), layoutParams);
+                            }
+                            // The task invokes cleanup before destroying the native coordinator. Defer
+                            // recreation until its BrowserWindow/Profile teardown has completed.
+                            if (!mIsDestroyed) {
+                                mHandler.post(
+                                        () -> {
+                                            if (mUpdateExtensionsToolbar != null) {
+                                                mUpdateExtensionsToolbar.run();
+                                            }
+                                        });
+                            }
+                        };
+                mExtensionsToolbarCoordinator =
+                        (ExtensionsToolbarCoordinator)
+                                task.addFeature(
+                                        key,
+                                        () ->
+                                                ExtensionsToolbarCoordinator.maybeCreate(
+                                                        mActivity,
+                                                        stub,
+                                                        mWindowAndroid,
+                                                        task,
+                                                        profile,
+                                                        mActivityTabProvider.asObservable(),
+                                                        mTabCreatorManager.getTabCreator(false),
+                                                        getBrowsingModeThemeColorProvider(),
+                                                        mToolbarLayout,
+                                                        contextMenuPopulatorFactory,
+                                                        selectionDropdownMenuDelegate,
+                                                        mTabModelSelector,
+                                                        mModalDialogManagerSupplier.get(),
+                                                        cleanup,
+                                                        /* isWebApp= */ false));
+                if (mExtensionsToolbarCoordinator == null) {
+                    mExtensionsToolbarFeatureKey = null;
+                }
+                mToolbar.setExtensionsToolbarCoordinator(mExtensionsToolbarCoordinator);
+            }\n
+
+# Reaper Android ordinary Omnibox caller closure after physical AI purge.
+  - description: Rename actual functional ordinary session operations in all selected
+      consumers and Brave override
+    regex:
+      re_pattern: beginFuseboxInput
+      replace: beginInput
+  - description: Rename actual functional ordinary session operations in all selected
+      consumers and Brave override
+    count: 7
+    regex:
+      re_pattern: endFuseboxInput
+      replace: endInput
+  - description: Remove original product interface import
+    regex:
+      re_pattern: 'import\ org\.chromium\.chrome\.browser\.omnibox\.fusebox\.FuseboxControls;\
+
+        '
+      replace: ''
+  - description: Remove the actual implements edge; retain all ordinary interface contracts
+    regex:
+      re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ TabObscuringHandler\.Observer,\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ FuseboxControls\ \{'
+      replace: '                TabObscuringHandler.Observer {'
+  - description: Remove annotation belonging solely to the omitted interface; public
+      functional wrappers remain
+    regex:
+      re_pattern: '\ \ \ \ @Override\
+
+        \ \ \ \ public\ void\ beginInput\(AutocompleteInput\ input\)'
+      replace: '    public void beginInput(AutocompleteInput input)'
+  - description: Remove annotation belonging solely to the omitted interface; public
+      functional wrappers remain
+    regex:
+      re_pattern: '\ \ \ \ @Override\
+
+        \ \ \ \ public\ void\ endInput\(\)'
+      replace: '    public void endInput()'
+  - description: Remove annotation belonging solely to the omitted interface; public
+      functional wrappers remain
+    regex:
+      re_pattern: '\ \ \ \ @Override\
+
+        \ \ \ \ public\ void\ suspendInput\(\)'
+      replace: '    public void suspendInput()'
+  - description: Describe normal input without the removed product name
+    regex:
+      re_pattern: Begin\ a\ new\ fusebox\ input\ session\.
+      replace: Begin a new Omnibox input session.
+  - description: Describe normal input without the removed product name
+    regex:
+      re_pattern: End\ the\ current\ fusebox\ input\ session\.
+      replace: End the current Omnibox input session.
+  - description: Describe normal input without the removed product name
+    regex:
+      re_pattern: Suspend\ the\ current\ fusebox\ input\ session\.
+      replace: Suspend the current Omnibox input session.
+
+# Reaper Android physical AI caller closure; genuine core behavior retained.
+  - description: Remove exclusive AI component state
+    regex:
+      re_pattern: '\ \ \ \ private\ final\ GlicButtonDelegate\ mToggleGlicCallback;\
+
+        '
+      replace: ''
+  - description: Remove exclusive AI component state
+    regex:
+      re_pattern: '\ \ \ \ private\ @Nullable\ GlicActionCoordinator\ mGlicActionCoordinator;\
+
+        '
+      replace: ''
+  - description: Remove exclusive AI component state
+    regex:
+      re_pattern: '\ \ \ \ private\ @Nullable\ AiModeActionCoordinator\ mAiModeActionCoordinator;\
+
+        '
+      replace: ''
+  - description: Remove exclusive AI callback from the real toolbar constructor; ordinary
+      args retain order
+    regex:
+      re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ GlicButtonDelegate\ toggleGlicCallback,\
+
+        '
+      replace: ''
+  - description: Remove actual AI constructor assignment
+    regex:
+      re_pattern: '\ \ \ \ \ \ \ \ mToggleGlicCallback\ =\ toggleGlicCallback;\
+
+        '
+      replace: ''
+  - description: Remove sole toolbar caller of Root physically removed popup-only full-width
+      API
+    regex:
+      re_pattern: '\ \ \ \ \ \ \ \ mLocationBarEmbedderUiOverrides\.setIsFullWidthExpansionAllowedSupplier\(\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \(\)\ \->\ !mControlContainer\.isToolbarInAppHeader\(\)\);\
+
+        '
+      replace: ''
+  - description: Remove real Glic/AiMode action service creation while ordinary action
+      registry remains
+    regex:
+      re_pattern: '\ \ \ \ \ \ \ \ if\ \(mActionRegistry\ !=\ null\)\ \{\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ mGlicActionCoordinator\ =\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ new\ GlicActionCoordinator\(\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mActivity,\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mActionRegistry,\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mToggleGlicCallback,\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mActivityTabProvider\.asObservable\(\),\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mChromeAndroidTaskSupplier,\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mBrowserControlsSizer,\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mTabModelSelectorSupplier,\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mSnackbarManager,\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mUserEducationHelper\);\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ mAiModeActionCoordinator\ =\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ new\ AiModeActionCoordinator\(\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mActivity,\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mActionRegistry,\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mActivityTabProvider\.asObservable\(\),\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mUserEducationHelper\);\
+
+        \ \ \ \ \ \ \ \ \}'
+      replace: ''
+  - description: Remove exclusive Glic service teardown
+    regex:
+      re_pattern: '\ \ \ \ \ \ \ \ if\ \(mGlicActionCoordinator\ !=\ null\)\ \{\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ mGlicActionCoordinator\.destroy\(\);\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ mGlicActionCoordinator\ =\ null;\
+
+        \ \ \ \ \ \ \ \ \}'
+      replace: ''
+  - description: Remove exclusive AI-mode service teardown
+    regex:
+      re_pattern: '\ \ \ \ \ \ \ \ if\ \(mAiModeActionCoordinator\ !=\ null\)\ \{\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ mAiModeActionCoordinator\.destroy\(\);\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ mAiModeActionCoordinator\ =\ null;\
+
+        \ \ \ \ \ \ \ \ \}'
+      replace: ''
+  - description: Remove actual Glic toolbar callback dispatch
+    regex:
+      re_pattern: '\ \ \ \ private\ void\ onGlicToggled\(\)\ \{\
+
+        \ \ \ \ \ \ \ \ mToggleGlicCallback\.onClick\(/\*\ preventClose=\ \*/\ false,\
+        GlicInvocationSource\.TOOLBAR_BUTTON\);\
+
+        \ \ \ \ \}'
+      replace: ''
+  - description: Remove actual optional AI promotional hint route
+    regex:
+      re_pattern: '\ \ \ \ private\ void\ maybeShowGlicIph\(@Nullable\ Tab\ tab\)\ \{\
+
+        \ \ \ \ \ \ \ \ if\ \(tab\ ==\ null\ \|\|\ tab\.isIncognitoBranded\(\)\)\ return;\
+
+        \ \ \ \ \ \ \ \ if\ \(!mToolbar\.shouldShowGlicToolbarButton\(\)\)\ return;\
+
+        \ \ \ \ \ \ \ \ if\ \(!GlicUtils\.isTabEligibleForGlicIph\(tab\)\)\ return;\
+
+        \
+
+        \ \ \ \ \ \ \ \ View\ anchorView\ =\ mToolbar\.getGlicActionChipView\(\);\
+
+        \ \ \ \ \ \ \ \ if\ \(anchorView\ ==\ null\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \|\|\ anchorView\.getVisibility\(\)\ !=\ View\.VISIBLE\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \|\|\ !anchorView\.isAttachedToWindow\(\)\)\
+        \{\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ return;\
+
+        \ \ \ \ \ \ \ \ \}\
+
+        \
+
+        \ \ \ \ \ \ \ \ mIphController\.showGlicIph\(anchorView\);\
+
+        \ \ \ \ \}'
+      replace: ''
+  - description: Remove this AI-only page-load observer override; ordinary tab/content
+      observers stay
+    regex:
+      re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ @Override\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ public\ void\ onPageLoadFinished\(Tab\
+        tab,\ GURL\ url\)\ \{\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ if\ \(tab\ ==\ mActivityTabProvider\.get\(\)\)\
+        \{\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ maybeShowGlicIph\(tab\);\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}'
+      replace: ''
+  - description: Remove remaining AI hint dispatch from selected-tab observer
+    regex:
+      re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ maybeShowGlicIph\(tab\);\
+
+        '
+      replace: ''
+  - description: Adapt real TopToolbar initialize caller to retained ordinary signature
+    regex:
+      re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mTabStripTopControlLayer,\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ this::onGlicToggled\);'
+      replace: '                mTabStripTopControlLayer);'
+  - description: Remove obsolete removed-product-only comment; generic real sheet dismissal
+      remains
+    regex:
+      re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \
+        \ \ \ //\ TODO\(crbug\.com/518852349\):\ Revisit\ this\ approach\ to\ handle\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ //\
+        the\ case\ form\ GLIC\.\
+
+        '
+      replace: ''
+  - description: Remove imports with no retained source reference
+    regex:
+      re_pattern: 'import\ org\.chromium\.chrome\.browser\.ui\.bottombar\.AiModeActionCoordinator;\
+
+        '
+      replace: ''
+  - description: Remove imports with no retained source reference
+    regex:
+      re_pattern: 'import\ org\.chromium\.chrome\.browser\.ui\.actions\.glic\.GlicActionCoordinator;\
+
+        '
+      replace: ''
+  - description: Remove imports with no retained source reference
+    regex:
+      re_pattern: 'import\ org\.chromium\.chrome\.browser\.glic\.GlicUtils;\
+
+        '
+      replace: ''
+  - description: Remove imports with no retained source reference
+    regex:
+      re_pattern: 'import\ org\.chromium\.chrome\.browser\.glic\.GlicKeyedService\.GlicInvocationSource;\
+
+        '
+      replace: ''
+  - description: Remove imports with no retained source reference
+    regex:
+      re_pattern: 'import\ org\.chromium\.chrome\.browser\.glic\.GlicButtonDelegate;\
+
+        '
+      replace: ''
+  - description: Normalize exact removed-section gaps
+    count: 6
+    regex:
+      re_pattern: '\
+
+        \
+
+        \
+
+        '
+      replace: '
+
+
+        '
+  - description: Normalize exact removed-section gaps
+    count: 4
+    regex:
+      re_pattern: '\
+
+        \
+
+        \
+
+        '
+      replace: '
+
+
+        '
+  - description: Normalize exact removed-section gaps
+    count: 2
+    regex:
+      re_pattern: '\
+
+        \
+
+        \
+
+        '
+      replace: '
+
+
+        '
+
+# Reaper Android physical AI caller closure; genuine core behavior retained.
+  - description: Remove optional AI-sheet home-button collapse; ordinary homepage/window
+      behavior stays
+    regex:
+      re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \
+        \ \ \ TabBottomSheetManager\ tabBottomSheetManager\ =\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \
+        \ \ \ \ \ \ TabBottomSheetUtils\.getManagerFromWindow\(\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ mWindowAndroid\);\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ if\
+        \(tabBottomSheetManager\ !=\ null\)\ \{\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \
+        \ \ tabBottomSheetManager\.setSheetExpanded\(false\);\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+        '
+      replace: ''
+  - description: Remove imports with no retained source use
+    regex:
+      re_pattern: 'import\ org\.chromium\.chrome\.browser\.tab_bottom_sheet\.TabBottomSheetUtils;\
+
+        '
+      replace: ''
+  - description: Remove imports with no retained source use
+    regex:
+      re_pattern: 'import\ org\.chromium\.chrome\.browser\.tab_bottom_sheet\.TabBottomSheetManager;\
+
+        '
+      replace: ''
+  - description: Remove only the retired supplier parameter documentation
+    regex:
+      pattern: "     * @param merchantTrustSignalsCoordinatorSupplier Supplier of {@link\n     *     MerchantTrustSignalsCoordinator}.\n"
+      replace: ''
+    count: 1
+  - description: Remove only the merchant constructor parameter
+    regex:
+      pattern: "            MonotonicObservableSupplier<MerchantTrustSignalsCoordinator>\n                    merchantTrustSignalsCoordinatorSupplier,\n"
+      replace: ''
+    count: 1
+  - description: Keep ordinary toolbar PageInfo creation without the merchant action supplier
+    regex:
+      pattern: "                            SupplierUtils.upcast(\n                                    merchantTrustSignalsCoordinatorSupplier,\n\
+        \                                    StoreInfoActionHandler.class),\n"
+      replace: ''
+    count: 1
+  - description: Remove only the now-unused MerchantTrustSignalsCoordinator import
+    regex:
+      pattern: 'import org.chromium.chrome.browser.merchant_viewer.MerchantTrustSignalsCoordinator;
+
+        '
+      replace: ''
+    count: 1
+  - description: Remove only the now-unused StoreInfoActionHandler import
+    regex:
+      pattern: 'import org.chromium.chrome.browser.merchant_viewer.PageInfoStoreInfoController.StoreInfoActionHandler;
+
+        '
+      replace: ''
+    count: 1

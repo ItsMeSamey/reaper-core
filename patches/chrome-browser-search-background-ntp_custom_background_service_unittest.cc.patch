@@ -1,0 +1,106 @@
+--- a/chrome/browser/search/background/ntp_custom_background_service_unittest.cc
++++ b/chrome/browser/search/background/ntp_custom_background_service_unittest.cc
+@@ -5,6 +5,7 @@
+ #include "chrome/browser/search/background/ntp_custom_background_service.h"
+ 
+ #include <optional>
++#include <string>
+ #include <vector>
+ 
+ #include "base/files/file_util.h"
+@@ -16,6 +17,7 @@
+ #include "base/test/metrics/histogram_tester.h"
+ #include "base/test/mock_callback.h"
+ #include "base/test/simple_test_clock.h"
++#include "base/test/scoped_feature_list.h"
+ #include "base/time/time.h"
+ #include "base/token.h"
+ #include "build/build_config.h"
+@@ -31,6 +33,7 @@
+ #include "chrome/test/base/testing_browser_process.h"
+ #include "chrome/test/base/testing_profile.h"
+ #include "components/application_locale_storage/application_locale_storage.h"
++#include "components/search/ntp_features.h"
+ #include "components/sync_preferences/testing_pref_service_syncable.h"
+ #include "components/themes/ntp_custom_background_service_observer.h"
+ #include "content/public/test/browser_task_environment.h"
+@@ -179,10 +182,10 @@
+   content::BrowserTaskEnvironment task_environment_;
+   network::TestURLLoaderFactory test_url_loader_factory_;
+   raw_ptr<ApplicationLocaleStorage> application_locale_storage_;
++  MockThemeDelegate mock_theme_delegate_;
+   std::unique_ptr<TestingProfile> profile_;
+   base::SimpleTestClock clock_;
+   MockNtpCustomBackgroundServiceObserver observer_;
+-  MockThemeDelegate mock_theme_delegate_;
+   raw_ptr<MockNtpBackgroundService> mock_ntp_background_service_;
+   base::HistogramTester histogram_tester_;
+   raw_ptr<NtpCustomBackgroundService> custom_background_service_;
+@@ -994,3 +997,67 @@
+   EXPECT_EQ(true, custom_background->is_uploaded_image);
+   EXPECT_TRUE(custom_background->is_inspiration_image);
+ }
++
++#if BUILDFLAG(IS_ANDROID)
++TEST_F(NtpCustomBackgroundServiceTest,
++       WallpaperFlagPreservesOrdinaryPrefsAndLocalImageCopy) {
++  base::test::ScopedFeatureList feature_list;
++  feature_list.InitAndEnableFeature(ntp_features::kCustomizeChromeWallpaperSearch);
++  sync_preferences::TestingPrefServiceSyncable prefs_service;
++  NtpCustomBackgroundService::RegisterProfilePrefs(prefs_service.registry());
++  EXPECT_NE(nullptr, prefs_service.FindPreference(prefs::kNtpCustomBackgroundDict));
++  EXPECT_FALSE(prefs_service.GetBoolean(prefs::kNtpCustomBackgroundLocalToDevice));
++  EXPECT_TRUE(prefs_service.GetString(prefs::kNtpCustomBackgroundLocalToDeviceId)
++                  .empty());
++  EXPECT_FALSE(prefs_service.GetBoolean(prefs::kNtpCustomBackgroundInspiration));
++  EXPECT_EQ(nullptr, prefs_service.FindPreference(prefs::kNtpWallpaperSearchHistory));
++
++  EXPECT_CALL(observer_, OnCustomBackgroundImageUpdated).Times(1);
++  const base::FilePath path = profile().GetPath().AppendASCII("ordinary_local_image");
++  const base::FilePath copy_path = profile().GetPath().AppendASCII(
++      chrome::kChromeUIUntrustedNewTabPageBackgroundFilename);
++  ASSERT_TRUE(base::WriteFile(path, "ordinary_background_bytes"));
++  custom_background_service_->SelectLocalBackgroundImage(path);
++  task_environment_.RunUntilIdle();
++
++  std::string copied;
++  ASSERT_TRUE(base::ReadFileToString(copy_path, &copied));
++  EXPECT_EQ("ordinary_background_bytes", copied);
++  EXPECT_TRUE(profile().GetPrefs()->GetBoolean(
++      prefs::kNtpCustomBackgroundLocalToDevice));
++  EXPECT_TRUE(profile().GetPrefs()->GetString(
++      prefs::kNtpCustomBackgroundLocalToDeviceId).empty());
++  auto background = custom_background_service_->GetCustomBackground();
++  ASSERT_TRUE(background);
++  EXPECT_TRUE(background->is_uploaded_image);
++  EXPECT_TRUE(custom_background_service_->IsCustomBackgroundSet());
++}
++
++TEST_F(NtpCustomBackgroundServiceTest,
++       WallpaperFlagPreservesSyncedBackgroundReplacingLocalImage) {
++  base::test::ScopedFeatureList feature_list;
++  feature_list.InitAndEnableFeature(ntp_features::kCustomizeChromeWallpaperSearch);
++  EXPECT_CALL(observer_, OnCustomBackgroundImageUpdated).Times(2);
++  const base::FilePath path = profile().GetPath().AppendASCII(
++      chrome::kChromeUIUntrustedNewTabPageBackgroundFilename);
++  ASSERT_TRUE(base::WriteFile(path, "ordinary_local_background"));
++  custom_background_service_->SelectLocalBackgroundImage(path);
++  task_environment_.RunUntilIdle();
++  ASSERT_TRUE(profile().GetPrefs()->GetBoolean(
++      prefs::kNtpCustomBackgroundLocalToDevice));
++  ASSERT_TRUE(base::PathExists(path));
++
++  const GURL synced_url("https://example.test/synced-background");
++  profile().GetTestingPrefService()->SetUserPref(
++      prefs::kNtpCustomBackgroundDict,
++      GetBackgroundInfoAsDict(synced_url, GURL()));
++  task_environment_.RunUntilIdle();
++  auto background = custom_background_service_->GetCustomBackground();
++  ASSERT_TRUE(background);
++  EXPECT_EQ(synced_url, background->custom_background_url);
++  EXPECT_FALSE(background->is_uploaded_image);
++  EXPECT_FALSE(profile().GetPrefs()->GetBoolean(
++      prefs::kNtpCustomBackgroundLocalToDevice));
++  EXPECT_FALSE(base::PathExists(path));
++}
++#endif

@@ -1,0 +1,187 @@
+diff --git a/chrome/android/java/src/org/chromium/chrome/browser/download/DownloadManagerService.java b/chrome/android/java/src/org/chromium/chrome/browser/download/DownloadManagerService.java
+index 16f7f15c89aee1ef4db1271cdb9a2d2f8973711f..2f2ccdbd63a86bd9901cdbcb7bc779aa4f4ebd2f 100644
+--- a/chrome/android/java/src/org/chromium/chrome/browser/download/DownloadManagerService.java
++++ b/chrome/android/java/src/org/chromium/chrome/browser/download/DownloadManagerService.java
+@@ -8,6 +8,7 @@ import static org.chromium.build.NullUtil.assertNonNull;
+ import static org.chromium.build.NullUtil.assumeNonNull;
+ 
+ import android.annotation.SuppressLint;
++import android.app.Activity;
+ import android.app.DownloadManager;
+ import android.content.ActivityNotFoundException;
+ import android.content.Context;
+@@ -26,6 +27,8 @@ import org.jni_zero.CalledByNative;
+ import org.jni_zero.JniType;
+ import org.jni_zero.NativeMethods;
+ 
++import org.chromium.base.ActivityState;
++import org.chromium.base.ApplicationStatus;
+ import org.chromium.base.Callback;
+ import org.chromium.base.ContentUriUtils;
+ import org.chromium.base.ContextUtils;
+@@ -48,9 +51,11 @@ import org.chromium.chrome.browser.media.MediaViewerUtils;
+ import org.chromium.chrome.browser.pdf.PdfUtils;
+ import org.chromium.chrome.browser.preferences.Pref;
+ import org.chromium.chrome.browser.profiles.OtrProfileId;
++import org.chromium.chrome.browser.app.download.home.DownloadActivityLauncher;
+ import org.chromium.chrome.browser.profiles.Profile;
+ import org.chromium.chrome.browser.profiles.ProfileKey;
+ import org.chromium.chrome.browser.profiles.ProfileManager;
++import org.chromium.chrome.browser.tab.Tab;
+ import org.chromium.components.download.DownloadCollectionBridge;
+ import org.chromium.components.download.DownloadState;
+ import org.chromium.components.external_intents.ExternalNavigationHandler;
+@@ -64,6 +69,7 @@ import org.chromium.components.prefs.PrefService;
+ import org.chromium.components.user_prefs.UserPrefs;
+ import org.chromium.content_public.browser.BrowserStartupController;
+ import org.chromium.ui.base.MimeTypeUtils;
++import org.chromium.ui.base.WindowAndroid;
+ import org.chromium.ui.widget.Toast;
+ 
+ import java.io.File;
+@@ -181,6 +187,34 @@ public class DownloadManagerService implements DownloadServiceDelegate, ProfileM
+         return sDownloadManagerService;
+     }
+ 
++    /** Policy changes do not start a download service or create a UI controller. */
++    static void onDownloadUiPolicyChanged() {
++        ThreadUtils.assertOnUiThread();
++        DownloadManagerService service = sDownloadManagerService;
++        if (service == null || service.mMessageUiController == null) return;
++        service.mMessageUiController.onDownloadUiPolicyChanged();
++    }
++
++    /** Match the original-profile aggregator and the item's exact existing OTR profile. */
++    public static boolean shouldSuppressDownloadUi(@Nullable String serializedOtrProfileId) {
++        ThreadUtils.assertOnUiThread();
++        // Extension policy exists only after full profile initialization. Reduced-mode
++        // background downloads must keep their normal notification lifecycle.
++        if (!ProfileManager.isInitialized()) return false;
++        Profile profile = ProfileManager.getLastUsedRegularProfile();
++        if (!profile.isNativeInitialized()) return true;
++        if (serializedOtrProfileId != null) {
++            OtrProfileId otrProfileId =
++                    OtrProfileId.deserializeWithoutVerify(serializedOtrProfileId);
++            if (otrProfileId == null) return true;
++            Profile otrProfile = profile.getOffTheRecordProfile(otrProfileId, false);
++            if (otrProfile == null) return true;
++            profile = otrProfile;
++        }
++        return !profile.isNativeInitialized()
++                || DownloadManagerServiceJni.get().shouldSuppressDownloadUi(profile);
++    }
++
+     public static boolean hasDownloadManagerService() {
+         ThreadUtils.assertOnUiThread();
+         return sDownloadManagerService != null;
+@@ -567,7 +601,10 @@ public class DownloadManagerService implements DownloadServiceDelegate, ProfileM
+         DownloadMessageUiController messageUiController =
+                 getMessageUiController(
+                         assumeNonNull(downloadItem.getDownloadInfo()).getOtrProfileId());
+-        if (messageUiController != null) messageUiController.onDownloadStarted();
++        if (messageUiController != null) {
++            messageUiController.onDownloadStarted(
++                    assumeNonNull(downloadItem.getDownloadInfo()).getOtrProfileId());
++        }
+     }
+ 
+     static @Nullable Intent getLaunchIntentForDownload(
+@@ -808,6 +845,89 @@ public class DownloadManagerService implements DownloadServiceDelegate, ProfileM
+         }
+     }
+ 
++    /** Checks an explicit foreground host without creating a request or an OTR profile. */
++    @CalledByNative
++    static boolean canShowDownloadItemForExtension(
++            @Nullable Tab tab, @Nullable Profile itemProfile) {
++        ThreadUtils.assertOnUiThread();
++        return getDownloadItemRevealHost(tab, itemProfile) != null;
++    }
++
++    private static @Nullable Activity getDownloadItemRevealHost(
++            @Nullable Tab tab, @Nullable Profile itemProfile) {
++        if (tab == null || !tab.isInitialized() || tab.isDestroyed() || tab.isClosing()
++                || tab.isHidden() || itemProfile == null || !itemProfile.isNativeInitialized()
++                || itemProfile.shutdownStarted()) {
++            return null;
++        }
++        Profile tabProfile = tab.getProfile();
++        if (!tabProfile.isNativeInitialized() || tabProfile.shutdownStarted()) return null;
++        Profile original = itemProfile.getOriginalProfile();
++        if (!original.isNativeInitialized() || original.shutdownStarted()
++                || tabProfile.getOriginalProfile() != original) {
++            return null;
++        }
++        if (itemProfile.isOffTheRecord()
++                && (!itemProfile.isPrimaryOtrProfile()
++                        || original.getOffTheRecordProfile(
++                                        assumeNonNull(itemProfile.getOtrProfileId()), false)
++                                != itemProfile)) {
++            return null;
++        }
++        WindowAndroid window = tab.getWindowAndroid();
++        Activity host = window == null ? null : window.getActivity().get();
++        if (host == null || host.isFinishing() || host.isDestroyed()
++                || ApplicationStatus.getStateForActivity(host) != ActivityState.RESUMED) {
++            return null;
++        }
++        return host;
++    }
++
++    /** Reveal the exact native-authorized item; acknowledgment comes from the Downloads list. */
++    @CalledByNative
++    static long showDownloadItemForExtension(
++            @Nullable Tab tab,
++            @Nullable Profile itemProfile,
++            @JniType("std::string") String itemNamespace,
++            @JniType("std::string") String guid,
++            @JniType("base::OnceCallback<void(bool)>&&") Callback<Boolean> completion) {
++        ThreadUtils.assertOnUiThread();
++        Activity host = getDownloadItemRevealHost(tab, itemProfile);
++        if (host == null || itemNamespace.isEmpty() || guid.isEmpty()) {
++            completion.onResult(false);
++            return 0;
++        }
++        return DownloadActivityLauncher.getInstance().showDownloadItem(
++                host, assumeNonNull(itemProfile), new ContentId(itemNamespace, guid), completion);
++    }
++
++    @CalledByNative
++    static void cancelDownloadItemForExtension(long token) {
++        ThreadUtils.assertOnUiThread();
++        if (token != 0) DownloadActivityLauncher.getInstance().cancelDownloadItem(token);
++    }
++
++    /** Opens Android's downloads collection in the actual extension window's profile. */
++    @CalledByNative
++    static boolean showDownloadsForExtension(@Nullable Tab tab) {
++        ThreadUtils.assertOnUiThread();
++        if (tab == null || tab.isDestroyed() || tab.isClosing()) return false;
++        WindowAndroid window = tab.getWindowAndroid();
++        Activity activity = window == null ? null : window.getActivity().get();
++        if (activity == null || activity.isFinishing() || activity.isDestroyed()) return false;
++        Profile profile = tab.getProfile();
++        if (profile.shutdownStarted()) return false;
++        try {
++            // Pass the real tab so regular-profile calls cannot inherit an unrelated
++            // last-focused incognito tab. Keep the normal download UI and permissions.
++            return DownloadUtils.showDownloadManager(
++                    activity, tab, profile.getOtrProfileId(), DownloadOpenSource.UNKNOWN);
++        } catch (ActivityNotFoundException | SecurityException exception) {
++            Log.e(TAG, "Cannot open extension downloads collection", exception);
++            return false;
++        }
++    }
++
+     // Deprecated after new download backend.
+     @Override
+     public void resumeDownload(ContentId id, DownloadItem item) {
+@@ -1545,6 +1665,8 @@ public class DownloadManagerService implements DownloadServiceDelegate, ProfileM
+ 
+     @NativeMethods
+     interface Natives {
++        boolean shouldSuppressDownloadUi(@JniType("Profile*") Profile profile);
++
+         boolean isSupportedMimeType(@JniType("std::string") @Nullable String mimeType);
+ 
+         long init(DownloadManagerService self, boolean isProfileAdded);

@@ -104,6 +104,117 @@ describe('Apply Patches', function () {
     }
   })
 
+  test('propagates unexpected patch errors when requested', async function () {
+    const error = new Error('patch operation failed')
+    const operation = jest
+      .spyOn(gitPatcher, 'performApplyForPatches')
+      .mockRejectedValue(error)
+    const log = jest.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await expect(gitPatcher.applyPatches(true)).rejects.toBe(error)
+    } finally {
+      operation.mockRestore()
+      log.mockRestore()
+    }
+  })
+
+  test('preserves default handling of unexpected patch errors', async function () {
+    const operation = jest
+      .spyOn(gitPatcher, 'performApplyForPatches')
+      .mockRejectedValue(new Error('patch operation failed'))
+    const log = jest.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await expect(gitPatcher.applyPatches()).resolves.toEqual([])
+    } finally {
+      operation.mockRestore()
+      log.mockRestore()
+    }
+  })
+
+
+  function newFilePatch() {
+    return [
+      'diff --git a/new-file.txt b/new-file.txt',
+      'new file mode 100644',
+      '--- /dev/null',
+      '+++ b/new-file.txt',
+      '@@ -0,0 +1 @@',
+      '+patch-owned content',
+      '',
+    ].join('\n')
+  }
+
+  test('resets tracked targets when a new-file patch shares the batch', async () => {
+    await fs.writeFile(testFile1Path, file1ModifiedContent)
+    await fs.writeFile(path.join(patchPath, 'new-file.patch'), newFilePatch())
+    const status = await gitPatcher.applyPatches(true)
+    expect(status).toHaveLength(2)
+    expect(status.every(({ error }) => !error)).toBe(true)
+    expect(await fs.readFile(testFile1Path, 'utf8')).toBe(file1ModifiedContent)
+    expect(await fs.readFile(path.join(repoPath, 'new-file.txt'), 'utf8'))
+      .toBe('patch-owned content\n')
+    expect(await gitPatcher.applyPatches(true)).toEqual([])
+  })
+
+  test('preserves an untracked collision while resetting other patch targets', async () => {
+    await fs.writeFile(testFile1Path, file1ModifiedContent)
+    await fs.writeFile(path.join(repoPath, 'new-file.txt'), 'user content')
+    await fs.writeFile(path.join(patchPath, 'new-file.patch'), newFilePatch())
+    const status = await gitPatcher.applyPatches(true)
+    expect(status.find(({ path }) => path === file1Name).error).toBeUndefined()
+    expect(status.find(({ path }) => path === 'new-file.txt').error).toBeDefined()
+    expect(await fs.readFile(path.join(repoPath, 'new-file.txt'), 'utf8'))
+      .toBe('user content')
+    expect(await fs.readFile(testFile1Path, 'utf8')).toBe(file1ModifiedContent)
+    expect(await fs.pathExists(path.join(patchPath, 'new-file.patchinfo'))).toBe(false)
+  })
+
+  test('empty and all-untracked resets preserve tracked worktree and index edits', async () => {
+    await fs.writeFile(testFile1Path, 'staged change')
+    await runGitAsyncWithErrorLog(repoPath, ['add', '--', file1Name])
+    await fs.writeFile(testFile1Path, 'unstaged change')
+    await fs.writeFile(path.join(repoPath, 'untracked.txt'), 'user file')
+    const staged = await runGitAsyncWithErrorLog(repoPath, ['diff', '--cached'])
+    await gitPatcher.resetRepoFiles([])
+    await gitPatcher.resetRepoFiles(['untracked.txt', 'absent.txt'])
+    expect(await fs.readFile(testFile1Path, 'utf8')).toBe('unstaged change')
+    expect(await fs.readFile(path.join(repoPath, 'untracked.txt'), 'utf8')).toBe('user file')
+    expect(await runGitAsyncWithErrorLog(repoPath, ['diff', '--cached'])).toBe(staged)
+  })
+
+  test('resets only exact literal requested paths and preserves unrelated edits', async () => {
+    const literalNames = ['-target', 'literal[1].txt', 'space name.txt']
+    for (const name of [...literalNames, 'literal1.txt']) {
+      await fs.writeFile(path.join(repoPath, name), 'original')
+    }
+    await runGitAsyncWithErrorLog(repoPath, ['add', '--', ...literalNames, 'literal1.txt'])
+    await runGitAsyncWithErrorLog(repoPath, ['commit', '-m', 'literal paths'])
+    for (const name of [...literalNames, 'literal1.txt', file1Name]) {
+      await fs.writeFile(path.join(repoPath, name), 'edited')
+    }
+    await gitPatcher.resetRepoFiles([...literalNames, literalNames[0], 'missing'])
+    for (const name of literalNames) {
+      expect(await fs.readFile(path.join(repoPath, name), 'utf8')).toBe('original')
+    }
+    expect(await fs.readFile(path.join(repoPath, 'literal1.txt'), 'utf8')).toBe('edited')
+    expect(await fs.readFile(testFile1Path, 'utf8')).toBe('edited')
+  })
+
+  test('a real reset failure aborts before any patch or patchinfo write', async () => {
+    await fs.writeFile(testFile1Path, 'unreset content')
+    await fs.writeFile(path.join(repoPath, '.git', 'index.lock'), 'test-held lock')
+    const log = jest.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await expect(gitPatcher.applyPatches(true)).rejects.toMatchObject({
+        stderr: expect.stringContaining('index.lock'),
+      })
+      expect(await fs.readFile(testFile1Path, 'utf8')).toBe('unreset content')
+      expect(await fs.pathExists(path.join(patchPath, file1Name + '.patchinfo'))).toBe(false)
+    } finally {
+      log.mockRestore()
+    }
+  })
+
   test('applies simple patch to unmodified original', async function () {
     validate()
     const affectedPaths = await gitPatcher.applyPatches()
@@ -163,7 +274,7 @@ describe('Apply Patches', function () {
     expect(testFile1Content).toBe(file1InitialContent)
   })
 
-  test('handles missing file when resets target file if patch file is removed', async function () {
+  test('skips an already untracked target when its patch is removed', async function () {
     validate()
     // apply once
     await gitPatcher.applyPatches()
@@ -182,7 +293,7 @@ describe('Apply Patches', function () {
     const status = await gitPatcher.applyPatches()
     expect(status).toHaveLength(1)
     expect(status[0]).toHaveProperty('path', file1Name)
-    expect(status[0]).toHaveProperty('warning')
+    expect(status[0]).not.toHaveProperty('warning')
     expect(status[0]).toHaveProperty('reason', patchApplyReasons.PATCH_REMOVED)
   })
 

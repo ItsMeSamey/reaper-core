@@ -5,6 +5,7 @@
 
 package org.chromium.chrome.browser.settings;
 
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.os.Bundle;
@@ -26,11 +27,24 @@ public class BraveSettingsLauncherImpl extends SettingsNavigationImpl {
         super();
     }
 
-    // This is the only overload that every startSettings() and createSettingsIntent() variant in
-    // SettingsNavigationImpl funnels into, so overriding it applies the Brave fragment substitution
-    // to all entry points, including the ones that pass a @SettingsFragment enum value instead of a
-    // fragment class (for example Quick Delete's "More options" and the History page's "Delete
-    // browsing data").
+    @Override
+    public void startSettings(
+            Context context,
+            @Nullable Class<? extends Fragment> fragment,
+            @Nullable Bundle fragmentArgs,
+            boolean addToBackStack,
+            @Nullable String tag) {
+        // An existing settings tab consumes the fragment before createSettingsIntent() is called.
+        if (fragment != null) {
+            fragment = substituteFragment(fragment);
+        }
+        super.startSettings(context, fragment, fragmentArgs, addToBackStack, tag);
+    }
+
+    // Every createSettingsIntent() variant funnels into this overload, so Brave fragment
+    // substitution applies to direct intent callers, including ones that pass a
+    // @SettingsFragment enum value instead of a fragment class. startSettings() also reaches
+    // this overload when it falls back to launching an intent.
     @Override
     public Intent createSettingsIntent(
             Context context,
@@ -45,7 +59,12 @@ public class BraveSettingsLauncherImpl extends SettingsNavigationImpl {
         }
         Intent intent =
                 super.createSettingsIntent(context, fragment, fragmentArgs, addToBackStack, tag);
-        intent.setClass(context, BraveSettingsActivity.class);
+        // Settings tabs keep Chromium's launcher; only activity-based settings need the Brave host.
+        ComponentName component = intent.getComponent();
+        if (component != null
+                && SettingsActivity.class.getName().equals(component.getClassName())) {
+            intent.setClass(context, BraveSettingsActivity.class);
+        }
         return intent;
     }
 

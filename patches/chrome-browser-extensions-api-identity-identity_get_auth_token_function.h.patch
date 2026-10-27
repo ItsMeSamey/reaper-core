@@ -1,26 +1,117 @@
 diff --git a/chrome/browser/extensions/api/identity/identity_get_auth_token_function.h b/chrome/browser/extensions/api/identity/identity_get_auth_token_function.h
-index 53bdc5b2e63b4b1437cf4166cb84ba17aa402ea6..454ca446fa630590fd7562f5442d6b7298237caa 100644
 --- a/chrome/browser/extensions/api/identity/identity_get_auth_token_function.h
 +++ b/chrome/browser/extensions/api/identity/identity_get_auth_token_function.h
-@@ -146,7 +146,7 @@ class IdentityGetAuthTokenFunction : public ExtensionFunction,
+@@ -15,6 +15,7 @@
+ #include "base/memory/weak_ptr.h"
+ #include "base/scoped_observation.h"
+ #include "base/time/time.h"
++#include "build/build_config.h"
+ #include "build/chromeos_buildflags.h"
+ #include "chrome/browser/extensions/api/identity/gaia_remote_consent_flow.h"
+ #include "chrome/browser/extensions/api/identity/identity_mint_queue.h"
+@@ -25,6 +26,12 @@
+ #include "google_apis/gaia/gaia_id.h"
+ #include "google_apis/gaia/google_service_auth_error.h"
+ #include "google_apis/gaia/oauth2_mint_token_flow.h"
++
++#if BUILDFLAG(IS_ANDROID)
++#include "base/android/scoped_java_ref.h"
++#include "extensions/browser/extension_registry.h"
++#include "extensions/browser/extension_registry_observer.h"
++#endif
+
+ namespace signin {
+ class AccessTokenFetcher;
+@@ -59,7 +66,12 @@
+                                      public GaiaRemoteConsentFlow::Delegate,
+                                      public IdentityMintRequestQueue::Request,
+                                      public signin::IdentityManager::Observer,
+-                                     public OAuth2MintTokenFlow::Delegate {
++                                     public OAuth2MintTokenFlow::Delegate
++#if BUILDFLAG(IS_ANDROID)
++    ,
++                                     public ExtensionRegistryObserver
++#endif
++{
+  public:
+   // Interactive requests showing UIs (like a signin tab or a consent window)
+   // may be rejected to avoid creating unwanted or out-of-context user
+@@ -85,6 +97,15 @@
+
+   IdentityGetAuthTokenFunction();
+
++#if BUILDFLAG(IS_ANDROID)
++  bool ShouldKeepWorkerAliveIndefinitely() override;
++
++  // Public for generated JNI completion from this request's owned SDK recovery bridge.
++  void OnAndroidAccountConsentResult(
++      JNIEnv* env,
++      const std::string& browser_login_token);
++#endif
++
+   const ExtensionTokenKey* GetExtensionTokenKeyForTest() { return &token_key_; }
+
+   void OnIdentityAPIShutdown();
+@@ -138,6 +159,20 @@
+   bool enable_granular_permissions() const;
+
+  private:
++#if BUILDFLAG(IS_ANDROID)
++  friend class BraveWebAuthFlowAndroidTest;
++
++  void OnExtensionUnloaded(content::BrowserContext* browser_context,
++                           const Extension* extension,
++                           UnloadedExtensionReason reason) override;
++  void OnShutdown(ExtensionRegistry* registry) override;
++  void OnBrowserContextShutdown() override;
++  void CancelAndroidAsyncRun(const IdentityGetAuthTokenError& error,
++                             bool defer_response);
++  bool StartAndroidAccountConsentRecovery(const GoogleServiceAuthError& error);
++  void CancelAndroidAccountConsentRecovery();
++#endif
++
+   FRIEND_TEST_ALL_PREFIXES(GetAuthTokenFunctionTest,
+                            ComponentWithChromeClientId);
+   FRIEND_TEST_ALL_PREFIXES(GetAuthTokenFunctionTest,
+@@ -146,7 +181,7 @@
    FRIEND_TEST_ALL_PREFIXES(GetAuthTokenFunctionTest, NoninteractiveShutdown);
- 
+
    class RefreshTokensLoadedWaiter;
 -#if BUILDFLAG(ENABLE_DESKTOP_ANDROID_EXTENSIONS)
 +#if BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_EXTENSIONS_CORE)
    class AccountsInCookieUpdatedWaiter;
  #endif
    enum class InteractionType { kSignin, kConsent };
-@@ -159,7 +159,7 @@ class IdentityGetAuthTokenFunction : public ExtensionFunction,
+@@ -159,7 +194,7 @@
    // might be started.
    void GetAuthTokenForAccount(const GaiaId& gaia_id);
- 
+
 -#if BUILDFLAG(ENABLE_DESKTOP_ANDROID_EXTENSIONS)
 +#if BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_EXTENSIONS_CORE)
    void OnCookiesUpdatedForRemoteConsent(bool success);
    bool ShouldDelayRemoteConsent();
    void StartWaitingForCookies();
-@@ -272,7 +272,7 @@ class IdentityGetAuthTokenFunction : public ExtensionFunction,
+@@ -264,6 +299,19 @@
+   // extension.
+   GaiaId selected_gaia_id_;
+
++#if BUILDFLAG(IS_ANDROID)
++  // Only an explicit TokenDetails.account, separate from remembered accounts.
++  GaiaId android_explicit_requested_gaia_id_;
++
++  // Recovery is attempted once for the same approved browser login account.
++  bool android_account_consent_attempted_ = false;
++  CoreAccountInfo android_account_consent_account_;
++  GoogleServiceAuthError android_account_consent_error_ =
++      GoogleServiceAuthError::AuthErrorNone();
++  base::android::ScopedJavaGlobalRef<jobject> android_account_consent_bridge_;
++  base::CallbackListSubscription android_account_consent_window_subscription_;
++#endif
++
+   ExtensionTokenKey token_key_{/*extension_id=*/"",
+                                /*account_info=*/CoreAccountInfo(),
+                                /*scopes=*/{}};
+@@ -272,7 +320,7 @@
    // a permissions prompt will be popped up to the user.
    RemoteConsentResolutionData resolution_data_;
    std::unique_ptr<RefreshTokensLoadedWaiter> refresh_tokens_loaded_waiter_;
@@ -29,3 +120,17 @@ index 53bdc5b2e63b4b1437cf4166cb84ba17aa402ea6..454ca446fa630590fd7562f5442d6b72
    std::unique_ptr<AccountsInCookieUpdatedWaiter>
        accounts_in_cookie_updated_waiter_;
  #endif
+@@ -281,6 +329,13 @@
+   // Added for debugging https://crbug.com/40134189.
+   bool remote_consent_approved_ = false;
+
++#if BUILDFLAG(IS_ANDROID)
++  // The explicit async reference is released by exactly one terminal response.
++  bool async_run_active_ = false;
++  base::ScopedObservation<ExtensionRegistry, ExtensionRegistryObserver>
++      registry_observation_{this};
++#endif
++
+   // Invoked when IdentityAPI is shut down.
+   base::CallbackListSubscription identity_api_shutdown_subscription_;
+

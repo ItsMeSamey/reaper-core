@@ -1,8 +1,256 @@
 diff --git a/chrome/android/features/tab_ui/java/src/org/chromium/chrome/browser/tasks/tab_management/TabListMediator.java b/chrome/android/features/tab_ui/java/src/org/chromium/chrome/browser/tasks/tab_management/TabListMediator.java
-index 9ec60322f0ed9d81c2eb52a08c5fce9c92b58eb2..957437145882de869c693e4647424736480b2dfb 100644
 --- a/chrome/android/features/tab_ui/java/src/org/chromium/chrome/browser/tasks/tab_management/TabListMediator.java
 +++ b/chrome/android/features/tab_ui/java/src/org/chromium/chrome/browser/tasks/tab_management/TabListMediator.java
-@@ -867,7 +867,7 @@ public class TabListMediator implements TabListNotificationHandler {
+@@ -12,7 +12,6 @@
+ import static org.chromium.chrome.browser.tasks.tab_management.TabProperties.TAB_GROUP_COLOR_VIEW_PROVIDER;
+ import static org.chromium.chrome.browser.tasks.tab_management.TabProperties.TAB_ID;
+ import static org.chromium.chrome.browser.tasks.tab_management.TabProperties.THUMBNAIL_FETCHER;
+-import static org.chromium.chrome.browser.tasks.tab_management.UiTypeHelper.isLargeMessageCard;
+ import static org.chromium.chrome.browser.tasks.tab_management.UiTypeHelper.isMessageCard;
+
+ import android.animation.Animator;
+@@ -52,23 +51,16 @@
+ import org.chromium.base.ValueChangedCallback;
+ import org.chromium.base.metrics.RecordHistogram;
+ import org.chromium.base.metrics.RecordUserAction;
+-import org.chromium.base.shared_preferences.SharedPreferencesManager;
+ import org.chromium.base.supplier.NonNullObservableSupplier;
+ import org.chromium.base.supplier.NullableObservableSupplier;
+ import org.chromium.build.annotations.Initializer;
+ import org.chromium.build.annotations.NullMarked;
+ import org.chromium.build.annotations.Nullable;
+-import org.chromium.chrome.browser.actor.ui.ActorUiTabController;
+-import org.chromium.chrome.browser.actor.ui.ActorUiTabController.UiTabState;
+-import org.chromium.chrome.browser.actor.ui.TabIndicatorStatus;
+ import org.chromium.chrome.browser.collaboration.CollaborationServiceFactory;
+-import org.chromium.chrome.browser.compositor.overlays.strip.TabUnderlineManager;
++import org.chromium.chrome.browser.containers.ContainerMetadataObserver;
++import org.chromium.chrome.browser.containers.ContainerTabBadge;
+ import org.chromium.chrome.browser.data_sharing.DataSharingServiceFactory;
+ import org.chromium.chrome.browser.data_sharing.DataSharingTabManager;
+-import org.chromium.chrome.browser.preferences.ChromePreferenceKeys;
+-import org.chromium.chrome.browser.preferences.ChromeSharedPreferences;
+-import org.chromium.chrome.browser.price_tracking.PriceTrackingFeatures;
+-import org.chromium.chrome.browser.price_tracking.PriceTrackingUtilities;
+ import org.chromium.chrome.browser.profiles.Profile;
+ import org.chromium.chrome.browser.quick_delete.QuickDeleteAnimationGradientDrawable;
+ import org.chromium.chrome.browser.tab.Tab;
+@@ -76,7 +68,6 @@
+ import org.chromium.chrome.browser.tab.TabId;
+ import org.chromium.chrome.browser.tab.TabLaunchType;
+ import org.chromium.chrome.browser.tab.TabSelectionType;
+-import org.chromium.chrome.browser.tab.state.ShoppingPersistedTabData;
+ import org.chromium.chrome.browser.tab_group_sync.TabGroupSyncFeatures;
+ import org.chromium.chrome.browser.tab_group_sync.TabGroupSyncServiceFactory;
+ import org.chromium.chrome.browser.tab_ui.TabListFaviconProvider;
+@@ -94,7 +85,6 @@
+ import org.chromium.chrome.browser.tabmodel.TabModelActionListener;
+ import org.chromium.chrome.browser.tabmodel.TabModelObserver;
+ import org.chromium.chrome.browser.tabmodel.TabModelUtils;
+-import org.chromium.chrome.browser.tasks.tab_management.PriceMessageService.PriceTabData;
+ import org.chromium.chrome.browser.tasks.tab_management.TabActionButtonData.TabActionButtonType;
+ import org.chromium.chrome.browser.tasks.tab_management.TabGridItemLongPressOrchestrator.OnLongPressTabItemEventListener;
+ import org.chromium.chrome.browser.tasks.tab_management.TabGridItemTouchHelperCallback.OnDropOnArchivalMessageCardEventListener;
+@@ -134,8 +124,6 @@
+ import org.chromium.ui.modaldialog.DialogDismissalCause;
+ import org.chromium.ui.modaldialog.ModalDialogManager;
+ import org.chromium.ui.modaldialog.ModalDialogProperties;
+-import org.chromium.ui.modelutil.ListObservable;
+-import org.chromium.ui.modelutil.ListObservable.ListObserver;
+ import org.chromium.ui.modelutil.MVCListAdapter.ListItem;
+ import org.chromium.ui.modelutil.PropertyModel;
+ import org.chromium.ui.modelutil.PropertyModel.WritableObjectPropertyKey;
+@@ -146,7 +134,6 @@
+ import java.lang.annotation.Retention;
+ import java.lang.annotation.RetentionPolicy;
+ import java.util.ArrayList;
+-import java.util.Collections;
+ import java.util.HashSet;
+ import java.util.List;
+ import java.util.Map;
+@@ -278,63 +265,6 @@
+         void setDisableItemAnimations(boolean state);
+     }
+
+-    /** Provides capability to asynchronously acquire {@link ShoppingPersistedTabData} */
+-    static class ShoppingPersistedTabDataFetcher {
+-        protected final Tab mTab;
+-        protected final @Nullable Supplier<@Nullable PriceWelcomeMessageController>
+-                mPriceWelcomeMessageControllerSupplier;
+-
+-        /**
+-         * @param tab {@link Tab} {@link ShoppingPersistedTabData} will be acquired for.
+-         * @param priceWelcomeMessageControllerSupplier to show the price welcome message.
+-         */
+-        ShoppingPersistedTabDataFetcher(
+-                Tab tab,
+-                @Nullable Supplier<@Nullable PriceWelcomeMessageController>
+-                        priceWelcomeMessageControllerSupplier) {
+-            mTab = tab;
+-            mPriceWelcomeMessageControllerSupplier = priceWelcomeMessageControllerSupplier;
+-        }
+-
+-        /**
+-         * Asynchronously acquire {@link ShoppingPersistedTabData}
+-         *
+-         * @param callback {@link Callback} to pass {@link ShoppingPersistedTabData} back in
+-         */
+-        public void fetch(Callback<@Nullable ShoppingPersistedTabData> callback) {
+-            ShoppingPersistedTabData.from(
+-                    mTab,
+-                    (res) -> {
+-                        callback.onResult(res);
+-                        maybeShowPriceWelcomeMessage(res);
+-                    });
+-        }
+-
+-        @VisibleForTesting
+-        void maybeShowPriceWelcomeMessage(
+-                @Nullable ShoppingPersistedTabData shoppingPersistedTabData) {
+-            // Avoid inserting message while RecyclerView is computing a layout.
+-            new Handler()
+-                    .post(
+-                            () -> {
+-                                if (!PriceTrackingUtilities.isPriceWelcomeMessageCardEnabled(
+-                                                mTab.getProfile())
+-                                        || (mPriceWelcomeMessageControllerSupplier == null)
+-                                        || (mPriceWelcomeMessageControllerSupplier.get() == null)
+-                                        || (shoppingPersistedTabData == null)
+-                                        || (shoppingPersistedTabData.getPriceDrop() == null)) {
+-                                    return;
+-                                }
+-                                mPriceWelcomeMessageControllerSupplier
+-                                        .get()
+-                                        .showPriceWelcomeMessage(
+-                                                new PriceTabData(
+-                                                        mTab.getId(),
+-                                                        shoppingPersistedTabData.getPriceDrop()));
+-                            });
+-        }
+-    }
+-
+     @IntDef({
+         TabClosedFrom.TAB_STRIP,
+         TabClosedFrom.GRID_TAB_SWITCHER,
+@@ -369,8 +299,6 @@
+             mSelectionDelegateProvider;
+     private final @Nullable TabListItemOnClickListenerProvider mTabListItemOnClickListenerProvider;
+     private final @Nullable UngroupBarStatusHandler mUngroupBarStatusHandler;
+-    private final @Nullable Supplier<@Nullable PriceWelcomeMessageController>
+-            mPriceWelcomeMessageControllerSupplier;
+     private final @Nullable DataSharingTabManager mDataSharingTabManager;
+     private final TabModelObserver mTabModelObserver;
+     private final TabListLayoutDelegate mTabListLayoutDelegate;
+@@ -387,7 +315,6 @@
+     private final boolean mIsSingleContextMode;
+     private final @TabListLayoutType int mLayoutType;
+     private final TabListConfig mTabListConfig;
+-    private final @Nullable TabUnderlineManager mTabUnderlineManager;
+
+     private int mLastSelectedTabListModelIndex = TabList.INVALID_TAB_INDEX;
+     private @TabComponentId int mComponentId;
+@@ -399,47 +326,16 @@
+     private @Nullable TabListGroupMenuCoordinator mTabListGroupMenuCoordinator;
+     private @Nullable Size mDefaultGridCardSize;
+     private @Nullable ComponentCallbacks mComponentCallbacks;
+-    private @Nullable GridLayoutManager mGridLayoutManager;
+     // Set to true after a `resetWithListOfTabs` that used a non-null list of tabs. Remains true
+     // until `prepareHiding`/`postHiding` is invoked or the mediator is destroyed. While true, this
+     // mediator is actively tracking updates to a TabModel.
+     private boolean mTrackingTabs;
+     private RecyclerViewItemAnimationToggle mRecyclerViewItemAnimationToggle;
+-    private @Nullable ListObserver<Void> mListObserver;
+     private View.AccessibilityDelegate mAccessibilityDelegate;
+     private int mCurrentSpanCount;
+     private @Nullable OnLongPressTabItemEventListener mOnLongPressTabItemEventListener;
+
+-    private final ActorUiTabController.Observer mActorObserver =
+-            new ActorUiTabController.Observer() {
+-                @Override
+-                public void onUiTabStateChanged(UiTabState state) {
+-                    int tabId = state.tabId;
+-                    Tab tab = getCurrentTabModelChecked().getTabById(tabId);
+-                    if (tab == null) return;
+-
+-                    PropertyModel model = mModelList.getModelFromTabId(tabId);
+-                    if (model != null) {
+-                        updateActorUiState(model, state);
+-                    }
+-
+-                    mTabListLayoutDelegate.onUiTabStateChanged(tab, state);
+-                }
+-            };
+-
+-    private final TabUnderlineManager.Observer mTabUnderlineObserver =
+-            new TabUnderlineManager.Observer() {
+-                @Override
+-                public void onIndicatorStateChanged(int tabId, boolean isActive) {
+-                    PropertyModel model = mModelList.getModelFromTabId(tabId);
+-                    if (model != null) {
+-                        model.set(TabProperties.IS_GLIC_ACTIVE, isActive);
+-                    }
+-                }
+-
+-                @Override
+-                public void onResetAnimationCycle(int tabId) {}
+-            };
++
+
+     private final TabActionListener mTabSelectedListener =
+             new TabActionListener() {
+@@ -552,8 +448,6 @@
+      * @param tabListConfig Configuration policies and visual capabilities (e.g. nested tab groups,
+      *     message cards, etc).
+      * @param ungroupBarStatusHandler A handler to update the ungroup bar status.
+-     * @param priceWelcomeMessageControllerSupplier A supplier of a controller to show
+-     *     PriceWelcomeMessage.
+      * @param componentId The {@link TabComponentId} identifying the parent UI container hosting
+      *     this tab list.
+      * @param initialTabActionState The initial {@link TabActionState} to use for the shown tabs.
+@@ -578,8 +472,6 @@
+             @Nullable TabListItemOnClickListenerProvider tabListItemOnClickListenerProvider,
+             TabListConfig tabListConfig,
+             @Nullable UngroupBarStatusHandler ungroupBarStatusHandler,
+-            @Nullable Supplier<@Nullable PriceWelcomeMessageController>
+-                    priceWelcomeMessageControllerSupplier,
+             @TabComponentId int componentId,
+             @TabActionState int initialTabActionState,
+             @Nullable DataSharingTabManager dataSharingTabManager,
+@@ -600,12 +492,7 @@
+         mLayoutType = tabListConfig.layoutType;
+         mRailCollapseStateSupplier = tabListConfig.railCollapseStateSupplier;
+         mTabListConfig = tabListConfig;
+-        mTabUnderlineManager = tabListConfig.tabUnderlineManager;
+-        if (mTabUnderlineManager != null) {
+-            mTabUnderlineManager.addObserver(mTabUnderlineObserver);
+-        }
+         mUngroupBarStatusHandler = ungroupBarStatusHandler;
+-        mPriceWelcomeMessageControllerSupplier = priceWelcomeMessageControllerSupplier;
+         mComponentId = componentId;
+         mTabActionState = initialTabActionState;
+         mDataSharingTabManager = dataSharingTabManager;
+@@ -777,7 +664,8 @@
+                                         .tabClosingSource(tabClosingSource)
+                                         .build();
+
+-                        @Nullable TabModelActionListener listener =
++                        @Nullable
++                        TabModelActionListener listener =
+                                 TabUiUtils.buildMaybeDidCloseTabListener(
+                                         getOnMaybeTabClosedCallback(tabId));
+                         tabModel.getTabRemover()
+@@ -795,8 +683,8 @@
+                         int index = mModelList.indexFromArchivedTabGroupSyncId(syncId);
+                         if (index == TabModel.INVALID_TAB_INDEX) return;
+
+-                        @Nullable PropertyModel model =
+-                                mModelList.getModelFromArchivedTabGroupSyncId(syncId);
++                        @Nullable
++                        PropertyModel model = mModelList.getModelFromArchivedTabGroupSyncId(syncId);
+                         if (model != null) {
+                             assumeNonNull(mTabGroupSyncService);
+                             SavedTabGroup tabGroup = mTabGroupSyncService.getGroup(syncId);
+@@ -867,7 +755,7 @@
                  new TabGroupCreationDialogManager(
                          activity, assumeNonNull(modalDialogManager), onTabGroupCreation);
          mTabGridItemTouchHelperCallback =
@@ -11,3 +259,418 @@ index 9ec60322f0ed9d81c2eb52a08c5fce9c92b58eb2..957437145882de869c693e4647424736
                          activity,
                          tabGroupCreationDialogManager,
                          mModelList,
+@@ -987,40 +875,34 @@
+         }
+         mCollaborationService = CollaborationServiceFactory.getForProfile(originalProfile);
+
+-        // Right now we need to update layout only if there is a price welcome message card in tab
+-        // switcher.
+-        if (mTabListConfig.supportsMessageCards
+-                && mTabActionState != TabActionState.SELECTABLE
+-                && PriceTrackingFeatures.isPriceAnnotationsEnabled(originalProfile)) {
+-            mListObserver =
+-                    new ListObserver<>() {
+-                        @Override
+-                        public void onItemRangeInserted(
+-                                ListObservable source, int index, int count) {
+-                            updateLayout();
+-                        }
+-
+-                        @Override
+-                        public void onItemRangeRemoved(
+-                                ListObservable source, int index, int count) {
+-                            updateLayout();
+-                        }
+-
+-                        @Override
+-                        public void onItemRangeChanged(
+-                                ListObservable<Void> source,
+-                                int index,
+-                                int count,
+-                                @Nullable Void payload) {
+-                            updateLayout();
+-                        }
+-
+-                        @Override
+-                        public void onItemMoved(ListObservable source, int curIndex, int newIndex) {
+-                            updateLayout();
+-                        }
+-                    };
+-            mModelList.addObserver(mListObserver);
++    }
++
++    private final ContainerMetadataObserver mContainerMetadataObserver =
++            new ContainerMetadataObserver(this::refreshContainerBadges);
++
++    private ContainerTabBadge.@Nullable Info getContainerBadge(
++            Tab tab, @CardProperties.ModelType int cardType) {
++        if (cardType == ModelType.TAB_GROUP || cardType == ModelType.ARCHIVED_TAB_GROUP) {
++            @Nullable TabModel tabModel = mCurrentTabModelSupplier.get();
++            if (tabModel == null) return null;
++            return ContainerTabBadge.forTabs(mActivity, tabModel.getRelatedTabList(tab.getId()));
++        }
++        return ContainerTabBadge.forTab(mActivity, tab);
++    }
++
++    private void refreshContainerBadges() {
++        @Nullable TabModel tabModel = mCurrentTabModelSupplier.get();
++        for (int index = 0; index < mModelList.size(); index++) {
++            PropertyModel model = mModelList.get(index).model;
++            if (!model.containsKey(TabProperties.CONTAINER_BADGE)) continue;
++            @Nullable
++            Tab tab =
++                    tabModel == null || !model.containsKey(TAB_ID)
++                            ? null
++                            : tabModel.getTabById(model.get(TAB_ID));
++            model.set(
++                    TabProperties.CONTAINER_BADGE,
++                    tab == null ? null : getContainerBadge(tab, model.get(CARD_TYPE)));
+         }
+     }
+
+@@ -1149,9 +1031,6 @@
+         } else {
+             removeObservers(tabModel);
+         }
+-        if (tabs != null) {
+-            recordPriceAnnotationsEnabledMetrics();
+-        }
+         // Only update tabs in place if there are no saved tab groups to be shown.
+         if (tabGroupSyncIds == null && areTabsUnchanged(tabs)) {
+             if (tabs == null) return true;
+@@ -1298,9 +1177,9 @@
+         }
+
+         updateTabGroupProperties(tab, model, tabGroupColorId);
++        model.set(TabProperties.CONTAINER_BADGE, getContainerBadge(tab, model.get(CARD_TYPE)));
+         model.set(TabProperties.TAB_CLICK_LISTENER, getTabActionListener(tab, isInTabGroup));
+         model.set(TabProperties.IS_SELECTED, isTabSelected);
+-        model.set(TabProperties.SHOULD_SHOW_PRICE_DROP_TOOLTIP, false);
+         model.set(
+                 TabProperties.TITLE,
+                 getLatestTitleForTabOrGroup(tab, model, /* useDefault= */ true));
+@@ -1312,12 +1191,9 @@
+
+         model.set(TabProperties.URL_DOMAIN, getDomainForTab(tab, model));
+
+-        setupPersistedTabDataFetcherForTab(tab, model);
+
+         updateFaviconForTab(model, tab, null, null);
+
+-        ActorUiTabController controller = ActorUiTabController.from(tab);
+-        updateActorUiState(model, controller == null ? null : controller.getUiTabState());
+
+         boolean forceUpdate = isTabSelected && !quickMode;
+         boolean forceUpdateLastSelected =
+@@ -1337,14 +1213,6 @@
+         }
+     }
+
+-    private void updateActorUiState(PropertyModel model, @Nullable UiTabState state) {
+-        boolean isTabGroupCard = TabProperties.isTabGroupHeader(model);
+-        model.set(
+-                TabProperties.ACTOR_UI_STATE,
+-                (isTabGroupCard || state == null || state.tabIndicator == TabIndicatorStatus.NONE)
+-                        ? null
+-                        : state);
+-    }
+
+     boolean isTabInTabGroup(Tab tab) {
+         TabModel tabModel = getCurrentTabModelChecked();
+@@ -1377,17 +1245,12 @@
+                     @Override
+                     public void onConfigurationChanged(Configuration newConfig) {
+                         updateSpanCount(manager, newConfig.screenWidthDp);
+-                        if (mTabListConfig.supportsMessageCards
+-                                && mTabActionState != TabActionState.SELECTABLE) {
+-                            updateLayout();
+-                        }
+                     }
+
+                     @Override
+                     public void onLowMemory() {}
+                 };
+         mActivity.registerComponentCallbacks(mComponentCallbacks);
+-        mGridLayoutManager = manager;
+     }
+
+     /**
+@@ -1529,9 +1392,7 @@
+
+     /** Destroy any members that needs clean up. */
+     public void destroy() {
+-        if (mListObserver != null) {
+-            mModelList.removeObserver(mListObserver);
+-        }
++        mContainerMetadataObserver.destroy();
+         removeObservers(mCurrentTabModelSupplier.get());
+         mCurrentTabModelSupplier.removeObserver(mOnTabModelChanged);
+
+@@ -1543,9 +1404,6 @@
+             mRailCollapseStateSupplier.removeObserver(mRailCollapseStateObserver);
+         }
+
+-        if (mTabUnderlineManager != null) {
+-            mTabUnderlineManager.removeObserver(mTabUnderlineObserver);
+-        }
+
+         mTabClosedFrom.clear();
+         mObserverManager.destroy();
+@@ -1816,6 +1674,7 @@
+                         .with(TabProperties.TAB_ACTION_STATE, mTabActionState)
+                         .with(TabProperties.TAB_ID, tab.getId())
+                         .with(TabProperties.IS_INCOGNITO, tab.isIncognito())
++                        .with(TabProperties.CONTAINER_BADGE, getContainerBadge(tab, cardType))
+                         .with(TabProperties.FAVICON_FETCHER, null)
+                         .with(TabProperties.FAVICON_FETCHED, false)
+                         .with(TabProperties.IS_SELECTED, isSelected)
+@@ -1825,15 +1684,10 @@
+                         .with(TabProperties.ACCESSIBILITY_DELEGATE, mAccessibilityDelegate)
+                         .with(CARD_TYPE, cardType)
+                         .with(TabProperties.VISIBILITY, View.VISIBLE)
+-                        .with(TabProperties.ACTOR_UI_STATE, null)
+-                        .with(TabProperties.IS_GLIC_ACTIVE, false)
+                         .with(TabProperties.IS_PINNED, tab.getIsPinned())
+                         .with(TabProperties.ALERT_STATE, TabAlert.NONE)
+                         .with(TabProperties.SHOW_THUMBNAIL_SPINNER, false)
+                         .build();
+-
+-        ActorUiTabController controller = ActorUiTabController.from(tab);
+-        updateActorUiState(tabInfo, controller == null ? null : controller.getUiTabState());
+
+         if (mRailCollapseStateSupplier != null) {
+             tabInfo.set(TabProperties.RAIL_COLLAPSE_STATE, mRailCollapseStateSupplier.get());
+@@ -1879,7 +1733,6 @@
+         tabInfo.set(TabProperties.URL_DOMAIN, getDomainForTab(tab, tabInfo));
+         @TabAlert int alertState = getTabGridAlertState(tab, tabInfo);
+         tabInfo.set(TabProperties.ALERT_STATE, alertState);
+-        tabInfo.set(TabProperties.SHOULD_SHOW_PRICE_DROP_TOOLTIP, false);
+         tabInfo.set(TabProperties.USE_SHRINK_CLOSE_ANIMATION, false);
+         tabInfo.set(
+                 TabProperties.QUICK_DELETE_ANIMATION_STATUS,
+@@ -1889,7 +1742,6 @@
+                 mTabListFaviconProvider.getDefaultFaviconFetcher(tab.isIncognito()));
+         tabInfo.set(TabProperties.IS_LOADING, false);
+
+-        setupPersistedTabDataFetcherForTab(tab, tabInfo);
+
+         updateFaviconForTab(tabInfo, tab, null, null);
+
+@@ -2300,23 +2152,6 @@
+         return getTabTitleOrUrl(tab);
+     }
+
+-    private void setupPersistedTabDataFetcherForTab(Tab tab, PropertyModel model) {
+-        if (mTabListConfig.supportsMessageCards && !tab.isIncognito()) {
+-            assert mOriginalProfile != null;
+-            if (PriceTrackingUtilities.isTrackPricesOnTabsEnabled(mOriginalProfile)
+-                    && !isTabInTabGroup(tab)) {
+-                model.set(
+-                        TabProperties.SHOPPING_PERSISTED_TAB_DATA_FETCHER,
+-                        new ShoppingPersistedTabDataFetcher(
+-                                tab, mPriceWelcomeMessageControllerSupplier));
+-            } else {
+-                model.set(TabProperties.SHOPPING_PERSISTED_TAB_DATA_FETCHER, null);
+-            }
+-        } else {
+-            model.set(TabProperties.SHOPPING_PERSISTED_TAB_DATA_FETCHER, null);
+-        }
+-    }
+-
+     void updateFaviconForTab(
+             PropertyModel model, Tab tab, @Nullable Bitmap icon, @Nullable GURL iconUrl) {
+         if (TabProperties.isTabGroupHeader(model)) {
+@@ -2433,98 +2268,6 @@
+     }
+
+     /**
+-     * The PriceWelcomeMessage should be in view when user enters the tab switcher, so we put it
+-     * exactly below the currently selected tab.
+-     *
+-     * @return Where the PriceWelcomeMessage should be inserted in the {@link TabListModel} when
+-     *     user enters the tab switcher, or TabList.INVALID_TAB_INDEX if message cards are not
+-     *     supported.
+-     */
+-    int getPriceWelcomeMessageInsertionIndex() {
+-        if (!mTabListConfig.supportsMessageCards) {
+-            return TabList.INVALID_TAB_INDEX;
+-        }
+-        assert mGridLayoutManager != null;
+-        int spanCount = mGridLayoutManager.getSpanCount();
+-        int selectedTabIndex =
+-                mModelList.indexOfNthTabCard(
+-                        getCurrentTabModelChecked().getCurrentRepresentativeTabIndex());
+-        int indexBelowSelectedTab = (selectedTabIndex / spanCount + 1) * spanCount;
+-        int indexAfterLastTab = mModelList.getTabIndexBefore(mModelList.size()) + 1;
+-        return Math.min(indexBelowSelectedTab, indexAfterLastTab);
+-    }
+-
+-    /**
+-     * Update the layout of tab switcher to make it compact. Because now we have messages within the
+-     * tabs like PriceMessage and these messages take up the entire row, some operations like
+-     * closing a tab above the message card will leave a blank grid, so we need to update the
+-     * layout.
+-     */
+-    @VisibleForTesting
+-    void updateLayout() {
+-        // Right now we need to update layout only if there is a price welcome message card in tab
+-        // switcher.
+-        if (!mTabListConfig.supportsMessageCards) {
+-            return;
+-        }
+-        if (mOriginalProfile == null
+-                || !PriceTrackingUtilities.isPriceWelcomeMessageCardEnabled(mOriginalProfile)
+-                || getCurrentTabModelChecked().isIncognitoBranded()) {
+-            return;
+-        }
+-        assert mGridLayoutManager != null;
+-        int spanCount = mGridLayoutManager.getSpanCount();
+-        GridLayoutManager.SpanSizeLookup spanSizeLookup = mGridLayoutManager.getSpanSizeLookup();
+-        int spanSizeSumForCurrentRow = 0;
+-        int index = 0;
+-        for (; index < mModelList.size(); index++) {
+-            spanSizeSumForCurrentRow += spanSizeLookup.getSpanSize(index);
+-            if (spanSizeSumForCurrentRow == spanCount) {
+-                // This row is compact, we clear and recount the spanSize for next row.
+-                spanSizeSumForCurrentRow = 0;
+-            } else if (spanSizeSumForCurrentRow > spanCount) {
+-                // Find a blank grid and break.
+-                if (isLargeMessageCard(mModelList.get(index).type)) break;
+-                spanSizeSumForCurrentRow = 0;
+-            }
+-        }
+-        if (spanSizeSumForCurrentRow <= spanCount) return;
+-        int blankSize = spanCount - (spanSizeSumForCurrentRow - spanSizeLookup.getSpanSize(index));
+-        for (int i = index + 1; i < mModelList.size(); i++) {
+-            if (spanSizeLookup.getSpanSize(i) > blankSize) continue;
+-            mModelList.move(i, index);
+-            // We should return after one move because once item moved, updateLayout() will be
+-            // called again.
+-            return;
+-        }
+-    }
+-
+-    @VisibleForTesting
+-    void recordPriceAnnotationsEnabledMetrics() {
+-        if (!mTabListConfig.supportsMessageCards
+-                || getCurrentTabModelChecked().isIncognitoBranded()
+-                || !mTabListLayoutDelegate.supportsTabGroups()
+-                || mOriginalProfile == null
+-                || !PriceTrackingFeatures.isPriceAnnotationsEligible(mOriginalProfile)) {
+-            return;
+-        }
+-        SharedPreferencesManager preferencesManager = ChromeSharedPreferences.getInstance();
+-        if (System.currentTimeMillis()
+-                        - preferencesManager.readLong(
+-                                ChromePreferenceKeys
+-                                        .PRICE_TRACKING_ANNOTATIONS_ENABLED_METRICS_TIMESTAMP,
+-                                -1)
+-                >= PriceTrackingFeatures.getAnnotationsEnabledMetricsWindowDurationMilliSeconds()) {
+-            RecordHistogram.recordBooleanHistogram(
+-                    "Commerce.PriceDrop.AnnotationsEnabled",
+-                    PriceTrackingUtilities.isTrackPricesOnTabsEnabled(mOriginalProfile));
+-            preferencesManager.writeLong(
+-                    ChromePreferenceKeys.PRICE_TRACKING_ANNOTATIONS_ENABLED_METRICS_TIMESTAMP,
+-                    System.currentTimeMillis());
+-        }
+-    }
+-
+-    /**
+      * @param tabId the {@link Tab} to find the group index of.
+      * @return the index for the tab group within {@link mModelList}
+      */
+@@ -2578,6 +2321,8 @@
+         if (tabs != null && !tabs.isEmpty()) {
+             PropertyModel headerModel = mModelList.get(headerIndex).model;
+             headerModel.set(TabProperties.TAB_ID, tabs.get(0).getId());
++            headerModel.set(
++                    TabProperties.CONTAINER_BADGE, ContainerTabBadge.forTabs(mActivity, tabs));
+         }
+     }
+
+@@ -2588,6 +2333,14 @@
+
+     private void onTabModelChanged(@Nullable TabModel newTabModel, @Nullable TabModel oldTabModel) {
+         removeObservers(oldTabModel);
++        mContainerMetadataObserver.setProfile(null);
++        // Reset identities before the replacement profile's tabs are bound, including OTR.
++        for (int index = 0; index < mModelList.size(); index++) {
++            PropertyModel model = mModelList.get(index).model;
++            if (model.containsKey(TabProperties.CONTAINER_BADGE)) {
++                model.set(TabProperties.CONTAINER_BADGE, null);
++            }
++        }
+
+         // The observers will be bound to the newFilter's when the model is reset for with tabs for
+         // that filter for the first time. Doing this on the first reset after changing models
+@@ -2604,33 +2357,18 @@
+     void addObserversForTab(Tab tab) {
+         mObserverManager.addTabObserver(tab);
+
+-        ActorUiTabController controller = ActorUiTabController.from(tab);
+-        if (controller != null) {
+-            controller.addObserver(mActorObserver);
+-
+-            @Nullable PropertyModel model = mModelList.getModelFromTabId(tab.getId());
+-            if (model != null) {
+-                updateActorUiState(model, controller.getUiTabState());
+-            }
+-        }
+-
+-        if (mTabUnderlineManager != null && !tab.isIncognito()) {
+-            mTabUnderlineManager.registerTab(tab);
+-        }
++
++
+     }
+
+     void removeObserversForTab(Tab tab) {
+         mObserverManager.removeTabObserver(tab);
+
+-        ActorUiTabController controller = ActorUiTabController.from(tab);
+-        if (controller != null) controller.removeObserver(mActorObserver);
+-
+-        if (mTabUnderlineManager != null) {
+-            mTabUnderlineManager.unregisterTab(tab.getId());
+-        }
++
+     }
+
+     private void addObservers(TabModel tabModel, List<Tab> tabs) {
++        mContainerMetadataObserver.setProfile(tabModel.getProfile());
+         if (mTabListLayoutDelegate.supportsTabGroups()) {
+             for (Tab rootTab : tabs) {
+                 for (Tab tab : tabModel.getRelatedTabList(rootTab.getId())) {
+@@ -3123,29 +2861,16 @@
+                                     assumeNonNull(tab.getTabGroupId()))
+                             : null;
+
+-            List<Integer> actingTabIds = Collections.emptyList();
+-            if (TabProperties.isTabGroupHeader(model) && isInTabGroup) {
+-                actingTabIds = new ArrayList<>();
+-                for (Tab groupTab : tabModel.getRelatedTabList(tabId)) {
+-                    ActorUiTabController controller = ActorUiTabController.from(groupTab);
+-                    if (controller != null) {
+-                        UiTabState state = controller.getUiTabState();
+-                        if (state != null && state.tabIndicator != TabIndicatorStatus.NONE) {
+-                            actingTabIds.add(groupTab.getId());
+-                        }
+-                    }
+-                }
+-            }
++
+
+             newFetcher =
+                     new ThumbnailFetcher(
+                             mThumbnailProvider,
+-                            MultiThumbnailMetadata.createMetadataWithActingTabs(
++                            MultiThumbnailMetadata.createMetadataWithoutUrls(
+                                     tabId,
+                                     isInTabGroup,
+                                     tabModel.isIncognitoBranded(),
+-                                    tabGroupColor,
+-                                    actingTabIds));
++                                    tabGroupColor));
+         }
+         model.set(THUMBNAIL_FETCHER, newFetcher);
+     }

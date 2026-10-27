@@ -4,18 +4,14 @@
  * You can obtain one at https://mozilla.org/MPL/2.0/. */
 package org.chromium.chrome.browser.firstrun;
 
-import android.text.SpannableString;
-import android.text.method.LinkMovementMethod;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
-import android.widget.TextView;
 
 import androidx.recyclerview.widget.RecyclerView;
 
 import com.airbnb.lottie.LottieAnimationView;
-import com.google.android.material.checkbox.MaterialCheckBox;
 
 import org.chromium.brave.browser.firstrun.R;
 import org.chromium.build.annotations.NullMarked;
@@ -38,32 +34,18 @@ public class OnboardingStepAdapter
 
         void onDismiss();
 
-        void onWebDiscoverPreferenceEnabled();
-
-        void onCrashReportingPreferenceChanged(final boolean enabled);
-
-        void onP3aPreferenceChanged(final boolean enabled);
     }
 
     private static final int[] STEPS = {
-        R.layout.help_brave_search, R.layout.block_interruptions, R.layout.make_brave_better
+        R.layout.block_interruptions, R.layout.make_brave_better
     };
 
-    private static final int HELP_BRAVE_SEARCH_POSITION = 0;
-    private static final int BLOCK_INTERRUPTIONS_POSITION = 1;
-    private static final int MAKE_BRAVE_BETTER_POSITION = 2;
+    private static final int BLOCK_INTERRUPTIONS_POSITION = 0;
+    private static final int READY_TO_BROWSE_POSITION = 1;
 
-    private final SpannableString mWdpLearnMore;
     private final OnboardingNavigationListener mListener;
 
-    private boolean mCrashReportingChecked;
-    private boolean mCrashReportingManaged;
-    private boolean mP3aChecked;
-    private boolean mP3aManaged;
-
-    public OnboardingStepAdapter(
-            final SpannableString wdpLearnMore, final OnboardingNavigationListener listener) {
-        mWdpLearnMore = wdpLearnMore;
+    public OnboardingStepAdapter(final OnboardingNavigationListener listener) {
         mListener = listener;
     }
 
@@ -72,17 +54,9 @@ public class OnboardingStepAdapter
         LayoutInflater inflater = LayoutInflater.from(parent.getContext());
         View view = inflater.inflate(STEPS[viewType], parent, false);
         return switch (viewType) {
-            case HELP_BRAVE_SEARCH_POSITION ->
-                    new HelpBraveSearchViewHolder(view, mWdpLearnMore, mListener);
             case BLOCK_INTERRUPTIONS_POSITION -> new BlockInterruptionsViewHolder(view, mListener);
-            case MAKE_BRAVE_BETTER_POSITION ->
-                    new MakeBraveBetterViewHolder(
-                            view,
-                            mCrashReportingManaged,
-                            mCrashReportingChecked,
-                            mP3aManaged,
-                            mP3aChecked,
-                            mListener);
+            case READY_TO_BROWSE_POSITION ->
+                    new ReadyToBrowseViewHolder(view, mListener);
             default ->
                     throw new IllegalStateException(
                             String.format("View not found for view type %d.", viewType));
@@ -91,10 +65,7 @@ public class OnboardingStepAdapter
 
     @Override
     public void onBindViewHolder(OnboardingBaseViewHolder holder, int position) {
-        if (holder instanceof MakeBraveBetterViewHolder makeBraveBetterViewHolder) {
-            makeBraveBetterViewHolder.bind(
-                    mCrashReportingManaged, mCrashReportingChecked, mP3aManaged, mP3aChecked);
-        }
+        // This page has no persisted controls to bind.
     }
 
     @Override
@@ -112,38 +83,6 @@ public class OnboardingStepAdapter
         return STEPS.length;
     }
 
-    public void setCrashReportingChecked(final boolean checked) {
-        if (mCrashReportingChecked == checked) {
-            return;
-        }
-        mCrashReportingChecked = checked;
-        notifyItemChanged(MAKE_BRAVE_BETTER_POSITION);
-    }
-
-    public void setCrashReportingManaged(final boolean managed) {
-        if (mCrashReportingManaged == managed) {
-            return;
-        }
-        mCrashReportingManaged = managed;
-        notifyItemChanged(MAKE_BRAVE_BETTER_POSITION);
-    }
-
-    public void setP3aChecked(final boolean checked) {
-        if (mP3aChecked == checked) {
-            return;
-        }
-        mP3aChecked = checked;
-        notifyItemChanged(MAKE_BRAVE_BETTER_POSITION);
-    }
-
-    public void setP3aManaged(final boolean managed) {
-        if (mP3aManaged == managed) {
-            return;
-        }
-        mP3aManaged = managed;
-        notifyItemChanged(MAKE_BRAVE_BETTER_POSITION);
-    }
-
     public abstract static class OnboardingBaseViewHolder extends RecyclerView.ViewHolder {
 
         public OnboardingBaseViewHolder(View itemView) {
@@ -152,41 +91,6 @@ public class OnboardingStepAdapter
         }
 
         public abstract void viewRecycled();
-    }
-
-    private static final class HelpBraveSearchViewHolder extends OnboardingBaseViewHolder {
-        final TextView mSubtitle;
-        final Button mLater;
-        final Button mSure;
-
-        private HelpBraveSearchViewHolder(
-                final View itemView,
-                final SpannableString wdpLearnMore,
-                final OnboardingNavigationListener listener) {
-            super(itemView);
-            mSubtitle = itemView.findViewById(R.id.brave_onboarding_subtitle);
-
-            mSubtitle.setMovementMethod(LinkMovementMethod.getInstance());
-            mSubtitle.setText(wdpLearnMore);
-
-            mLater = itemView.findViewById(R.id.onboarding_later);
-            mLater.setClipToOutline(true);
-            mLater.setOnClickListener(
-                    v -> listener.onRequestPageChange(BLOCK_INTERRUPTIONS_POSITION));
-
-            mSure = itemView.findViewById(R.id.onboarding_sure);
-            mSure.setClipToOutline(true);
-            mSure.setOnClickListener(
-                    view -> {
-                        listener.onWebDiscoverPreferenceEnabled();
-                        listener.onRequestPageChange(BLOCK_INTERRUPTIONS_POSITION);
-                    });
-        }
-
-        @Override
-        public void viewRecycled() {
-            /* No-op. */
-        }
     }
 
     private static final class BlockInterruptionsViewHolder extends OnboardingBaseViewHolder {
@@ -199,7 +103,7 @@ public class OnboardingStepAdapter
             mContinue = itemView.findViewById(R.id.onboarding_continue);
             mContinue.setClipToOutline(true);
             mContinue.setOnClickListener(
-                    view -> listener.onRequestPageChange(MAKE_BRAVE_BETTER_POSITION));
+                    view -> listener.onRequestPageChange(READY_TO_BROWSE_POSITION));
 
             mBlockInterruptions = itemView.findViewById(R.id.onboarding_illustration);
         }
@@ -210,66 +114,16 @@ public class OnboardingStepAdapter
         }
     }
 
-    private static final class MakeBraveBetterViewHolder extends OnboardingBaseViewHolder {
-        final Button mStartBrowsing;
-        final MaterialCheckBox mSendCrashReports;
-        final MaterialCheckBox mSendP3a;
-
-        private MakeBraveBetterViewHolder(
-                final View itemView,
-                final boolean crashReportingManaged,
-                final boolean crashReportingChecked,
-                final boolean p3aManaged,
-                final boolean p3aChecked,
-                final OnboardingNavigationListener listener) {
+    private static final class ReadyToBrowseViewHolder extends OnboardingBaseViewHolder {
+        private ReadyToBrowseViewHolder(
+                final View itemView, final OnboardingNavigationListener listener) {
             super(itemView);
-            mStartBrowsing = itemView.findViewById(R.id.onboarding_start_browsing);
-            mStartBrowsing.setClipToOutline(true);
-            mStartBrowsing.setOnClickListener(view -> listener.onDismiss());
-
-            mSendCrashReports = itemView.findViewById(R.id.send_crash_reports);
-            if (crashReportingManaged) {
-                mSendCrashReports.setVisibility(View.INVISIBLE);
-            } else {
-                mSendCrashReports.setChecked(crashReportingChecked);
-                mSendCrashReports.setOnCheckedChangeListener(
-                        (buttonView, isChecked) ->
-                                listener.onCrashReportingPreferenceChanged(isChecked));
-            }
-
-            mSendP3a = itemView.findViewById(R.id.send_p3a_reports);
-            if (p3aManaged) {
-                mSendP3a.setVisibility(View.INVISIBLE);
-            } else {
-                mSendP3a.setChecked(p3aChecked);
-                mSendP3a.setOnCheckedChangeListener(
-                        (buttonView, isChecked) -> listener.onP3aPreferenceChanged(isChecked));
-            }
-        }
-
-        private void bind(
-                boolean crashReportingManaged,
-                boolean crashReportingChecked,
-                boolean p3aManaged,
-                boolean p3aChecked) {
-            if (crashReportingManaged) {
-                mSendCrashReports.setVisibility(View.INVISIBLE);
-            } else {
-                mSendCrashReports.setVisibility(View.VISIBLE);
-                mSendCrashReports.setChecked(crashReportingChecked);
-            }
-
-            if (p3aManaged) {
-                mSendP3a.setVisibility(View.INVISIBLE);
-            } else {
-                mSendP3a.setVisibility(View.VISIBLE);
-                mSendP3a.setChecked(p3aChecked);
-            }
+            Button startBrowsing = itemView.findViewById(R.id.onboarding_start_browsing);
+            startBrowsing.setClipToOutline(true);
+            startBrowsing.setOnClickListener(view -> listener.onDismiss());
         }
 
         @Override
-        public void viewRecycled() {
-            /* No-op. */
-        }
+        public void viewRecycled() {}
     }
 }

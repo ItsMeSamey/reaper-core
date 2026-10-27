@@ -6,6 +6,8 @@
 #ifndef BRAVE_COMPONENTS_SYNC_SERVICE_BRAVE_SYNC_SERVICE_IMPL_H_
 #define BRAVE_COMPONENTS_SYNC_SERVICE_BRAVE_SYNC_SERVICE_IMPL_H_
 
+#include "build/build_config.h"
+
 #include <memory>
 #include <string>
 
@@ -13,7 +15,9 @@
 #include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/types/expected.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_sync/brave_sync_p3a.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_sync/brave_sync_prefs.h"
 #include "components/prefs/pref_change_registrar.h"
 #include "components/sync/engine/sync_protocol_error.h"
@@ -103,8 +107,10 @@ class BraveSyncServiceImpl : public SyncServiceImpl {
   FRIEND_TEST_ALL_PREFIXES(BraveSyncServiceImplTest, JoinActiveOrNewChain);
   FRIEND_TEST_ALL_PREFIXES(BraveSyncServiceImplTest, JoinDeletedChain);
   FRIEND_TEST_ALL_PREFIXES(BraveSyncServiceImplTest, HistoryPreconditions);
+#if !BUILDFLAG(IS_ANDROID)
   FRIEND_TEST_ALL_PREFIXES(BraveSyncServiceImplTest,
                            P3aForHistoryThroughDelegate);
+#endif  // !BUILDFLAG(IS_ANDROID)
 
   BraveSyncAuthManager* GetBraveSyncAuthManager();
 
@@ -127,6 +133,7 @@ class BraveSyncServiceImpl : public SyncServiceImpl {
 
   void LocalDeviceAppeared();
 
+#if !BUILDFLAG(IS_ANDROID)
   struct SyncedObjectsCountContext {
     size_t types_requested = 0;
     size_t types_responed = 0;
@@ -137,6 +144,7 @@ class BraveSyncServiceImpl : public SyncServiceImpl {
 
   void UpdateP3AObjectsNumber();
   void OnGetTypeEntitiesCount(const TypeEntitiesCount& count);
+#endif  // !BUILDFLAG(IS_ANDROID)
 
   // IdentityManager::Observer implementation.
   // Override with an empty implementation.
@@ -159,7 +167,9 @@ class BraveSyncServiceImpl : public SyncServiceImpl {
 
   PrefChangeRegistrar brave_sync_prefs_change_registrar_;
 
+#if !BUILDFLAG(IS_ANDROID)
   brave_sync::p3a::SyncCodeMonitor sync_code_monitor_;
+#endif  // !BUILDFLAG(IS_ANDROID)
 
   // This is set to true between |PermanentlyDeleteAccount| succeeded call and
   // new sync chain setup or browser exit. This is used to avoid show the
@@ -175,7 +185,9 @@ class BraveSyncServiceImpl : public SyncServiceImpl {
   // BraveSyncServiceImpl::StopAndClear from BraveSyncServiceImpl::ResetEngine
   bool initiated_self_device_info_deleted_ = false;
 
+#if !BUILDFLAG(IS_ANDROID)
   int completed_cycles_count_ = 0;
+#endif  // !BUILDFLAG(IS_ANDROID)
 
   // This flag is set to true during BraveSyncServiceImpl::Initialize call. The
   // reason is that upstream SyncServiceImpl::Initialize() can invoke

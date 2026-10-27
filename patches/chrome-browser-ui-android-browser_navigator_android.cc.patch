@@ -1,0 +1,85 @@
+diff --git a/chrome/browser/ui/android/browser_navigator_android.cc b/chrome/browser/ui/android/browser_navigator_android.cc
+index 0e08b50fd1b9d84a3f00847fccc8c00a0a9f4c72..f85deb4f20aa69b56f7cb194525aaaa437c8c80e 100644
+--- a/chrome/browser/ui/android/browser_navigator_android.cc
++++ b/chrome/browser/ui/android/browser_navigator_android.cc
+@@ -4,6 +4,14 @@
+ 
+ #include "chrome/browser/ui/navigator/browser_navigator.h"
+ 
++#include <string>
++#include <variant>
++
++#include "brave/browser/containers/android/containers_bridge.h"
++#include "brave/browser/containers/container_specifier_utils.h"
++#include "brave/components/containers/content/browser/storage_partition_utils.h"
++#include "content/public/browser/security_principal.h"
++#include "content/public/browser/site_instance.h"
+ #include "base/feature_list.h"
+ #include "base/notimplemented.h"
+ #include "base/task/single_thread_task_runner.h"
+@@ -283,8 +291,18 @@
+     case WindowOpenDisposition::IGNORE_ACTION:
+       [[fallthrough]];
+     case WindowOpenDisposition::CURRENT_TAB: {
++      base::WeakPtr<BrowserWindowInterface> browser;
++      if (params->browser) {
++        browser = params->browser->GetWeakPtr();
++      }
+       base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+-          FROM_HERE, base::BindOnce(std::move(callback), params->browser));
++          FROM_HERE,
++          base::BindOnce(
++              [](base::WeakPtr<BrowserWindowInterface> browser,
++                 base::OnceCallback<void(BrowserWindowInterface*)> callback) {
++                std::move(callback).Run(browser.get());
++              },
++              std::move(browser), std::move(callback)));
+       break;
+     }
+     default:
+@@ -373,13 +391,43 @@
+     parent = TabAndroid::FromWebContents(params->source_contents);
+   }
+ 
++  std::string container_id = parent && parent->GetProfile() == params->initiating_profile
++                                 ? parent->GetContainerId() : std::string();
++  bool explicit_container = !std::holds_alternative<std::monostate>(
++      params->container_specifier);
++  if (explicit_container) {
++    auto selected = containers::GetStoragePartitionConfigForContainerSpecifier(
++        params->initiating_profile, params->container_specifier);
++    if (!selected) return nullptr;
++    container_id = selected->partition_name();
++    if (parent && parent->GetContainerId() != container_id) parent = nullptr;
++  }
++
+   // Use the supplied WebContents or create a new one.
+   std::unique_ptr<content::WebContents> web_contents;
+   if (params->contents_to_insert) {
++    const auto& actual = params->contents_to_insert->GetSiteInstance()
++                             ->GetSecurityPrincipal().GetStoragePartitionConfig();
++    std::string actual_id = actual.partition_domain() ==
++                                   containers::kContainersStoragePartitionDomain
++                               ? actual.partition_name() : std::string();
++    if ((explicit_container || parent) && actual_id != container_id) return nullptr;
++    container_id = actual_id;
++    if (!containers::android::WebContentsMatchesContainer(
++            params->initiating_profile, params->contents_to_insert.get(), container_id)) {
++      return nullptr;
++    }
+     web_contents = std::move(params->contents_to_insert);
+   } else {
+-    content::WebContents::CreateParams create_params(
+-        params->initiating_profile);
++    auto partition = containers::android::ResolveContainerStoragePartition(
++        params->initiating_profile, container_id);
++    if (!partition) return nullptr;
++    content::WebContents::CreateParams create_params(params->initiating_profile);
++    if (!container_id.empty()) {
++      create_params.site_instance =
++          content::SiteInstance::CreateForFixedStoragePartition(
++              params->initiating_profile, GURL(), *partition);
++    }
+     web_contents = content::WebContents::Create(create_params);
+   }
+ 

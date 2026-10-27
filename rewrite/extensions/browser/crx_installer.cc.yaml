@@ -1,0 +1,143 @@
+# Copyright (c) 2026 The Reaper Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+substitutions:
+- description: Reject an installed Android update after uninstall (1).
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ const\ int\ initial_flags\)\ \{\
+
+      \ \ DCHECK\(extension\);\
+
+      \
+
+      \ \ creation_flags_\ =\ initial_flags;\
+
+      \
+
+      \ \ //\ If\ the\ extension\ was\ installed\ from\ or\ has\ migrated\ to\ the\ webstore,\ or\
+
+      '
+    replace: "                                                    const int initial_flags) {\n  DCHECK(extension);\n\n#if BUILDFLAG(IS_ANDROID)\n  DCHECK_CURRENTLY_ON(BrowserThread::UI);\n  if (is_update_ && installed_update_id_.empty()) {\n    // Both updater paths reach this before NotifyCrxInstallBegin() or any\n    // asynchronous unpack work. Pending new installs do not enter this branch.\n    installed_update_id_ = extension->id();\n    installed_update_observation_.Observe(\n        ExtensionRegistry::Get(browser_context_));\n  }\n#endif\n\n  creation_flags_ = initial_flags;\n\n  // If the extension was installed from or has migrated to the webstore, or\n"
+- description: Reject an installed Android update after uninstall (2).
+  regex:
+    re_pattern: '\
+
+      void\ CrxInstaller::UpdateCreationFlagsAndCompleteInstall\(\
+
+      \ \ \ \ WithholdingBehavior\ withholding_behavior\)\ \{\
+
+      \ \ creation_flags_\ =\ extension\(\)\->creation_flags\(\)\ \|\ Extension::REQUIRE_KEY;\
+
+      \ \ //\ If\ the\ extension\ was\ already\ installed\ and\ had\ file\ access,\ also\ grant\ file\
+
+      \ \ //\ access\ to\ the\ updated\ extension\.\
+
+      '
+    replace: "\nvoid CrxInstaller::UpdateCreationFlagsAndCompleteInstall(\n    WithholdingBehavior withholding_behavior) {\n#if BUILDFLAG(IS_ANDROID)\n  if (AbortIfInstalledUpdateWasUninstalled()) {\n    return;\n  }\n#endif\n  creation_flags_ = extension()->creation_flags() | Extension::REQUIRE_KEY;\n  // If the extension was already installed and had file access, also grant file\n  // access to the updated extension.\n"
+- description: Reject an installed Android update after uninstall (3).
+  regex:
+    re_pattern: '\ \ if\ \(!browser_context_\)\ \{\
+
+      \ \ \ \ return;\
+
+      \ \ \}\
+
+      \
+
+      \ \ extension\(\)\->permissions_data\(\)\->BindToCurrentThread\(\);\
+
+      \
+
+      '
+    replace: "  if (!browser_context_) {\n    return;\n  }\n\n#if BUILDFLAG(IS_ANDROID)\n  // File work can finish after uninstall. Do not grant permissions or restore\n  // preferences/registry state for the retired install. Its final version path\n  // may now belong to a same-ID reinstall, so only clean installer-owned temp\n  // files here; ordinary extension garbage collection handles orphaned assets.\n  if (AbortIfInstalledUpdateWasUninstalled()) {\n    return;\n  }\n#endif\n\n  extension()->permissions_data()->BindToCurrentThread();\n\n"
+- description: Reject an installed Android update after uninstall (4).
+  regex:
+    re_pattern: '\
+
+      void\ CrxInstaller::RunInstallerCallbacks\(\
+
+      \ \ \ \ const\ std::optional<CrxInstallError>\&\ error\)\ \{\
+
+      \ \ for\ \(InstallerResultCallback\&\ callback\ :\ installer_callbacks_\)\ \{\
+
+      \ \ \ \ if\ \(!content::GetUIThreadTaskRunner\(\{\}\)\->PostTask\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ FROM_HERE,\ base::BindOnce\(std::move\(callback\),\ error\)\)\)\ \{\
+
+      '
+    replace: "\nvoid CrxInstaller::RunInstallerCallbacks(\n    const std::optional<CrxInstallError>& error) {\n#if BUILDFLAG(IS_ANDROID)\n  installed_update_observation_.Reset();\n#endif\n  for (InstallerResultCallback& callback : installer_callbacks_) {\n    if (!content::GetUIThreadTaskRunner({})->PostTask(\n            FROM_HERE, base::BindOnce(std::move(callback), error))) {\n"
+- description: Reject an installed Android update after uninstall (5).
+  regex:
+    re_pattern: '\ \ expectations_verified_callback_\ =\ std::move\(callback\);\
+
+      \}\
+
+      \
+
+      void\ CrxInstaller::Shutdown\(\)\ \{\
+
+      \ \ profile_keep_alive_\.reset\(\);\
+
+      \ \ browser_context_\ =\ nullptr;\
+
+      \ \ //\ The\ registrar\ will\ be\ deleted\ shortly\.\
+
+      '
+    replace: "  expectations_verified_callback_ = std::move(callback);\n}\n\n#if BUILDFLAG(IS_ANDROID)\nvoid CrxInstaller::OnExtensionUninstalled(\n    content::BrowserContext* browser_context,\n    const Extension* extension,\n    UninstallReason reason) {\n  DCHECK_CURRENTLY_ON(BrowserThread::UI);\n  if (extension->id() == installed_update_id_) {\n    installed_update_was_uninstalled_ = true;\n  }\n}\n\nvoid CrxInstaller::OnShutdown(ExtensionRegistry* registry) {\n  DCHECK_CURRENTLY_ON(BrowserThread::UI);\n  installed_update_was_uninstalled_ = true;\n  installed_update_observation_.Reset();\n}\n\nbool CrxInstaller::AbortIfInstalledUpdateWasUninstalled() {\n  DCHECK_CURRENTLY_ON(BrowserThread::UI);\n  if (installed_update_id_.empty()) {\n    return false;\n  }\n  if (!installed_update_was_uninstalled_ &&\n      ExtensionRegistry::Get(browser_context_)\n          ->GetInstalledExtension(installed_update_id_)) {\n    return false;\n  }\n  ReportFailureFromUIThread(\n      CrxInstallError(CrxInstallErrorType::OTHER,\n                      CrxInstallErrorDetail::UPDATE_NON_EXISTING_EXTENSION));\n  return true;\n}\n#endif\n\nvoid CrxInstaller::Shutdown() {\n#if BUILDFLAG(IS_ANDROID)\n  installed_update_observation_.Reset();\n#endif\n  profile_keep_alive_.reset();\n  browser_context_ = nullptr;\n  // The registrar will be deleted shortly.\n"
+- description: Round2 reviewed Android signed install consent repair
+  regex:
+    re_pattern: '\ \ \ \ case\ ExtensionInstallPromptClient::Result::ACCEPTED:\
+
+      \ \ \ \ case\ ExtensionInstallPromptClient::Result::\
+
+      \ \ \ \ \ \ \ \ ACCEPTED_WITH_WITHHELD_PERMISSIONS:\
+
+      \ \ \ \ \ \ if\ \(!browser_context_\)\ \{\
+
+      \ \ \ \ \ \ \ \ return;\
+
+      \ \ \ \ \ \ \}\
+
+      '
+    replace: "    case ExtensionInstallPromptClient::Result::ACCEPTED:\n    case ExtensionInstallPromptClient::Result::\n        ACCEPTED_WITH_WITHHELD_PERMISSIONS:\n#if BUILDFLAG(IS_ANDROID)\n      // Settings updates finish installing before the re-enable prompt. A\n      // later signed update can replace its extension while that prompt stays\n      // open. Treat consent for the old instance like cancellation, without\n      // granting or enabling the replacement, and release the prompt reference.\n      if (update_from_settings_page_ &&\n          (!browser_context_ ||\n           ExtensionRegistry::Get(browser_context_)\n                   ->GetInstalledExtension(extension()->id()) != extension())) {\n        break;\n      }\n#endif\n      if (!browser_context_) {\n        return;\n      }\n"
+- {"description":"Reject unapproved Android user download when no prompt host exists","count":1,"regex":{"re_pattern":"\\ \\ if\\ \\(client_\\ \\&\\&\\ \\(!allow_silent_install_\\ \\|\\|\\ !approved_\\)\\ \\&\\&\\\n","replace":"#if BUILDFLAG(IS_ANDROID)\n  // A downloaded CRX without completed approval still requires a user prompt.\n  // Missing Android UI must not select the null-client silent install path.\n  if (was_triggered_by_user_download_ && !client_ && !approved_) {\n    ReportFailureFromUIThread(\n        CrxInstallError(CrxInstallErrorType::OTHER,\n                        CrxInstallErrorDetail::USER_ABORTED));\n    return;\n  }\n\n#endif\n  if (client_ && (!allow_silent_install_ || !approved_) &&\n"}}
+- description: "Android CrxInstaller measurement449: step 1"
+  regex:
+    pattern: "#include \"base/metrics/histogram_functions.h\"\n#include \"base/metrics/histogram_macros.h\"\n"
+    replace: "#if !BUILDFLAG(IS_ANDROID)\n#include \"base/metrics/histogram_functions.h\"\n#include \"base/metrics/histogram_macros.h\"\n#endif\n"
+  count: 1
+- description: "Android CrxInstaller measurement449: step 2"
+  regex:
+    pattern: "#include \"extensions/browser/install/sandboxed_unpacker_failure_reason.h\"\n"
+    replace: "#if !BUILDFLAG(IS_ANDROID)\n#include \"extensions/browser/install/sandboxed_unpacker_failure_reason.h\"\n#endif\n"
+  count: 1
+- description: "Android CrxInstaller measurement449: step 3"
+  regex:
+    pattern: "      UMA_HISTOGRAM_ENUMERATION(\"ExtensionBlacklist.BlockCRX\",\n                                extension()->location());\n"
+    replace: "#if !BUILDFLAG(IS_ANDROID)\n      UMA_HISTOGRAM_ENUMERATION(\"ExtensionBlacklist.BlockCRX\",\n                                extension()->location());\n#endif\n"
+  count: 1
+- description: "Android CrxInstaller measurement449: step 4"
+  regex:
+    pattern: "  // Tracking number of extensions installed by users\n  if (was_triggered_by_user_download()) {\n    UMA_HISTOGRAM_ENUMERATION(\"Extensions.ExtensionInstalled\", 1, 2);\n  }\n"
+    replace: "#if !BUILDFLAG(IS_ANDROID)\n  // Tracking number of extensions installed by users\n  if (was_triggered_by_user_download()) {\n    UMA_HISTOGRAM_ENUMERATION(\"Extensions.ExtensionInstalled\", 1, 2);\n  }\n#endif\n"
+  count: 1
+- description: "Android CrxInstaller measurement449: step 5"
+  regex:
+    pattern: "  if (!util::AnyCurrentlyInstalledExtensionIsFromWebstore(browser_context()) &&\n      was_triggered_by_user_download()) {\n    base::UmaHistogramBoolean(\"Extensions.ExtensionInstalled.NewFromWebstore\",\n                              true);\n  }\n"
+    replace: "#if !BUILDFLAG(IS_ANDROID)\n  if (!util::AnyCurrentlyInstalledExtensionIsFromWebstore(browser_context()) &&\n      was_triggered_by_user_download()) {\n    base::UmaHistogramBoolean(\"Extensions.ExtensionInstalled.NewFromWebstore\",\n                              true);\n  }\n#endif\n"
+  count: 1
+- description: "Android CrxInstaller measurement449: step 6"
+  regex:
+    pattern: "  if (is_update_) {\n    if (success) {\n      base::UmaHistogramBoolean(\"Extensions.SandboxUnpackSuccessForUpdates\",\n                                true);\n    } else if (error->type() ==\n               CrxInstallErrorType::SANDBOXED_UNPACKER_FAILURE) {\n      base::UmaHistogramBoolean(\"Extensions.SandboxUnpackSuccessForUpdates\",\n                                false);\n    }\n  }\n"
+    replace: "#if !BUILDFLAG(IS_ANDROID)\n  if (is_update_) {\n    if (success) {\n      base::UmaHistogramBoolean(\"Extensions.SandboxUnpackSuccessForUpdates\",\n                                true);\n    } else if (error->type() ==\n               CrxInstallErrorType::SANDBOXED_UNPACKER_FAILURE) {\n      base::UmaHistogramBoolean(\"Extensions.SandboxUnpackSuccessForUpdates\",\n                                false);\n    }\n  }\n#endif\n"
+  count: 1
+- description: "Android CrxInstaller measurement449: step 7"
+  regex:
+    pattern: "        if (is_update_) {\n          base::UmaHistogramEnumeration(\n              \"Extensions.SandboxUnpackFailureReasonForUpdates\",\n              error->sandbox_failure_detail(),\n              SandboxedUnpackerFailureReason::NUM_FAILURE_REASONS);\n        }\n"
+    replace: "#if !BUILDFLAG(IS_ANDROID)\n        if (is_update_) {\n          base::UmaHistogramEnumeration(\n              \"Extensions.SandboxUnpackFailureReasonForUpdates\",\n              error->sandbox_failure_detail(),\n              SandboxedUnpackerFailureReason::NUM_FAILURE_REASONS);\n        }\n#endif\n"
+  count: 1
+- description: "Cancel the retired Android verifier-key request after context shutdown"
+  regex:
+    re_pattern: "void\\ CrxInstaller::GetContentVerifierKeyOnUI\\(\\\n\\ \\ \\ \\ base::OnceCallback<void\\(ContentVerifierKey\\)>\\ callback\\)\\ \\{\\\n\\ \\ DCHECK_CURRENTLY_ON\\(BrowserThread::UI\\);\\\n\\\n"
+    replace: "void CrxInstaller::GetContentVerifierKeyOnUI(\n    base::OnceCallback<void(ContentVerifierKey)> callback) {\n  DCHECK_CURRENTLY_ON(BrowserThread::UI);\n\n#if BUILDFLAG(IS_ANDROID)\n  if (!browser_context_) {\n    return;\n  }\n#endif\n\n"

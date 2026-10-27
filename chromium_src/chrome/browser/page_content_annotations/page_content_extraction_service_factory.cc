@@ -7,6 +7,9 @@
 // instead of the upstream feature flags, enabling the upstream
 // PageContentExtractionService when history embeddings is active.
 
+#include "build/build_config.h"
+
+#if !BUILDFLAG(IS_ANDROID)
 #include "components/history_embeddings/core/history_embeddings_features.h"
 #include "components/page_content_annotations/core/page_content_annotations_features.h"
 
@@ -20,6 +23,8 @@ inline bool ShouldEnablePageContentAnnotations_Brave() {
 
 #define ShouldEnablePageContentAnnotations \
   ShouldEnablePageContentAnnotations_Brave
+
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 #include <chrome/browser/page_content_annotations/page_content_extraction_service_factory.cc>
 

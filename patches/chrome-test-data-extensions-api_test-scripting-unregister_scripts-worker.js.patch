@@ -1,0 +1,57 @@
+diff --git a/chrome/test/data/extensions/api_test/scripting/unregister_scripts/worker.js b/chrome/test/data/extensions/api_test/scripting/unregister_scripts/worker.js
+--- a/chrome/test/data/extensions/api_test/scripting/unregister_scripts/worker.js
++++ b/chrome/test/data/extensions/api_test/scripting/unregister_scripts/worker.js
+@@ -97,10 +97,8 @@
+     chrome.test.succeed();
+   },
+ 
+-  // Test that unregisterContentScripts with empty filter ids unregisters all
+-  // content scripts.
+-  // TODO(crbug.com/40216362): This is incorrect, when filter ids is empty it
+-  // should not unregister any script.
++  // Android distinguishes an explicitly empty ID list from an omitted filter.
++  // Desktop retains the upstream behavior pending crbug.com/40216362.
+   async function unregisterScript_EmptyFilterIds() {
+     await chrome.scripting.unregisterContentScripts();
+ 
+@@ -126,17 +124,32 @@
+     chrome.test.assertEq(
+         ['injected', 'injected_2'], await getInjectedElementIds(tab.id));
+ 
+-    // Unregister all content scripts.
++    const isAndroid = (await chrome.runtime.getPlatformInfo()).os === 'android';
++    const before = await chrome.scripting.getRegisteredContentScripts();
++    const emptySelection =
++        await chrome.scripting.getRegisteredContentScripts({ids: []});
++    chrome.test.assertEq(isAndroid ? [] : before, emptySelection);
++
+     await chrome.scripting.unregisterContentScripts({ids: []});
++    const after = await chrome.scripting.getRegisteredContentScripts();
++    chrome.test.assertEq(isAndroid ? before : [], after);
+ 
+-    // Verify all content scripts are removed.
+-    const registeredContentScripts =
+-        await chrome.scripting.getRegisteredContentScripts();
+-    chrome.test.assertEq(0, registeredContentScripts.length);
++    // Confirm the surviving registrations still inject into a fresh document.
++    tab = await navigateToRequestedUrl();
++    chrome.test.assertEq(
++        isAndroid ? ['injected', 'injected_2'] : [],
++        await getInjectedElementIds(tab.id));
+ 
+-    // Re-navigate to the requested url, and verify no script is injected.
+-    tab = await navigateToRequestedUrl();
+-    chrome.test.assertEq([], await getInjectedElementIds(tab.id));
++    if (isAndroid) {
++      // An omitted ids field remains unfiltered, and removes every script.
++      chrome.test.assertEq(
++          before, await chrome.scripting.getRegisteredContentScripts({}));
++      await chrome.scripting.unregisterContentScripts({});
++      chrome.test.assertEq(
++          [], await chrome.scripting.getRegisteredContentScripts());
++      tab = await navigateToRequestedUrl();
++      chrome.test.assertEq([], await getInjectedElementIds(tab.id));
++    }
+ 
+     chrome.test.succeed();
+   },

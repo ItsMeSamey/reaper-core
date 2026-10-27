@@ -1,0 +1,179 @@
+diff --git a/chrome/android/junit/src/org/chromium/chrome/browser/tab/TabUnitTest.java b/chrome/android/junit/src/org/chromium/chrome/browser/tab/TabUnitTest.java
+--- a/chrome/android/junit/src/org/chromium/chrome/browser/tab/TabUnitTest.java
++++ b/chrome/android/junit/src/org/chromium/chrome/browser/tab/TabUnitTest.java
+@@ -159,6 +159,157 @@
+         mTab.setAutofillProvider(mAutofillProvider);
+     }
+ 
++    private void prepareVisibilityTestTab() {
++        mTab = spy(mTab);
++        mTab.setNativePtrForTesting(1);
++        // Keep the production show/hide state machine, without creating a renderer.
++        doReturn(false).when(mTab).loadIfNeeded(anyBoolean());
++    }
++
++    @Test
++    @SmallTest
++    public void testVisibilityTransitionsNotifyOnceInOrder() {
++        prepareVisibilityTestTab();
++        doAnswer(
++                        invocation -> {
++                            assertFalse(mTab.isHidden());
++                            return null;
++                        })
++                .when(mNativeMock)
++                .sendDidBecomeVisibleUpdate(1);
++        doAnswer(
++                        invocation -> {
++                            assertFalse(mTab.isHidden());
++                            return null;
++                        })
++                .when(mNativeMock)
++                .sendWillBecomeHiddenUpdate(1);
++
++        mTab.show(TabSelectionType.FROM_USER);
++        mTab.show(TabSelectionType.FROM_USER);
++        mTab.hide(TabHidingType.CHANGED_TABS);
++        mTab.hide(TabHidingType.CHANGED_TABS);
++        mTab.show(TabSelectionType.FROM_USER);
++        mTab.hide(TabHidingType.CHANGED_TABS);
++
++        assertTrue(mTab.isHidden());
++        InOrder order = inOrder(mNativeMock, mObserver);
++        order.verify(mNativeMock).sendDidBecomeVisibleUpdate(1);
++        order.verify(mNativeMock).onShow(1);
++        order.verify(mObserver).onShown(mTab, TabSelectionType.FROM_USER);
++        order.verify(mNativeMock).sendWillBecomeHiddenUpdate(1);
++        order.verify(mObserver).onHidden(mTab, TabHidingType.CHANGED_TABS);
++        order.verify(mNativeMock).sendDidBecomeVisibleUpdate(1);
++        order.verify(mNativeMock).onShow(1);
++        order.verify(mObserver).onShown(mTab, TabSelectionType.FROM_USER);
++        order.verify(mNativeMock).sendWillBecomeHiddenUpdate(1);
++        order.verify(mObserver).onHidden(mTab, TabHidingType.CHANGED_TABS);
++        verify(mNativeMock, times(2)).sendDidBecomeVisibleUpdate(1);
++        verify(mNativeMock, times(2)).sendWillBecomeHiddenUpdate(1);
++        verify(mNativeMock, never()).sendDidActivateUpdate(anyLong());
++        verify(mNativeMock, never()).sendWillDeactivateUpdate(anyLong());
++    }
++
++    @Test
++    @SmallTest
++    public void testDidBecomeVisibleObserverCanHideBeforeShowWork() {
++        prepareVisibilityTestTab();
++        doAnswer(
++                        invocation -> {
++                            mTab.hide(TabHidingType.CHANGED_TABS);
++                            return null;
++                        })
++                .when(mNativeMock)
++                .sendDidBecomeVisibleUpdate(1);
++
++        mTab.show(TabSelectionType.FROM_USER);
++
++        assertTrue(mTab.isHidden());
++        verify(mNativeMock).sendDidBecomeVisibleUpdate(1);
++        verify(mNativeMock).sendWillBecomeHiddenUpdate(1);
++        verify(mTab, never()).loadIfNeeded(anyBoolean());
++        verify(mNativeMock, never()).onShow(anyLong());
++        verify(mObserver, never()).onShown(any(), anyInt());
++        verify(mObserver).onHidden(mTab, TabHidingType.CHANGED_TABS);
++    }
++
++    @Test
++    @SmallTest
++    public void testWillBecomeHiddenObserverCannotDispatchHideTwice() {
++        prepareVisibilityTestTab();
++        mTab.show(TabSelectionType.FROM_USER);
++        doAnswer(
++                        invocation -> {
++                            assertFalse(mTab.isHidden());
++                            mTab.hide(TabHidingType.CHANGED_TABS);
++                            assertFalse(mTab.isHidden());
++                            return null;
++                        })
++                .when(mNativeMock)
++                .sendWillBecomeHiddenUpdate(1);
++
++        mTab.hide(TabHidingType.CHANGED_TABS);
++
++        assertTrue(mTab.isHidden());
++        verify(mNativeMock).sendWillBecomeHiddenUpdate(1);
++        verify(mObserver).onHidden(mTab, TabHidingType.CHANGED_TABS);
++    }
++
++    @Test
++    @SmallTest
++    @EnableFeatures({ChromeFeatureList.ABORT_NAVIGATIONS_FROM_TAB_CLOSURES})
++    public void testDidBecomeVisibleObserverCanDestroyTab() {
++        prepareVisibilityTestTab();
++        doAnswer(
++                        invocation -> {
++                            mTab.clearNativePtr();
++                            return null;
++                        })
++                .when(mNativeMock)
++                .destroy(1);
++        doAnswer(
++                        invocation -> {
++                            mTab.destroy();
++                            return null;
++                        })
++                .when(mNativeMock)
++                .sendDidBecomeVisibleUpdate(1);
++
++        mTab.show(TabSelectionType.FROM_USER);
++        mTab.show(TabSelectionType.FROM_USER);
++        mTab.hide(TabHidingType.CHANGED_TABS);
++
++        assertTrue(mTab.isDestroyed());
++        verify(mNativeMock).sendDidBecomeVisibleUpdate(1);
++        verify(mNativeMock).destroy(1);
++        verify(mNativeMock, never()).onShow(anyLong());
++        verify(mNativeMock, never()).sendWillBecomeHiddenUpdate(anyLong());
++        verify(mTab, never()).loadIfNeeded(anyBoolean());
++        verify(mObserver, never()).onShown(any(), anyInt());
++    }
++
++    @Test
++    @SmallTest
++    public void testShowStillLoadsWhenNativePeerInitiallyAbsent() {
++        prepareVisibilityTestTab();
++        mTab.clearNativePtr();
++        doAnswer(
++                        invocation -> {
++                            mTab.setNativePtrForTesting(1);
++                            return false;
++                        })
++                .when(mTab)
++                .loadIfNeeded(false);
++
++        mTab.show(TabSelectionType.FROM_USER);
++
++        assertFalse(mTab.isHidden());
++        verify(mTab).loadIfNeeded(false);
++        verify(mNativeMock).onShow(1);
++        verify(mNativeMock, never()).sendDidBecomeVisibleUpdate(anyLong());
++        verify(mObserver).onShown(mTab, TabSelectionType.FROM_USER);
++    }
++
+     @Test
+     @SmallTest
+     public void testOnAddedToTabModel_SendsDidInsertUpdate() {
+@@ -178,6 +329,8 @@
+         mTab.onAddedToTabModel(mTabSupplier, ignored -> false);
+         mTabSupplier.set(mTab);
+         verify(mNativeMock).sendDidActivateUpdate(anyLong());
++        verify(mNativeMock, never()).sendDidBecomeVisibleUpdate(anyLong());
++        verify(mNativeMock, never()).sendWillBecomeHiddenUpdate(anyLong());
+     }
+ 
+     @Test
+@@ -193,6 +346,8 @@
+ 
+         mTabSupplier.set(null);
+         verify(mNativeMock).sendWillDeactivateUpdate(anyLong());
++        verify(mNativeMock, never()).sendDidBecomeVisibleUpdate(anyLong());
++        verify(mNativeMock, never()).sendWillBecomeHiddenUpdate(anyLong());
+     }
+ 
+     @Test

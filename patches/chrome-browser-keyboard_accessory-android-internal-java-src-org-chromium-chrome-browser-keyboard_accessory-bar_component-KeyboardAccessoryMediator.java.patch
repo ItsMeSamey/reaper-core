@@ -1,0 +1,241 @@
+diff --git a/chrome/browser/keyboard_accessory/android/internal/java/src/org/chromium/chrome/browser/keyboard_accessory/bar_component/KeyboardAccessoryMediator.java b/chrome/browser/keyboard_accessory/android/internal/java/src/org/chromium/chrome/browser/keyboard_accessory/bar_component/KeyboardAccessoryMediator.java
+--- a/chrome/browser/keyboard_accessory/android/internal/java/src/org/chromium/chrome/browser/keyboard_accessory/bar_component/KeyboardAccessoryMediator.java
++++ b/chrome/browser/keyboard_accessory/android/internal/java/src/org/chromium/chrome/browser/keyboard_accessory/bar_component/KeyboardAccessoryMediator.java
+@@ -30,11 +30,8 @@
+ import org.chromium.base.ObserverList;
+ import org.chromium.base.TraceEvent;
+ import org.chromium.base.TriState;
+-import org.chromium.base.metrics.RecordHistogram;
+ import org.chromium.build.annotations.NullMarked;
+ import org.chromium.build.annotations.Nullable;
+-import org.chromium.chrome.browser.autofill.autofill_ai.EntityDataManager;
+-import org.chromium.chrome.browser.autofill.autofill_ai.EntityDataManagerFactory;
+ import org.chromium.chrome.browser.flags.ChromeFeatureList;
+ import org.chromium.chrome.browser.keyboard_accessory.AccessoryAction;
+ import org.chromium.chrome.browser.keyboard_accessory.KeyboardAccessoryVisualStateProvider;
+@@ -55,24 +52,12 @@
+ import org.chromium.chrome.browser.keyboard_accessory.sheet_component.AccessorySheetCoordinator;
+ import org.chromium.chrome.browser.keyboard_accessory.utils.ManualFillingMetricsRecorder;
+ import org.chromium.chrome.browser.profiles.Profile;
+-import org.chromium.components.autofill.AutofillAiPayload;
+ import org.chromium.components.autofill.AutofillDelegate;
+ import org.chromium.components.autofill.AutofillSuggestion;
+ import org.chromium.components.autofill.FillingProduct;
+ import org.chromium.components.autofill.FillingProductBridge;
+ import org.chromium.components.autofill.SuggestionType;
+-import org.chromium.components.autofill.autofill_ai.EntityInstance;
+-import org.chromium.components.autofill.autofill_ai.EntityType;
+-import org.chromium.components.autofill.autofill_ai.EntityTypeName;
+-import org.chromium.components.autofill.autofill_ai.RecordType;
+-import org.chromium.components.browser_ui.widget.ActionConfirmationDialog;
+-import org.chromium.components.browser_ui.widget.ActionConfirmationDialog.ConfirmationDialogParams;
+-import org.chromium.components.browser_ui.widget.ActionConfirmationDialog.DialogDismissType;
+-import org.chromium.components.browser_ui.widget.ActionConfirmationDialog.DismissHandler;
+-import org.chromium.components.browser_ui.widget.StrictButtonPressController.ButtonClickResult;
+ import org.chromium.components.feature_engagement.FeatureConstants;
+-import org.chromium.ui.modaldialog.ModalDialogManager;
+-import org.chromium.ui.modelutil.ListModel;
+ import org.chromium.ui.modelutil.PropertyKey;
+ import org.chromium.ui.modelutil.PropertyModel;
+ import org.chromium.ui.modelutil.PropertyObservable;
+@@ -95,17 +80,12 @@
+         implements PropertyObservable.PropertyObserver<PropertyKey>,
+                 Provider.Observer<Action[]>,
+                 KeyboardAccessoryButtonGroupCoordinator.AccessoryTabObserver {
+-    private static final String UMA_AUTOFILL_AI_SETTINGS_LINKOUT_DIALOG =
+-            "Autofill.Ai.SettingsLinkoutDialog";
+-
+-    private final Context mContext;
+     private final PropertyModel mModel;
+     private final BarVisibilityDelegate mBarVisibilityDelegate;
+     private final AccessorySheetCoordinator.SheetVisibilityDelegate mSheetVisibilityDelegate;
+     private final TabSwitchingDelegate mTabSwitcher;
+     private final Supplier<Integer> mBackgroundColorSupplier;
+     private final Profile mProfile;
+-    private final @Nullable ActionConfirmationDialog mDialog;
+     private final ObserverList<KeyboardAccessoryVisualStateProvider.Observer> mVisualObservers =
+             new ObserverList<>();
+
+@@ -116,25 +96,18 @@
+             Context context,
+             PropertyModel model,
+             Profile profile,
+-            ModalDialogManager modalDialogManager,
+             BarVisibilityDelegate barVisibilityDelegate,
+             AccessorySheetCoordinator.SheetVisibilityDelegate sheetVisibilityDelegate,
+             TabSwitchingDelegate tabSwitcher,
+             KeyboardAccessoryButtonGroupCoordinator.SheetOpenerCallbacks sheetOpenerCallbacks,
+             Supplier<Integer> backgroundColorSupplier,
+             Runnable dismissRunnable) {
+-        mContext = context;
+         mModel = model;
+         mProfile = profile;
+         mBarVisibilityDelegate = barVisibilityDelegate;
+         mSheetVisibilityDelegate = sheetVisibilityDelegate;
+         mTabSwitcher = tabSwitcher;
+         mBackgroundColorSupplier = backgroundColorSupplier;
+-        mDialog =
+-                modalDialogManager != null
+-                        ? new ActionConfirmationDialog(context, modalDialogManager)
+-                        : null;
+-
+         // Add mediator as observer so it can use model changes as signal for accessory visibility.
+         mModel.set(OBFUSCATED_CHILD_AT_CALLBACK, this::onSuggestionObfuscatedAt);
+         mModel.set(ON_TOUCH_EVENT_CALLBACK, this::onTouchEvent);
+@@ -391,8 +364,7 @@
+             barItems.add(
+                     new AutofillBarItem(
+                             suggestion,
+-                            createAutofillAction(
+-                                    delegate, suggestion.getOriginalIndex(), suggestion),
++                            createAutofillAction(delegate, suggestion.getOriginalIndex()),
+                             mProfile));
+         }
+
+@@ -427,133 +399,21 @@
+         return barItems;
+     }
+
+-    private Action createAutofillAction(
+-            AutofillDelegate delegate, int pos, AutofillSuggestion suggestion) {
++    private Action createAutofillAction(AutofillDelegate delegate, int pos) {
+         return new Action(
+                 AccessoryAction.AUTOFILL_SUGGESTION,
+                 result -> {
+                     ManualFillingMetricsRecorder.recordActionSelected(
+                             AccessoryAction.AUTOFILL_SUGGESTION);
+-                    if (suggestion.showLoadingOnAcceptance()) {
+-                        showLoadingUIOnSuggestion(suggestion);
+-                    }
+-                    delegate.suggestionAccepted(pos, suggestion.showLoadingOnAcceptance());
++                    delegate.suggestionAccepted(pos);
+                 },
+                 result -> {
+-                    if (maybeShowDialogOnLongPress(delegate, suggestion)) {
+-                        return;
+-                    }
+                     delegate.deleteSuggestion(pos);
+                 },
+                 ChromeFeatureList.isEnabled(
+                                 ChromeFeatureList.AUTOFILL_ANDROID_KEYBOARD_ACCESSORY_HOVER_PREVIEW)
+                         ? selected -> delegate.suggestionSelectionStateChanged(pos, selected)
+                         : null);
+-    }
+-
+-    private boolean maybeShowDialogOnLongPress(
+-            AutofillDelegate delegate, AutofillSuggestion suggestion) {
+-        AutofillAiPayload payload = suggestion.getAutofillAiPayload();
+-        if (payload == null || mDialog == null) {
+-            return false;
+-        }
+-        EntityDataManager entityDataManager = EntityDataManagerFactory.getForProfile(mProfile);
+-        if (entityDataManager == null) {
+-            return false;
+-        }
+-        EntityInstance entityInstance = entityDataManager.getEntityInstance(payload.getGuid());
+-        if (entityInstance == null
+-                || entityInstance.getRecordType() != RecordType.PERSONAL_CONTEXT
+-                || !shouldOpenSettingsForEntityType(entityInstance.getEntityType().getTypeName())) {
+-            return false;
+-        }
+-        String sublabel = suggestion.getSublabel();
+-        if (sublabel == null) {
+-            return false;
+-        }
+-        mDialog.show(
+-                new ConfirmationDialogParams.Builder(mContext)
+-                        .withTitle(sublabel)
+-                        .withDescription(
+-                                mContext.getString(
+-                                        R.string
+-                                                .autofill_ai_suggestion_long_press_dialog_description))
+-                        .withPositiveButton(
+-                                mContext.getString(
+-                                        R.string
+-                                                .autofill_ai_suggestion_long_press_dialog_positive_button))
+-                        .withNegativeButton(
+-                                mContext.getString(
+-                                        R.string
+-                                                .autofill_ai_suggestion_long_press_dialog_negative_button))
+-                        .build(),
+-                (dismissHandler, buttonClickResult, stopShowing) ->
+-                        handleDialogAction(
+-                                delegate,
+-                                entityInstance.getEntityType(),
+-                                dismissHandler,
+-                                buttonClickResult,
+-                                stopShowing));
+-        return true;
+-    }
+-
+-    private boolean shouldOpenSettingsForEntityType(@EntityTypeName int entityType) {
+-        switch (entityType) {
+-            case EntityTypeName.PASSPORT:
+-            case EntityTypeName.DRIVERS_LICENSE:
+-            case EntityTypeName.NATIONAL_ID_CARD:
+-            case EntityTypeName.KNOWN_TRAVELER_NUMBER:
+-            case EntityTypeName.REDRESS_NUMBER:
+-            case EntityTypeName.VEHICLE:
+-            case EntityTypeName.ORDER:
+-            case EntityTypeName.FLIGHT_RESERVATION:
+-            case EntityTypeName.SHIPMENT:
+-                return true;
+-            default:
+-                return false;
+-        }
+-    }
+-
+-    private @DialogDismissType int handleDialogAction(
+-            AutofillDelegate delegate,
+-            EntityType entityType,
+-            DismissHandler unusedDismissHandler,
+-            @ButtonClickResult int buttonClickResult,
+-            boolean unusedStopShowing) {
+-        boolean isPositive = buttonClickResult == ButtonClickResult.POSITIVE;
+-        RecordHistogram.recordBooleanHistogram(
+-                UMA_AUTOFILL_AI_SETTINGS_LINKOUT_DIALOG + "."
+-                        + entityType.getTypeNameAsMetricsString(),
+-                isPositive);
+-        if (isPositive) {
+-            // Need to go through C++ because `SettingsNavigationHelper` is in `chrome_java`.
+-            // Keyboard accessory Java code should not depend on `chrome_java`.
+-            delegate.openSettingsForEntityType(entityType.getTypeName());
+-        }
+-        return DialogDismissType.DISMISS_IMMEDIATELY;
+-    }
+-
+-    private void updateActionBarItemsState(
+-            ListModel<BarItem> barItems, AutofillSuggestion acceptedSuggestion) {
+-        // Ungroup the elements, make all elements disabled and show loading UI for the accepted
+-        // item.
+-        List<ActionBarItem> listOfBarItems = ungroupBarItems(barItems);
+-        for (ActionBarItem actionBarItem : listOfBarItems) {
+-            actionBarItem.setEnabled(false);
+-            if (actionBarItem instanceof AutofillBarItem autofillBarItem) {
+-                autofillBarItem.setLoading(
+-                        autofillBarItem.getSuggestion().equals(acceptedSuggestion));
+-            }
+-        }
+-        // Update the UI once the data model is updated.
+-        for (int i = 0; i < barItems.size(); i++) {
+-            barItems.update(i, barItems.get(i));
+-        }
+-    }
+-
+-    private void showLoadingUIOnSuggestion(AutofillSuggestion acceptedSuggestion) {
+-        updateActionBarItemsState(mModel.get(BAR_ITEMS), acceptedSuggestion);
+-        updateActionBarItemsState(mModel.get(BAR_ITEMS_FIXED), acceptedSuggestion);
+     }
+
+     private @BarItem.Type int toBarItemType(@AccessoryAction int accessoryAction) {
+@@ -745,10 +605,6 @@
+         @FillingProduct
+         final int fillingProduct =
+                 FillingProductBridge.getFillingProductFromSuggestionType(suggestionType);
+-        if (fillingProduct == FillingProduct.AUTOFILL_AI) {
+-            return ChromeFeatureList.isEnabled(
+-                    ChromeFeatureList.AUTOFILL_AI_LIMIT_SUGGESTION_WIDTH);
+-        }
+         return fillingProduct == FillingProduct.ADDRESS;
+     }
+

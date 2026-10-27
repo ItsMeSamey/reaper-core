@@ -3,7 +3,10 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+#include "build/build_config.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_extension/grit/brave_extension_generated_map.h"
 #include "brave/components/brave_extension/grit/brave_extension_resources_map.h"
+#endif
 
 #include <chrome/browser/extensions/chrome_component_extension_resource_manager.cc>

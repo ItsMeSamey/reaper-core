@@ -1,0 +1,114 @@
+diff --git a/components/update_client/op_download.cc b/components/update_client/op_download.cc
+--- a/components/update_client/op_download.cc
++++ b/components/update_client/op_download.cc
+@@ -18,6 +18,11 @@
+ #include "base/types/expected.h"
+ #include "base/values.h"
+ #include "build/build_config.h"
++#if BUILDFLAG(IS_ANDROID)
++#include "base/task/thread_pool.h"
++#include "components/update_client/task_traits.h"
++#include "components/update_client/utils.h"
++#endif
+ #include "components/update_client/cancellation.h"
+ #include "components/update_client/configurator.h"
+ #include "components/update_client/crx_downloader.h"
+@@ -46,6 +51,7 @@
+ }
+
+ // Returns a string literal corresponding to the value of the downloader |d|.
++#if !BUILDFLAG(IS_ANDROID)
+ const char* DownloaderToString(CrxDownloader::DownloadMetrics::Downloader d) {
+   switch (d) {
+     case CrxDownloader::DownloadMetrics::kUrlFetcher:
+@@ -58,7 +64,9 @@
+       return "unknown";
+   }
+ }
+-
++#endif  // !BUILDFLAG(IS_ANDROID)
++
++#if !BUILDFLAG(IS_ANDROID)
+ base::DictValue MakeEvent(const CrxDownloader::DownloadMetrics& dm) {
+   base::DictValue event;
+   event.Set("eventtype", protocol_request::kEventDownload);
+@@ -87,6 +95,47 @@
+   }
+   return event;
+ }
++#endif  // !BUILDFLAG(IS_ANDROID)
++
++#if BUILDFLAG(IS_ANDROID)
++void DeliverAndroidDownloadResult(
++    scoped_refptr<Cancellation> cancellation,
++    base::OnceCallback<void(base::expected<base::FilePath, CategorizedError>)>
++        callback,
++    const CrxDownloader::Result& result) {
++  // Check on the delivery sequence: cancellation can also arrive after hash
++  // verification completed but before this queued result reaches the pipeline.
++  if (cancellation->IsCancelled()) {
++    auto complete = base::BindOnce(
++        std::move(callback),
++        base::unexpected<CategorizedError>(
++            {.category = ErrorCategory::kService,
++             .code = std::to_underlying(ServiceError::CANCELLED)}));
++    if (result.response.empty()) {
++      std::move(complete).Run();
++      return;
++    }
++    base::ThreadPool::PostTaskAndReply(
++        FROM_HERE, kTaskTraits,
++        base::BindOnce(
++            [](const base::FilePath& path) {
++              DeleteFileAndEmptyParentDirectory(path);
++            },
++            result.response),
++        std::move(complete));
++    return;
++  }
++  if (result.error) {
++    CHECK(result.response.empty());
++    std::move(callback).Run(base::unexpected<CategorizedError>(
++        {.category = ErrorCategory::kDownload,
++         .code = result.error,
++         .extra = result.extra_code1}));
++    return;
++  }
++  std::move(callback).Run(result.response);
++}
++#endif  // BUILDFLAG(IS_ANDROID)
+
+ void DownloadComplete(
+     const std::string& id,
+@@ -98,6 +147,7 @@
+     const CrxDownloader::Result& download_result) {
+   cancellation->Clear();
+
++#if !BUILDFLAG(IS_ANDROID)
+   for (const auto& metric : crx_downloader->download_metrics()) {
+     event_adder.Run(MakeEvent(metric));
+     if (metric.error == 0) {
+@@ -105,7 +155,14 @@
+           base::Milliseconds(metric.download_time_ms), id);
+     }
+   }
+-
++#endif  // !BUILDFLAG(IS_ANDROID)
++
++#if BUILDFLAG(IS_ANDROID)
++  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++      FROM_HERE,
++      base::BindOnce(&DeliverAndroidDownloadResult, cancellation,
++                     std::move(callback), download_result));
++#else
+   if (cancellation->IsCancelled()) {
+     base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
+         FROM_HERE,
+@@ -129,6 +186,7 @@
+   }
+   base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
+       FROM_HERE, base::BindOnce(std::move(callback), download_result.response));
++#endif  // BUILDFLAG(IS_ANDROID)
+ }
+
+ }  // namespace

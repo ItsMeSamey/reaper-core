@@ -1,0 +1,181 @@
+# Copyright (c) 2026 The Reaper Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+substitutions:
+- description: Coordinate Android context menu restoration and current API mutations
+  regex:
+    re_pattern: '\#include\ <stddef\.h>\
+
+      \#include\ <stdint\.h>\
+
+      \
+
+      \#include\ <map>\
+
+      \#include\ <memory>\
+
+      \#include\ <set>\
+
+      \#include\ <string>\
+
+      \#include\ <vector>\
+
+      \
+
+      \#include\ "base/gtest_prod_util\.h"\
+
+      \#include\ "base/memory/raw_ptr\.h"\
+
+      \#include\ "base/memory/weak_ptr\.h"\
+
+      \#include\ "base/observer_list\.h"\
+
+      \#include\ "base/observer_list_types\.h"\
+
+      '
+    replace: '#include <stddef.h>
+
+      #include <stdint.h>
+
+
+      #include <deque>
+
+      #include <map>
+
+      #include <memory>
+
+      #include <set>
+
+      #include <string>
+
+      #include <vector>
+
+
+      #include "base/functional/callback_helpers.h"
+
+      #include "base/gtest_prod_util.h"
+
+      #include "base/memory/raw_ptr.h"
+
+      #include "base/memory/scoped_refptr.h"
+
+      #include "base/memory/weak_ptr.h"
+
+      #include "base/observer_list.h"
+
+      #include "base/observer_list_types.h"
+
+      '
+- description: Coordinate Android context menu restoration and current API mutations
+  regex:
+    re_pattern: '\#include\ "base/scoped_observation\.h"\
+
+      \#include\ "base/timer/timer\.h"\
+
+      \#include\ "base/values\.h"\
+
+      \#include\ "chrome/browser/profiles/profile\.h"\
+
+      \#include\ "chrome/browser/profiles/profile_observer\.h"\
+
+      \#include\ "components/keyed_service/core/keyed_service\.h"\
+
+      '
+    replace: '#include "base/scoped_observation.h"
+
+      #include "base/timer/timer.h"
+
+      #include "base/values.h"
+
+      #include "build/build_config.h"
+
+      #include "chrome/browser/profiles/profile.h"
+
+      #include "chrome/browser/profiles/profile_observer.h"
+
+      #include "components/keyed_service/core/keyed_service.h"
+
+      '
+- description: Coordinate Android context menu restoration and current API mutations
+  regex:
+    re_pattern: '\
+
+      \ \ \~MenuManager\(\)\ override;\
+
+      \
+
+      \ \ //\ Convenience\ function\ to\ get\ the\ MenuManager\ for\ a\ browser\ context\.\
+
+      \ \ static\ MenuManager\*\ Get\(content::BrowserContext\*\ context\);\
+
+      \
+
+      '
+    replace: "\n  ~MenuManager() override;\n\n#if BUILDFLAG(IS_ANDROID)\n  void Shutdown() override;\n\n  // Runs inline if the initial read is complete; otherwise queues in API\n  // arrival order. Destroying the returned handle cancels only this request.\n  base::ScopedClosureRunner RunAfterInitialRestore(\n      const Extension& extension,\n      base::OnceCallback<void(bool)> callback);\n#endif\n\n  // Convenience function to get the MenuManager for a browser context.\n  static MenuManager* Get(content::BrowserContext* context);\n\n"
+- description: Coordinate Android context menu restoration and current API mutations
+  regex:
+    re_pattern: '\
+
+      \ \ void\ WriteToStorageInternal\(const\ MenuItem::ExtensionKey\&\ extension_key\);\
+
+      \
+
+      \ \ //\ We\ keep\ items\ organized\ by\ mapping\ ExtensionKey\ to\ a\ list\ of\ items\.\
+
+      \ \ std::map<MenuItem::ExtensionKey,\ MenuItem::OwnedList>\ context_items_;\
+
+      \
+
+      '
+    replace: "\n  void WriteToStorageInternal(const MenuItem::ExtensionKey& extension_key);\n\n#if BUILDFLAG(IS_ANDROID)\n  struct PendingRestoreRequest {\n    uint64_t id;\n    base::OnceCallback<void(bool)> callback;\n  };\n  struct InitialRestore {\n    uint64_t generation;\n    scoped_refptr<const Extension> extension;\n    std::deque<PendingRestoreRequest> requests;\n  };\n\n  void OnInitialRestoreRead(const std::string& extension_id,\n                            uint64_t generation,\n                            std::optional<base::Value> value);\n  void CancelRestoreRequest(const std::string& extension_id,\n                            uint64_t generation,\n                            uint64_t request_id);\n  static void FailRestoreRequests(std::deque<PendingRestoreRequest> requests);\n\n  // The record remains present while draining, so reentrant calls join the\n  // tail. Generations distinguish even same-object disable/re-enable cycles.\n  std::map<std::string, InitialRestore> initial_restores_;\n  uint64_t next_restore_generation_ = 0;\n  uint64_t next_restore_request_id_ = 0;\n  bool shutting_down_ = false;\n#endif\n\n  // We keep items organized by mapping ExtensionKey to a list of items.\n  std::map<MenuItem::ExtensionKey, MenuItem::OwnedList> context_items_;\n\n"
+- description: Preserve Android pending menu writes across retained-state unloads
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ const\ Extension\*\ extension,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ UnloadedExtensionReason\ reason\)\ override;\
+
+      \
+
+      \ \ //\ Stores\ the\ menu\ items\ for\ the\ extension\ in\ the\ state\ storage\.\ The\ write\
+
+      \ \ //\ will\ happen\ asynchronously\ after\ some\ delay\.\
+
+      \ \ void\ WriteToStorage\(const\ Extension\*\ extension,\
+
+      '
+    replace: "                           const Extension* extension,\n                           UnloadedExtensionReason reason) override;\n\n#if BUILDFLAG(IS_ANDROID)\n  void OnExtensionWillBeInstalled(content::BrowserContext* browser_context,\n                                  const Extension* extension,\n                                  bool is_update,\n                                  const std::string& old_name) override;\n  void OnExtensionUninstalled(content::BrowserContext* browser_context,\n                              const Extension* extension,\n                              UninstallReason reason) override;\n#endif\n\n  // Stores the menu items for the extension in the state storage. The write\n  // will happen asynchronously after some delay.\n  void WriteToStorage(const Extension* extension,\n"
+- description: Preserve Android pending menu writes across retained-state unloads
+  regex:
+    re_pattern: '\ \ //\ Returns\ true\ if\ item\ is\ a\ descendant\ of\ an\ item\ with\ id\ `ancestor_id`\.\
+
+      \ \ bool\ DescendantOf\(MenuItem\*\ item,\ const\ MenuItem::Id\&\ ancestor_id\);\
+
+      \
+
+      \ \ void\ WriteToStorageInternal\(const\ MenuItem::ExtensionKey\&\ extension_key\);\
+
+      \
+
+      \#if\ BUILDFLAG\(IS_ANDROID\)\
+
+      \ \ struct\ PendingRestoreRequest\ \{\
+
+      '
+    replace: "  // Returns true if item is a descendant of an item with id `ancestor_id`.\n  bool DescendantOf(MenuItem* item, const MenuItem::Id& ancestor_id);\n\n#if BUILDFLAG(IS_ANDROID)\n  void WriteToStorageInternal(const MenuItem::ExtensionKey& extension_key,\n                              uint64_t write_id);\n  base::Value SerializeMenuItems(\n      const MenuItem::ExtensionKey& extension_key) const;\n  bool IsCurrentPendingWrite(const MenuItem::ExtensionKey& extension_key,\n                             uint64_t write_id) const;\n  void SubmitPendingWrite(const MenuItem::ExtensionKey& extension_key,\n                          uint64_t write_id,\n                          base::Value value);\n#else\n  void WriteToStorageInternal(const MenuItem::ExtensionKey& extension_key);\n#endif\n\n#if BUILDFLAG(IS_ANDROID)\n  struct PendingRestoreRequest {\n"
+- description: Preserve Android pending menu writes across retained-state unloads
+  regex:
+    re_pattern: '\ \ std::map<std::string,\ InitialRestore>\ initial_restores_;\
+
+      \ \ uint64_t\ next_restore_generation_\ =\ 0;\
+
+      \ \ uint64_t\ next_restore_request_id_\ =\ 0;\
+
+      \ \ bool\ shutting_down_\ =\ false;\
+
+      \#endif\
+
+      \
+
+      '
+    replace: "  std::map<std::string, InitialRestore> initial_restores_;\n  uint64_t next_restore_generation_ = 0;\n  uint64_t next_restore_request_id_ = 0;\n\n  // Keep the ID until submission, including while WillWrite observers run\n  // after the timer has been removed. A reload or another write retires it.\n  std::map<MenuItem::ExtensionKey, uint64_t> pending_write_ids_;\n  uint64_t next_pending_write_id_ = 0;\n  bool notifying_write_observers_ = false;\n  bool shutting_down_ = false;\n#endif\n\n"

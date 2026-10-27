@@ -1,0 +1,109 @@
+# Copyright (c) 2026 The Reaper Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+substitutions:
+- description: Balance Android page-capture response ownership (1).
+  regex:
+    re_pattern: '\#include\ "base/values\.h"\
+
+      \#include\ "build/build_config\.h"\
+
+      \#include\ "content/public/browser/browser_thread\.h"\
+
+      \#include\ "content/public/browser/render_frame_host\.h"\
+
+      \#include\ "content/public/browser/render_process_host\.h"\
+
+      \#include\ "content/public/browser/render_process_host_observer\.h"\
+
+      '
+    replace: '#include "base/values.h"
+
+      #include "build/build_config.h"
+
+      #include "content/public/browser/browser_thread.h"
+
+      #if BUILDFLAG(IS_ANDROID)
+
+      #include "content/public/browser/global_routing_id.h"
+
+      #include "content/public/browser/weak_document_ptr.h"
+
+      #endif
+
+      #include "content/public/browser/render_frame_host.h"
+
+      #include "content/public/browser/render_process_host.h"
+
+      #include "content/public/browser/render_process_host_observer.h"
+
+      '
+- description: Balance Android page-capture response ownership (2).
+  regex:
+    re_pattern: '\ \ return\ nullptr;\
+
+      \}\
+
+      \
+
+      ExtensionFunctionDispatcher::ExtensionFunctionDispatcher\(\
+
+      \ \ \ \ content::BrowserContext\*\ browser_context\)\
+
+      \ \ \ \ :\ browser_context_\(browser_context\),\ delegate_\(nullptr\)\ \{\}\
+
+      \
+
+      ExtensionFunctionDispatcher::\~ExtensionFunctionDispatcher\(\)\ =\ default;\
+
+      \
+
+      void\ ExtensionFunctionDispatcher::Dispatch\(\
+
+      \ \ \ \ mojom::RequestParamsPtr\ params,\
+
+      '
+    replace: "  return nullptr;\n}\n\n#if BUILDFLAG(IS_ANDROID)\nclass ExtensionFunctionDispatcher::ResponseTarget\n    : public content::WebContentsObserver {\n public:\n  ResponseTarget(ExtensionFunction* function,\n                 base::WeakPtr<ExtensionFunctionDispatcher> dispatcher)\n      : function_(function), dispatcher_(std::move(dispatcher)) {\n    if (auto* frame = function_->render_frame_host()) {\n      sender_frame_id_ = frame->GetGlobalId();\n      sender_document_ = frame->GetWeakDocumentPtr();\n      Observe(content::WebContents::FromRenderFrameHost(frame));\n    } else {\n      CHECK(function_->is_from_service_worker());\n    }\n  }\n\n  ~ResponseTarget() override {\n    // Releasing the function can notify other browser services.\n    Observe(nullptr);\n  }\n\n  ExtensionFunction* function() const { return function_.get(); }\n\n private:\n  void RenderFrameDeleted(content::RenderFrameHost* frame) override {\n    if (frame->GetGlobalId() == sender_frame_id_) {\n      Cancel();\n    }\n  }\n\n  void DidFinishNavigation(content::NavigationHandle*) override {\n    // Preserve same-document navigation and a still-valid BFCache document.\n    if (!sender_document_.AsRenderFrameHostIfValid()) {\n      Cancel();\n    }\n  }\n\n  void WebContentsDestroyed() override { Cancel(); }\n\n  void Cancel() {\n    if (dispatcher_) {\n      dispatcher_->RemoveResponseTarget(function_.get());\n    }\n    // Removal can destroy this observer. Do not access members afterward.\n  }\n\n  scoped_refptr<ExtensionFunction> function_;\n  base::WeakPtr<ExtensionFunctionDispatcher> dispatcher_;\n  content::GlobalRenderFrameHostId sender_frame_id_;\n  content::WeakDocumentPtr sender_document_;\n};\n\n#endif\n\nExtensionFunctionDispatcher::ExtensionFunctionDispatcher(\n    content::BrowserContext* browser_context)\n    : browser_context_(browser_context), delegate_(nullptr) {}\n\n#if BUILDFLAG(IS_ANDROID)\nExtensionFunctionDispatcher::~ExtensionFunctionDispatcher() {\n  // A released function must not call back into a partially destroyed owner.\n  weak_ptr_factory_.InvalidateWeakPtrs();\n  response_targets_.clear();\n}\n#else\nExtensionFunctionDispatcher::~ExtensionFunctionDispatcher() = default;\n#endif\n\nvoid ExtensionFunctionDispatcher::Dispatch(\n    mojom::RequestParamsPtr params,\n"
+- description: Balance Android page-capture response ownership (3).
+  regex:
+    re_pattern: '\}\
+
+      \
+
+      void\ ExtensionFunctionDispatcher::AddResponseTarget\(ExtensionFunction\*\ func\)\ \{\
+
+      \ \ response_targets_\.insert\(func\);\
+
+      \}\
+
+      \
+
+      void\ ExtensionFunctionDispatcher::ProcessResponseAck\(\
+
+      \ \ \ \ const\ base::Uuid\&\ request_uuid\)\ \{\
+
+      \ \ auto\ iter\ =\ std::ranges::find_if\(\
+
+      \ \ \ \ \ \ response_targets_,\ \[request_uuid\]\(ExtensionFunction\*\ function\)\ \{\
+
+      \ \ \ \ \ \ \ \ return\ function\->request_uuid\(\)\ ==\ request_uuid;\
+
+      '
+    replace: "}\n\nvoid ExtensionFunctionDispatcher::AddResponseTarget(ExtensionFunction* func) {\n#if BUILDFLAG(IS_ANDROID)\n  auto it = response_targets_.find(func->request_uuid());\n  if (it != response_targets_.end()) {\n    CHECK_EQ(it->second->function(), func);\n    return;\n  }\n  response_targets_.emplace(\n      func->request_uuid(),\n      std::make_unique<ResponseTarget>(func, weak_ptr_factory_.GetWeakPtr()));\n#else\n  response_targets_.insert(func);\n#endif\n}\n\n#if BUILDFLAG(IS_ANDROID)\nvoid ExtensionFunctionDispatcher::RemoveResponseTarget(\n    ExtensionFunction* func) {\n  auto it = response_targets_.find(func->request_uuid());\n  if (it == response_targets_.end() || it->second->function() != func) {\n    return;\n  }\n  // Remove the map entry before observer/function destruction can reenter.\n  auto target = response_targets_.extract(it);\n  target.mapped().reset();\n}\n#endif\n\nvoid ExtensionFunctionDispatcher::ProcessResponseAck(\n    const base::Uuid& request_uuid) {\n#if BUILDFLAG(IS_ANDROID)\n  auto target = response_targets_.extract(request_uuid);\n  if (target.empty()) {\n    return;\n  }\n  // The local owner keeps the function alive across the callback.\n  target.mapped()->function()->OnResponseAck();\n#else\n  auto iter = std::ranges::find_if(\n      response_targets_, [request_uuid](ExtensionFunction* function) {\n        return function->request_uuid() == request_uuid;\n"
+- description: Balance Android page-capture response ownership (4).
+  regex:
+    re_pattern: '\ \ //\ referencing\ it\ after\ this!\
+
+      \ \ \(\*iter\)\->OnResponseAck\(\);\
+
+      \ \ response_targets_\.erase\(iter\);\
+
+      \}\
+
+      \
+
+      scoped_refptr<ExtensionFunction>\
+
+      '
+    replace: "  // referencing it after this!\n  (*iter)->OnResponseAck();\n  response_targets_.erase(iter);\n#endif\n}\n\nscoped_refptr<ExtensionFunction>\n"

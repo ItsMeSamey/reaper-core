@@ -1,0 +1,994 @@
+# Copyright (c) 2026 The Brave Authors. All rights reserved.
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this file,
+# You can obtain one at https://mozilla.org/MPL/2.0/.
+
+substitutions:
+  - description: Destroy a single task feature through the existing removal lifecycle.
+    regex:
+      re_pattern: |2-
+            @Override
+            public void removeAllFeaturesForActivity\(ActivityWindowAndroid activityWindowAndroid\) \{
+      replace: |2-
+            @Override
+            public void removeFeature(ChromeAndroidTaskFeatureKey featureKey) {
+                ThreadUtils.assertOnUiThread();
+                removeFeaturesIf(featureKey::equals);
+            }
+
+            @Override
+            public void removeAllFeaturesForActivity(ActivityWindowAndroid activityWindowAndroid) {
+  - description: Allow feature recreation while a live task has a pending window state update.
+    regex:
+      re_pattern: |2-
+                    ChromeAndroidTaskFeatureKey featureKey, Supplier<@Nullable T> featureSupplier\) \{
+                ThreadUtils\.assertOnUiThread\(\);
+                assertPendingCreateOrIdle\(\);
+      replace: |2-
+                    ChromeAndroidTaskFeatureKey featureKey, Supplier<@Nullable T> featureSupplier) {
+                ThreadUtils.assertOnUiThread();
+                // Profile-scoped UI can be recreated while the OS completes a window state update.
+                assert mState == State.PENDING_CREATE
+                                || mState == State.IDLE
+                                || mState == State.PENDING_UPDATE
+                        : "This Task is not pending or alive.";
+  - description: "Support initialized phone task deactivation using the existing asynchronous focus path"
+    regex:
+      re_pattern: "\\ \\ \\ \\ @Override\\\n\\ \\ \\ \\ public\\ void\\ deactivate\\(\\)\\ \\{\\\n\\ \\ \\ \\ \\ \\ \\ \\ ThreadUtils\\.assertOnUiThread\\(\\);\\\n\\ \\ \\ \\ \\ \\ \\ \\ if\\ \\(Boolean\\.FALSE\\.equals\\(mPendingActionManager\\.isActiveFuture\\(mState\\)\\)\\)\\ return;\\\n\\\n\\ \\ \\ \\ \\ \\ \\ \\ if\\ \\(mState\\ ==\\ State\\.PENDING_CREATE\\)\\ \\{\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ mPendingActionManager\\.requestAction\\(PendingAction\\.DEACTIVATE\\);\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ return;\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\}\\\n\\\n\\ \\ \\ \\ \\ \\ \\ \\ useActivity\\(\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ topActivityScopedObjects\\ \\->\\ \\{\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ if\\ \\(!AppHeaderUtils\\.isAppInDesktopWindow\\(\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ topActivityScopedObjects\\.mDesktopWindowStateManager\\)\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\|\\|\\ !isActiveInternal\\(topActivityScopedObjects\\)\\)\\ \\{\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ return;\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\}\\\n\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ //\\ Do\\ nothing\\ if\\ there\\ is\\ only\\ one\\ task\\ left\\.\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ if\\ \\(ChromeAndroidTaskTrackerImpl\\.getInstance\\(\\)\\.countOfTasks\\(\\)\\ <=\\ 1\\)\\ \\{\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ return;\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\}\\\n\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ mPendingActionManager\\.requestAction\\(PendingAction\\.DEACTIVATE\\);\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ mState\\ =\\ State\\.PENDING_UPDATE;\\\n\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ ChromeAndroidTaskTrackerImpl\\.getInstance\\(\\)\\.activatePenultimatelyActivatedTask\\(\\);\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\}\\);\\\n\\ \\ \\ \\ \\}\\\n\\\n"
+      replace: "    @Override\n    public void deactivate() {\n        ThreadUtils.assertOnUiThread();\n        if (Boolean.FALSE.equals(mPendingActionManager.isActiveFuture(mState))) return;\n\n        if (mState == State.PENDING_CREATE) {\n            mPendingActionManager.requestAction(PendingAction.DEACTIVATE);\n            return;\n        }\n\n        useActivity(\n                topActivityScopedObjects -> {\n                    if (!isActiveInternal(topActivityScopedObjects)) {\n                        return;\n                    }\n\n                    // Do nothing if there is only one task left.\n                    if (ChromeAndroidTaskTrackerImpl.getInstance().countOfTasks() <= 1) {\n                        return;\n                    }\n\n                    mPendingActionManager.requestAction(PendingAction.DEACTIVATE);\n                    mState = State.PENDING_UPDATE;\n\n                    ChromeAndroidTaskTrackerImpl.getInstance().activatePenultimatelyActivatedTask();\n                });\n    }\n\n"
+  - description: "Reuse a caller-excluding live alternate and existing pending focus path for phone ShowInactive"
+    regex:
+      re_pattern: "\\ \\ \\ \\ \\ \\ \\ \\ useActivity\\(\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ topActivityScopedObjects\\ \\->\\ \\{\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ if\\ \\(!AppHeaderUtils\\.isAppInDesktopWindow\\(\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ topActivityScopedObjects\\.mDesktopWindowStateManager\\)\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\|\\|\\ !isActiveInternal\\(topActivityScopedObjects\\)\\)\\ \\{\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ return;\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\}\\\n\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ //\\ Do\\ nothing\\ is\\ there\\ is\\ only\\ one\\ task\\ left\\.\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ if\\ \\(ChromeAndroidTaskTrackerImpl\\.getInstance\\(\\)\\.countOfTasks\\(\\)\\ <=\\ 1\\)\\ \\{\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ return;\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\}\\\n\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ mPendingActionManager\\.requestAction\\(PendingAction\\.SHOW_INACTIVE\\);\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ mState\\ =\\ State\\.PENDING_UPDATE;\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ ChromeAndroidTaskTrackerImpl\\.getInstance\\(\\)\\.activatePenultimatelyActivatedTask\\(\\);\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\}\\);\\\n\\ \\ \\ \\ \\}\\\n\\\n"
+      replace: "        requestInactive(PendingAction.SHOW_INACTIVE);\n    }\n\n    private void requestInactive(@PendingAction int action) {\n        useActivity(\n                topActivityScopedObjects -> {\n                    if (!isActiveInternal(topActivityScopedObjects)) return;\n\n                    // The creation callback can run before this task is registered in the tracker.\n                    var taskToActivate =\n                            ChromeAndroidTaskTrackerImpl.getInstance()\n                                    .getMostRecentlyActivatedTaskOtherThan(this);\n                    if (taskToActivate == null) return;\n\n                    mPendingActionManager.requestAction(action);\n                    mState = State.PENDING_UPDATE;\n                    taskToActivate.activate();\n                });\n    }\n\n"
+  - description: "Keep action-specific prediction and live alternate selection for queued Deactivate"
+    regex:
+      re_pattern: "\\ \\ \\ \\ \\ \\ \\ \\ useActivity\\(\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ topActivityScopedObjects\\ \\->\\ \\{\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ if\\ \\(!isActiveInternal\\(topActivityScopedObjects\\)\\)\\ \\{\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ return;\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\}\\\n\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ //\\ Do\\ nothing\\ if\\ there\\ is\\ only\\ one\\ task\\ left\\.\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ if\\ \\(ChromeAndroidTaskTrackerImpl\\.getInstance\\(\\)\\.countOfTasks\\(\\)\\ <=\\ 1\\)\\ \\{\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ return;\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\}\\\n\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ mPendingActionManager\\.requestAction\\(PendingAction\\.DEACTIVATE\\);\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ mState\\ =\\ State\\.PENDING_UPDATE;\\\n\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ ChromeAndroidTaskTrackerImpl\\.getInstance\\(\\)\\.activatePenultimatelyActivatedTask\\(\\);\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\}\\);\\\n\\ \\ \\ \\ \\}\\\n\\\n"
+      replace: "        requestInactive(PendingAction.DEACTIVATE);\n    }\n\n"
+  - description: "Dispatch cleared queued secondary focus actions through their predictive public methods"
+    regex:
+      re_pattern: "\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ case\\ PendingAction\\.SHOW_INACTIVE:\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ case\\ PendingAction\\.DEACTIVATE:\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ ChromeAndroidTaskTrackerImpl\\.getInstance\\(\\)\\.activatePenultimatelyActivatedTask\\(\\);\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ break;\\\n"
+      replace: "                case PendingAction.SHOW_INACTIVE:\n                    showInactive();\n                    break;\n                case PendingAction.DEACTIVATE:\n                    deactivate();\n                    break;\n"
+
+  - description: Owned Android window/auth/options/fullscreen and fixture routing final integration (1)
+    regex:
+      re_pattern: 'import\ java\.util\.Iterator;\
+
+        import\ java\.util\.LinkedHashMap;\
+
+        import\ java\.util\.List;\
+
+        import\ java\.util\.Map;\
+
+        import\ java\.util\.function\.Predicate;\
+
+        import\ java\.util\.function\.Supplier;\
+
+        \
+
+        /\*\*\ Implements\ \{@link\ ChromeAndroidTask\}\.\ \*/\
+
+        '
+      replace: 'import java.util.Iterator;
+
+        import java.util.LinkedHashMap;
+
+        import java.util.List;
+
+        import java.util.Map;
+
+        import java.util.function.Consumer;
+
+        import java.util.function.Predicate;
+
+        import java.util.function.Supplier;
+
+
+        /** Implements {@link ChromeAndroidTask}. */
+
+        '
+  - description: Owned Android window/auth/options/fullscreen and fixture routing final integration (2)
+    regex:
+      re_pattern: '\ \ \ \ \ \ \ \ \ \*\ different\ Profile\.\
+
+        \ \ \ \ \ \ \ \ \ \*/\
+
+        \ \ \ \ \ \ \ \ final\ Map<Profile,\ AndroidBrowserWindow>\ mAndroidBrowserWindows\ =\ new\ ArrayMap<>\(\);\
+
+        \ \ \ \ \ \ \ \ @Nullable\ IncognitoTabModelObserver\ mIncognitoTabModelObserver;\
+
+        \
+
+        \ \ \ \ \ \ \ \ InternalActivityScopedObjects\(\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ ActivityScopedObjects\ activityScopedObjects,\ AndroidBrowserWindow\ browserWindow\)\
+        \{\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ assert\ activityScopedObjects\.mActivityWindowAndroid\
+
+        '
+      replace: "         * different Profile.\n         */\n        final Map<Profile, AndroidBrowserWindow> mAndroidBrowserWindows\
+        \ = new ArrayMap<>();\n        @Nullable IncognitoTabModelObserver mIncognitoTabModelObserver;\n        final Map<Class<?\
+        \ extends ChromeAndroidTaskFeature>,\n                        Supplier<@Nullable ChromeAndroidTaskFeature>>\n      \
+        \          mTabModelScopedFeatureFactories = new ArrayMap<>();\n\n        InternalActivityScopedObjects(\n         \
+        \       ActivityScopedObjects activityScopedObjects, AndroidBrowserWindow browserWindow) {\n            assert activityScopedObjects.mActivityWindowAndroid\n"
+  - description: Owned Android window/auth/options/fullscreen and fixture routing final integration (3)
+    regex:
+      re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ /\*\ incognito=\ \*/\ true\);\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ mIncognitoTabModelObserver\ =\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ new\ IncognitoTabModelObserverImpl\(chromeAndroidTaskImpl,\ this\);\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ incognitoModel\.addIncognitoObserver\(mIncognitoTabModelObserver\);\
+
+        \ \ \ \ \ \ \ \ \}\
+
+        \
+
+        \ \ \ \ \ \ \ \ void\ removeIncognitoTabModelObserver\(\)\ \{\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ if\ \(mIncognitoTabModelObserver\ !=\ null\)\ \{\
+
+        '
+      replace: "                                    /* incognito= */ true);\n            mIncognitoTabModelObserver =\n    \
+        \                new IncognitoTabModelObserverImpl(chromeAndroidTaskImpl, this);\n            incognitoModel.addIncognitoObserver(mIncognitoTabModelObserver);\n\
+        \            // Observer registration does not replay creation. A restored, noncurrent\n            // incognito delegate\
+        \ can already exist before this task is initialized.\n            var profile = incognitoModel.getProfile();\n     \
+        \       if (profile != null && !mAndroidBrowserWindows.containsKey(profile)) {\n                mIncognitoTabModelObserver.onIncognitoModelCreated();\n\
+        \            }\n        }\n\n        void removeIncognitoTabModelObserver() {\n            if (mIncognitoTabModelObserver\
+        \ != null) {\n"
+  - description: Owned Android window/auth/options/fullscreen and fixture routing final integration (4)
+    regex:
+      re_pattern: '\ \ \ \ //\ TabModelSelector\ to\ determine\ the\ profile\.\
+
+        \ \ \ \ private\ final\ Profile\ mInitialProfile;\
+
+        \
+
+        \ \ \ \ private\ final\ WindowStateManager\ mWindowStateManager\ =\ new\ WindowStateManager\(\);\
+
+        \
+
+        \ \ \ \ /\*\*\
+
+        \ \ \ \ \ \*\ Contains\ all\ \{@link\ ChromeAndroidTaskFeature\}s\ associated\ with\ this\ \{@link\
+
+        \ \ \ \ \ \*\ ChromeAndroidTask\}\.\
+
+        '
+      replace: "    // TabModelSelector to determine the profile.\n    private final Profile mInitialProfile;\n\n    private\
+        \ final WindowStateManager mWindowStateManager = new WindowStateManager();\n    private boolean mBrowserFullscreenRequested;\n\
+        \    private String mBrowserFullscreenExtensionUrl = \"\";\n    private String mBrowserFullscreenExtensionName = \"\"\
+        ;\n    private @Nullable BrowserFullscreenDelegate mFullscreenDelegate;\n    private @Nullable Callback<Boolean> mBrowserFullscreenCallback;\n\
+        \n    /**\n     * Contains all {@link ChromeAndroidTaskFeature}s associated with this {@link\n     * ChromeAndroidTask}.\n"
+  - description: Owned Android window/auth/options/fullscreen and fixture routing final integration (5)
+    regex:
+      re_pattern: '\ \ \ \ \ \*\ When\ the\ Task\ is\ PENDING,\ this\ variable\ is\ used\ to\ store\ the\ associated\ \{@link\
+
+        \ \ \ \ \ \*\ AndroidBrowserWindow\}\.\
+
+        \ \ \ \ \ \*/\
+
+        \ \ \ \ @Nullable\ private\ AndroidBrowserWindow\ mPendingBrowserWindow;\
+
+        \
+
+        \ \ \ \ /\*\*\
+
+        \ \ \ \ \ \*\ All\ \{@link\ InternalActivityScopedObjects\}\ instances\ associated\ with\ this\ Task\.\
+
+        \ \ \ \ \ \*\
+
+        '
+      replace: "     * When the Task is PENDING, this variable is used to store the associated {@link\n     * AndroidBrowserWindow}.\n\
+        \     */\n    @Nullable private AndroidBrowserWindow mPendingBrowserWindow;\n\n    // Retire the exact pending tracker\
+        \ entry before any disposal or completion\n    // callback can reenter window creation.\n    private @Nullable Consumer<Boolean>\
+        \ mPendingTaskRemovalCallback;\n    private @Nullable Runnable mTransferredTabCleanup;\n\n    /**\n     * All {@link\
+        \ InternalActivityScopedObjects} instances associated with this Task.\n     *\n"
+  - description: Owned Android window/auth/options/fullscreen and fixture routing final integration (6)
+    regex:
+      re_pattern: '\ \ \ \ \ \*/\
+
+        \ \ \ \ private\ final\ Deque<InternalActivityScopedObjects>\ mActivityScopedObjectsDeque\ =\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ new\ ArrayDeque<>\(\);\
+
+        \
+
+        \ \ \ \ /\*\*\
+
+        \ \ \ \ \ \*\ Observer\ for\ profile\ removal\.\ This\ is\ attached\ to\ the\ \{@link\ ProfileManager\}\ in\ the\
+
+        \ \ \ \ \ \*\ constructor\ and\ is\ removed\ when\ the\ \{@link\ ChromeAndroidTask\}\ is\ destroyed\.\
+
+        \ \ \ \ \ \*/\
+
+        '
+      replace: "     */\n    private final Deque<InternalActivityScopedObjects> mActivityScopedObjectsDeque =\n            new\
+        \ ArrayDeque<>();\n\n    // Invalidates listener continuations after any nested registration or retirement.\n    private\
+        \ long mActivityListenerRegistrationGeneration;\n\n    /**\n     * Observer for profile removal. This is attached to\
+        \ the {@link ProfileManager} in the\n     * constructor and is removed when the {@link ChromeAndroidTask} is destroyed.\n\
+        \     */\n"
+  - description: Owned Android window/auth/options/fullscreen and fixture routing final integration (7)
+    regex:
+      re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ public\ void\ onProfileAdded\(Profile\ profile\)\ \{\}\
+
+        \
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ @Override\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ public\ void\ onProfileDestroyed\(Profile\ profile\)\ \{\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ if\ \(mPendingBrowserWindow\ !=\ null\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \&\&\ mPendingBrowserWindow\.getProfile\(\)\ ==\ profile\)\
+        \{\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ throw\ new\ IllegalStateException\(\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ "Profile\ destroyed\ when\ an\ associated\ browser\
+        window\ is\ pending"\);\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+        \
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ removeAllFeaturesForProfile\(profile\);\
+
+        \
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ var\ iterator\ =\ mActivityScopedObjectsDeque\.iterator\(\);\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ while\ \(iterator\.hasNext\(\)\)\ \{\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ var\ internalActivityScopedObjects\ =\ iterator\.next\(\);\
+
+        '
+      replace: "                public void onProfileAdded(Profile profile) {}\n\n                @Override\n              \
+        \  public void onProfileDestroyed(Profile profile) {\n                    if (mPendingTaskInfo != null\n           \
+        \                 && mPendingTaskInfo.mCreateParams.getProfile() == profile) {\n                        destroy();\n\
+        \                        return;\n                    }\n\n                    removeAllFeaturesForProfile(profile);\n\
+        \                    if (profile == mInitialProfile) cleanupTransferredTab();\n\n                    var iterator =\
+        \ mActivityScopedObjectsDeque.iterator();\n                    while (iterator.hasNext()) {\n                      \
+        \  var internalActivityScopedObjects = iterator.next();\n"
+  - description: Owned Android window/auth/options/fullscreen and fixture routing final integration (8)
+    regex:
+      re_pattern: '\ \ \ \ \ \ \ \ \}\
+
+        \
+
+        \ \ \ \ \ \ \ \ @Override\
+
+        \ \ \ \ \ \ \ \ public\ void\ onIncognitoModelCreated\(\)\ \{\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ var\ incognitoModel\ =\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mInternalActivityScopedObjects\.mActivityScopedObjects\.mTabModelSelector\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \.getModel\(/\*\ incognito=\ \*/\ true\);\
+
+        \
+
+        \ \ \ \ \ \ \ \ \ \ \ \ var\ incognitoProfile\ =\ incognitoModel\.getProfile\(\);\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ assert\ incognitoProfile\ !=\ null\ :\ "Incognito\ profile\ should\ not\ be\ null\.";\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ assert\ mInternalActivityScopedObjects\.mAndroidBrowserWindows\.get\(incognitoProfile\)\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ ==\ null\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ :\ "Incognito\ TabModel\ created,\ but\ its\ Activity\ already\ has\ the"\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \+\ "\ incognito\ Profile";\
+
+        \
+
+        \ \ \ \ \ \ \ \ \ \ \ \ var\ browserWindow\ =\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ new\ AndroidBrowserWindow\(\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mChromeAndroidTaskImpl,\
+
+        '
+      replace: "        }\n\n        @Override\n        public void onIncognitoModelCreated() {\n            if (!mChromeAndroidTaskImpl.ownsActivity(mInternalActivityScopedObjects))\
+        \ {\n                return;\n            }\n            var incognitoModel =\n                    mInternalActivityScopedObjects.mActivityScopedObjects.mTabModelSelector\n\
+        \                            .getModel(/* incognito= */ true);\n\n            var incognitoProfile = incognitoModel.getProfile();\n\
+        \            if (incognitoProfile == null\n                    || incognitoProfile.getNativeBrowserContextPointer()\
+        \ == 0\n                    || mInternalActivityScopedObjects.mAndroidBrowserWindows.containsKey(\n                \
+        \            incognitoProfile)) {\n                return;\n            }\n\n            var browserWindow =\n     \
+        \               new AndroidBrowserWindow(\n                            mChromeAndroidTaskImpl,\n"
+  - description: Owned Android window/auth/options/fullscreen and fixture routing final integration (9)
+    regex:
+      re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \.mActivityWindowAndroid\);\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ mInternalActivityScopedObjects\.addBrowserWindow\(browserWindow\);\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ long\ ptr\ =\ browserWindow\.getOrCreateNativePtr\(\);\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ incognitoModel\.associateWithBrowserWindow\(ptr\);\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ mChromeAndroidTaskImpl\.mAndroidBrowserWindowObserverNotifier\.notifyBrowserWindowAdded\(\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ browserWindow\);\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ mChromeAndroidTaskImpl\.mAndroidBrowserWindowObserverNotifier\.updateActiveBrowserWindow\(\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mChromeAndroidTaskImpl\.getActiveBrowserWindow\(\)\);\
+
+        \ \ \ \ \ \ \ \ \}\
+
+        \
+
+        \ \ \ \ \ \ \ \ @Override\
+
+        \ \ \ \ \ \ \ \ public\ void\ didBecomeEmpty\(\)\ \{\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ //\ It\ is\ possible\ that\ the\ profile\ will\ start\ destruction\ shortly\ after\ this\ happens\.\
+        In\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ //\ this\ case,\ the\ ProfileObserver\ will\ also\ handle\ the\ BrowserWindow\ destruction\
+        \(in\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ //\ addition\ to\ profile\ scoped\ feature\ and\ pending\ activity\ cleanup\)\.\ However,\ if\
+        at\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ //\ least\ one\ other\ IncognitoTabModel\ is\ non\-empty,\ the\ OTR\ profile\ will\ remain\
+        valid\.\
+
+        '
+      replace: "                                    .mActivityWindowAndroid);\n            mInternalActivityScopedObjects.addBrowserWindow(browserWindow);\n\
+        \            long ptr = browserWindow.getOrCreateNativePtr();\n            incognitoModel.associateWithBrowserWindow(ptr);\n\
+        \            mChromeAndroidTaskImpl.addTabModelScopedFeatures(\n                    mInternalActivityScopedObjects,\
+        \ incognitoModel);\n            mChromeAndroidTaskImpl.mAndroidBrowserWindowObserverNotifier.notifyBrowserWindowAdded(\n\
+        \                    browserWindow);\n            mChromeAndroidTaskImpl.mAndroidBrowserWindowObserverNotifier.updateActiveBrowserWindow(\n\
+        \                    mChromeAndroidTaskImpl.getActiveBrowserWindow());\n        }\n\n        @Override\n        public\
+        \ void didBecomeEmpty() {\n            if (!mChromeAndroidTaskImpl.ownsActivity(mInternalActivityScopedObjects)) {\n\
+        \                return;\n            }\n            // It is possible that the profile will start destruction shortly\
+        \ after this happens. In\n            // this case, the ProfileObserver will also handle the BrowserWindow destruction\
+        \ (in\n            // addition to profile scoped feature and pending activity cleanup). However, if at\n           \
+        \ // least one other IncognitoTabModel is non-empty, the OTR profile will remain valid.\n"
+  - description: Owned Android window/auth/options/fullscreen and fixture routing final integration (10)
+    regex:
+      re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ List<WindowInsetsAnimationCompat>\ list\)\ \{\}\
+
+        \
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ @Override\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ public\ void\ onEnd\(WindowInsetsAnimationCompat\ animation\)\ \{\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ useActivity\(\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ topActivityScopedObjects\ \->\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mWindowStateManager\.update\(\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ topActivityScopedObjects\.mActivity,\
+
+        '
+      replace: "                        List<WindowInsetsAnimationCompat> list) {}\n\n                @Override\n          \
+        \      public void onEnd(WindowInsetsAnimationCompat animation) {\n                    if (mFullscreenDelegate != null)\
+        \ mFullscreenDelegate.onWindowInsetsChanged();\n                    useActivity(\n                            topActivityScopedObjects\
+        \ ->\n                                    mWindowStateManager.update(\n                                            topActivityScopedObjects.mActivity,\n"
+  - description: Owned Android window/auth/options/fullscreen and fixture routing final integration (11)
+    regex:
+      re_pattern: '\
+
+        \ \ \ \ \ \ \ \ ProfileManager\.addObserver\(mProfileObserver\);\
+
+        \
+
+        \ \ \ \ \ \ \ \ mState\ =\ State\.PENDING_CREATE;\
+
+        \ \ \ \ \ \ \ \ mPendingActionManager\.updateFutureStates\(mPendingTaskInfo\);\
+
+        \ \ \ \ \}\
+
+        \
+
+        \ \ \ \ @Override\
+
+        '
+      replace: "\n        ProfileManager.addObserver(mProfileObserver);\n\n        mState = State.PENDING_CREATE;\n        String\
+        \ fullscreenExtensionUrl = pendingTaskInfo.mCreateParams.getFullscreenExtensionUrl();\n        mBrowserFullscreenExtensionUrl\
+        \ =\n                fullscreenExtensionUrl == null ? \"\" : fullscreenExtensionUrl;\n        String fullscreenExtensionName\
+        \ = pendingTaskInfo.mCreateParams.getFullscreenExtensionName();\n        mBrowserFullscreenExtensionName =\n       \
+        \         fullscreenExtensionName == null ? \"\" : fullscreenExtensionName;\n        mPendingActionManager.updateFutureStates(mPendingTaskInfo);\n\
+        \    }\n\n    @Override\n"
+  - description: Owned Android window/auth/options/fullscreen and fixture routing final integration (12)
+    regex:
+      re_pattern: '\ \ \ \ \ \*\ @param\ activityScopedObjects\ The\ \{@link\ ActivityScopedObjects\}\ to\ be\ associated\ with\
+        this\
+
+        \ \ \ \ \ \*\ \ \ \ \ \{@link\ ChromeAndroidTask\}\.\
+
+        \ \ \ \ \ \*\ @see\ \#removeActivityScopedObjects\
+
+        \ \ \ \ \ \*/\
+
+        \ \ \ \ void\ addActivityScopedObjects\(ActivityScopedObjects\ activityScopedObjects\)\ \{\
+
+        \ \ \ \ \ \ \ \ ThreadUtils\.assertOnUiThread\(\);\
+
+        \ \ \ \ \ \ \ \ addActivityScopedObjectsInternal\(activityScopedObjects\);\
+
+        \ \ \ \ \}\
+
+        '
+      replace: "     * @param activityScopedObjects The {@link ActivityScopedObjects} to be associated with this\n     *   \
+        \  {@link ChromeAndroidTask}.\n     * @see #removeActivityScopedObjects\n     */\n    void setPendingTaskRemovalCallback(Consumer<Boolean>\
+        \ callback) {\n        assert mPendingTaskInfo != null && mPendingTaskRemovalCallback == null;\n        mPendingTaskRemovalCallback\
+        \ = callback;\n    }\n\n    void setTransferredTabCleanup(Runnable cleanup) {\n        assert mTransferredTabCleanup\
+        \ == null;\n        mTransferredTabCleanup = cleanup;\n    }\n\n    private void cleanupTransferredTab() {\n       \
+        \ var cleanup = mTransferredTabCleanup;\n        mTransferredTabCleanup = null;\n        if (cleanup != null) cleanup.run();\n\
+        \    }\n\n    void addActivityScopedObjects(ActivityScopedObjects activityScopedObjects) {\n        ThreadUtils.assertOnUiThread();\n\
+        \        addActivityScopedObjectsInternal(activityScopedObjects);\n    }\n"
+  - description: Owned Android window/auth/options/fullscreen and fixture routing final integration (13)
+    regex:
+      re_pattern: '\ \ \ \ \ \ \ \ //\ IDLE\ state\ \(when\ we\ have\ a\ real\ Task\ and\ an\ Activity\)\.\
+
+        \ \ \ \ \ \ \ \ mId\ =\ getTaskId\(topActivityScopedObjects\.mActivity\);\
+
+        \ \ \ \ \ \ \ \ mState\ =\ State\.IDLE;\
+
+        \
+
+        \ \ \ \ \ \ \ \ //\ \(3\)\ Dispatch\ pending\ actions\.\
+
+        \ \ \ \ \ \ \ \ @Nullable\ Rect\ futureBounds\ =\ mPendingActionManager\.getFutureBoundsInDp\(\);\
+
+        \ \ \ \ \ \ \ \ @Nullable\ Rect\ futureRestoredBounds\ =\ mPendingActionManager\.getFutureRestoredBoundsInDp\(\);\
+
+        \ \ \ \ \ \ \ \ dispatchPendingActions\(topActivityScopedObjects,\ futureBounds,\ futureRestoredBounds\);\
+
+        \
+
+        \ \ \ \ \ \ \ \ //\ \(4\)\ Invoke\ the\ JNI\ callback\ for\ the\ native\ CreateBrowserWindow\(\)\ function\.\
+
+        \ \ \ \ \ \ \ \ JniOnceCallback<Long>\ taskCreationCallbackForNative\ =\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mPendingTaskInfo\.mTaskCreationCallbackForNative;\
+
+        \ \ \ \ \ \ \ \ if\ \(taskCreationCallbackForNative\ !=\ null\)\ \{\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ assert\ mActivityScopedObjectsDeque\.size\(\)\ ==\ 1\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ :\ "\#completePendingCreate\(\)\ called\ in\ an\ invalid\ state";\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ var\ internalActivityScopedObjects\ =\ mActivityScopedObjectsDeque\.peekFirst\(\);\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ var\ browserWindow\ =\ internalActivityScopedObjects\.getBrowserWindowForCurrentProfile\(\);\
+
+        \
+
+        \ \ \ \ \ \ \ \ \ \ \ \ taskCreationCallbackForNative\.onResult\(browserWindow\.getOrCreateNativePtr\(\)\);\
+
+        \ \ \ \ \ \ \ \ \}\
+
+        \ \ \ \ \ \ \ \ mPendingTaskInfo\ =\ null;\
+
+        \ \ \ \ \}\
+
+        \
+
+        \ \ \ \ @Override\
+
+        \ \ \ \ public\ @Nullable\ ActivityWindowAndroid\ getTopActivityWindowAndroid\(\)\ \{\
+
+        '
+      replace: "        // IDLE state (when we have a real Task and an Activity).\n        mId = getTaskId(topActivityScopedObjects.mActivity);\n\
+        \        mState = State.IDLE;\n\n        // Consume callback ownership before actions or native completion can\n   \
+        \     // destroy this task synchronously.\n        var pendingTaskInfo = mPendingTaskInfo;\n        mPendingTaskInfo\
+        \ = null;\n        var removePendingTask = mPendingTaskRemovalCallback;\n        mPendingTaskRemovalCallback = null;\n\
+        \        var taskCreationCallbackForNative = pendingTaskInfo.takeTaskCreationCallbackForNative();\n        // Keep the\
+        \ request discoverable until model association has completed,\n        // then retire it before externally observable\
+        \ actions or completion.\n        if (removePendingTask != null) removePendingTask.accept(false);\n\n        // (3)\
+        \ Dispatch pending actions.\n        @Nullable Rect futureBounds = mPendingActionManager.getFutureBoundsInDp();\n  \
+        \      @Nullable Rect futureRestoredBounds = mPendingActionManager.getFutureRestoredBoundsInDp();\n        dispatchPendingActions(topActivityScopedObjects,\
+        \ futureBounds, futureRestoredBounds);\n\n        // (4) Invoke the JNI callback for the native CreateBrowserWindow()\
+        \ function.\n        if (taskCreationCallbackForNative != null) {\n            if (isDestroyed() || mInitialProfile.shutdownStarted())\
+        \ {\n                taskCreationCallbackForNative.onResult(0L);\n                return;\n            }\n         \
+        \   assert mActivityScopedObjectsDeque.size() == 1\n                    : \"#completePendingCreate() called in an invalid\
+        \ state\";\n            var internalActivityScopedObjects = mActivityScopedObjectsDeque.peekFirst();\n            var\
+        \ browserWindow = internalActivityScopedObjects.getBrowserWindowForCurrentProfile();\n\n            taskCreationCallbackForNative.onResult(browserWindow.getOrCreateNativePtr());\n\
+        \        }\n    }\n\n    @Override\n    public @Nullable ActivityWindowAndroid getTopActivityWindowAndroid() {\n"
+  - description: Owned Android window/auth/options/fullscreen and fixture routing final integration (14)
+    regex:
+      re_pattern: '\ \ \ \ \ \ \ \ return\ feature;\
+
+        \ \ \ \ \}\
+
+        \
+
+        \ \ \ \ @Override\
+
+        \ \ \ \ public\ void\ removeFeature\(ChromeAndroidTaskFeatureKey\ featureKey\)\ \{\
+
+        \ \ \ \ \ \ \ \ ThreadUtils\.assertOnUiThread\(\);\
+
+        \ \ \ \ \ \ \ \ removeFeaturesIf\(featureKey::equals\);\
+
+        \ \ \ \ \}\
+
+        '
+      replace: "        return feature;\n    }\n\n    @Override\n    public void addTabModelScopedFeatureFactory(\n        \
+        \    ActivityWindowAndroid activityWindowAndroid,\n            Class<? extends ChromeAndroidTaskFeature> featureClass,\n\
+        \            Supplier<@Nullable ChromeAndroidTaskFeature> featureSupplier) {\n        ThreadUtils.assertOnUiThread();\n\
+        \        var objects = findInternalActivityScopedObjects(activityWindowAndroid);\n        if (objects == null || !ownsActivity(objects))\
+        \ {\n            return;\n        }\n        objects.mTabModelScopedFeatureFactories.putIfAbsent(featureClass, featureSupplier);\n\
+        \        // Enumerate only windows already owned by this activity. In particular, asking for\n        // extension metadata\
+        \ cannot initialize an absent incognito profile or window.\n        for (var profile : objects.mAndroidBrowserWindows.keySet())\
+        \ {\n            var model = objects.mActivityScopedObjects.mTabModelSelector.getModel(\n                    profile.isOffTheRecord());\n\
+        \            if (model != null && model.getProfile() == profile) {\n                addTabModelScopedFeatures(objects,\
+        \ model);\n            }\n        }\n        notifyFeatureFocus(isActive(), true);\n    }\n\n    private boolean ownsActivity(InternalActivityScopedObjects\
+        \ objects) {\n        return (mState == State.IDLE || mState == State.PENDING_UPDATE\n                        || mState\
+        \ == State.PENDING_CREATE)\n                && mActivityScopedObjectsDeque.contains(objects);\n    }\n\n    private\
+        \ void addTabModelScopedFeatures(InternalActivityScopedObjects objects, TabModel model) {\n        if (!ownsActivity(objects))\
+        \ return;\n        var profile = model.getProfile();\n        var window = objects.mAndroidBrowserWindows.get(profile);\n\
+        \        if (profile == null || window == null || window.getNativePtr() == 0) return;\n        for (var entry : objects.mTabModelScopedFeatureFactories.entrySet())\
+        \ {\n            addFeature(new ChromeAndroidTaskFeatureKey(entry.getKey(), profile,\n                            objects.mActivityScopedObjects.mActivityWindowAndroid,\
+        \ model),\n                    entry.getValue());\n        }\n    }\n\n    @Override\n    public void removeFeature(ChromeAndroidTaskFeatureKey\
+        \ featureKey) {\n        ThreadUtils.assertOnUiThread();\n        removeFeaturesIf(featureKey::equals);\n    }\n"
+  - description: Owned Android window/auth/options/fullscreen and fixture routing final integration (15)
+    regex:
+      re_pattern: '\ \ \ \ \ \ \ \ //\ won''t\ become\ "DESTROYED"\ until\ after\ Feature\#onFeatureRemoved\(\),\ we\ need\
+        the\ "DESTROYING"\
+
+        \ \ \ \ \ \ \ \ //\ state\ to\ prevent\ the\ Feature\ from\ accessing\ the\ Task''s\ APIs\ that\ should\ only\ be\ called\
+
+        \ \ \ \ \ \ \ \ //\ when\ mState\ is\ "ALIVE"\.\
+
+        \ \ \ \ \ \ \ \ mState\ =\ State\.DESTROYING;\
+
+        \
+
+        \ \ \ \ \ \ \ \ if\ \(mPendingTaskInfo\ !=\ null\)\ \{\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ mPendingTaskInfo\.destroy\(\);\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ mPendingTaskInfo\ =\ null;\
+
+        \ \ \ \ \ \ \ \ \}\
+
+        \
+
+        \ \ \ \ \ \ \ \ removeAllFeatures\(\);\
+
+        \ \ \ \ \ \ \ \ ProfileManager\.removeObserver\(mProfileObserver\);\
+
+        \
+
+        \ \ \ \ \ \ \ \ removeAllActivityScopedObjects\(\);\
+
+        \
+
+        \ \ \ \ \ \ \ \ mState\ =\ State\.DESTROYED;\
+
+        \ \ \ \ \}\
+
+        \
+
+        \ \ \ \ /\*\*\
+
+        \ \ \ \ \ \*\ Destroys\ an\ \{@link\ AndroidBrowserWindow\}\ with\ guaranteed\ correctness\ of\ the\ order\ of\ method\
+
+        '
+      replace: "        // won't become \"DESTROYED\" until after Feature#onFeatureRemoved(), we need the \"DESTROYING\"\n \
+        \       // state to prevent the Feature from accessing the Task's APIs that should only be called\n        // when mState\
+        \ is \"ALIVE\".\n        mState = State.DESTROYING;\n        mBrowserFullscreenRequested = false;\n        mBrowserFullscreenExtensionUrl\
+        \ = \"\";\n        mBrowserFullscreenExtensionName = \"\";\n\n        var pendingTaskInfo = mPendingTaskInfo;\n    \
+        \    mPendingTaskInfo = null;\n        JniOnceCallback<Long> callback =\n                pendingTaskInfo == null\n \
+        \                       ? null\n                        : pendingTaskInfo.takeTaskCreationCallbackForNative();\n   \
+        \     var removePendingTask = mPendingTaskRemovalCallback;\n        mPendingTaskRemovalCallback = null;\n        if\
+        \ (removePendingTask != null) removePendingTask.accept(true);\n        if (pendingTaskInfo != null) pendingTaskInfo.destroy();\n\
+        \n        removeAllFeatures();\n        cleanupTransferredTab();\n        ProfileManager.removeObserver(mProfileObserver);\n\
+        \n        removeAllActivityScopedObjects();\n\n        mState = State.DESTROYED;\n        if (callback != null) callback.onResult(0L);\n\
+        \    }\n\n    /**\n     * Destroys an {@link AndroidBrowserWindow} with guaranteed correctness of the order of method\n"
+  - description: Owned Android window/auth/options/fullscreen and fixture routing final integration (16)
+    regex:
+      re_pattern: '\ \ \ \ \ \ \ \ return\ useActivity\(ChromeAndroidTaskImpl::isActiveInternal,\ /\*\ defaultValue=\ \*/\ false\);\
+
+        \ \ \ \ \}\
+
+        \
+
+        \ \ \ \ @Override\
+
+        \ \ \ \ public\ boolean\ isMaximized\(\)\ \{\
+
+        \ \ \ \ \ \ \ \ ThreadUtils\.assertOnUiThread\(\);\
+
+        \ \ \ \ \ \ \ \ if\ \(Build\.VERSION\.SDK_INT\ <\ Build\.VERSION_CODES\.R\)\ \{\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ Log\.w\(TAG,\ "isMaximized\(\)\ requires\ Android\ R\+;\ returning\ a\ false"\);\
+
+        '
+      replace: "        return useActivity(ChromeAndroidTaskImpl::isActiveInternal, /* defaultValue= */ false);\n    }\n\n \
+        \   @Override\n    public boolean isProfileWindowActive(\n            Profile profile, @Nullable ActivityWindowAndroid\
+        \ activityWindowAndroid) {\n        ThreadUtils.assertOnUiThread();\n        var objects = mActivityScopedObjectsDeque.peekFirst();\n\
+        \        if (objects == null || !ownsActivity(objects)\n                || objects.mActivityScopedObjects.mActivityWindowAndroid\
+        \ != activityWindowAndroid\n                || !objects.mAndroidBrowserWindows.containsKey(profile)) {\n           \
+        \ return false;\n        }\n        return objects.mActivityScopedObjects.mTabModelSelector.getCurrentModel().getProfile()\n\
+        \                        == profile\n                && isActive();\n    }\n\n    @Override\n    public boolean isMaximized()\
+        \ {\n        ThreadUtils.assertOnUiThread();\n        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {\n       \
+        \     Log.w(TAG, \"isMaximized() requires Android R+; returning a false\");\n"
+  - description: Owned Android window/auth/options/fullscreen and fixture routing final integration (17)
+    regex:
+      re_pattern: '\ \ \ \ @Override\
+
+        \ \ \ \ public\ boolean\ isFullscreen\(\)\ \{\
+
+        \ \ \ \ \ \ \ \ ThreadUtils\.assertOnUiThread\(\);\
+
+        \ \ \ \ \ \ \ \ if\ \(mState\ ==\ State\.PENDING_CREATE\)\ \{\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ return\ false;\
+
+        \ \ \ \ \ \ \ \ \}\
+
+        \
+
+        \ \ \ \ \ \ \ \ return\ mWindowStateManager\.getWindowState\(\)\ ==\ WindowState\.FULLSCREEN;\
+
+        \ \ \ \ \}\
+
+        \
+
+        \ \ \ \ @Override\
+
+        \ \ \ \ public\ Rect\ getRestoredBoundsInDp\(\)\ \{\
+
+        '
+      replace: "    @Override\n    public boolean isFullscreen() {\n        ThreadUtils.assertOnUiThread();\n        if (mState\
+        \ == State.PENDING_CREATE) {\n            return Boolean.TRUE.equals(mPendingActionManager.getFullscreenRequest());\n\
+        \        }\n        if (mState == State.DESTROYED || mState == State.DESTROYING) return false;\n        if (mFullscreenDelegate\
+        \ != null) {\n            return mFullscreenDelegate.getFullscreenUiModeSupplier().get();\n        }\n        return\
+        \ mWindowStateManager.getWindowState() == WindowState.FULLSCREEN;\n    }\n\n    @Override\n    public void setFullscreen(boolean\
+        \ fullscreen) {\n        setFullscreen(fullscreen, \"\");\n    }\n\n    @Override\n    public void setFullscreen(boolean\
+        \ fullscreen, String extensionUrl) {\n        setFullscreen(fullscreen, extensionUrl, \"\");\n    }\n\n    @Override\n\
+        \    public void setFullscreen(boolean fullscreen, String extensionUrl, String extensionName) {\n        ThreadUtils.assertOnUiThread();\n\
+        \        if (mState == State.DESTROYING || mState == State.DESTROYED || mState == State.UNKNOWN)\n            return;\n\
+        \        mBrowserFullscreenRequested = fullscreen;\n        mBrowserFullscreenExtensionUrl = fullscreen ? extensionUrl\
+        \ : \"\";\n        mBrowserFullscreenExtensionName = fullscreen ? extensionName : \"\";\n        if (mState == State.PENDING_CREATE)\
+        \ {\n            mPendingActionManager.requestFullscreen(fullscreen);\n            return;\n        }\n        var delegate\
+        \ = mFullscreenDelegate;\n        if (delegate != null) {\n            if (fullscreen) delegate.setBrowserFullscreenExtensionInfo(extensionUrl,\
+        \ extensionName);\n            if (isDestroyed() || mFullscreenDelegate != delegate) return;\n            delegate.setBrowserFullscreenMode(fullscreen);\n\
+        \            // Match the desktop window-state API: normal state exits actual tab fullscreen too.\n            if (!fullscreen\n\
+        \                    && !isDestroyed()\n                    && mFullscreenDelegate == delegate\n                   \
+        \ && delegate.getFullscreenUiModeSupplier().get()) {\n                delegate.exitTabFullscreen();\n            }\n\
+        \        }\n    }\n\n    @Override\n    public Rect getRestoredBoundsInDp() {\n"
+  - description: Owned Android window/auth/options/fullscreen and fixture routing final integration (18)
+    regex:
+      re_pattern: '\
+
+        \ \ \ \ @Override\
+
+        \ \ \ \ public\ void\ maximize\(\)\ \{\
+
+        \ \ \ \ \ \ \ \ ThreadUtils\.assertOnUiThread\(\);\
+
+        \ \ \ \ \ \ \ \ if\ \(Build\.VERSION\.SDK_INT\ <\ Build\.VERSION_CODES\.R\)\ \{\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ Log\.w\(TAG,\ "maximize\(\)\ requires\ Android\ R\+;\ does\ nothing"\);\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ return;\
+
+        \ \ \ \ \ \ \ \ \}\
+
+        '
+      replace: "\n    @Override\n    public void maximize() {\n        ThreadUtils.assertOnUiThread();\n        setFullscreen(false);\n\
+        \        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {\n            Log.w(TAG, \"maximize() requires Android\
+        \ R+; does nothing\");\n            return;\n        }\n"
+  - description: Owned Android window/auth/options/fullscreen and fixture routing final integration (19)
+    regex:
+      re_pattern: '\
+
+        \ \ \ \ @Override\
+
+        \ \ \ \ public\ void\ restore\(\)\ \{\
+
+        \ \ \ \ \ \ \ \ ThreadUtils\.assertOnUiThread\(\);\
+
+        \ \ \ \ \ \ \ \ if\ \(Build\.VERSION\.SDK_INT\ <\ Build\.VERSION_CODES\.R\)\ \{\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ Log\.w\(TAG,\ "restore\(\)\ requires\ Android\ R\+;\ does\ nothing"\);\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ return;\
+
+        \ \ \ \ \ \ \ \ \}\
+
+        '
+      replace: "\n    @Override\n    public void restore() {\n        ThreadUtils.assertOnUiThread();\n        setFullscreen(false);\n\
+        \        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {\n            Log.w(TAG, \"restore() requires Android R+;\
+        \ does nothing\");\n            return;\n        }\n"
+  - description: Owned Android window/auth/options/fullscreen and fixture routing final integration (20)
+    regex:
+      re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ var\ actions\ =\ mPendingActionManager\.getAndClearTargetPendingActions\(settledActions\);\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ maybeSetStateIdle\(actions\);\
+
+        \ \ \ \ \ \ \ \ \}\
+
+        \
+
+        \ \ \ \ \ \ \ \ for\ \(var\ feature\ :\ mFeatures\.values\(\)\)\ \{\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ feature\.onTaskFocusChanged\(isTopResumedActivity\);\
+
+        \ \ \ \ \ \ \ \ \}\
+
+        \
+
+        \ \ \ \ \ \ \ \ mAndroidBrowserWindowObserverNotifier\.updateActiveBrowserWindow\(getActiveBrowserWindow\(\)\);\
+
+        \ \ \ \ \}\
+
+        \
+
+        '
+      replace: "            var actions = mPendingActionManager.getAndClearTargetPendingActions(settledActions);\n         \
+        \   maybeSetStateIdle(actions);\n        }\n\n        notifyFeatureFocus(isTopResumedActivity, false);\n\n        mAndroidBrowserWindowObserverNotifier.updateActiveBrowserWindow(getActiveBrowserWindow());\n\
+        \    }\n\n"
+  - description: Owned Android window/auth/options/fullscreen and fixture routing final integration (21)
+    regex:
+      re_pattern: '\ \ \ \ \ \ \ \ \}\
+
+        \
+
+        \ \ \ \ \ \ \ \ //\ By\ this\ point,\ mActivityScopedObjectsDeque\ has\ been\ correctly\
+
+        \ \ \ \ \ \ \ \ //\ updated\.\ Register\ listeners\ for\ its\ current\ top\ Activity\.\
+
+        \ \ \ \ \ \ \ \ registerListenersForTopActivity\(\);\
+
+        \
+
+        \ \ \ \ \ \ \ \ //\ Cache\ the\ maximize\ bound\.\
+
+        \ \ \ \ \ \ \ \ if\ \(VERSION\.SDK_INT\ >=\ VERSION_CODES\.R\)\ \{\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ var\ activity\ =\ getActivity\(activityWindowAndroid\);\
+
+        '
+      replace: "        }\n\n        // By this point, mActivityScopedObjectsDeque has been correctly\n        // updated. Register\
+        \ listeners for its current top Activity.\n        var expectedTop = mActivityScopedObjectsDeque.peekFirst();\n    \
+        \    boolean registeredCurrentScope = registerListenersForTopActivity();\n        // Native completion can retire or\
+        \ replace this Activity scope. Do not\n        // continue accessing its window or cache bounds for a former owner.\n\
+        \        if (!registeredCurrentScope\n                || expectedTop == null\n                || !ownsActivity(expectedTop)\n\
+        \                || mActivityScopedObjectsDeque.peekFirst() != expectedTop) {\n            return;\n        }\n\n  \
+        \      // Cache the maximize bound.\n        if (VERSION.SDK_INT >= VERSION_CODES.R) {\n            var activity = getActivity(activityWindowAndroid);\n"
+  - description: Owned Android window/auth/options/fullscreen and fixture routing final integration (22)
+    regex:
+      re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ PendingActionManager\.setMaximumBounds\(maximizedBounds\);\
+
+        \ \ \ \ \ \ \ \ \}\
+
+        \ \ \ \ \}\
+
+        \
+
+        \ \ \ \ private\ void\ registerListenersForTopActivity\(\)\ \{\
+
+        \ \ \ \ \ \ \ \ var\ internalActivityScopedObjects\ =\ mActivityScopedObjectsDeque\.peekFirst\(\);\
+
+        \ \ \ \ \ \ \ \ if\ \(internalActivityScopedObjects\ ==\ null\)\ \{\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ return;\
+
+        \ \ \ \ \ \ \ \ \}\
+
+        \ \ \ \ \ \ \ \ var\ topActivityScopedObjects\ =\ internalActivityScopedObjects\.mActivityScopedObjects;\
+
+        \ \ \ \ \ \ \ \ var\ topActivityWindowAndroid\ =\ topActivityScopedObjects\.mActivityWindowAndroid;\
+
+        \
+
+        \ \ \ \ \ \ \ \ //\ Register\ Activity\ LifecycleObservers\
+
+        \ \ \ \ \ \ \ \ var\ lifecycleDispatcher\ =\ getActivityLifecycleDispatcher\(topActivityWindowAndroid\);\
+
+        \ \ \ \ \ \ \ \ lifecycleDispatcher\.register\(this\);\
+
+        '
+      replace: "            PendingActionManager.setMaximumBounds(maximizedBounds);\n        }\n    }\n\n    private boolean\
+        \ isCurrentActivityListenerRegistration(\n            long generation, InternalActivityScopedObjects objects) {\n  \
+        \      return generation == mActivityListenerRegistrationGeneration\n                && ownsActivity(objects)\n    \
+        \            && mActivityScopedObjectsDeque.peekFirst() == objects;\n    }\n\n    private boolean registerListenersForTopActivity()\
+        \ {\n        long registrationGeneration = ++mActivityListenerRegistrationGeneration;\n        var internalActivityScopedObjects\
+        \ = mActivityScopedObjectsDeque.peekFirst();\n        if (internalActivityScopedObjects == null) {\n            return\
+        \ false;\n        }\n        var topActivityScopedObjects = internalActivityScopedObjects.mActivityScopedObjects;\n\
+        \        var topActivityWindowAndroid = topActivityScopedObjects.mActivityWindowAndroid;\n\n        var fullscreenDelegate\
+        \ = topActivityScopedObjects.mBrowserFullscreenDelegate;\n        if (fullscreenDelegate != null) {\n            mFullscreenDelegate\
+        \ = fullscreenDelegate;\n            Boolean pendingFullscreen = mPendingActionManager.getFullscreenRequest();\n   \
+        \         if (pendingFullscreen != null) mBrowserFullscreenRequested = pendingFullscreen;\n            fullscreenDelegate.setBrowserFullscreenExtensionInfo(\n\
+        \                    mBrowserFullscreenExtensionUrl, mBrowserFullscreenExtensionName);\n            if (!isCurrentActivityListenerRegistration(\n\
+        \                    registrationGeneration, internalActivityScopedObjects)) return false;\n            fullscreenDelegate.setBrowserFullscreenMode(mBrowserFullscreenRequested);\n\
+        \            if (!isCurrentActivityListenerRegistration(\n                    registrationGeneration, internalActivityScopedObjects))\
+        \ return false;\n            Callback<Boolean> browserFullscreenCallback =\n                    fullscreen -> {\n  \
+        \                      if (isCurrentActivityListenerRegistration(\n                                        registrationGeneration,\
+        \ internalActivityScopedObjects)\n                                && mFullscreenDelegate == fullscreenDelegate) {\n\
+        \                            // Posted initial supplier values may be stale after an ordinary exit.\n              \
+        \              mBrowserFullscreenRequested =\n                                    fullscreenDelegate.getBrowserFullscreenModeSupplier().get();\n\
+        \                            if (!mBrowserFullscreenRequested) {\n                                mBrowserFullscreenExtensionUrl\
+        \ = \"\";\n                                mBrowserFullscreenExtensionName = \"\";\n                            }\n\
+        \                        }\n                    };\n            mBrowserFullscreenCallback = browserFullscreenCallback;\n\
+        \            fullscreenDelegate\n                    .getBrowserFullscreenModeSupplier()\n                    .addSyncObserverAndPostIfNonNull(browserFullscreenCallback);\n\
+        \        }\n\n        // Register Activity LifecycleObservers\n        var lifecycleDispatcher = getActivityLifecycleDispatcher(topActivityWindowAndroid);\n\
+        \        lifecycleDispatcher.register(this);\n"
+  - description: Owned Android window/auth/options/fullscreen and fixture routing final integration (23)
+    regex:
+      re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ mIsTopActivityResumedWithNative\ =\ true;\
+
+        \ \ \ \ \ \ \ \ \}\
+
+        \ \ \ \ \ \ \ \ if\ \(mIsTopActivityResumedWithNative\)\ \{\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ completePendingCreate\(\);\
+
+        \ \ \ \ \ \ \ \ \}\
+
+        \
+
+        \ \ \ \ \ \ \ \ //\ Register\ OnLayoutChangeListener\ for\ the\ decor\ View\.\
+
+        \ \ \ \ \ \ \ \ var\ window\ =\ getActivity\(topActivityWindowAndroid\)\.getWindow\(\);\
+
+        '
+      replace: "            mIsTopActivityResumedWithNative = true;\n        }\n        if (mIsTopActivityResumedWithNative)\
+        \ {\n            completePendingCreate();\n        }\n        // A once callback can retire this Task or move away and\
+        \ back to the\n        // same scope. Only the most recent registration owns its listeners.\n        if (!isCurrentActivityListenerRegistration(\n\
+        \                registrationGeneration, internalActivityScopedObjects)) {\n            return false;\n        }\n\n\
+        \        // Register OnLayoutChangeListener for the decor View.\n        var window = getActivity(topActivityWindowAndroid).getWindow();\n"
+  - description: Owned Android window/auth/options/fullscreen and fixture routing final integration (24)
+    regex:
+      re_pattern: '\
+
+        \ \ \ \ \ \ \ \ tabModelSelector\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \.getCurrentTabModelSupplier\(\)\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \.addSyncObserverAndPostIfNonNull\(mOnTabModelSelectedCallback\);\
+
+        \ \ \ \ \ \ \ \ onTabModelSelected\(tabModelSelector\.getCurrentModel\(\)\);\
+
+        \ \ \ \ \}\
+
+        \
+
+        \ \ \ \ private\ void\ unregisterListenersForTopActivity\(\)\ \{\
+
+        \ \ \ \ \ \ \ \ var\ internalActivityScopedObjects\ =\ mActivityScopedObjectsDeque\.peekFirst\(\);\
+
+        \ \ \ \ \ \ \ \ if\ \(internalActivityScopedObjects\ ==\ null\)\ \{\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ return;\
+
+        \ \ \ \ \ \ \ \ \}\
+
+        '
+      replace: "\n        tabModelSelector\n                .getCurrentTabModelSupplier()\n                .addSyncObserverAndPostIfNonNull(mOnTabModelSelectedCallback);\n\
+        \        if (!isCurrentActivityListenerRegistration(\n                registrationGeneration, internalActivityScopedObjects))\
+        \ {\n            return false;\n        }\n        onTabModelSelected(tabModelSelector.getCurrentModel());\n       \
+        \ return isCurrentActivityListenerRegistration(\n                registrationGeneration, internalActivityScopedObjects);\n\
+        \    }\n\n    private void unregisterListenersForTopActivity() {\n        ++mActivityListenerRegistrationGeneration;\n\
+        \        var fullscreenDelegate = mFullscreenDelegate;\n        var fullscreenCallback = mBrowserFullscreenCallback;\n\
+        \        mFullscreenDelegate = null;\n        mBrowserFullscreenCallback = null;\n        if (fullscreenDelegate !=\
+        \ null) {\n            if (fullscreenCallback != null) {\n                fullscreenDelegate\n                     \
+        \   .getBrowserFullscreenModeSupplier()\n                        .removeObserver(fullscreenCallback);\n            }\n\
+        \            // Clear only the retiring Activity browser UI, not its tab/DOM session.\n            fullscreenDelegate.setBrowserFullscreenMode(false);\n\
+        \        }\n        var internalActivityScopedObjects = mActivityScopedObjectsDeque.peekFirst();\n        if (internalActivityScopedObjects\
+        \ == null) {\n            return;\n        }\n"
+  - description: Owned Android window/auth/options/fullscreen and fixture routing final integration (25)
+    regex:
+      re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ @Nullable\ Rect\ futureRestoredBoundsInDp\)\ \{\
+
+        \ \ \ \ \ \ \ \ //\ Initiate\ actions\ on\ a\ live\ Task\.\
+
+        \ \ \ \ \ \ \ \ assertAlive\(\);\
+
+        \
+
+        \ \ \ \ \ \ \ \ @PendingAction\ int\[\]\ pendingActions\ =\ mPendingActionManager\.getAndClearPendingActions\(\);\
+
+        \ \ \ \ \ \ \ \ for\ \(@PendingAction\ int\ action\ :\ pendingActions\)\ \{\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ if\ \(action\ ==\ PendingAction\.NONE\)\ continue;\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ switch\ \(action\)\ \{\
+
+        '
+      replace: "            @Nullable Rect futureRestoredBoundsInDp) {\n        // Initiate actions on a live Task.\n      \
+        \  assertAlive();\n\n        Boolean fullscreen = mPendingActionManager.takeFullscreenRequest();\n        String fullscreenExtensionUrl\
+        \ = mBrowserFullscreenExtensionUrl;\n        String fullscreenExtensionName = mBrowserFullscreenExtensionName;\n   \
+        \     @PendingAction int[] pendingActions = mPendingActionManager.getAndClearPendingActions();\n        for (@PendingAction\
+        \ int action : pendingActions) {\n            if (action == PendingAction.NONE) continue;\n            switch (action)\
+        \ {\n"
+  - description: Owned Android window/auth/options/fullscreen and fixture routing final integration (26)
+    regex:
+      re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ break;\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ default:\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ assert\ false\ :\ "Unsupported\ pending\ action\.";\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+        \ \ \ \ \ \ \ \ \}\
+
+        \ \ \ \ \}\
+
+        \
+
+        \ \ \ \ @Nullable\
+
+        '
+      replace: "                    break;\n                default:\n                    assert false : \"Unsupported pending\
+        \ action.\";\n            }\n        }\n        if (fullscreen != null && !isDestroyed()) {\n            setFullscreen(fullscreen,\
+        \ fullscreenExtensionUrl, fullscreenExtensionName);\n        }\n    }\n\n    @Nullable\n"
+  - description: Owned Android window/auth/options/fullscreen and fixture routing final integration (27)
+    regex:
+      re_pattern: '\ \ \ \ \ \ \ \ \}\
+
+        \ \ \ \ \}\
+
+        \
+
+        \ \ \ \ private\ void\ removeAllFeaturesForActivityInternal\(ActivityWindowAndroid\ activityWindowAndroid\)\ \{\
+
+        \ \ \ \ \ \ \ \ removeFeaturesIf\(key\ \->\ activityWindowAndroid\ ==\ key\.mActivityWindowAndroid\);\
+
+        \ \ \ \ \}\
+
+        \
+
+        \ \ \ \ private\ void\ removeAllFeaturesForTabModel\(TabModel\ tabModel\)\ \{\
+
+        '
+      replace: "        }\n    }\n\n    private void removeAllFeaturesForActivityInternal(ActivityWindowAndroid activityWindowAndroid)\
+        \ {\n        var objects = findInternalActivityScopedObjects(activityWindowAndroid);\n        if (objects != null) objects.mTabModelScopedFeatureFactories.clear();\n\
+        \        removeFeaturesIf(key -> activityWindowAndroid == key.mActivityWindowAndroid);\n    }\n\n    private void removeAllFeaturesForTabModel(TabModel\
+        \ tabModel) {\n"
+  - description: Owned Android window/auth/options/fullscreen and fixture routing final integration (28)
+    regex:
+      re_pattern: '\ \ \ \ \ \ \ \ \}\
+
+        \ \ \ \ \ \ \ \ mState\ =\ State\.IDLE;\
+
+        \ \ \ \ \}\
+
+        \
+
+        \ \ \ \ private\ void\ onTabModelSelected\(TabModel\ tabModel\)\ \{\
+
+        \ \ \ \ \ \ \ \ for\ \(var\ feature\ :\ mFeatures\.values\(\)\)\ \{\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ feature\.onTabModelSelected\(tabModel\);\
+
+        \ \ \ \ \ \ \ \ \}\
+
+        \ \ \ \ \ \ \ \ mAndroidBrowserWindowObserverNotifier\.updateActiveBrowserWindow\(getActiveBrowserWindow\(\)\);\
+
+        \ \ \ \ \}\
+
+        \
+
+        \ \ \ \ private\ @Nullable\ AndroidBrowserWindow\ getActiveBrowserWindow\(\)\ \{\
+
+        '
+      replace: "        }\n        mState = State.IDLE;\n    }\n\n    private void notifyFeatureFocus(boolean hasFocus, boolean\
+        \ tabModelScopedOnly) {\n        var objects = mActivityScopedObjectsDeque.peekFirst();\n        if (objects == null\
+        \ || !ownsActivity(objects)) return;\n        var current = objects.mActivityScopedObjects.mTabModelSelector.getCurrentModel();\n\
+        \        // Emit loss before gain, so a profile switch cannot finish with WINDOW_ID_NONE.\n        for (var entry :\
+        \ mFeatures.entrySet()) {\n            var key = entry.getKey();\n            if (key.mTabModel != null\n          \
+        \          && (key.mTabModel != current\n                            || key.mActivityWindowAndroid\n               \
+        \                     != objects.mActivityScopedObjects.mActivityWindowAndroid)) {\n                entry.getValue().onTaskFocusChanged(false);\n\
+        \            }\n        }\n        for (var entry : mFeatures.entrySet()) {\n            var key = entry.getKey();\n\
+        \            if (key.mTabModel == null) {\n                if (!tabModelScopedOnly) entry.getValue().onTaskFocusChanged(hasFocus);\n\
+        \            } else if (key.mTabModel == current\n                    && key.mActivityWindowAndroid\n              \
+        \              == objects.mActivityScopedObjects.mActivityWindowAndroid) {\n                entry.getValue().onTaskFocusChanged(hasFocus);\n\
+        \            }\n        }\n    }\n\n    private void onTabModelSelected(TabModel tabModel) {\n        var objects =\
+        \ mActivityScopedObjectsDeque.peekFirst();\n        if (objects == null || !ownsActivity(objects)\n                ||\
+        \ objects.mActivityScopedObjects.mTabModelSelector.getCurrentModel() != tabModel) {\n            return;\n        }\n\
+        \        for (var feature : mFeatures.values()) {\n            feature.onTabModelSelected(tabModel);\n        }\n  \
+        \      notifyFeatureFocus(isActive(), true);\n        mAndroidBrowserWindowObserverNotifier.updateActiveBrowserWindow(getActiveBrowserWindow());\n\
+        \    }\n\n    private @Nullable AndroidBrowserWindow getActiveBrowserWindow() {\n"

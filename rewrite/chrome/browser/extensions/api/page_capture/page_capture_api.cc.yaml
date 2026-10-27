@@ -1,0 +1,175 @@
+# Copyright (c) 2026 The Reaper Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+substitutions:
+- description: Balance Android page-capture response ownership (1).
+  regex:
+    re_pattern: '\#include\ "content/public/common/child_process_id\.h"\
+
+      \#include\ "content/public/common/mhtml_generation_params\.h"\
+
+      \#include\ "extensions/browser/extension_api_frame_id_map\.h"\
+
+      \#include\ "extensions/browser/extension_util\.h"\
+
+      \#include\ "extensions/buildflags/buildflags\.h"\
+
+      \#include\ "extensions/common/permissions/permissions_data\.h"\
+
+      '
+    replace: '#include "content/public/common/child_process_id.h"
+
+      #include "content/public/common/mhtml_generation_params.h"
+
+      #include "extensions/browser/extension_api_frame_id_map.h"
+
+      #if BUILDFLAG(IS_ANDROID)
+
+      #include "content/public/browser/render_frame_host.h"
+
+      #include "extensions/browser/extension_function_dispatcher.h"
+
+      #endif
+
+      #include "extensions/browser/extension_util.h"
+
+      #include "extensions/buildflags/buildflags.h"
+
+      #include "extensions/common/permissions/permissions_data.h"
+
+      '
+- description: Balance Android page-capture response ownership (2).
+  regex:
+    re_pattern: '\ \ \ \ "Tab\ navigated\ before\ capture\ could\ complete\.";\
+
+      const\ char\ kPageCaptureNotAllowed\[\]\ =\
+
+      \ \ \ \ "Don''t\ have\ permissions\ required\ to\ capture\ this\ page\.";\
+
+      constexpr\ base::TaskTraits\ kCreateTemporaryFileTaskTraits\ =\ \{\
+
+      \ \ \ \ //\ Requires\ IO\.\
+
+      \ \ \ \ base::MayBlock\(\),\
+
+      '
+    replace: "    \"Tab navigated before capture could complete.\";\nconst char kPageCaptureNotAllowed[] =\n    \"Don't have permissions required to capture this page.\";\n#if BUILDFLAG(IS_ANDROID)\nconstexpr char kResponseRecipientGone[] =\n    \"The requesting context is no longer available.\";\n#endif\nconstexpr base::TaskTraits kCreateTemporaryFileTaskTraits = {\n    // Requires IO.\n    base::MayBlock(),\n"
+- description: Balance Android page-capture response ownership (3).
+  regex:
+    re_pattern: '\ \ //\ time\ we\ do\ the\ capture\.\
+
+      \ \ document_id_\ =\ ExtensionApiFrameIdMap::GetDocumentId\(\
+
+      \ \ \ \ \ \ web_contents\->GetPrimaryMainFrame\(\)\);\
+
+      \
+
+      \ \ base::ThreadPool::PostTask\(\
+
+      \ \ \ \ \ \ FROM_HERE,\ kCreateTemporaryFileTaskTraits,\
+
+      '
+    replace: "  // time we do the capture.\n  document_id_ = ExtensionApiFrameIdMap::GetDocumentId(\n      web_contents->GetPrimaryMainFrame());\n#if BUILDFLAG(IS_ANDROID)\n  if (render_frame_host()) {\n    sender_document_ = render_frame_host()->GetWeakDocumentPtr();\n  }\n#endif\n\n  base::ThreadPool::PostTask(\n      FROM_HERE, kCreateTemporaryFileTaskTraits,\n"
+- description: Balance Android page-capture response ownership (4).
+  regex:
+    re_pattern: '\}\
+
+      \
+
+      void\ PageCaptureSaveAsMHTMLFunction::OnResponseAck\(\)\ \{\
+
+      \ \ //\ The\ extension\ process\ has\ processed\ the\ response\ and\ has\ created\ a\
+
+      \ \ //\ reference\ to\ the\ blob,\ it\ is\ safe\ for\ us\ to\ go\ away\.\
+
+      \ \ //\ This\ instance\ may\ be\ deleted\ after\ this\ call,\ so\ no\ code\ goes\ after\
+
+      \ \ //\ this!!!\
+
+      \ \ Release\(\);\ \ //\ Balanced\ in\ Run\(\)\
+
+      \}\
+
+      \
+
+      void\ PageCaptureSaveAsMHTMLFunction::CreateTemporaryFile\(\)\ \{\
+
+      \ \ bool\ success\ =\ base::CreateTemporaryFile\(\&mhtml_path_\);\
+
+      '
+    replace: "}\n\nvoid PageCaptureSaveAsMHTMLFunction::OnResponseAck() {\n#if BUILDFLAG(IS_ANDROID)\n  // The dispatcher's extracted response owner releases its reference.\n#else\n  // The extension process has processed the response and has created a\n  // reference to the blob, it is safe for us to go away.\n  // This instance may be deleted after this call, so no code goes after\n  // this!!!\n  Release();  // Balanced in Run()\n#endif\n}\n\n#if BUILDFLAG(IS_ANDROID)\nvoid PageCaptureSaveAsMHTMLFunction::OnBrowserContextShutdown() {\n  if (dispatcher()) {\n    dispatcher()->RemoveResponseTarget(this);\n  }\n}\n\nbool PageCaptureSaveAsMHTMLFunction::HasLiveResponseRecipient() const {\n  if (!browser_context() || !dispatcher()) {\n    return false;\n  }\n  if (is_from_service_worker()) {\n    return true;\n  }\n  auto* frame = sender_document_.AsRenderFrameHostIfValid();\n  return frame && frame == render_frame_host() && frame->IsRenderFrameLive();\n}\n#endif\n\nvoid PageCaptureSaveAsMHTMLFunction::CreateTemporaryFile() {\n  bool success = base::CreateTemporaryFile(&mhtml_path_);\n"
+- description: Balance Android page-capture response ownership (5).
+  regex:
+    re_pattern: '\}\
+
+      \
+
+      void\ PageCaptureSaveAsMHTMLFunction::MHTMLGenerated\(int64_t\ mhtml_file_size\)\ \{\
+
+      \ \ if\ \(mhtml_file_size\ <=\ 0\)\ \{\
+
+      \ \ \ \ ReturnFailure\(kMHTMLGenerationFailedError\);\
+
+      \ \ \ \ return;\
+
+      '
+    replace: "}\n\nvoid PageCaptureSaveAsMHTMLFunction::MHTMLGenerated(int64_t mhtml_file_size) {\n#if BUILDFLAG(IS_ANDROID)\n  if (test_delegate_) {\n    test_delegate_->OnMHTMLGenerated(mhtml_file_size);\n  }\n#endif\n  if (mhtml_file_size <= 0) {\n    ReturnFailure(kMHTMLGenerationFailedError);\n    return;\n"
+- description: Balance Android page-capture response ownership (6).
+  regex:
+    re_pattern: '\
+
+      void\ PageCaptureSaveAsMHTMLFunction::ReturnSuccess\(int\ file_size\)\ \{\
+
+      \ \ DCHECK_CURRENTLY_ON\(BrowserThread::UI\);\
+
+      \
+
+      \ \ WebContents\*\ web_contents\ =\ GetWebContents\(\);\
+
+      \ \ if\ \(!web_contents\)\ \{\
+
+      '
+    replace: "\nvoid PageCaptureSaveAsMHTMLFunction::ReturnSuccess(int file_size) {\n  DCHECK_CURRENTLY_ON(BrowserThread::UI);\n#if BUILDFLAG(IS_ANDROID)\n  // Keep the function alive if a test callback tears down its response owner.\n  scoped_refptr<PageCaptureSaveAsMHTMLFunction> keep_alive(this);\n  if (!HasLiveResponseRecipient()) {\n    ReturnFailure(kResponseRecipientGone);\n    return;\n  }\n#endif\n\n  WebContents* web_contents = GetWebContents();\n  if (!web_contents) {\n"
+- description: Balance Android page-capture response ownership (7).
+  regex:
+    re_pattern: '\ \ response\.Set\("mhtmlFileLength",\ file_size\);\
+
+      \ \ response\.Set\("requestId",\ request_uuid\(\)\.AsLowercaseString\(\)\);\
+
+      \
+
+      \ \ //\ Add\ a\ reference,\ extending\ the\ lifespan\ of\ this\ extension\ function\ until\
+
+      \ \ //\ the\ response\ has\ been\ received\ by\ the\ renderer\.\ This\ function\ generates\ a\
+
+      \ \ //\ blob\ which\ contains\ a\ reference\ scoped\ to\ this\ object\.\ In\ order\ for\ the\
+
+      '
+    replace: "  response.Set(\"mhtmlFileLength\", file_size);\n  response.Set(\"requestId\", request_uuid().AsLowercaseString());\n\n#if BUILDFLAG(IS_ANDROID)\n  AddResponseTarget();\n  if (test_delegate_) {\n    test_delegate_->OnResponseTargetAdded();\n  }\n#else\n  // Add a reference, extending the lifespan of this extension function until\n  // the response has been received by the renderer. This function generates a\n  // blob which contains a reference scoped to this object. In order for the\n"
+- description: Balance Android page-capture response ownership (8).
+  regex:
+    re_pattern: '\ \ //\ TODO\(crbug\.com/40673405\):\ Potential\ memory\ leak\ here\.\
+
+      \ \ AddRef\(\);\ \ //\ Balanced\ in\ either\ OnMessageReceived\(\)\
+
+      \ \ AddResponseTarget\(\);\
+
+      \
+
+      \ \ Respond\(WithArguments\(std::move\(response\)\)\);\
+
+      \}\
+
+      \
+
+      WebContents\*\ PageCaptureSaveAsMHTMLFunction::GetWebContents\(\)\ \{\
+
+      \ \ content::WebContents\*\ web_contents\ =\ nullptr;\
+
+      \ \ if\ \(!ExtensionTabUtil::GetTabById\(params_\->details\.tab_id,\ browser_context\(\),\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ include_incognito_information\(\),\
+
+      '
+    replace: "  // TODO(crbug.com/40673405): Potential memory leak here.\n  AddRef();  // Balanced in either OnMessageReceived()\n  AddResponseTarget();\n#endif\n\n  Respond(WithArguments(std::move(response)));\n}\n\nWebContents* PageCaptureSaveAsMHTMLFunction::GetWebContents() {\n#if BUILDFLAG(IS_ANDROID)\n  if (!browser_context()) {\n    return nullptr;\n  }\n#endif\n  content::WebContents* web_contents = nullptr;\n  if (!ExtensionTabUtil::GetTabById(params_->details.tab_id, browser_context(),\n                                    include_incognito_information(),\n"

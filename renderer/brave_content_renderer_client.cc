@@ -3,7 +3,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+#include "build/build_config.h"
+
 #include "brave/renderer/brave_content_renderer_client.h"
+
+#include "brave/components/brave_news/common/buildflags/buildflags.h"
 
 #include <algorithm>
 #include <memory>
@@ -11,17 +15,23 @@
 
 #include "base/feature_list.h"
 #include "brave/components/ai_chat/core/common/buildflags/buildflags.h"
+#if BUILDFLAG(ENABLE_BRAVE_NEWS)
 #include "brave/components/brave_news/renderer/rss_link_reader.h"
+#endif  // BUILDFLAG(ENABLE_BRAVE_NEWS)
 #include "brave/components/brave_search/common/brave_search_utils.h"
 #include "brave/components/brave_search/renderer/brave_search_render_frame_observer.h"
 #include "brave/components/brave_shields/core/common/features.h"
 #include "brave/components/brave_vpn/common/buildflags/buildflags.h"
 #include "brave/components/cosmetic_filters/renderer/cosmetic_filters_js_render_frame_observer.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/misc_metrics/renderer/web3_metrics_render_frame_observer.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/playlist/core/common/buildflags/buildflags.h"
 #include "brave/components/script_injector/renderer/script_injector_render_frame_observer.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/skus/common/features.h"
 #include "brave/components/skus/renderer/skus_render_frame_observer.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/speedreader/common/buildflags/buildflags.h"
 #include "brave/components/web_discovery/buildflags/buildflags.h"
 #include "brave/renderer/brave_render_frame_observer.h"
@@ -57,11 +67,6 @@
 #include "brave/components/brave_vpn/common/brave_vpn_utils.h"
 #endif  // BUILDFLAG(ENABLE_BRAVE_VPN)
 
-#if BUILDFLAG(IS_ANDROID)
-#include "brave/components/brave_mobile_subscription/renderer/android/subscription_render_frame_observer.h"
-#include "brave/components/brave_origin/features.h"
-#endif  // BUILDFLAG(IS_ANDROID)
-
 #if BUILDFLAG(ENABLE_WIDEVINE)
 #include "media/base/key_system_info.h"
 #include "third_party/widevine/cdm/widevine_cdm_common.h"
@@ -94,6 +99,7 @@ void MaybeRemoveWidevineSupport(media::GetSupportedKeySystemsCB cb,
   cb.Run(std::move(key_systems));
 }
 
+#if !BUILDFLAG(IS_ANDROID)
 class Web3MetricsDelegate
     : public misc_metrics::Web3MetricsRenderFrameObserver::Delegate {
  public:
@@ -113,6 +119,7 @@ class Web3MetricsDelegate
 #endif
   }
 };
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 }  // namespace
 
@@ -179,14 +186,21 @@ void BraveContentRendererClient::RenderThreadStarted() {
 void BraveContentRendererClient::RenderFrameCreated(
     content::RenderFrame* render_frame) {
   ChromeContentRendererClient::RenderFrameCreated(render_frame);
+#if BUILDFLAG(ENABLE_BRAVE_NEWS) || BUILDFLAG(ENABLE_AI_CHAT) || \
+    BUILDFLAG(ENABLE_WEB_DISCOVERY_NATIVE)
   auto* rfo = new BraveRenderFrameObserver(render_frame);
   auto* registry = rfo->registry();
+#else
+  new BraveRenderFrameObserver(render_frame);
+#endif
 
+#if BUILDFLAG(ENABLE_BRAVE_NEWS)
   // Only the main frame is queried by `brave_news::FetchRssLinks`, so binding
   // a receiver on subframes would just be dead weight.
   if (render_frame->IsMainFrame()) {
     new brave_news::RssLinkReader(render_frame, registry);
   }
+#endif  // BUILDFLAG(ENABLE_BRAVE_NEWS)
 
   if (base::FeatureList::IsEnabled(
           brave_shields::features::kBraveAdblockCosmeticFiltering)) {
@@ -199,8 +213,10 @@ void BraveContentRendererClient::RenderFrameCreated(
         render_frame, ISOLATED_WORLD_ID_BRAVE_INTERNAL, dynamic_params_closure);
   }
 
+#if !BUILDFLAG(IS_ANDROID)
   new misc_metrics::Web3MetricsRenderFrameObserver(
       render_frame, std::make_unique<Web3MetricsDelegate>());
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 #if BUILDFLAG(ENABLE_BRAVE_WALLET)
   if (IsBraveWalletAvailable()) {
@@ -217,27 +233,13 @@ void BraveContentRendererClient::RenderFrameCreated(
         render_frame, content::ISOLATED_WORLD_ID_GLOBAL);
   }
 
+#if !BUILDFLAG(IS_ANDROID)
   if (base::FeatureList::IsEnabled(skus::features::kSkusFeature) &&
       !process_state::IsIncognitoProcess()) {
     skus::SkusRenderFrameObserver::Create(render_frame);
   }
+#endif  // !BUILDFLAG(IS_ANDROID)
 
-#if BUILDFLAG(IS_ANDROID)
-  bool should_create_subscription_observer = false;
-#if BUILDFLAG(ENABLE_BRAVE_VPN)
-  should_create_subscription_observer |= brave_vpn::IsBraveVPNFeatureEnabled();
-#endif  // BUILDFLAG(ENABLE_BRAVE_VPN)
-#if BUILDFLAG(ENABLE_AI_CHAT)
-  should_create_subscription_observer |=
-      ai_chat::features::IsAIChatHistoryEnabled();
-#endif  // BUILDFLAG(ENABLE_AI_CHAT)
-  should_create_subscription_observer |=
-      base::FeatureList::IsEnabled(brave_origin::features::kBraveOrigin);
-  if (should_create_subscription_observer) {
-    new brave_subscription::SubscriptionRenderFrameObserver(
-        render_frame, content::ISOLATED_WORLD_ID_GLOBAL);
-  }
-#endif  // BUILDFLAG(IS_ANDROID)
 
 #if BUILDFLAG(ENABLE_SPEEDREADER)
   if (base::FeatureList::IsEnabled(

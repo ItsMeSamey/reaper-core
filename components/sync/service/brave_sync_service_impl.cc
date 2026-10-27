@@ -3,6 +3,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+#include "build/build_config.h"
+
 #include "brave/components/sync/service/brave_sync_service_impl.h"
 
 #include <utility>
@@ -17,12 +19,13 @@
 #include "base/metrics/histogram_functions.h"
 #include "base/strings/string_util.h"
 #include "brave/components/ai_chat/core/common/buildflags/buildflags.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_sync/brave_sync_p3a.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_sync/crypto/crypto.h"
 #include "brave/components/brave_sync/features.h"
 #include "brave/components/sync/service/brave_sync_auth_manager.h"
 #include "brave/components/sync/service/sync_service_impl_delegate.h"
-#include "build/build_config.h"
 #include "components/os_crypt/async/browser/os_crypt_async.h"
 #include "components/prefs/pref_service.h"
 
@@ -36,12 +39,14 @@ namespace syncer {
 
 using GetSeedStatusEnum = BraveSyncServiceImpl::GetSeedStatusEnum;
 
+#if !BUILDFLAG(IS_ANDROID)
 void BraveSyncServiceImpl::SyncedObjectsCountContext::Reset(
     size_t types_requested_init) {
   types_requested = types_requested_init;
   types_responed = 0;
   total_objects_count = 0;
 }
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 BraveSyncServiceImpl::BraveSyncServiceImpl(
     InitParams init_params,
@@ -179,7 +184,9 @@ void BraveSyncServiceImpl::Initialize(
   base::AutoReset<bool> is_initializing_resetter(&is_initializing_, true);
   SyncServiceImpl::Initialize(std::move(controllers));
   if (!user_settings_->IsInitialSyncFeatureSetupComplete()) {
+#if !BUILDFLAG(IS_ANDROID)
     base::UmaHistogramExactLinear("Brave.Sync.Status.2", 0, 3);
+#endif  // !BUILDFLAG(IS_ANDROID)
   }
 }
 
@@ -237,7 +244,9 @@ std::string BraveSyncServiceImpl::GetOrCreateSyncCode() {
   if (sync_code->empty()) {
     std::vector<uint8_t> seed = brave_sync::crypto::GetSeed();
     *sync_code = brave_sync::crypto::PassphraseFromBytes32(seed);
+#if !BUILDFLAG(IS_ANDROID)
     sync_code_monitor_.RecordCodeGenerated();
+#endif  // !BUILDFLAG(IS_ANDROID)
   }
 
   CHECK(!sync_code->empty()) << "Attempt to return empty sync code";
@@ -261,7 +270,9 @@ bool BraveSyncServiceImpl::SetSyncCode(const std::string& sync_code) {
   initiated_self_device_info_deleted_ = false;
   initiated_join_chain_ = true;
 
+#if !BUILDFLAG(IS_ANDROID)
   sync_code_monitor_.RecordCodeSet();
+#endif  // !BUILDFLAG(IS_ANDROID)
 
   return true;
 }
@@ -332,7 +343,9 @@ void BraveSyncServiceImpl::OnBraveSyncPrefsChanged(const std::string& path) {
       // Send updated status here, because OnDeviceInfoChange is not triggered
       // when device leaves the chain by `Leave Sync Chain` button
       // 0 means disabled or 1 device
+#if !BUILDFLAG(IS_ANDROID)
       base::UmaHistogramExactLinear("Brave.Sync.Status.2", 0, 3);
+#endif  // !BUILDFLAG(IS_ANDROID)
     }
   }
 }
@@ -507,22 +520,27 @@ void BraveSyncServiceImpl::LocalDeviceAppeared() {
 }
 
 namespace {
+#if !BUILDFLAG(IS_ANDROID)
 // Typical cycle takes 30 sec, let's send P3A updates each ~30 minutes
 constexpr int kCyclesBeforeUpdateP3AObjects = 60;
 // And Let's do the first update in ~5 minutes after sync start
 constexpr int kCyclesBeforeFirstUpdatesP3A = 10;
+#endif  // !BUILDFLAG(IS_ANDROID)
 }  // namespace
 
 void BraveSyncServiceImpl::OnSyncCycleCompleted(
     const SyncCycleSnapshot& snapshot) {
   SyncServiceImpl::OnSyncCycleCompleted(snapshot);
+#if !BUILDFLAG(IS_ANDROID)
   if (completed_cycles_count_ == kCyclesBeforeFirstUpdatesP3A ||
       completed_cycles_count_ % kCyclesBeforeUpdateP3AObjects == 0) {
     UpdateP3AObjectsNumber();
   }
   ++completed_cycles_count_;
+#endif  // !BUILDFLAG(IS_ANDROID)
 }
 
+#if !BUILDFLAG(IS_ANDROID)
 void BraveSyncServiceImpl::UpdateP3AObjectsNumber() {
   synced_objects_context_.Reset(GetUserSettings()->GetSelectedTypes().size());
 
@@ -530,7 +548,9 @@ void BraveSyncServiceImpl::UpdateP3AObjectsNumber() {
       base::BindRepeating(&BraveSyncServiceImpl::OnGetTypeEntitiesCount,
                           weak_ptr_factory_.GetWeakPtr()));
 }
+#endif  // !BUILDFLAG(IS_ANDROID)
 
+#if !BUILDFLAG(IS_ANDROID)
 void BraveSyncServiceImpl::OnGetTypeEntitiesCount(
     const TypeEntitiesCount& count) {
   ++synced_objects_context_.types_responed;
@@ -553,13 +573,16 @@ void BraveSyncServiceImpl::OnGetTypeEntitiesCount(
     }
   }
 }
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 void BraveSyncServiceImpl::OnSelectedTypesChanged() {
   SyncServiceImpl::OnSelectedTypesChanged();
 
+#if !BUILDFLAG(IS_ANDROID)
   brave_sync::p3a::RecordEnabledTypes(
       GetUserSettings()->IsSyncEverythingEnabled(),
       GetUserSettings()->GetSelectedTypes());
+#endif  // !BUILDFLAG(IS_ANDROID)
 }
 
 void BraveSyncServiceImpl::StopAndClearWithShutdownReason() {

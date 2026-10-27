@@ -1,0 +1,298 @@
+# Android modal dialog static-analysis corrections.
+substitutions:
+- description: Reject new tab dialogs and retire pending owner observers during Activity teardown
+  regex:
+    re_pattern: '\ \ \ \ public\ void\ onDestroy\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ if\ \(mTabModelObserver\ !=\ null\)\ mTabModelObserver\.destroy\(\);\
+
+      \ \ \ \ \ \ \ \ if\ \(mPresenter\ !=\ null\)\ mPresenter\.destroy\(\);'
+    replace: "    public void onDestroy() {\n        mDestroyed = true;\n        if (mTabModelObserver != null) mTabModelObserver.destroy();\n        if (mPresenter != null) mPresenter.destroy();\n        mManager.dismissDialogsOfType(\n                ModalDialogType.TAB, DialogDismissalCause.ACTIVITY_DESTROYED);\n        stopObservingQueuedDialogs();"
+- description: Avoid cancelling an unrelated queued peer request when the active tab closes
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ public\ void\ onDestroyed\(Tab\ tab\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ if\ \(mActiveTab\ ==\ tab\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mManager\.dismissDialogsOfType\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ ModalDialogType\.TAB,\ DialogDismissalCause\.TAB_DESTROYED\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mActiveTab\ =\ null;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}'
+    replace: "                public void onDestroyed(Tab tab) {\n                    // Each displayed or queued dialog observes its own requesting tab.\n                    if (mActiveTab == tab) mActiveTab = null;\n                }"
+- description: Let the exact request owner observer cancel navigation without dismissing peer dialogs
+  regex:
+    re_pattern: '\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ @Override\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ public\ void\ onPageLoadStarted\(Tab\ tab,\ GURL\ url\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ if\ \(mActiveTab\ ==\ tab\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mManager\.dismissDialogsOfType\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ ModalDialogType\.TAB,\ DialogDismissalCause\.NAVIGATE\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      '
+    replace: '
+
+      '
+- description: Back applies to the selected pane instead of an inactive peer dialog
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \&\&\ mPresenter\.getDialogModel\(\)\ !=\ null\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \&\&\ mTabModalSuspendedToken'
+    replace: "                && mPresenter.getDialogModel() != null\n                && mPresenter.shouldHandleBackPress()\n                && mTabModalSuspendedToken"
+- description: Preserve requester dialog and scrim when selection moves within the same split
+  regex:
+    re_pattern: \ \ \ \ \ \ \ \ \ \ \ \ mManager\.dismissDialogsOfType\(ModalDialogType\.TAB,\ DialogDismissalCause\.TAB_SWITCHED\);
+    replace: "            if (mPresenter != null && mPresenter.getDialogModel() != null\n                    && !mPresenter.canKeepDialogForTab(tab)) {\n                mPresenter.dismissCurrentDialog(DialogDismissalCause.TAB_SWITCHED);\n            }"
+- description: Retain queued request owners across activation of their visible split peer
+  regex:
+    re_pattern: import\ org\.chromium\.chrome\.browser\.fullscreen\.FullscreenManager;
+    replace: 'import org.chromium.chrome.browser.compositor.SplitTabCoordinator;
+
+      import org.chromium.chrome.browser.fullscreen.FullscreenManager;'
+- description: Resolve explicit request owners while their dialogs are queued
+  regex:
+    re_pattern: import\ org\.chromium\.chrome\.browser\.tab\.TabSelectionType;
+    replace: 'import org.chromium.chrome.browser.tab.TabSelectionType;
+
+      import org.chromium.chrome.browser.tab.TabUtils;'
+- description: Observe queued requests against their captured contents
+  regex:
+    re_pattern: import\ org\.chromium\.ui\.modaldialog\.DialogDismissalCause;
+    replace: 'import org.chromium.content_public.browser.WebContents;
+
+      import org.chromium.ui.modaldialog.DialogDismissalCause;'
+- description: Read opaque request ownership in the Chrome embedder
+  regex:
+    re_pattern: import\ org\.chromium\.ui\.modelutil\.PropertyModel;
+    replace: 'import org.chromium.ui.modaldialog.ModalDialogProperties;
+
+      import org.chromium.ui.modelutil.PropertyModel;'
+- description: Keep one lifecycle observer per queued property model
+  regex:
+    re_pattern: import\ java\.util\.function\.Supplier;
+    replace: 'import java.util.ArrayList;
+
+      import java.util.IdentityHashMap;
+
+      import java.util.Map;
+
+      import java.util.function.Supplier;'
+- description: Cancel only a queued request whose original owner navigates or is replaced
+  regex:
+    re_pattern: \ \ \ \ private\ int\ mTabModalSuspendedToken;
+    replace: "    private int mTabModalSuspendedToken;\n    private boolean mDestroyed;\n    private final Map<PropertyModel, QueuedDialogObserver> mQueuedDialogObservers =\n            new IdentityHashMap<>();\n\n    private final class QueuedDialogObserver implements TabObserver {\n        private final PropertyModel mModel;\n        private final Tab mOwner;\n        private final @Nullable WebContents mContents;\n        private final boolean mHasOwnerMetadata;\n\n        QueuedDialogObserver(PropertyModel model, Tab owner, @Nullable WebContents contents,\n                boolean hasOwnerMetadata) {\n            mModel = model;\n            mOwner = owner;\n            mContents = contents;\n            mHasOwnerMetadata = hasOwnerMetadata;\n        }\n\n        void onSelectedTabChanged(@Nullable Tab selected) {\n            if (selected == mOwner) return;\n            WebContents selectedContents = selected == null ? null : selected.getWebContents();\n            SplitTabCoordinator coordinator = mContents == null\n                    ? null : SplitTabCoordinator.fromWebContents(mContents);\n            // A modal APP dialog can suspend the presenter while its original split\n            // stays visible. Preserve each queued request independently of that presenter.\n            if (mHasOwnerMetadata && coordinator != null && coordinator.isShown()\n                    && selectedContents != null && coordinator.contains(selectedContents)) return;\n            // Custom models cannot carry their captured owner into presentation and\n            // therefore keep the ordinary switch-to-dismiss behavior.\n            dismiss(DialogDismissalCause.TAB_SWITCHED);\n        }\n\n        @Override\n        public void onPageLoadStarted(Tab tab, GURL url) {\n            if (tab == mOwner) dismiss(DialogDismissalCause.NAVIGATE);\n        }\n\n        @Override\n        public void onDestroyed(Tab tab) {\n            if (tab == mOwner) dismiss(DialogDismissalCause.TAB_DESTROYED);\n        }\n\n        @Override\n        public void onContentChanged(Tab tab) {\n            if (tab == mOwner && tab.getWebContents() != mContents) {\n                dismiss(DialogDismissalCause.WEB_CONTENTS_DESTROYED);\n            }\n        }\n\n        private void dismiss(@DialogDismissalCause int cause) {\n            stopObservingQueuedDialog(mModel);\n            mManager.dismissDialog(mModel, cause);\n        }\n\n        void detach() {\n            mOwner.removeObserver(this);\n        }\n    }\n\n    private void stopObservingQueuedDialog(PropertyModel model) {\n        QueuedDialogObserver observer = mQueuedDialogObservers.remove(model);\n        if (observer != null) observer.detach();\n    }\n\n    private void stopObservingQueuedDialogs() {\n        var observers = new ArrayList<>(mQueuedDialogObservers.values());\n        mQueuedDialogObservers.clear();\n        for (QueuedDialogObserver observer : observers) observer.detach();\n    }\n\n    private void dismissQueuedDialogsOutsideSelectedTab(@Nullable Tab selected) {\n        for (QueuedDialogObserver observer : new ArrayList<>(mQueuedDialogObservers.values())) {\n            observer.onSelectedTabChanged(selected);\n        }\n    }\n\n    @Override\n    public void onDialogQueued(PropertyModel model, @ModalDialogType int dialogType) {\n        if (dialogType != ModalDialogType.TAB || mQueuedDialogObservers.containsKey(model)) return;\n        if (mDestroyed) {\n            mManager.dismissDialog(model, DialogDismissalCause.ACTIVITY_DESTROYED);\n            return;\n        }\n        boolean supportsOwner = model.containsKey(ModalDialogProperties.TAB_MODAL_OWNER);\n        Object requestedOwner = supportsOwner ? model.get(ModalDialogProperties.TAB_MODAL_OWNER) : null;\n        Tab owner;\n        WebContents contents;\n        if (requestedOwner == null) {\n            TabModelSelector selector = mTabModelSelectorSupplier.get();\n            owner = selector == null ? null : selector.getCurrentTab();\n            contents = owner == null ? null : owner.getWebContents();\n        } else if (requestedOwner instanceof WebContents requestedContents\n                && !requestedContents.isDestroyed()) {\n            contents = requestedContents;\n            owner = TabUtils.fromWebContents(contents);\n        } else {\n            mManager.dismissDialog(model, DialogDismissalCause.WEB_CONTENTS_DESTROYED);\n            return;\n        }\n        if (owner == null || owner.isDestroyed()\n                || contents != null && (contents.isDestroyed() || owner.getWebContents() != contents)) {\n            mManager.dismissDialog(model, DialogDismissalCause.TAB_DESTROYED);\n            return;\n        }\n        // Capture legacy models at queue entry, before peer activation can change\n        // which tab the presenter's ordinary current-tab fallback would resolve.\n        boolean hasOwnerMetadata = supportsOwner && contents != null;\n        if (hasOwnerMetadata && requestedOwner == null) {\n            model.set(ModalDialogProperties.TAB_MODAL_OWNER, contents);\n        }\n        QueuedDialogObserver observer =\n                new QueuedDialogObserver(model, owner, contents, hasOwnerMetadata);\n        mQueuedDialogObservers.put(model, observer);\n        owner.addObserver(observer);\n    }"
+- description: Hand a dequeued request back to the presenter owner observer
+  regex:
+    re_pattern: '\ \ \ \ public\ void\ onDialogAdded\(PropertyModel\ model\)\ \{\
+
+      \ \ \ \ \ \ \ \ mHandleBackPressChangedSupplier\.set\(shouldInterceptBackPress\(\)\);'
+    replace: "    public void onDialogAdded(PropertyModel model) {\n        stopObservingQueuedDialog(model);\n        mHandleBackPressChangedSupplier.set(shouldInterceptBackPress());"
+- description: Retire queued observers before a dismissal callback can expose the next model
+  regex:
+    re_pattern: '\ \ \ \ public\ void\ onDialogDismissed\(PropertyModel\ model\)\ \{\
+
+      \ \ \ \ \ \ \ \ mHandleBackPressChangedSupplier\.set\(shouldInterceptBackPress\(\)\);'
+    replace: "    public void onDialogDismissed(PropertyModel model) {\n        stopObservingQueuedDialog(model);\n        mHandleBackPressChangedSupplier.set(shouldInterceptBackPress());"
+- description: Filter queued requests by their own owner when selected tabs change
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ if\ \(tab\ !=\ mActiveTab\)\ \{\
+
+      '
+    replace: "        if (tab != mActiveTab) {\n            dismissQueuedDialogsOutsideSelectedTab(tab);\n"
+- description: Format changed Java with the pinned Chromium formatter
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ public\ void\ onDestroyed\(Tab\ tab\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ //\ Each\ displayed\ or\ queued\ dialog\ observes\ its\ own\ requesting\ tab\.\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ if\ \(mActiveTab\ ==\ tab\)\ mActiveTab\ =\ null;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \};\
+
+      \
+
+      \ \ \ \ private\ Activity\ mActivity;\
+
+      \ \ \ \ private\ final\ ActivityLifecycleDispatcher\ mActivityLifecycleDispatcher;\
+
+      '
+    replace: "                public void onDestroyed(Tab tab) {\n                    // Each displayed or queued dialog observes its own requesting tab.\n                    if (mActiveTab == tab) mActiveTab = null;\n                }\n            };\n\n    private Activity mActivity;\n    private final ActivityLifecycleDispatcher mActivityLifecycleDispatcher;\n"
+- description: Format changed Java with the pinned Chromium formatter
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ private\ final\ Tab\ mOwner;\
+
+      \ \ \ \ \ \ \ \ private\ final\ @Nullable\ WebContents\ mContents;\
+
+      \ \ \ \ \ \ \ \ private\ final\ boolean\ mHasOwnerMetadata;\
+
+      \
+
+      \ \ \ \ \ \ \ \ QueuedDialogObserver\(PropertyModel\ model,\ Tab\ owner,\ @Nullable\ WebContents\ contents,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ boolean\ hasOwnerMetadata\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mModel\ =\ model;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mOwner\ =\ owner;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mContents\ =\ contents;\
+
+      '
+    replace: "        private final Tab mOwner;\n        private final @Nullable WebContents mContents;\n        private final boolean mHasOwnerMetadata;\n\n        QueuedDialogObserver(\n                PropertyModel model,\n                Tab owner,\n                @Nullable WebContents contents,\n                boolean hasOwnerMetadata) {\n            mModel = model;\n            mOwner = owner;\n            mContents = contents;\n"
+- description: Format changed Java with the pinned Chromium formatter
+  regex:
+    re_pattern: '\
+
+      \ \ \ \ \ \ \ \ void\ onSelectedTabChanged\(@Nullable\ Tab\ selected\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(selected\ ==\ mOwner\)\ return;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ WebContents\ selectedContents\ =\ selected\ ==\ null\ \?\ null\ :\ selected\.getWebContents\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ SplitTabCoordinator\ coordinator\ =\ mContents\ ==\ null\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \?\ null\ :\ SplitTabCoordinator\.fromWebContents\(mContents\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ //\ A\ modal\ APP\ dialog\ can\ suspend\ the\ presenter\ while\ its\ original\ split\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ //\ stays\ visible\.\ Preserve\ each\ queued\ request\ independently\ of\ that\ presenter\.\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(mHasOwnerMetadata\ \&\&\ coordinator\ !=\ null\ \&\&\ coordinator\.isShown\(\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \&\&\ selectedContents\ !=\ null\ \&\&\ coordinator\.contains\(selectedContents\)\)\ return;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ //\ Custom\ models\ cannot\ carry\ their\ captured\ owner\ into\ presentation\ and\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ //\ therefore\ keep\ the\ ordinary\ switch\-to\-dismiss\ behavior\.\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ dismiss\(DialogDismissalCause\.TAB_SWITCHED\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      '
+    replace: "\n        void onSelectedTabChanged(@Nullable Tab selected) {\n            if (selected == mOwner) return;\n            WebContents selectedContents = selected == null ? null : selected.getWebContents();\n            SplitTabCoordinator coordinator =\n                    mContents == null ? null : SplitTabCoordinator.fromWebContents(mContents);\n            // A modal APP dialog can suspend the presenter while its original split\n            // stays visible. Preserve each queued request independently of that presenter.\n            if (mHasOwnerMetadata\n                    && coordinator != null\n                    && coordinator.isShown()\n                    && selectedContents != null\n                    && coordinator.contains(selectedContents)) return;\n            // Custom models cannot carry their captured owner into presentation and\n            // therefore keep the ordinary switch-to-dismiss behavior.\n            dismiss(DialogDismissalCause.TAB_SWITCHED);\n        }\n"
+- description: Format changed Java with the pinned Chromium formatter
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ mManager\.dismissDialog\(model,\ DialogDismissalCause\.ACTIVITY_DESTROYED\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ return;\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ boolean\ supportsOwner\ =\ model\.containsKey\(ModalDialogProperties\.TAB_MODAL_OWNER\);\
+
+      \ \ \ \ \ \ \ \ Object\ requestedOwner\ =\ supportsOwner\ \?\ model\.get\(ModalDialogProperties\.TAB_MODAL_OWNER\)\ :\ null;\
+
+      \ \ \ \ \ \ \ \ Tab\ owner;\
+
+      \ \ \ \ \ \ \ \ WebContents\ contents;\
+
+      \ \ \ \ \ \ \ \ if\ \(requestedOwner\ ==\ null\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ TabModelSelector\ selector\ =\ mTabModelSelectorSupplier\.get\(\);\
+
+      '
+    replace: "            mManager.dismissDialog(model, DialogDismissalCause.ACTIVITY_DESTROYED);\n            return;\n        }\n        boolean supportsOwner = model.containsKey(ModalDialogProperties.TAB_MODAL_OWNER);\n        Object requestedOwner =\n                supportsOwner ? model.get(ModalDialogProperties.TAB_MODAL_OWNER) : null;\n        Tab owner;\n        WebContents contents;\n        if (requestedOwner == null) {\n            TabModelSelector selector = mTabModelSelectorSupplier.get();\n"
+- description: Format changed Java with the pinned Chromium formatter
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \}\ else\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mManager\.dismissDialog\(model,\ DialogDismissalCause\.WEB_CONTENTS_DESTROYED\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ return;\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ if\ \(owner\ ==\ null\ \|\|\ owner\.isDestroyed\(\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \|\|\ contents\ !=\ null\ \&\&\ \(contents\.isDestroyed\(\)\ \|\|\ owner\.getWebContents\(\)\ !=\ contents\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mManager\.dismissDialog\(model,\ DialogDismissalCause\.TAB_DESTROYED\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ return;\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ //\ Capture\ legacy\ models\ at\ queue\ entry,\ before\ peer\ activation\ can\ change\
+
+      '
+    replace: "        } else {\n            mManager.dismissDialog(model, DialogDismissalCause.WEB_CONTENTS_DESTROYED);\n            return;\n        }\n        if (owner == null\n                || owner.isDestroyed()\n                || contents != null\n                        && (contents.isDestroyed() || owner.getWebContents() != contents)) {\n            mManager.dismissDialog(model, DialogDismissalCause.TAB_DESTROYED);\n            return;\n        }\n        // Capture legacy models at queue entry, before peer activation can change\n"
+- description: Format changed Java with the pinned Chromium formatter
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ //\ Do\ not\ use\ lastId\ here\ since\ it\ can\ be\ the\ selected\ tab''s\ ID\ if\ model\ is\ switched\
+
+      \ \ \ \ \ \ \ \ //\ inside\ tab\ switcher\.\
+
+      \ \ \ \ \ \ \ \ if\ \(tab\ !=\ mActiveTab\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ dismissQueuedDialogsOutsideSelectedTab\(tab\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(mPresenter\ !=\ null\ \&\&\ mPresenter\.getDialogModel\(\)\ !=\ null\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \&\&\ !mPresenter\.canKeepDialogForTab\(tab\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mPresenter\.dismissCurrentDialog\(DialogDismissalCause\.TAB_SWITCHED\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(mActiveTab\ !=\ null\)\ mActiveTab\.removeObserver\(mTabObserver\);\
+
+      '
+    replace: "        // Do not use lastId here since it can be the selected tab's ID if model is switched\n        // inside tab switcher.\n        if (tab != mActiveTab) {\n            dismissQueuedDialogsOutsideSelectedTab(tab);\n            if (mPresenter != null\n                    && mPresenter.getDialogModel() != null\n                    && !mPresenter.canKeepDialogForTab(tab)) {\n                mPresenter.dismissCurrentDialog(DialogDismissalCause.TAB_SWITCHED);\n            }\n            if (mActiveTab != null) mActiveTab.removeObserver(mTabObserver);\n"
+- description: Format changed Java with the pinned Chromium formatter
+  regex:
+    re_pattern: '\ \ \ \ public\ void\ onDestroy\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ mDestroyed\ =\ true;\
+
+      \ \ \ \ \ \ \ \ if\ \(mTabModelObserver\ !=\ null\)\ mTabModelObserver\.destroy\(\);\
+
+      \ \ \ \ \ \ \ \ if\ \(mPresenter\ !=\ null\)\ mPresenter\.destroy\(\);\
+
+      \ \ \ \ \ \ \ \ mManager\.dismissDialogsOfType\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ ModalDialogType\.TAB,\ DialogDismissalCause\.ACTIVITY_DESTROYED\);\
+
+      \ \ \ \ \ \ \ \ stopObservingQueuedDialogs\(\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ if\ \(mActiveTab\ !=\ null\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mActiveTab\.removeObserver\(mTabObserver\);\
+
+      '
+    replace: "    public void onDestroy() {\n        mDestroyed = true;\n        if (mTabModelObserver != null) mTabModelObserver.destroy();\n        if (mPresenter != null) mPresenter.destroy();\n        mManager.dismissDialogsOfType(ModalDialogType.TAB, DialogDismissalCause.ACTIVITY_DESTROYED);\n        stopObservingQueuedDialogs();\n\n        if (mActiveTab != null) {\n            mActiveTab.removeObserver(mTabObserver);\n"
+- description: Remove the Map import after retaining the concrete identity-map type
+  regex:
+    re_pattern: 'import\ java\.util\.Map;\
+
+      '
+    replace: ''
+- description: Keep the identity-key semantics explicit in the queued-dialog observer field type
+  regex:
+    re_pattern: private\ final\ Map<PropertyModel,\ QueuedDialogObserver>\ mQueuedDialogObservers\ =
+    replace: private final IdentityHashMap<PropertyModel, QueuedDialogObserver> mQueuedDialogObservers =
+- description: Group the existing queued-owner validity conjunction without changing short-circuit order
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \|\|\ contents\ !=\ null\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \&\&\ \(contents\.isDestroyed\(\)\ \|\|\ owner\.getWebContents\(\)\ !=\ contents\)\)\ \{'
+    replace: "                || (contents != null\n                        && (contents.isDestroyed() || owner.getWebContents() != contents))) {"

@@ -1,0 +1,139 @@
+diff --git a/chrome/browser/android/tab_android_unittest.cc b/chrome/browser/android/tab_android_unittest.cc
+index bf7e2f48e2bceb9d151dfc4a801b94afff7694c7..97131c9b7c87cd84af27cf8e272b21a195eb0b4f 100644
+--- a/chrome/browser/android/tab_android_unittest.cc
++++ b/chrome/browser/android/tab_android_unittest.cc
+@@ -10,26 +10,35 @@
+ #include "base/android/jni_android.h"
+ #include "base/android/scoped_java_ref.h"
+ #include "base/memory/raw_ptr.h"
++#include "base/scoped_observation.h"
+ #include "base/test/scoped_feature_list.h"
+ #include "base/test/task_environment.h"
++#include "build/build_config.h"
+ #include "cc/slim/layer.h"
+ #include "chrome/android/chrome_jni_headers/TabAndroidTestHelper_jni.h"
++#if !BUILDFLAG(IS_ANDROID)
+ #include "chrome/browser/actor/actor_keyed_service.h"
+ #include "chrome/browser/actor/actor_task.h"
+ #include "chrome/browser/actor/actor_test_util.h"
+ #include "chrome/browser/actor/actor_util.h"
+ #include "chrome/browser/actor/ui/test_support/mock_actor_ui_tab_controller.h"
++#endif  // !BUILDFLAG(IS_ANDROID)
+ #include "chrome/browser/android/tab_features.h"
+ #include "chrome/browser/android/tab_group_android.h"
+ #include "chrome/browser/android/tab_web_contents_delegate_android.h"
+ #include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/sessions/session_tab_helper_factory.h"
++#include "components/sessions/content/session_tab_helper.h"
++#include "components/tabs/public/tab_handle_factory.h"
+ #include "chrome/browser/ui/android/tab_model/tab_model.h"
+ #include "chrome/browser/ui/webui/webui_embedding_context.h"
+ #include "chrome/common/chrome_features.h"
+ #include "chrome/test/base/testing_browser_process.h"
+ #include "chrome/test/base/testing_profile.h"
+ #include "chrome/test/base/testing_profile_manager.h"
++#if !BUILDFLAG(IS_ANDROID)
+ #include "components/actor/core/actor_features.h"
++#endif  // !BUILDFLAG(IS_ANDROID)
+ #include "components/sync_sessions/synced_tab_delegate.h"
+ #include "components/tab_groups/tab_group_id.h"
+ #include "components/tabs/public/pinned_tab_collection.h"
+@@ -223,6 +232,7 @@
+   EXPECT_EQ(tab.get(), webui::GetTabInterface(raw_web_contents));
+ }
+ 
++#if !BUILDFLAG(IS_ANDROID)
+ class GlicTabAndroidTest : public TabAndroidTest {
+  public:
+   GlicTabAndroidTest() {
+@@ -307,6 +317,8 @@
+       GURL(), "", GURL()));
+ }
+ 
++#endif  // !BUILDFLAG(IS_ANDROID)
++
+ TEST_F(TabAndroidTest, Getters) {
+   EXPECT_EQ(u"about:blank", tab_android_->GetTitle());
+   EXPECT_EQ(GURL("about:blank"), tab_android_->GetURL());
+@@ -464,3 +476,81 @@
+ }
+ 
+ DEFINE_JNI(TabAndroidTestHelper)
++
++
++// Destruction may happen after a lazy tab has detached from its model, before
++// it ever initializes WebContents. Observers must not outlive the tab.
++TEST_F(TabAndroidTest, LazyTabDestructionAllowsObserverToStopObserving) {
++  class Observer final : public TabAndroid::Observer {
++   public:
++    void OnInitWebContents(TabAndroid*) override { ADD_FAILURE(); }
++    void OnTabAndroidDestroyed(TabAndroid* tab) override {
++      EXPECT_EQ(nullptr, tab->GetContents());
++      ++destroyed;
++      observation.Reset();
++    }
++    int destroyed = 0;
++    base::ScopedObservation<TabAndroid, TabAndroid::Observer> observation{this};
++  } observer;
++  auto lazy = TabAndroid::CreateForTesting(profile_.get(), kTabId + 1, nullptr);
++  observer.observation.Observe(lazy.get());
++  lazy.reset();
++  EXPECT_EQ(1, observer.destroyed);
++  EXPECT_FALSE(observer.observation.IsObserving());
++}
++
++// Native IDs exist before contents, and the first immutable helper consumes that
++// exact identity. These use the real Chrome factory and native tab lookup.
++TEST_F(TabAndroidTest, ReservesGenuineIdentityBeforeSessionHelper) {
++  auto contents = content::WebContents::Create(
++      content::WebContents::CreateParams(profile_.get()));
++  auto tab = TabAndroid::CreateForTesting(profile_.get(), kTabId + 1,
++                                         std::move(contents));
++  auto& factory = tabs::SessionMappedTabHandleFactory::GetInstance();
++  const auto id = factory.GetSessionIdForHandle(tab->GetHandle().raw_value());
++  ASSERT_TRUE(id);
++  EXPECT_TRUE(SessionID::IsValidValue(*id));
++  CreateSessionServiceTabHelper(tab->GetContents());
++  EXPECT_EQ(*id, sessions::SessionTabHelper::IdForTab(tab->GetContents()).id());
++  CreateSessionServiceTabHelper(tab->GetContents());
++  EXPECT_EQ(id, factory.GetSessionIdForHandle(tab->GetHandle().raw_value()));
++}
++
++TEST_F(TabAndroidTest, ExistingEagerHelperIdentityWinsAndSurvivesReparent) {
++  auto contents = content::WebContents::Create(
++      content::WebContents::CreateParams(profile_.get()));
++  const SessionID actual = SessionID::NewUnique();
++  sessions::SessionTabHelper::CreateForWebContents(
++      contents.get(), sessions::SessionTabHelper::DelegateLookup(), actual);
++  auto tab = TabAndroid::CreateForTesting(profile_.get(), kTabId + 1,
++                                         std::move(contents));
++  auto& factory = tabs::SessionMappedTabHandleFactory::GetInstance();
++  EXPECT_EQ(actual.id(),
++            factory.GetSessionIdForHandle(tab->GetHandle().raw_value()));
++  CreateSessionServiceTabHelper(tab->GetContents());
++  EXPECT_EQ(actual, sessions::SessionTabHelper::IdForTab(tab->GetContents()));
++  auto released = tab->ReleaseWebContentsForTesting();
++  EXPECT_FALSE(factory.GetSessionIdForHandle(tab->GetHandle().raw_value()));
++  EXPECT_EQ(actual, sessions::SessionTabHelper::IdForTab(released.get()));
++  auto adopted = TabAndroid::CreateForTesting(profile_.get(), kTabId + 2,
++                                             std::move(released));
++  EXPECT_EQ(actual.id(),
++            factory.GetSessionIdForHandle(adopted->GetHandle().raw_value()));
++  const auto handle = adopted->GetHandle();
++  adopted.reset();
++  EXPECT_FALSE(factory.GetSessionIdForHandle(handle.raw_value()));
++  EXPECT_EQ(0, factory.GetHandleForSessionId(actual.id()));
++}
++
++TEST_F(TabAndroidTest, DestroyContentsRetainsReservedIdentity) {
++  auto contents = content::WebContents::Create(
++      content::WebContents::CreateParams(profile_.get()));
++  auto tab = TabAndroid::CreateForTesting(profile_.get(), kTabId + 1,
++                                         std::move(contents));
++  CreateSessionServiceTabHelper(tab->GetContents());
++  auto& factory = tabs::SessionMappedTabHandleFactory::GetInstance();
++  const auto id = factory.GetSessionIdForHandle(tab->GetHandle().raw_value());
++  tab->DestroyWebContents();
++  EXPECT_EQ(nullptr, tab->GetContents());
++  EXPECT_EQ(id, factory.GetSessionIdForHandle(tab->GetHandle().raw_value()));
++}

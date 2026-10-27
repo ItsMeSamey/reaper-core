@@ -1,0 +1,222 @@
+diff --git a/chrome/android/junit/src/org/chromium/chrome/browser/ChromeTabbedActivityUnitTest.java b/chrome/android/junit/src/org/chromium/chrome/browser/ChromeTabbedActivityUnitTest.java
+--- a/chrome/android/junit/src/org/chromium/chrome/browser/ChromeTabbedActivityUnitTest.java
++++ b/chrome/android/junit/src/org/chromium/chrome/browser/ChromeTabbedActivityUnitTest.java
+@@ -18,10 +18,13 @@
+ import static org.mockito.Mockito.mock;
+ import static org.mockito.Mockito.never;
+ import static org.mockito.Mockito.spy;
++import static org.mockito.Mockito.times;
+ import static org.mockito.Mockito.verify;
++import static org.mockito.Mockito.verifyNoInteractions;
+ import static org.mockito.Mockito.when;
+ 
+ import android.os.Bundle;
++import android.view.KeyEvent;
+ import android.view.Window;
+ 
+ import org.junit.After;
+@@ -29,8 +32,10 @@
+ import org.junit.Test;
+ import org.junit.runner.RunWith;
+ import org.robolectric.Robolectric;
++import org.robolectric.util.ReflectionHelpers;
+ 
+ import org.chromium.base.DeviceInfo;
++import org.chromium.base.supplier.OneshotSupplierImpl;
+ import org.chromium.base.test.BaseRobolectricTestRunner;
+ import org.chromium.base.test.util.Features.DisableFeatures;
+ import org.chromium.base.test.util.Features.EnableFeatures;
+@@ -38,6 +43,7 @@
+ import org.chromium.chrome.browser.app.tabmodel.TabModelOrchestrator;
+ import org.chromium.chrome.browser.educational_tip.EducationTipModuleActionDelegate;
+ import org.chromium.chrome.browser.flags.ChromeFeatureList;
++import org.chromium.chrome.browser.fullscreen.FullscreenManager;
+ import org.chromium.chrome.browser.hub.PaneId;
+ import org.chromium.chrome.browser.profiles.Profile;
+ import org.chromium.chrome.browser.profiles.ProfileManager;
+@@ -46,6 +52,9 @@
+ import org.chromium.chrome.browser.tabmodel.TabModel;
+ import org.chromium.chrome.browser.tabmodel.TabModelSelectorBase;
+ import org.chromium.chrome.browser.tasks.tab_management.vertical_tabs.VerticalTabsActionDelegate;
++import org.chromium.chrome.browser.toolbar.ToolbarManager;
++import org.chromium.chrome.browser.toolbar.extensions.ExtensionsToolbarCoordinator;
++import org.chromium.chrome.browser.ui.RootUiCoordinator;
+ 
+ /** Unit tests for {@link ChromeTabbedActivity}. */
+ @RunWith(BaseRobolectricTestRunner.class)
+@@ -103,6 +112,54 @@
+         }
+     }
+ 
++    private static class KeyboardTestChromeTabbedActivity extends TestChromeTabbedActivity {
++        private final FullscreenManager mFullscreenManager = mock(FullscreenManager.class);
++        private boolean mBrowserKeyHandled;
++        private int mLastMenuAction;
++
++        @Override
++        public FullscreenManager getFullscreenManager() {
++            return mFullscreenManager;
++        }
++
++        @Override
++        public boolean onKeyDown(int keyCode, KeyEvent event) {
++            return mBrowserKeyHandled;
++        }
++
++        @Override
++        public boolean onMenuOrKeyboardAction(int id, boolean fromMenu) {
++            mLastMenuAction = id;
++            return true;
++        }
++    }
++
++    private KeyboardTestChromeTabbedActivity createKeyboardActivity(
++            ExtensionsToolbarCoordinator coordinator) {
++        KeyboardTestChromeTabbedActivity activity =
++                Robolectric.buildActivity(KeyboardTestChromeTabbedActivity.class).get();
++        activity.setDidFinishNativeInitialization(true);
++        ReflectionHelpers.setField(activity, "mUiWithNativeInitialized", true);
++        ToolbarManager toolbarManager = mock(ToolbarManager.class);
++        when(toolbarManager.getExtensionsToolbarCoordinator()).thenReturn(coordinator);
++        OneshotSupplierImpl<ToolbarManager> toolbarSupplier = new OneshotSupplierImpl<>();
++        toolbarSupplier.set(toolbarManager);
++        RootUiCoordinator rootUiCoordinator = mock(RootUiCoordinator.class);
++        when(rootUiCoordinator.getToolbarManagerSupplier()).thenReturn(toolbarSupplier);
++        ReflectionHelpers.setField(activity, "mRootUiCoordinator", rootUiCoordinator);
++        return activity;
++    }
++
++    private KeyEvent extensionShortcut() {
++        return new KeyEvent(
++                0,
++                0,
++                KeyEvent.ACTION_DOWN,
++                KeyEvent.KEYCODE_1,
++                0,
++                KeyEvent.META_CTRL_ON | KeyEvent.META_SHIFT_ON);
++    }
++
+     private ChromeTabbedActivity mActivity;
+ 
+     @Before
+@@ -358,4 +415,120 @@
+         activity.onPreCreate();
+         verify(activity).supportRequestWindowFeature(Window.FEATURE_ACTION_MODE_OVERLAY);
+     }
++    @Test
++    @EnableFeatures(ChromeFeatureList.UNIVERSAL_KEYBOARD_HANDLING)
++    public void testPreHandleKeyboardEvent_routesExtensionShortcutOnce() {
++        ExtensionsToolbarCoordinator coordinator = mock(ExtensionsToolbarCoordinator.class);
++        KeyboardTestChromeTabbedActivity activity = createKeyboardActivity(coordinator);
++        KeyEvent event = extensionShortcut();
++        when(coordinator.dispatchKeyEvent(event)).thenReturn(true);
++
++        assertTrue(activity.preHandleKeyboardEvent(event));
++
++        verify(coordinator, times(1)).dispatchKeyEvent(event);
++    }
++
++    @Test
++    @EnableFeatures(ChromeFeatureList.UNIVERSAL_KEYBOARD_HANDLING)
++    public void testHandleKeyboardEvent_routesExtensionShortcutOnce() {
++        ExtensionsToolbarCoordinator coordinator = mock(ExtensionsToolbarCoordinator.class);
++        KeyboardTestChromeTabbedActivity activity = createKeyboardActivity(coordinator);
++        KeyEvent event = extensionShortcut();
++        when(coordinator.dispatchKeyEvent(event)).thenReturn(true);
++
++        assertTrue(activity.handleKeyboardEvent(event));
++
++        verify(coordinator, times(1)).dispatchKeyEvent(event);
++    }
++
++    @Test
++    @EnableFeatures(ChromeFeatureList.UNIVERSAL_KEYBOARD_HANDLING)
++    public void testUniversalKeyboardCallbacks_browserHandlingTakesPriority() {
++        ExtensionsToolbarCoordinator coordinator = mock(ExtensionsToolbarCoordinator.class);
++        KeyboardTestChromeTabbedActivity activity = createKeyboardActivity(coordinator);
++
++        assertTrue(
++                activity.preHandleKeyboardEvent(
++                        new KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_SEARCH)));
++        assertEquals(R.id.focus_url_bar, activity.mLastMenuAction);
++        activity.mBrowserKeyHandled = true;
++        assertTrue(activity.handleKeyboardEvent(extensionShortcut()));
++
++        verifyNoInteractions(coordinator);
++    }
++
++    @Test
++    @EnableFeatures(ChromeFeatureList.UNIVERSAL_KEYBOARD_HANDLING)
++    public void testUniversalKeyboardCallbacks_ignoreKeyUpAndRepeats() {
++        ExtensionsToolbarCoordinator coordinator = mock(ExtensionsToolbarCoordinator.class);
++        KeyboardTestChromeTabbedActivity activity = createKeyboardActivity(coordinator);
++        KeyEvent keyUp = new KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_1);
++        KeyEvent repeated = new KeyEvent(0, 0, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_1, 1);
++
++        assertFalse(activity.preHandleKeyboardEvent(keyUp));
++        assertFalse(activity.handleKeyboardEvent(keyUp));
++        assertFalse(activity.preHandleKeyboardEvent(repeated));
++        assertFalse(activity.handleKeyboardEvent(repeated));
++
++        verifyNoInteractions(coordinator);
++    }
++
++    @Test
++    @EnableFeatures(ChromeFeatureList.UNIVERSAL_KEYBOARD_HANDLING)
++    public void testUniversalKeyboardCallbacks_waitForNativeAndUiInitialization() {
++        ExtensionsToolbarCoordinator coordinator = mock(ExtensionsToolbarCoordinator.class);
++        KeyboardTestChromeTabbedActivity activity = createKeyboardActivity(coordinator);
++        KeyEvent event = extensionShortcut();
++
++        activity.setDidFinishNativeInitialization(false);
++        assertFalse(activity.preHandleKeyboardEvent(event));
++        assertFalse(activity.handleKeyboardEvent(event));
++        activity.setDidFinishNativeInitialization(true);
++        ReflectionHelpers.setField(activity, "mUiWithNativeInitialized", false);
++        assertFalse(activity.preHandleKeyboardEvent(event));
++        assertFalse(activity.handleKeyboardEvent(event));
++
++        verifyNoInteractions(coordinator);
++    }
++
++    @Test
++    @DisableFeatures(ChromeFeatureList.UNIVERSAL_KEYBOARD_HANDLING)
++    public void testUniversalKeyboardCallbacks_disabledFeatureDoesNotDispatch() {
++        ExtensionsToolbarCoordinator coordinator = mock(ExtensionsToolbarCoordinator.class);
++        KeyboardTestChromeTabbedActivity activity = createKeyboardActivity(coordinator);
++        KeyEvent event = extensionShortcut();
++
++        assertFalse(activity.preHandleKeyboardEvent(event));
++        assertFalse(activity.handleKeyboardEvent(event));
++
++        verifyNoInteractions(coordinator);
++    }
++
++    @Test
++    @EnableFeatures(ChromeFeatureList.UNIVERSAL_KEYBOARD_HANDLING)
++    public void testUniversalKeyboardCallbacks_unhandledShortcutIsNotConsumed() {
++        ExtensionsToolbarCoordinator coordinator = mock(ExtensionsToolbarCoordinator.class);
++        KeyboardTestChromeTabbedActivity activity = createKeyboardActivity(coordinator);
++        KeyEvent event = extensionShortcut();
++        when(coordinator.dispatchKeyEvent(event)).thenReturn(false);
++
++        assertFalse(activity.preHandleKeyboardEvent(event));
++        verify(coordinator, times(1)).dispatchKeyEvent(event);
++        assertFalse(activity.handleKeyboardEvent(event));
++        verify(coordinator, times(2)).dispatchKeyEvent(event);
++    }
++
++    @Test
++    @EnableFeatures(ChromeFeatureList.UNIVERSAL_KEYBOARD_HANDLING)
++    public void testDispatchKeyEvent_routesExtensionShortcutOnce() {
++        ExtensionsToolbarCoordinator coordinator = mock(ExtensionsToolbarCoordinator.class);
++        KeyboardTestChromeTabbedActivity activity = createKeyboardActivity(coordinator);
++        KeyEvent event = extensionShortcut();
++        when(coordinator.dispatchKeyEvent(event)).thenReturn(true);
++
++        assertTrue(activity.dispatchKeyEvent(event));
++
++        verify(coordinator, times(1)).dispatchKeyEvent(event);
++    }
++
+ }

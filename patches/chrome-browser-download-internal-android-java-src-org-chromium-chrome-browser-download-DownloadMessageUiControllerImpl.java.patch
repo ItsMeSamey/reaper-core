@@ -1,0 +1,103 @@
+diff --git a/chrome/browser/download/internal/android/java/src/org/chromium/chrome/browser/download/DownloadMessageUiControllerImpl.java b/chrome/browser/download/internal/android/java/src/org/chromium/chrome/browser/download/DownloadMessageUiControllerImpl.java
+--- a/chrome/browser/download/internal/android/java/src/org/chromium/chrome/browser/download/DownloadMessageUiControllerImpl.java
++++ b/chrome/browser/download/internal/android/java/src/org/chromium/chrome/browser/download/DownloadMessageUiControllerImpl.java
+@@ -324,6 +324,11 @@
+     // state (i.e. complete, failed or pending) or is cancelled/removed from the backend.
+     private final LinkedHashMap<ContentId, OfflineItem> mTrackedItems = new LinkedHashMap<>();
+ 
++    // Keep only real in-progress items while optional UI is suppressed. Terminal
++    // updates remove these entries; enabling UI must not resurrect completed work.
++    private final Map<ContentId, OfflineItem> mPolicySuppressedItems = new HashMap<>();
++    private @Nullable String mEarlyDownloadOtrProfileId;
++
+     // Keeps track of all the items that have been seen in the current chrome session.
+     private final Set<ContentId> mSeenItems = new HashSet<>();
+ 
+@@ -374,7 +379,26 @@
+      */
+     @Override
+     public void onDownloadStarted() {
++        onDownloadStarted(null);
++    }
++
++    @Override
++    public void onDownloadStarted(@Nullable OtrProfileId otrProfileId) {
++        mEarlyDownloadOtrProfileId = OtrProfileId.serialize(otrProfileId);
++        if (mDelegate.shouldSuppressDownloadUi(mEarlyDownloadOtrProfileId)) return;
+         computeNextStepForUpdate(null, true, false, false);
++    }
++
++    @Override
++    public void onDownloadUiPolicyChanged() {
++        // Replay retained real state, not a provider removal or a synthetic completion.
++        List<OfflineItem> items = new ArrayList<>(mTrackedItems.values());
++        items.addAll(mPolicySuppressedItems.values());
++        for (OfflineItem item : items) onItemUpdated(item, null);
++        if (mTrackedItems.isEmpty()
++                && mDelegate.shouldSuppressDownloadUi(mEarlyDownloadOtrProfileId)) {
++            moveToState(UiState.INITIAL);
++        }
+     }
+ 
+     @Override
+@@ -496,6 +520,10 @@
+     @Override
+     public void onItemsAdded(List<OfflineItem> items) {
+         for (OfflineItem item : items) {
++            if (isSuppressedByExtension(item)) {
++                updateSuppressedItem(item);
++                continue;
++            }
+             if (!isVisibleToUser(item)) continue;
+             computeNextStepForUpdate(item);
+         }
+@@ -503,6 +531,7 @@
+ 
+     @Override
+     public void onItemRemoved(@Nullable ContentId id) {
++        mPolicySuppressedItems.remove(id);
+         if (!mSeenItems.contains(id)) return;
+ 
+         mTrackedItems.remove(id);
+@@ -519,6 +548,14 @@
+         if (item.state == OfflineItemState.COMPLETE) {
+             mInterstitialItems.remove(item.id);
+         }
++        if (isSuppressedByExtension(item)) {
++            updateSuppressedItem(item);
++            return;
++        }
++        if (mPolicySuppressedItems.remove(item.id) != null) {
++            // A live transfer returning to the UI is new to its visible state.
++            mSeenItems.remove(item.id);
++        }
+         if (!isVisibleToUser(item)) {
+             onItemRemoved(item.id);
+             return;
+@@ -541,6 +578,26 @@
+         }
+ 
+         computeNextStepForUpdate(item);
++    }
++
++    private boolean isSuppressedByExtension(OfflineItem item) {
++        // Security warnings and blocked-download feedback remain visible.
++        if (item.isDangerous
++                || shouldDisplayItemAsDangerousInMessage(item)
++                || shouldDisplayItemAsBlockedSensitiveInMessage(item)
++                || (item.state == OfflineItemState.FAILED
++                        && item.failState == FailState.FILE_BLOCKED)) {
++            return false;
++        }
++        return LegacyHelpers.isLegacyDownload(item.id)
++                && mDelegate.shouldSuppressDownloadUi(item.otrProfileId);
++    }
++
++    private void updateSuppressedItem(OfflineItem item) {
++        onItemRemoved(item.id);
++        if (item.state == OfflineItemState.IN_PROGRESS) {
++            mPolicySuppressedItems.put(item.id, item.clone());
++        }
+     }
+ 
+     /** @return Whether the message is currently showing. */

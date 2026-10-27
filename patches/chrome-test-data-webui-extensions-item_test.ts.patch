@@ -1,0 +1,240 @@
+diff --git a/chrome/test/data/webui/extensions/item_test.ts b/chrome/test/data/webui/extensions/item_test.ts
+index add54e6f34d403cce4167d6196e30ff18674a18a..c0c6d99e8284154c4201731d3391042378daeef4 100644
+--- a/chrome/test/data/webui/extensions/item_test.ts
++++ b/chrome/test/data/webui/extensions/item_test.ts
+@@ -6,6 +6,10 @@
+ 
+ import type {CrIconElement, ExtensionsItemElement} from 'chrome://extensions/extensions.js';
+ import {navigation, Page} from 'chrome://extensions/extensions.js';
++// <if expr="is_android">
++import {getToastManager} from 'chrome://resources/cr_elements/cr_toast/cr_toast_manager.js';
++import {MockTimer} from 'chrome://webui-test/mock_timer.js';
++// </if>
+ import {loadTimeData} from 'chrome://resources/js/load_time_data.js';
+ import {assertDeepEquals, assertEquals, assertFalse, assertTrue} from 'chrome://webui-test/chai_assert.js';
+ import {isChildVisible, microtasksFinished} from 'chrome://webui-test/test_util.js';
+@@ -143,6 +147,79 @@
+     document.body.appendChild(toastManager);
+   });
+ 
++  // <if expr="is_android">
++  test('AndroidWrappedActionControls', async () => {
++    // A 320px phone leaves a 288px card after the list's side padding.
++    item.style.display = 'block';
++    item.style.width = '288px';
++    const upload = createStoreItemData({canUploadAsAccountExtension: true});
++    const unpacked = createExtensionInfo(
++        {location: chrome.developerPrivate.Location.UNPACKED});
++    const corrupt = createStoreItemData();
++    corrupt.state = chrome.developerPrivate.ExtensionState.DISABLED;
++    corrupt.disableReasons.corruptInstall = true;
++    const terminated = createStoreItemData(
++        {state: chrome.developerPrivate.ExtensionState.TERMINATED});
++    const cases = [
++      {data: upload, devMode: false, control: '#account-upload-button'},
++      {data: unpacked, devMode: true, control: '#dev-reload-button'},
++      {data: corrupt, devMode: false, control: '#repair-button'},
++      {data: terminated, devMode: false, control: '#terminated-reload-button'},
++    ];
++    for (const entry of cases) {
++      entry.data.runtimeErrors = [createRuntimeError(entry.data.id)];
++      item.data = entry.data;
++      item.inDevMode = entry.devMode;
++      await microtasksFinished();
++      testVisible(item, '#errors-button', true);
++      testVisible(item, entry.control, true);
++      // Exercise long localized labels without depending on a UI locale.
++      for (const button of item.shadowRoot.querySelectorAll(
++               '#button-strip cr-button')) {
++        for (const node of button.childNodes) {
++          if (node.nodeType === Node.TEXT_NODE && node.textContent?.trim()) {
++            node.textContent = 'Extension action with a long localized label';
++          }
++        }
++      }
++      for (const fontSize of [13, 26]) {
++        item.style.fontSize = `${fontSize}px`;
++        for (const direction of ['ltr', 'rtl']) {
++          item.dir = direction;
++          const card = item.shadowRoot.querySelector<HTMLElement>('#card')!;
++          const bounds = card.getBoundingClientRect();
++          const controls = item.shadowRoot.querySelectorAll<HTMLElement>(
++              '#button-strip cr-button, #button-strip cr-icon-button, ' +
++              '#button-strip cr-toggle');
++          const rects: DOMRect[] = [];
++          for (const control of controls) {
++            const rect = control.getBoundingClientRect();
++            if (!rect.width || !rect.height) {
++              continue;
++            }
++            assertTrue(rect.left >= bounds.left && rect.right <= bounds.right);
++            assertTrue(rect.top >= bounds.top && rect.bottom <= bounds.bottom);
++            if (control.tagName !== 'CR-TOGGLE') {
++              assertTrue(rect.height >= 48);
++            }
++            if (control.tagName === 'CR-BUTTON') {
++              assertEquals(`${fontSize}px`, getComputedStyle(control).fontSize);
++            }
++            for (const other of rects) {
++              assertFalse(
++                  rect.left < other.right && rect.right > other.left &&
++                  rect.top < other.bottom && rect.bottom > other.top);
++            }
++            rects.push(rect);
++          }
++          assertTrue(rects.length >= 4);
++          assertTrue(card.scrollWidth <= card.clientWidth);
++        }
++      }
++    }
++  });
++  // </if>
++
+   test('ElementVisibilityNormalState', async () => {
+     testNormalElementsAreVisible(item);
+     testDeveloperElementsAreHidden(item);
+@@ -207,8 +284,22 @@
+ 
+     await mockDelegate.testClickingCalls(
+         item.$.removeButton, 'deleteItem', [item.data.id]);
++    // <if expr="is_android">
++    // Brave's toggle handles clicks on the inner Leo switch.
++    const leoToggle =
++        item.$.enableToggle.shadowRoot.querySelector('leo-toggle');
++    assertTrue(!!leoToggle);
++    const enableButton =
++        leoToggle.shadowRoot!.querySelector<HTMLButtonElement>(
++            'button[role="switch"]');
++    assertTrue(!!enableButton);
++    await mockDelegate.testClickingCalls(
++        enableButton, 'setItemEnabled', [item.data.id, false]);
++    // </if>
++    // <if expr="not is_android">
+     await mockDelegate.testClickingCalls(
+         item.$.enableToggle, 'setItemEnabled', [item.data.id, false]);
++    // </if>
+     await mockDelegate.testClickingCalls(
+         item.shadowRoot.querySelector<HTMLElement>(
+             '#inspect-views a[is="action-link"]')!,
+@@ -316,7 +407,107 @@
+     item.shadowRoot.querySelector<HTMLElement>('#dev-reload-button')!.click();
+     id = await proxyDelegate.whenCalled('reloadItem');
+     assertEquals(item.data.id, id);
++    // <if expr="not is_android">
+     return verifyEventPromise(true);
++    // </if>
++    // <if expr="is_android">
++    await verifyEventPromise(true);
++    const toast = getToastManager();
++    assertTrue(toast.duration > 0, 'Owned reload failure restores finite duration');
++    assertFalse(toast.isToastOpen);
++
++    // Different cards may reload concurrently; both use the same label and
++    // singleton toast. A's completion must not retire B's newer status.
++    for (const finishBFirst of [false, true]) {
++      for (const failA of [false, true]) {
++        const second = document.createElement('extensions-item');
++        second.data = createExtensionInfo({
++          id: 'b'.repeat(32),
++          location: chrome.developerPrivate.Location.UNPACKED,
++        });
++        const firstDelegate = new TestService();
++        const secondDelegate = new TestService();
++        let finishA: () => void = () => {};
++        let finishB: () => void = () => {};
++        const calls: string[] = [];
++        const loadError = {message: 'Expected first reload failure'};
++        firstDelegate.reloadItem = (id: string) => {
++          calls.push(id);
++          return new Promise<void>((resolve, reject) => {
++            finishA = failA ? () => reject(loadError) : resolve;
++          });
++        };
++        secondDelegate.reloadItem = (id: string) => {
++          calls.push(id);
++          return new Promise<void>(resolve => { finishB = resolve; });
++        };
++        item.delegate = firstDelegate;
++        second.delegate = secondDelegate;
++        document.body.appendChild(second);
++        await microtasksFinished();
++        const timer = new MockTimer();
++        timer.install();
++        try {
++          const first = item.reloadItem().then(
++              () => null, error => error);
++          const firstMarker = toast.$.content.lastChild!;
++          assertEquals(Node.COMMENT_NODE, firstMarker.nodeType);
++          const secondReload = second.reloadItem();
++          const secondMarker = toast.$.content.lastChild!;
++          assertEquals(Node.COMMENT_NODE, secondMarker.nodeType);
++          assertEquals(null, firstMarker.parentNode);
++          assertDeepEquals([item.data!.id, second.data!.id], calls);
++          assertTrue(toast.isToastOpen);
++          assertEquals(0, toast.duration);
++          if (finishBFirst) {
++            finishB();
++            await secondReload;
++            await toast.updateComplete;
++            await toast.$.toast.updateComplete;
++            const duration = toast.duration;
++            const elapsed = Math.floor(duration / 2);
++            assertTrue(elapsed > 0);
++            assertTrue(toast.isToastOpen);
++            const completedContent = toast.$.content.lastChild;
++            timer.tick(elapsed);
++            finishA();
++            assertEquals(failA ? loadError : null, await first);
++            await toast.updateComplete;
++            await toast.$.toast.updateComplete;
++            assertTrue(toast.isToastOpen, 'Stale A must not hide completed B');
++            assertEquals(duration, toast.duration);
++            assertEquals(completedContent, toast.$.content.lastChild);
++            assertEquals(loadTimeData.getString('itemReloaded'),
++                toast.$.content.textContent);
++            timer.tick(duration - elapsed - 1);
++            assertTrue(toast.isToastOpen);
++            timer.tick(1);
++            assertFalse(toast.isToastOpen, 'B retains its original auto-hide deadline');
++          } else {
++            finishA();
++            assertEquals(failA ? loadError : null, await first);
++            assertTrue(toast.isToastOpen, 'A must not hide B pending status');
++            assertEquals(0, toast.duration, 'A must not shorten B pending status');
++            assertEquals(secondMarker, toast.$.content.lastChild);
++            assertEquals(loadTimeData.getString('itemReloading'),
++                toast.$.content.textContent);
++            finishB();
++            await secondReload;
++            assertEquals(null, secondMarker.parentNode);
++            assertTrue(toast.isToastOpen);
++            assertTrue(toast.duration > 0);
++            assertEquals(loadTimeData.getString('itemReloaded'),
++                toast.$.content.textContent);
++          }
++        } finally {
++          toast.hide();
++          await toast.$.toast.updateComplete;
++          timer.uninstall();
++          second.remove();
++        }
++      }
++    }
++    // </if>
+   });
+ 
+   test('Description', async () => {
+@@ -825,7 +1016,13 @@
+     card.style.transition = 'none';
+ 
+     function assertCardHeight(expected: number) {
++      // <if expr="is_android">
++      // Android cards may grow to keep wrapped controls reachable.
++      assertTrue(Math.round(card.getBoundingClientRect().height) >= expected);
++      // </if>
++      // <if expr="not is_android">
+       assertEquals(expected, Math.round(card.getBoundingClientRect().height));
++      // </if>
+     }
+ 
+     // Hidden when feature flag is disabled.

@@ -9,6 +9,11 @@
 #include <utility>
 
 #include "base/logging.h"
+#include "build/build_config.h"
+#if BUILDFLAG(IS_ANDROID)
+#include "base/uuid.h"
+#include "brave/components/containers/core/browser/temporary_container.h"
+#endif
 #include "brave/components/containers/core/browser/pref_names.h"
 #include "brave/components/containers/core/common/features.h"
 #include "brave/components/containers/core/mojom/containers.mojom.h"
@@ -19,6 +24,21 @@ namespace containers {
 
 namespace {
 
+#if BUILDFLAG(IS_ANDROID)
+// Default browser storage has an empty ID, but persisted container records do
+// not. Temporary IDs keep the engine's existing local-only t-UUID format.
+bool IsPersistedContainerIdValid(std::string_view id) {
+  if (id.empty()) {
+    return false;
+  }
+  if (id.starts_with(kTemporaryContainerIdPrefix)) {
+    id.remove_prefix(kTemporaryContainerIdPrefix.size());
+  }
+  const auto uuid = base::Uuid::ParseLowercase(id);
+  return uuid.is_valid() && uuid.AsLowercaseString() == id;
+}
+#endif
+
 mojom::ContainerPtr ContainerFromDict(const base::DictValue& dict) {
   auto* id = dict.FindString("id");
   auto* name = dict.FindString("name");
@@ -28,6 +48,13 @@ mojom::ContainerPtr ContainerFromDict(const base::DictValue& dict) {
     LOG(ERROR) << "Container is missing id, name, icon, or background_color";
     return nullptr;
   }
+
+#if BUILDFLAG(IS_ANDROID)
+  if (!IsPersistedContainerIdValid(*id)) {
+    LOG(ERROR) << "Container has a noncanonical or empty id";
+    return nullptr;
+  }
+#endif
 
   return mojom::Container::New(*id, *name, static_cast<mojom::Icon>(*icon),
                                *background_color);
@@ -94,6 +121,12 @@ std::vector<mojom::ContainerPtr> GetLocallyUsedContainersFromPrefs(
     }
 
     if (auto parsed = ContainerFromDict(item.second.GetDict())) {
+#if BUILDFLAG(IS_ANDROID)
+      if (parsed->id != item.first) {
+        LOG(ERROR) << "Used container snapshot id differs from its key";
+        continue;
+      }
+#endif
       containers.push_back(std::move(parsed));
     }
   }
@@ -105,7 +138,13 @@ mojom::ContainerPtr GetLocallyUsedContainerFromPrefs(const PrefService& prefs,
   CHECK(base::FeatureList::IsEnabled(features::kContainers));
   if (const auto* value =
           prefs.GetDict(prefs::kLocallyUsedContainers).FindDict(id)) {
-    return ContainerFromDict(*value);
+    auto container = ContainerFromDict(*value);
+#if BUILDFLAG(IS_ANDROID)
+    if (container && container->id != id) {
+      return nullptr;
+    }
+#endif
+    return container;
   }
   return nullptr;
 }
@@ -121,7 +160,13 @@ void SetLocallyUsedContainerToPrefs(const mojom::ContainerPtr& container,
 bool HasLocallyUsedContainerInPrefs(const PrefService& prefs,
                                     std::string_view id) {
   CHECK(base::FeatureList::IsEnabled(features::kContainers));
+#if BUILDFLAG(IS_ANDROID)
+  // A corrupt raw key must not block trusted restoration from replacing it
+  // with a valid snapshot for the same immutable identity.
+  return !!GetLocallyUsedContainerFromPrefs(prefs, id);
+#else
   return prefs.GetDict(prefs::kLocallyUsedContainers).contains(id);
+#endif
 }
 
 void RemoveLocallyUsedContainerFromPrefs(std::string_view id,

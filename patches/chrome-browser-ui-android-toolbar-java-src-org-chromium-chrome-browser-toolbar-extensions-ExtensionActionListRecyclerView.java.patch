@@ -1,0 +1,79 @@
+diff --git a/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/extensions/ExtensionActionListRecyclerView.java b/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/extensions/ExtensionActionListRecyclerView.java
+index 0ba912c..f2565b9 100644
+--- a/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/extensions/ExtensionActionListRecyclerView.java
++++ b/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/extensions/ExtensionActionListRecyclerView.java
+@@ -41,6 +41,8 @@
+     private final List<Runnable> mOnAnimationsFinishedRunnables = new ArrayList<>();
+ 
+     private @Nullable Transition mLastTransition;
++
++    private boolean mWaitingForItemAnimations;
+ 
+     private View.@Nullable OnLayoutChangeListener mLayoutChangeListener;
+     private final AccelerateDecelerateInterpolator mAccelerateDecelerateInterpolator =
+@@ -90,12 +92,7 @@
+                 (v, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom) -> {
+                     post(
+                             () -> {
+-                                if (mItemAnimator.isRunning()) {
+-                                    return;
+-                                }
+-
+-                                updateRecyclerViewWidth();
+-                                runAllOnAnimationsFinishedRunnables();
++                                runOnAnimationsFinishedRunnablesIfStable();
+                             });
+                 };
+         addOnLayoutChangeListener(mLayoutChangeListener);
+@@ -116,6 +113,31 @@
+     /** Clears all of the registered callbacks. */
+     public void clearOnAnimationsFinishedRunnables() {
+         mOnAnimationsFinishedRunnables.clear();
++    }
++
++    /** Completes queued work only after the width, requested layout, and item owners settle. */
++    private void runOnAnimationsFinishedRunnablesIfStable() {
++        if (mLastTransition != null || isLayoutRequested()) {
++            return;
++        }
++        if (mItemAnimator.isRunning()) {
++            if (!mWaitingForItemAnimations) {
++                mWaitingForItemAnimations = true;
++                mItemAnimator.isRunning(
++                        () -> post(
++                                () -> {
++                                    mWaitingForItemAnimations = false;
++                                    runOnAnimationsFinishedRunnablesIfStable();
++                                }));
++            }
++            return;
++        }
++
++        updateRecyclerViewWidth();
++        // Updating the adapter-derived width can itself require another real layout.
++        if (mLastTransition == null && !isLayoutRequested() && !mItemAnimator.isRunning()) {
++            runAllOnAnimationsFinishedRunnables();
++        }
+     }
+ 
+     private void runAllOnAnimationsFinishedRunnables() {
+@@ -186,6 +208,8 @@
+         public void runPendingAnimations() {
+             assert mTransitionRoot != null;
+             if (mHasPendingRemovals || mHasPendingAdditions) {
++                // Retire the old width owner before its synchronous completion callback.
++                mLastTransition = null;
+                 TransitionManager.endTransitions(mTransitionRoot);
+ 
+                 long startDelay = mHasPendingRemovals ? getRemoveDuration() : 0;
+@@ -202,8 +226,9 @@
+                             public void onTransitionEnd(Transition transition) {
+                                 transition.removeListener(this);
+                                 if (transition == mLastTransition) {
+-                                    runAllOnAnimationsFinishedRunnables();
++                                    // External completion callbacks can start a new width owner.
+                                     mLastTransition = null;
++                                    runOnAnimationsFinishedRunnablesIfStable();
+                                 }
+                             }
+ 

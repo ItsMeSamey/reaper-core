@@ -1,0 +1,124 @@
+diff --git a/testing/test.gni b/testing/test.gni
+index 4e6faeec2a3eff63e5957ee4900e7c103436ce47..a2b83a7886ffb6601ef5d36575012f22f2a9477c 100644
+--- a/testing/test.gni
++++ b/testing/test.gni
+@@ -543,6 +543,17 @@
+         }
+       }
+     } else {
++      _reaper_isolation_vars = [
++        "reaper_isolated_script_loader_apk",
++        "reaper_script_loader_asset_sources",
++        "reaper_script_loader_asset_paths",
++        "reaper_script_loader_asset_deps",
++        "reaper_isolated_container_browser_apk",
++        "reaper_container_browser_manifest",
++        "reaper_container_browser_manifest_dep",
++        "reaper_container_browser_asset_sources",
++        "reaper_container_browser_asset_paths",
++      ]
+       _library_target_name = "${target_name}__library"
+       _library_crate_name = "${target_name}_library"
+       _apk_target_name = "${target_name}__apk"
+@@ -613,7 +624,7 @@
+                   "configs",
+                   "deps",
+                 ] + _apk_specific_vars + _wrapper_script_vars +
+-                TESTONLY_AND_VISIBILITY)
++                _reaper_isolation_vars + TESTONLY_AND_VISIBILITY)
+ 
+         # Use a crate name that avoids creating a warning due to double
+         # underscore (ie. `__`).
+@@ -670,6 +681,92 @@
+ 
+         if (use_rts) {
+           data_deps = [ ":${invoker.target_name}__rts_filters" ]
++        }
++      }
++
++      # Separate opt-in test containers; the ordinary APK and runner stay
++      # intact.
++      if (defined(invoker.reaper_isolated_script_loader_apk) &&
++          invoker.reaper_isolated_script_loader_apk) {
++        assert(_use_default_launcher && _generate_final_jni)
++        assert(!defined(invoker.android_manifest) &&
++               !defined(invoker.android_manifest_template))
++        assert(invoker.target_name == "unit_tests" ||
++               invoker.target_name == "extensions_unittests")
++        _isolated_assets = "${target_name}__reaper_script_loader_assets"
++
++        android_assets(_isolated_assets) {
++          renaming_sources = invoker.reaper_script_loader_asset_sources
++          renaming_destinations = invoker.reaper_script_loader_asset_paths
++          deps = invoker.reaper_script_loader_asset_deps
++        }
++
++        unittest_apk("${target_name}__reaper_script_loader_apk") {
++          forward_variables_from(invoker, _apk_specific_vars)
++          apk_name = "${_apk_name}_reaper_script_loader"
++          final_apk_path =
++              "$root_build_dir/${apk_name}_apk/${apk_name}-debug.apk"
++          android_manifest_template = "//brave/test/android/isolated_script_loader/AndroidManifest.xml.jinja2"
++          shared_library = ":$_library_target_name"
++          srcjar_deps = [ "${shared_library}__jni_registration" ]
++          if (defined(invoker.deps)) {
++            deps = invoker.deps
++          } else {
++            deps = []
++          }
++          if (defined(loadable_module_deps)) {
++            deps += loadable_module_deps
++          }
++          deps += [
++            ":$_isolated_assets",
++            "//base/test:test_support_java",
++            "//third_party/icu:icu_assets",
++          ]
++          if (defined(_unwind_table_asset_name)) {
++            deps += [ ":${_unwind_table_asset_name}" ]
++          }
++        }
++      }
++
++      # Browser fixtures retain their browser launcher and JNI closure.
++      if (defined(invoker.reaper_isolated_container_browser_apk) &&
++          invoker.reaper_isolated_container_browser_apk) {
++        assert(!_use_default_launcher && _generate_final_jni)
++        assert(invoker.target_name == "android_browsertests")
++        _browser_assets = "${target_name}__reaper_container_browser_assets"
++        android_assets(_browser_assets) {
++          renaming_sources = invoker.reaper_container_browser_asset_sources
++          renaming_destinations = invoker.reaper_container_browser_asset_paths
++        }
++        unittest_apk("${target_name}__reaper_container_browser_apk") {
++          _browser_apk_vars = _apk_specific_vars - [
++                                "android_manifest",
++                                "android_manifest_dep",
++                                "android_manifest_template",
++                              ]
++          forward_variables_from(invoker, _browser_apk_vars)
++          if (defined(proguard_enabled) && proguard_enabled) {
++            # Match the production browser's reflection retention rules.
++            proguard_configs += [
++              "//brave/android/java/proguard.flags",
++              "//brave/test/android/isolated_container_browser/proguard.flags",
++            ]
++          }
++          apk_name = "${_apk_name}_reaper_container_browser"
++          final_apk_path =
++              "$root_build_dir/${apk_name}_apk/${apk_name}-debug.apk"
++          android_manifest = invoker.reaper_container_browser_manifest
++          android_manifest_dep = invoker.reaper_container_browser_manifest_dep
++          shared_library = ":$_library_target_name"
++          srcjar_deps = [ "${shared_library}__jni_registration" ]
++          deps = invoker.deps
++          if (defined(loadable_module_deps)) {
++            deps += loadable_module_deps
++          }
++          deps += [ ":$_browser_assets" ]
++          if (defined(_unwind_table_asset_name)) {
++            deps += [ ":${_unwind_table_asset_name}" ]
++          }
+         }
+       }
+     }

@@ -1,0 +1,1499 @@
+diff --git a/chrome/android/junit/src/org/chromium/chrome/browser/RecentlyClosedEntriesManagerUnitTest.java b/chrome/android/junit/src/org/chromium/chrome/browser/RecentlyClosedEntriesManagerUnitTest.java
+index 06a6e97bf76ca41f5a026a1d2688414d2b804f19..b2550cb174d5cdb66c05c23d055cafe5af49efa9 100644
+--- a/chrome/android/junit/src/org/chromium/chrome/browser/RecentlyClosedEntriesManagerUnitTest.java
++++ b/chrome/android/junit/src/org/chromium/chrome/browser/RecentlyClosedEntriesManagerUnitTest.java
+@@ -7,17 +7,26 @@
+ import static org.hamcrest.MatcherAssert.assertThat;
+ import static org.hamcrest.Matchers.greaterThan;
+ import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertNotNull;
++import static org.junit.Assert.assertNull;
+ import static org.junit.Assert.assertTrue;
+ import static org.mockito.ArgumentMatchers.any;
+ import static org.mockito.ArgumentMatchers.anyInt;
+ import static org.mockito.ArgumentMatchers.eq;
++import static org.mockito.Mockito.doAnswer;
++import static org.mockito.Mockito.doThrow;
+ import static org.mockito.Mockito.inOrder;
+ import static org.mockito.Mockito.mock;
+ import static org.mockito.Mockito.never;
+ import static org.mockito.Mockito.verify;
++import static org.mockito.Mockito.verifyNoInteractions;
++import static org.mockito.Mockito.verifyNoMoreInteractions;
+ import static org.mockito.Mockito.when;
+ 
++import android.app.Activity;
++import android.content.ActivityNotFoundException;
+ import android.content.Context;
++import android.os.Looper;
+ import android.util.Pair;
+ 
+ import org.junit.After;
+@@ -31,7 +40,11 @@
+ import org.mockito.Mock;
+ import org.mockito.junit.MockitoJUnit;
+ import org.mockito.junit.MockitoRule;
+-
++import org.robolectric.Robolectric;
++import org.robolectric.Shadows;
++import org.robolectric.android.controller.ActivityController;
++
++import org.chromium.base.Callback;
+ import org.chromium.base.FakeTimeTestRule;
+ import org.chromium.base.JniOnceCallback;
+ import org.chromium.base.TimeUtils;
+@@ -42,15 +55,19 @@
+ import org.chromium.base.test.BaseRobolectricTestRunner;
+ import org.chromium.base.test.RobolectricUtil;
+ import org.chromium.base.test.util.CallbackHelper;
++import org.chromium.chrome.browser.ChromeTabbedActivity;
+ import org.chromium.chrome.browser.RecentlyClosedEntriesManager;
+ import org.chromium.chrome.browser.RecentlyClosedEntriesManagerTrackerFactory;
+ import org.chromium.chrome.browser.RecentlyClosedEntriesManagerTrackerImpl;
+ import org.chromium.chrome.browser.RecentlyClosedWindowMetadata;
+ import org.chromium.chrome.browser.app.tabwindow.TabWindowManagerSingleton;
++import org.chromium.chrome.browser.incognito.IncognitoUtils;
+ import org.chromium.chrome.browser.multiwindow.InstanceInfo;
+ import org.chromium.chrome.browser.multiwindow.MultiInstanceManager;
+ import org.chromium.chrome.browser.multiwindow.MultiInstanceManager.CloseWindowAppSource;
+ import org.chromium.chrome.browser.multiwindow.MultiInstanceManager.NewWindowAppSource;
++import org.chromium.chrome.browser.multiwindow.MultiInstanceOrchestrator;
++import org.chromium.chrome.browser.multiwindow.MultiInstanceOrchestratorFactory;
+ import org.chromium.chrome.browser.multiwindow.MultiWindowUtils;
+ import org.chromium.chrome.browser.ntp.RecentlyClosedEntry;
+ import org.chromium.chrome.browser.ntp.RecentlyClosedTab;
+@@ -59,18 +76,28 @@
+ import org.chromium.chrome.browser.ntp.SessionRecentlyClosedEntry;
+ import org.chromium.chrome.browser.profiles.Profile;
+ import org.chromium.chrome.browser.profiles.ProfileProvider;
++import org.chromium.chrome.browser.tab.Tab;
++import org.chromium.chrome.browser.tab.TabCreationState;
++import org.chromium.chrome.browser.tab.TabLaunchType;
+ import org.chromium.chrome.browser.tabmodel.NextTabPolicy.NextTabPolicySupplier;
+ import org.chromium.chrome.browser.tabmodel.TabCreatorManager;
+ import org.chromium.chrome.browser.tabmodel.TabList;
+ import org.chromium.chrome.browser.tabmodel.TabModel;
++import org.chromium.chrome.browser.tabmodel.TabModelObserver;
+ import org.chromium.chrome.browser.tabmodel.TabModelSelector;
++import org.chromium.chrome.browser.tabmodel.TabModelSelectorObserver;
++import org.chromium.chrome.browser.tabmodel.TabPersistentStoreImpl.ClosedWindowTabInfo;
+ import org.chromium.chrome.browser.tabpersistence.TabMetadataFileManager;
+ import org.chromium.chrome.browser.tabpersistence.TabMetadataFileManager.TabModelSelectorMetadata;
+ import org.chromium.chrome.browser.tabpersistence.TabStateDirectory;
+ import org.chromium.chrome.browser.tabwindow.TabModelSelectorFactory;
+ import org.chromium.chrome.browser.tabwindow.TabWindowManager;
+ import org.chromium.chrome.browser.tabwindow.WindowId;
++import org.chromium.chrome.browser.ui.browser_window.ChromeAndroidTask;
++import org.chromium.chrome.browser.ui.browser_window.ChromeAndroidTaskTracker;
++import org.chromium.chrome.browser.ui.browser_window.ChromeAndroidTaskTrackerObserver;
+ import org.chromium.ui.modaldialog.ModalDialogManager;
++import org.chromium.url.GURL;
+ import org.chromium.url.JUnitTestGURLs;
+ 
+ import java.io.File;
+@@ -1302,8 +1329,1405 @@
+         assertEquals(window.getUrl(), resultWindow.getUrl());
+     }
+ 
++    private static final int SAVED_ANDROID_TAB_ID = 741;
++    private MultiInstanceOrchestrator mSavedTabOrchestrator;
++    private TabModel mSavedSourceModel;
++    private Tab mSavedTab;
++    private TabModelObserver mSavedTargetObserver;
++    private JniOnceCallback<Tab> mSavedTabCallback;
++    private RecentlyClosedEntriesManager.RestoreOperation mSavedTabOperation;
++
++    private void setUpSavedTabRestore() {
++        setUpWindowRestore();
++        when(mRecentlyClosedTabManager.getRecentlyClosedEntries(anyInt())).thenReturn(List.of());
++        ChromeTabbedActivity targetActivity = mock(ChromeTabbedActivity.class);
++        MultiWindowUtils.setActivityByWindowIdForTesting(RESTORE_OWNER_ID, targetActivity);
++        when(mTabWindowManager.getIdForWindow(targetActivity)).thenReturn(RESTORE_OWNER_ID);
++        when(mTabModelSelector.isTabStateInitialized()).thenReturn(true);
++        mSavedTabOrchestrator = mock(MultiInstanceOrchestrator.class);
++        MultiInstanceOrchestratorFactory.setInstanceForTesting(mSavedTabOrchestrator);
++        mSavedSourceModel = mock(TabModel.class);
++        when(mClosedRestoreSelector.getModel(false)).thenReturn(mSavedSourceModel);
++        when(mSavedSourceModel.getProfile()).thenReturn(mProfile);
++        mSavedTab = mock(Tab.class);
++        when(mSavedTab.getId()).thenReturn(SAVED_ANDROID_TAB_ID);
++        when(mSavedTab.getProfile()).thenReturn(mProfile);
++        when(mSavedSourceModel.getTabById(SAVED_ANDROID_TAB_ID)).thenReturn(mSavedTab);
++        mSavedTabCallback = mock();
++        org.mockito.Mockito.doAnswer(
++                        invocation -> {
++                            mSavedTargetObserver = invocation.getArgument(0);
++                            return null;
++                        })
++                .when(mTabModel)
++                .addObserver(any());
++    }
++
++    private void installSuccessfulSavedTabMove() {
++        org.mockito.Mockito.doAnswer(
++                        invocation -> {
++                            when(mSavedSourceModel.getTabById(SAVED_ANDROID_TAB_ID))
++                                    .thenReturn(null);
++                            when(mTabModel.getTabById(SAVED_ANDROID_TAB_ID)).thenReturn(mSavedTab);
++                            mSavedTargetObserver.didAddTab(
++                                    mSavedTab,
++                                    TabLaunchType.FROM_REPARENTING,
++                                    TabCreationState.LIVE_IN_FOREGROUND,
++                                    true);
++                            return null;
++                        })
++                .when(mSavedTabOrchestrator)
++                .moveTabsToWindowByIdChecked(
++                        eq(RESTORE_OWNER_ID), eq(List.of(mSavedTab)), anyInt(), anyInt(), eq(true));
++    }
++
++    private void requestSavedTabRestore() {
++        mSavedTabOperation =
++                RecentlyClosedEntriesManager.restoreTab(
++                        mProfile,
++                        RESTORE_WINDOW_ID,
++                        mRestoreClosureTime,
++                        SAVED_ANDROID_TAB_ID,
++                        mTabModel,
++                        mSavedTabCallback);
++    }
++
++    private void verifySavedTabFailure() {
++        verify(mSavedTabCallback).onResult(null);
++        org.mockito.Mockito.verifyNoMoreInteractions(mSavedTabCallback);
++    }
++
++    @After
++    public void tearDownSavedTabRestore() {
++        RecentlyClosedEntriesManager.cancelRestoreOperation(mSavedTabOperation);
++    }
++
++    @Test
++    public void testRestoreSavedTabReturnsExactMovedTabAfterInsertion() {
++        setUpSavedTabRestore();
++        installSuccessfulSavedTabMove();
++        requestSavedTabRestore();
++        verify(mSavedTabCallback, never()).onResult(any());
++        idleRestoreChecks();
++        verify(mSavedTabCallback).onResult(mSavedTab);
++        org.mockito.Mockito.verifyNoMoreInteractions(mSavedTabCallback);
++        verify(mSavedTabOrchestrator)
++                .moveTabsToWindowByIdChecked(
++                        RESTORE_OWNER_ID,
++                        List.of(mSavedTab),
++                        TabList.INVALID_TAB_INDEX,
++                        TabList.INVALID_TAB_INDEX,
++                        true);
++        verify(mMultiInstanceManager, never()).openWindow(anyInt(), anyInt());
++        verify(mTabModel).removeObserver(mSavedTargetObserver);
++    }
++
++    @Test
++    public void testRestoreSavedTabRejectsStaleClosureBeforeMutation() {
++        setUpSavedTabRestore();
++        mSavedTabOperation =
++                RecentlyClosedEntriesManager.restoreTab(
++                        mProfile,
++                        RESTORE_WINDOW_ID,
++                        mRestoreClosureTime - 1,
++                        SAVED_ANDROID_TAB_ID,
++                        mTabModel,
++                        mSavedTabCallback);
++        verifySavedTabFailure();
++        org.mockito.Mockito.verifyNoInteractions(mSavedTabOrchestrator);
++    }
++
++    @Test
++    public void testRestoreSavedTabRejectsWrongSourceTabProfile() {
++        setUpSavedTabRestore();
++        when(mSavedTab.getProfile()).thenReturn(mock(Profile.class));
++        requestSavedTabRestore();
++        verifySavedTabFailure();
++        org.mockito.Mockito.verifyNoInteractions(mSavedTabOrchestrator);
++    }
++
++    @Test
++    public void testRestoreSavedTabRejectsCrossProfileTarget() {
++        setUpSavedTabRestore();
++        when(mTabModel.getProfile()).thenReturn(mock(Profile.class));
++        requestSavedTabRestore();
++        verifySavedTabFailure();
++        org.mockito.Mockito.verifyNoInteractions(mSavedTabOrchestrator);
++    }
++
++    @Test
++    public void testRestoreSavedTabRejectsIncognitoTarget() {
++        setUpSavedTabRestore();
++        when(mTabModel.isIncognito()).thenReturn(true);
++        requestSavedTabRestore();
++        verifySavedTabFailure();
++        org.mockito.Mockito.verifyNoInteractions(mSavedTabOrchestrator);
++    }
++
++    @Test
++    public void testRestoreSavedTabRejectsAlreadyReopenedSourceWindow() {
++        setUpSavedTabRestore();
++        MultiWindowUtils.setActivityByWindowIdForTesting(RESTORE_WINDOW_ID, mock(Activity.class));
++        requestSavedTabRestore();
++        verifySavedTabFailure();
++        org.mockito.Mockito.verifyNoInteractions(mSavedTabOrchestrator);
++    }
++
++    @Test
++    public void testRestoreSavedTabMissingDestinationInsertionDoesNotSucceed() {
++        setUpSavedTabRestore();
++        requestSavedTabRestore();
++        idleRestoreChecks();
++        verifySavedTabFailure();
++        verify(mTabModel).removeObserver(mSavedTargetObserver);
++    }
++
++    @Test
++    public void testRestoreSavedTabCancelBeforePostedReplyCompletesOnce() {
++        setUpSavedTabRestore();
++        installSuccessfulSavedTabMove();
++        requestSavedTabRestore();
++        RecentlyClosedEntriesManager.cancelRestoreOperation(mSavedTabOperation);
++        idleRestoreChecks();
++        verifySavedTabFailure();
++        verify(mTabModel).removeObserver(mSavedTargetObserver);
++    }
++
++    @Test
++    public void testRestoreSavedTabDestinationDestroyedBeforeReplyCompletesOnce() {
++        setUpSavedTabRestore();
++        installSuccessfulSavedTabMove();
++        requestSavedTabRestore();
++        mSavedTargetObserver.onDestroy();
++        idleRestoreChecks();
++        verifySavedTabFailure();
++    }
++
++    @Test
++    public void testRestoreSavedTabReentrantManagerTeardownDoesNotReplyTwice() {
++        setUpSavedTabRestore();
++        installSuccessfulSavedTabMove();
++        org.mockito.Mockito.doAnswer(
++                        ignored -> {
++                            RecentlyClosedEntriesManagerTrackerFactory.getInstance()
++                                    .destroy(mRecentlyClosedEntriesManager);
++                            return null;
++                        })
++                .when(mSavedTabCallback)
++                .onResult(mSavedTab);
++        requestSavedTabRestore();
++        idleRestoreChecks();
++        verify(mSavedTabCallback).onResult(mSavedTab);
++        org.mockito.Mockito.verifyNoMoreInteractions(mSavedTabCallback);
++    }
++
++    @Test
++    public void testRestoreSavedTabRetainsGroupedStatusAndVisualsWithoutDuplicateToken() {
++        setUpSavedTabRestore();
++        org.chromium.base.Token original = new org.chromium.base.Token(3L, 4L);
++        org.chromium.base.Token restored = new org.chromium.base.Token(5L, 6L);
++        java.util.concurrent.atomic.AtomicReference<org.chromium.base.Token> group =
++                new java.util.concurrent.atomic.AtomicReference<>(original);
++        when(mSavedTab.getTabGroupId()).thenAnswer(ignored -> group.get());
++        when(mSavedSourceModel.getTabGroupTitle(original)).thenReturn("Saved group");
++        when(mSavedSourceModel.getTabGroupColorWithFallback(original)).thenReturn(2);
++        when(mTabModel.getTabsInGroup(original)).thenReturn(List.of());
++        org.mockito.Mockito.doAnswer(
++                        invocation -> {
++                            group.set(null);
++                            when(mSavedSourceModel.getTabById(SAVED_ANDROID_TAB_ID))
++                                    .thenReturn(null);
++                            when(mTabModel.getTabById(SAVED_ANDROID_TAB_ID)).thenReturn(mSavedTab);
++                            mSavedTargetObserver.didAddTab(
++                                    mSavedTab,
++                                    TabLaunchType.FROM_REPARENTING,
++                                    TabCreationState.LIVE_IN_FOREGROUND,
++                                    true);
++                            return null;
++                        })
++                .when(mSavedTabOrchestrator)
++                .moveTabsToWindowByIdChecked(
++                        eq(RESTORE_OWNER_ID), eq(List.of(mSavedTab)), anyInt(), anyInt(), eq(true));
++        org.mockito.Mockito.doAnswer(
++                        ignored -> {
++                            group.set(restored);
++                            return null;
++                        })
++                .when(mTabModel)
++                .createSingleTabGroup(mSavedTab);
++        requestSavedTabRestore();
++        idleRestoreChecks();
++        verify(mTabModel).createSingleTabGroup(mSavedTab);
++        verify(mTabModel).setTabGroupColor(restored, 2);
++        verify(mTabModel).setTabGroupTitle(restored, "Saved group");
++        verify(mTabModel, never()).createTabGroupForTabGroupSync(any(), eq(original));
++        verify(mSavedTabCallback).onResult(mSavedTab);
++    }
++
++    @Test
++    public void testRestoreSavedTabJoinsExistingGroupAfterUngroupedTransfer() {
++        setUpSavedTabRestore();
++        org.chromium.base.Token original = new org.chromium.base.Token(9L, 10L);
++        java.util.concurrent.atomic.AtomicReference<org.chromium.base.Token> group =
++                new java.util.concurrent.atomic.AtomicReference<>(original);
++        when(mSavedTab.getTabGroupId()).thenAnswer(ignored -> group.get());
++        when(mSavedSourceModel.getTabGroupTitle(original)).thenReturn("Old title");
++        Tab sibling = mock(Tab.class);
++        when(sibling.getId()).thenReturn(742);
++        when(mTabModel.getTabsInGroup(original)).thenReturn(List.of(sibling));
++        org.mockito.Mockito.doAnswer(
++                        invocation -> {
++                            // Production move rejects a grouped input with a destination group.
++                            assertEquals(
++                                    TabList.INVALID_TAB_INDEX, (int) invocation.getArgument(3));
++                            group.set(null);
++                            when(mSavedSourceModel.getTabById(SAVED_ANDROID_TAB_ID))
++                                    .thenReturn(null);
++                            when(mTabModel.getTabById(SAVED_ANDROID_TAB_ID)).thenReturn(mSavedTab);
++                            mSavedTargetObserver.didAddTab(
++                                    mSavedTab,
++                                    TabLaunchType.FROM_REPARENTING,
++                                    TabCreationState.LIVE_IN_FOREGROUND,
++                                    true);
++                            return null;
++                        })
++                .when(mSavedTabOrchestrator)
++                .moveTabsToWindowByIdChecked(
++                        eq(RESTORE_OWNER_ID), eq(List.of(mSavedTab)), anyInt(), anyInt(), eq(true));
++        requestSavedTabRestore();
++        idleRestoreChecks();
++        verify(mTabModel).mergeTabsToGroup(SAVED_ANDROID_TAB_ID, 742);
++        verify(mTabModel, never()).createSingleTabGroup(any(Tab.class));
++        verify(mTabModel, never()).setTabGroupTitle(any(), any());
++        verify(mSavedTabCallback).onResult(mSavedTab);
++    }
++
++    @Test
++    public void testRestoreSavedTabCacheCallbackTeardownStopsFurtherUse() {
++        setUpSavedTabRestore();
++        installSuccessfulSavedTabMove();
++        mRecentlyClosedEntriesManager.setEntriesUpdatedCallback(
++                ignored ->
++                        RecentlyClosedEntriesManagerTrackerFactory.getInstance()
++                                .destroy(mRecentlyClosedEntriesManager));
++        requestSavedTabRestore();
++        idleRestoreChecks();
++        verifySavedTabFailure();
++        verify(mTabModel).removeObserver(mSavedTargetObserver);
++    }
++
++    @Test
++    public void testRestoreSavedTabNotifiesNativeRecentSessionsChangeOnce() {
++        setUpSavedTabRestore();
++        installSuccessfulSavedTabMove();
++        org.chromium.base.JniRepeatingCallback<Long> changed = mock();
++        when(mProfile.getNativeBrowserContextPointer()).thenReturn(4321L);
++        RecentlyClosedEntriesManager.setNativeUpdatedCallback(mProfile, changed);
++        requestSavedTabRestore();
++        idleRestoreChecks();
++        verify(changed).onResult(4321L);
++        verify(mSavedTabCallback).onResult(mSavedTab);
++        RecentlyClosedEntriesManager.cancelRestoreOperation(mSavedTabOperation);
++        org.mockito.Mockito.verifyNoMoreInteractions(changed);
++    }
++
++    @Test
++    public void testRestoreSavedTabNotifiesCallbackRegisteredOnAnotherWindow() {
++        setUpSavedTabRestore();
++        installSuccessfulSavedTabMove();
++        RecentlyClosedEntriesManagerTrackerFactory.getInstance()
++                .destroy(mRecentlyClosedEntriesManager);
++        TabModelSelector otherSelector = mock(TabModelSelector.class);
++        TabModel otherModel = mock(TabModel.class);
++        when(otherSelector.getModel(false)).thenReturn(otherModel);
++        when(otherModel.getProfile()).thenReturn(mProfile);
++        RecentlyClosedEntriesManager other =
++                RecentlyClosedEntriesManagerTrackerFactory.getInstance()
++                        .obtainManager(mock(MultiInstanceManager.class), otherSelector);
++        org.chromium.base.JniRepeatingCallback<Long> changed = mock();
++        when(mProfile.getNativeBrowserContextPointer()).thenReturn(9876L);
++        // Model callback registration predates destination-window registration in production.
++        // Register while only the other manager exists, then create the destination manager.
++        RecentlyClosedEntriesManager.setNativeUpdatedCallback(mProfile, changed);
++        mRecentlyClosedEntriesManager =
++                RecentlyClosedEntriesManagerTrackerFactory.getInstance()
++                        .obtainManager(mMultiInstanceManager, mTabModelSelector);
++        mRecentlyClosedEntriesManager.setEntriesUpdatedCallback(
++                result -> mEntriesUpdatedCallbackHelper.notifyCalled());
++        try {
++            requestSavedTabRestore();
++            idleRestoreChecks();
++            verify(changed).onResult(9876L);
++            org.mockito.Mockito.verifyNoMoreInteractions(changed);
++            verify(mSavedTabCallback).onResult(mSavedTab);
++        } finally {
++            RecentlyClosedEntriesManagerTrackerFactory.getInstance().destroy(other);
++        }
++    }
++
++    private static final int RESTORE_OWNER_ID = 1;
++    private static final int RESTORE_WINDOW_ID = 2;
++    private static final long RESTORED_BROWSER_WINDOW = 0x12345678L;
++
++    private ActivityController<RestoreActivity> mRestoreOwnerController;
++    private ActivityController<RestoreActivity> mRestoredActivityController;
++    private TabModelSelector mClosedRestoreSelector;
++    private TabModelSelector mRestoredSelector;
++    private TabModel mRestoredModel;
++    private ChromeAndroidTaskTracker mRestoreTaskTracker;
++    private ChromeAndroidTask mRestoredTask;
++    private RecentlyClosedEntriesManager.RestoreOperation mRestoreOperation;
++    private JniOnceCallback<Long> mRestoreCallback;
++    private long mRestoreClosureTime;
++
++    /**
++     * Gives the two real Activities separate task identities without launching Chrome native code.
++     */
++    public static class RestoreActivity extends Activity {
++        int mTestTaskId;
++
++        @Override
++        public int getTaskId() {
++            return mTestTaskId;
++        }
++    }
++
++    private void setUpWindowRestore() {
++        IncognitoUtils.setShouldOpenIncognitoAsWindowForTesting(false);
++        MultiWindowUtils.setInstanceCountForTesting(1);
++        MultiWindowUtils.setMaxInstancesForTesting(3);
++        MultiWindowUtils.setMultiInstanceApi31EnabledForTesting(true);
++        TabWindowManagerSingleton.setTabWindowManagerForTesting(mTabWindowManager);
++        when(mTabWindowManager.getIdForWindow(any()))
++                .thenReturn(TabWindowManager.INVALID_WINDOW_ID);
++        mRestoreTaskTracker = mock(ChromeAndroidTaskTracker.class);
++        mRecentlyClosedEntriesManager.setTaskTrackerForTesting(mRestoreTaskTracker);
++        mRestoreCallback = mock();
++        mRestoredTask = mock(ChromeAndroidTask.class);
++        mClosedRestoreSelector = mock(TabModelSelector.class);
++        mRestoredSelector = mock(TabModelSelector.class);
++        mRestoredModel = mock(TabModel.class);
++        when(mClosedRestoreSelector.getModel(false)).thenReturn(mTabModel);
++        when(mClosedRestoreSelector.isTabStateInitialized()).thenReturn(true);
++        when(mRestoredSelector.getModel(false)).thenReturn(mRestoredModel);
++        when(mRestoredModel.getProfile()).thenReturn(mProfile);
++        when(mTabWindowManager.getTabModelSelectorById(RESTORE_WINDOW_ID))
++                .thenReturn(mClosedRestoreSelector);
++        when(mTabWindowManager.getWindowIdForSelector(mClosedRestoreSelector))
++                .thenReturn(RESTORE_WINDOW_ID);
++        when(mTabWindowManager.getWindowIdForSelector(mRestoredSelector))
++                .thenReturn(RESTORE_WINDOW_ID);
++        mRestoreOwnerController = Robolectric.buildActivity(RestoreActivity.class);
++        mRestoreOwnerController.get().mTestTaskId = 101;
++        mRestoreOwnerController.setup();
++        Activity owner = mRestoreOwnerController.get();
++        when(mTabWindowManager.getIdForWindow(owner)).thenReturn(RESTORE_OWNER_ID);
++        when(mTabWindowManager.getWindowIdForSelector(mTabModelSelector))
++                .thenReturn(RESTORE_OWNER_ID);
++        when(mTabWindowManager.getTabModelSelectorById(RESTORE_OWNER_ID))
++                .thenReturn(mTabModelSelector);
++        MultiWindowUtils.setActivityByWindowIdForTesting(RESTORE_OWNER_ID, owner);
++        createRecentlyClosedWindows(1);
++        mRestoreClosureTime = getDaysAgoMillis(1) + 2;
++        idleRestoreChecks();
++    }
++
++    private static void idleRestoreChecks() {
++        // Leave the one-minute timeout pending while delivering immediate lifecycle work.
++        Shadows.shadowOf(Looper.getMainLooper()).idle();
++    }
++
++    private void requestWindowRestore() {
++        mRestoreOperation =
++                RecentlyClosedEntriesManager.restoreWindow(
++                        mProfile, RESTORE_WINDOW_ID, mRestoreClosureTime, mRestoreCallback);
++        idleRestoreChecks();
++    }
++
++    private TabWindowManager.Observer windowRestoreObserver() {
++        ArgumentCaptor<TabWindowManager.Observer> captor =
++                ArgumentCaptor.forClass(TabWindowManager.Observer.class);
++        verify(mTabWindowManager).addObserver(captor.capture());
++        return captor.getValue();
++    }
++
++    private TabModelSelectorObserver restoredSelectorObserver() {
++        ArgumentCaptor<TabModelSelectorObserver> captor =
++                ArgumentCaptor.forClass(TabModelSelectorObserver.class);
++        verify(mRestoredSelector).addObserver(captor.capture());
++        return captor.getValue();
++    }
++
++    private ChromeAndroidTaskTrackerObserver restoreTaskObserver() {
++        ArgumentCaptor<ChromeAndroidTaskTrackerObserver> captor =
++                ArgumentCaptor.forClass(ChromeAndroidTaskTrackerObserver.class);
++        verify(mRestoreTaskTracker).addObserver(captor.capture());
++        return captor.getValue();
++    }
++
++    private void publishRestoredActivity(boolean initialized, long nativeWindow) {
++        mRestoredActivityController = Robolectric.buildActivity(RestoreActivity.class);
++        mRestoredActivityController.get().mTestTaskId = 202;
++        mRestoredActivityController.setup();
++        Activity activity = mRestoredActivityController.get();
++        when(mTabWindowManager.getIdForWindow(activity)).thenReturn(RESTORE_WINDOW_ID);
++        MultiWindowUtils.setActivityByWindowIdForTesting(RESTORE_WINDOW_ID, activity);
++        when(mTabWindowManager.getTabModelSelectorById(RESTORE_WINDOW_ID))
++                .thenReturn(mRestoredSelector);
++        when(mRestoredSelector.isTabStateInitialized()).thenReturn(initialized);
++        when(mRestoredTask.getId()).thenReturn(202);
++        when(mRestoreTaskTracker.get(202)).thenReturn(mRestoredTask);
++        when(mRestoredTask.getNativeBrowserWindowPtr(mProfile, activity)).thenReturn(nativeWindow);
++        windowRestoreObserver().onTabModelSelectorAdded(mRestoredSelector);
++        idleRestoreChecks();
++    }
++
++    private void verifyRestoreFailure() {
++        verify(mRestoreCallback).onResult(0L);
++        verifyNoMoreInteractions(mRestoreCallback);
++    }
++
++    private void verifyRestoreObserversRemoved() {
++        verify(mTabWindowManager).removeObserver(any());
++        verify(mRestoreTaskTracker).removeObserver(any());
++    }
++
++    @After
++    public void tearDownWindowRestore() {
++        if (mRestoreOwnerController == null) return;
++        RecentlyClosedEntriesManager.cancelRestoreOperation(mRestoreOperation);
++        RecentlyClosedEntriesManagerTrackerFactory.getInstance()
++                .destroy(mRecentlyClosedEntriesManager);
++        if (mRestoredActivityController != null
++                && !mRestoredActivityController.get().isDestroyed()) {
++            mRestoredActivityController.pause().stop().destroy();
++        }
++        if (!mRestoreOwnerController.get().isDestroyed()) {
++            mRestoreOwnerController.pause().stop().destroy();
++        }
++        idleRestoreChecks();
++    }
++
++    @Test
++    public void testRestoreWindowWithoutManagerFailsWithoutLaunching() {
++        setUpWindowRestore();
++        RecentlyClosedEntriesManagerTrackerFactory.getInstance()
++                .destroy(mRecentlyClosedEntriesManager);
++
++        requestWindowRestore();
++
++        assertNull(mRestoreOperation);
++        verifyRestoreFailure();
++        verify(mMultiInstanceManager, never()).openWindow(anyInt(), anyInt());
++    }
++
++    @Test
++    public void testRestoreWindowRejectsOffTheRecordProfile() {
++        setUpWindowRestore();
++        when(mProfile.isOffTheRecord()).thenReturn(true);
++
++        requestWindowRestore();
++
++        assertNull(mRestoreOperation);
++        verifyRestoreFailure();
++        verify(mMultiInstanceManager, never()).openWindow(anyInt(), anyInt());
++    }
++
++    @Test
++    public void testRestoreWindowDoesNotSelectManagerFromAnotherProfile() {
++        setUpWindowRestore();
++        Profile otherProfile = mock(Profile.class);
++
++        assertNull(
++                RecentlyClosedEntriesManager.restoreWindow(
++                        otherProfile, RESTORE_WINDOW_ID, mRestoreClosureTime, mRestoreCallback));
++        idleRestoreChecks();
++
++        verifyRestoreFailure();
++        verify(mMultiInstanceManager, never()).openWindow(anyInt(), anyInt());
++    }
++
++    @Test
++    public void testRestoreWindowRejectsHeadlessManagerOwner() {
++        setUpWindowRestore();
++        when(mTabWindowManager.getWindowIdForSelector(mTabModelSelector))
++                .thenReturn(TabWindowManager.INVALID_WINDOW_ID);
++
++        requestWindowRestore();
++
++        assertNull(mRestoreOperation);
++        verifyRestoreFailure();
++        verify(mMultiInstanceManager, never()).openWindow(anyInt(), anyInt());
++    }
++
++    @Test
++    public void testRestoreWindowRejectsStaleClosureTimestamp() {
++        setUpWindowRestore();
++        mRestoreClosureTime++;
++
++        requestWindowRestore();
++
++        assertNull(mRestoreOperation);
++        verifyRestoreFailure();
++        verify(mMultiInstanceManager, never()).openWindow(anyInt(), anyInt());
++    }
++
++    @Test
++    public void testRestoreWindowRejectsInstanceLimit() {
++        setUpWindowRestore();
++        MultiWindowUtils.setInstanceCountForTesting(3);
++
++        requestWindowRestore();
++
++        assertNull(mRestoreOperation);
++        verifyRestoreFailure();
++        verify(mMultiInstanceManager, never()).openWindow(anyInt(), anyInt());
++    }
++
++    @Test
++    public void testRestoreWindowRejectsClosedSelectorFromAnotherProfile() {
++        setUpWindowRestore();
++        TabModel foreignModel = mock(TabModel.class);
++        when(foreignModel.getProfile()).thenReturn(mock(Profile.class));
++        when(mClosedRestoreSelector.getModel(false)).thenReturn(foreignModel);
++
++        requestWindowRestore();
++
++        assertNull(mRestoreOperation);
++        verifyRestoreFailure();
++        verify(mMultiInstanceManager, never()).openWindow(anyInt(), anyInt());
++    }
++
++    @Test
++    public void testRestoreWindowLaunchExceptionCompletesOnceAndUnregisters() {
++        setUpWindowRestore();
++        doThrow(new ActivityNotFoundException("No target Activity"))
++                .when(mMultiInstanceManager)
++                .openWindow(RESTORE_WINDOW_ID, NewWindowAppSource.BROWSER_WINDOW_CREATOR);
++
++        requestWindowRestore();
++        RecentlyClosedEntriesManager.cancelRestoreOperation(mRestoreOperation);
++        idleRestoreChecks();
++
++        verifyRestoreFailure();
++        verifyRestoreObserversRemoved();
++    }
++
++    @Test
++    public void testRestoreWindowWaitsForFreshSelectorAndInitializedExactActivity() {
++        setUpWindowRestore();
++        requestWindowRestore();
++        assertNotNull(mRestoreOperation);
++        verify(mMultiInstanceManager)
++                .openWindow(RESTORE_WINDOW_ID, NewWindowAppSource.BROWSER_WINDOW_CREATOR);
++
++        // Persisted headless metadata becoming ready is not a restored browser window.
++        windowRestoreObserver().onTabModelSelectorAdded(mClosedRestoreSelector);
++        windowRestoreObserver().onTabStateInitialized();
++        idleRestoreChecks();
++        verifyNoInteractions(mRestoreCallback);
++        verify(mClosedRestoreSelector, never()).addObserver(any());
++
++        publishRestoredActivity(false, RESTORED_BROWSER_WINDOW);
++        verifyNoInteractions(mRestoreCallback);
++        TabModelSelectorObserver observer = restoredSelectorObserver();
++        when(mRestoredSelector.isTabStateInitialized()).thenReturn(true);
++        observer.onTabStateInitialized();
++        idleRestoreChecks();
++
++        verify(mRestoreCallback).onResult(RESTORED_BROWSER_WINDOW);
++        verifyNoMoreInteractions(mRestoreCallback);
++        verify(mRestoredTask)
++                .getNativeBrowserWindowPtr(mProfile, mRestoredActivityController.get());
++        verify(mRestoredTask, never()).getOrCreateNativeBrowserWindowPtr(any());
++        verifyRestoreObserversRemoved();
++        verify(mRestoredSelector).removeObserver(observer);
++        verify(mRestoredTask).removeAndroidBrowserWindowObserver(any());
++
++        // Already-queued or repeated platform notifications cannot repeat the result.
++        observer.onTabStateInitialized();
++        observer.onDestroyed();
++        RecentlyClosedEntriesManager.cancelRestoreOperation(mRestoreOperation);
++        idleRestoreChecks();
++        verifyNoMoreInteractions(mRestoreCallback);
++    }
++
++    @Test
++    public void testRestoreWindowCannotSucceedWithoutExistingNativeWindow() {
++        setUpWindowRestore();
++        requestWindowRestore();
++        publishRestoredActivity(true, 0L);
++
++        verifyNoInteractions(mRestoreCallback);
++        verify(mRestoredTask, never()).getOrCreateNativeBrowserWindowPtr(any());
++        RecentlyClosedEntriesManager.cancelRestoreOperation(mRestoreOperation);
++        idleRestoreChecks();
++
++        verifyRestoreFailure();
++        verifyRestoreObserversRemoved();
++    }
++
++    @Test
++    public void testRestoreWindowRejectsRestoredRegularModelFromAnotherProfile() {
++        setUpWindowRestore();
++        requestWindowRestore();
++        when(mRestoredModel.getProfile()).thenReturn(mock(Profile.class));
++
++        publishRestoredActivity(true, RESTORED_BROWSER_WINDOW);
++
++        verifyRestoreFailure();
++        verify(mRestoredTask, never()).getNativeBrowserWindowPtr(any(), any());
++        verifyRestoreObserversRemoved();
++    }
++
++    @Test
++    public void testRestoreWindowSelectorDestructionCompletesFailureOnce() {
++        setUpWindowRestore();
++        requestWindowRestore();
++        publishRestoredActivity(false, RESTORED_BROWSER_WINDOW);
++        TabModelSelectorObserver observer = restoredSelectorObserver();
++
++        observer.onDestroyed();
++        observer.onTabStateInitialized();
++        idleRestoreChecks();
++
++        verifyRestoreFailure();
++        verifyRestoreObserversRemoved();
++        verify(mRestoredSelector).removeObserver(observer);
++    }
++
++    @Test
++    public void testRestoreWindowActivityDestructionCompletesFailureOnce() {
++        setUpWindowRestore();
++        requestWindowRestore();
++        publishRestoredActivity(false, RESTORED_BROWSER_WINDOW);
++
++        mRestoredActivityController.pause().stop().destroy();
++        idleRestoreChecks();
++
++        verifyRestoreFailure();
++        verifyRestoreObserversRemoved();
++    }
++
++    @Test
++    public void testRestoreWindowTaskRemovalCompletesFailureOnce() {
++        setUpWindowRestore();
++        requestWindowRestore();
++        publishRestoredActivity(false, RESTORED_BROWSER_WINDOW);
++        ChromeAndroidTaskTrackerObserver observer = restoreTaskObserver();
++
++        observer.onTaskRemoved(mRestoredTask);
++        observer.onTaskAdded(mRestoredTask);
++        idleRestoreChecks();
++
++        verifyRestoreFailure();
++        verifyRestoreObserversRemoved();
++        verify(mRestoredTask).removeAndroidBrowserWindowObserver(any());
++    }
++
++    @Test
++    public void testRestoreWindowManagerDestructionCancelsPendingRequest() {
++        setUpWindowRestore();
++        requestWindowRestore();
++
++        RecentlyClosedEntriesManagerTrackerFactory.getInstance()
++                .destroy(mRecentlyClosedEntriesManager);
++        windowRestoreObserver().onTabStateInitialized();
++        idleRestoreChecks();
++
++        verifyRestoreFailure();
++        verifyRestoreObserversRemoved();
++    }
++
++    @Test
++    public void testRestoreWindowCancellationRetiresQueuedCheckAndTimeout() {
++        setUpWindowRestore();
++        requestWindowRestore();
++        TabWindowManager.Observer observer = windowRestoreObserver();
++        observer.onTabStateInitialized();
++
++        RecentlyClosedEntriesManager.cancelRestoreOperation(mRestoreOperation);
++        RecentlyClosedEntriesManager.cancelRestoreOperation(mRestoreOperation);
++        Shadows.shadowOf(Looper.getMainLooper()).idleFor(1, TimeUnit.MINUTES);
++
++        verifyRestoreFailure();
++        verifyRestoreObserversRemoved();
++    }
++
++    @Test
++    public void testRestoreWindowTimeoutCompletesPendingHeadlessRequest() {
++        setUpWindowRestore();
++        requestWindowRestore();
++
++        Shadows.shadowOf(Looper.getMainLooper()).idleFor(1, TimeUnit.MINUTES);
++
++        verifyRestoreFailure();
++        verifyRestoreObserversRemoved();
++    }
++
++    @Test
++    public void testRestoreWindowDuplicatePendingRequestDoesNotLaunchAgain() {
++        setUpWindowRestore();
++        requestWindowRestore();
++        JniOnceCallback<Long> duplicateCallback = mock();
++
++        assertNull(
++                RecentlyClosedEntriesManager.restoreWindow(
++                        mProfile, RESTORE_WINDOW_ID, mRestoreClosureTime, duplicateCallback));
++
++        verify(duplicateCallback).onResult(0L);
++        verifyNoMoreInteractions(duplicateCallback);
++        verifyNoInteractions(mRestoreCallback);
++        verify(mMultiInstanceManager)
++                .openWindow(RESTORE_WINDOW_ID, NewWindowAppSource.BROWSER_WINDOW_CREATOR);
++    }
++
++    @Test
++    public void testRestoreWindowCallbackMayCancelAndDestroyOwnerReentrantly() {
++        setUpWindowRestore();
++        requestWindowRestore();
++        doAnswer(
++                        invocation -> {
++                            // All observers must be retired before native can reenter Java.
++                            verifyRestoreObserversRemoved();
++                            verify(mRestoredSelector).removeObserver(any());
++                            verify(mRestoredTask).removeAndroidBrowserWindowObserver(any());
++                            RecentlyClosedEntriesManager.cancelRestoreOperation(mRestoreOperation);
++                            RecentlyClosedEntriesManagerTrackerFactory.getInstance()
++                                    .destroy(mRecentlyClosedEntriesManager);
++                            return null;
++                        })
++                .when(mRestoreCallback)
++                .onResult(RESTORED_BROWSER_WINDOW);
++
++        publishRestoredActivity(true, RESTORED_BROWSER_WINDOW);
++        idleRestoreChecks();
++
++        verify(mRestoreCallback).onResult(RESTORED_BROWSER_WINDOW);
++        verifyNoMoreInteractions(mRestoreCallback);
++    }
++
++    @Test
++    public void testRestoreWindowSelectorReplacementBeforeReadyFails() {
++        setUpWindowRestore();
++        requestWindowRestore();
++        publishRestoredActivity(false, RESTORED_BROWSER_WINDOW);
++        TabModelSelectorObserver oldObserver = restoredSelectorObserver();
++        TabModelSelector replacement = mock(TabModelSelector.class);
++        when(mTabWindowManager.getTabModelSelectorById(RESTORE_WINDOW_ID)).thenReturn(replacement);
++
++        windowRestoreObserver().onTabModelSelectorAdded(replacement);
++        idleRestoreChecks();
++        oldObserver.onTabStateInitialized();
++        idleRestoreChecks();
++
++        verifyRestoreFailure();
++        verifyRestoreObserversRemoved();
++        verify(mRestoredSelector).removeObserver(oldObserver);
++        verify(replacement, never()).addObserver(any());
++    }
++
++    @Test
++    public void testRestoreWindowRejectsProfileShutdown() {
++        setUpWindowRestore();
++        when(mProfile.shutdownStarted()).thenReturn(true);
++
++        requestWindowRestore();
++
++        assertNull(mRestoreOperation);
++        verifyRestoreFailure();
++        verify(mMultiInstanceManager, never()).openWindow(anyInt(), anyInt());
++    }
++
++    private TabModelSelectorObserver closedMetadataObserver() {
++        ArgumentCaptor<TabModelSelectorObserver> captor =
++                ArgumentCaptor.forClass(TabModelSelectorObserver.class);
++        verify(mClosedRestoreSelector).addObserver(captor.capture());
++        return captor.getValue();
++    }
++
++    @Test
++    public void testClosedWindowMetadataAfterRestartMaterializesHeadlessSelectorWithoutListing() {
++        setUpWindowRestore();
++        when(mTabWindowManager.getTabModelSelectorById(RESTORE_WINDOW_ID)).thenReturn(null);
++        when(mClosedRestoreSelector.isTabStateInitialized()).thenReturn(false);
++        when(mTabWindowManager.requestSelectorWithoutActivity(RESTORE_WINDOW_ID, mProfile))
++                .thenAnswer(
++                        invocation -> {
++                            when(mTabWindowManager.getTabModelSelectorById(RESTORE_WINDOW_ID))
++                                    .thenReturn(mClosedRestoreSelector);
++                            return mClosedRestoreSelector;
++                        });
++        JniOnceCallback<RecentlyClosedWindowMetadata> callback = mock();
++
++        RecentlyClosedEntriesManager.getRecentlyClosedWindow(
++                mProfile, RESTORE_WINDOW_ID, /* expectedClosureMillis= */ 0L, callback);
++        idleRestoreChecks();
++
++        verify(mTabWindowManager).requestSelectorWithoutActivity(RESTORE_WINDOW_ID, mProfile);
++        verifyNoInteractions(callback);
++        TabModelSelectorObserver observer = closedMetadataObserver();
++        when(mClosedRestoreSelector.isTabStateInitialized()).thenReturn(true);
++        observer.onTabStateInitialized();
++        idleRestoreChecks();
++
++        ArgumentCaptor<RecentlyClosedWindowMetadata> metadata =
++                ArgumentCaptor.forClass(RecentlyClosedWindowMetadata.class);
++        verify(callback).onResult(metadata.capture());
++        assertEquals(mTabModel, metadata.getValue().tabModel);
++        assertEquals(RESTORE_WINDOW_ID, metadata.getValue().instanceId);
++        assertEquals(mRestoreClosureTime, metadata.getValue().timestamp);
++        verify(mRecentlyClosedTabManager, never()).getRecentlyClosedEntries(anyInt());
++        verify(mMultiInstanceManager, never()).openWindow(anyInt(), anyInt());
++        verify(mClosedRestoreSelector).removeObserver(observer);
++        observer.onDestroyed();
++        observer.onTabStateInitialized();
++        verifyNoMoreInteractions(callback);
++    }
++
++    @Test
++    public void testClosedWindowMetadataUsesRegularModelWhenCurrentModelIsOffTheRecord() {
++        setUpWindowRestore();
++        TabModel offTheRecordModel = mock(TabModel.class);
++        Profile offTheRecordProfile = mock(Profile.class);
++        when(offTheRecordProfile.isOffTheRecord()).thenReturn(true);
++        when(offTheRecordModel.getProfile()).thenReturn(offTheRecordProfile);
++        when(mClosedRestoreSelector.getCurrentModel()).thenReturn(offTheRecordModel);
++        JniOnceCallback<RecentlyClosedWindowMetadata> callback = mock();
++
++        mRecentlyClosedEntriesManager.getRecentlyClosedWindowInternal(RESTORE_WINDOW_ID, callback);
++        verifyNoInteractions(callback);
++        idleRestoreChecks();
++
++        ArgumentCaptor<RecentlyClosedWindowMetadata> metadata =
++                ArgumentCaptor.forClass(RecentlyClosedWindowMetadata.class);
++        verify(callback).onResult(metadata.capture());
++        assertEquals(mTabModel, metadata.getValue().tabModel);
++        verify(mClosedRestoreSelector, never()).getCurrentModel();
++        verifyNoMoreInteractions(callback);
++    }
++
++    @Test
++    public void testClosedWindowMetadataManagerDestructionCancelsPostedResultOnce() {
++        setUpWindowRestore();
++        JniOnceCallback<RecentlyClosedWindowMetadata> callback = mock();
++        mRecentlyClosedEntriesManager.getRecentlyClosedWindowInternal(RESTORE_WINDOW_ID, callback);
++        TabModelSelectorObserver observer = closedMetadataObserver();
++        verifyNoInteractions(callback);
++
++        RecentlyClosedEntriesManagerTrackerFactory.getInstance()
++                .destroy(mRecentlyClosedEntriesManager);
++        observer.onDestroyed();
++        observer.onTabStateInitialized();
++        idleRestoreChecks();
++
++        verify(callback).onResult(null);
++        verifyNoMoreInteractions(callback);
++        verify(mClosedRestoreSelector).removeObserver(observer);
++    }
++
++    @Test
++    public void testClosedWindowMetadataCallbackMayDestroyManagerReentrantly() {
++        setUpWindowRestore();
++        JniOnceCallback<RecentlyClosedWindowMetadata> callback = mock();
++        doAnswer(
++                        invocation -> {
++                            RecentlyClosedWindowMetadata metadata = invocation.getArgument(0);
++                            assertNotNull(metadata);
++                            assertEquals(mTabModel, metadata.tabModel);
++                            verify(mClosedRestoreSelector).removeObserver(any());
++                            RecentlyClosedEntriesManagerTrackerFactory.getInstance()
++                                    .destroy(mRecentlyClosedEntriesManager);
++                            return null;
++                        })
++                .when(callback)
++                .onResult(any());
++        mRecentlyClosedEntriesManager.getRecentlyClosedWindowInternal(RESTORE_WINDOW_ID, callback);
++        TabModelSelectorObserver observer = closedMetadataObserver();
++
++        idleRestoreChecks();
++        observer.onDestroyed();
++        observer.onTabStateInitialized();
++
++        verify(callback).onResult(any());
++        verifyNoMoreInteractions(callback);
++    }
++
++    @Test
++    public void testClosedWindowSnapshotReturnsNewestFirstIdentityTimestampPairs() {
++        setUpWindowRestore();
++        createRecentlyClosedWindows(3);
++
++        long[] snapshot =
++                RecentlyClosedEntriesManager.getRecentlyClosedWindowSnapshot(mProfile, 25);
++
++        org.junit.Assert.assertArrayEquals(
++                new long[] {
++                    6, mRestoreClosureTime + 4,
++                    4, mRestoreClosureTime + 2,
++                    2, mRestoreClosureTime
++                },
++                snapshot);
++    }
++
++    @Test
++    public void testClosedWindowSnapshotHonorsRequestedEntryCount() {
++        setUpWindowRestore();
++        createRecentlyClosedWindows(3);
++
++        org.junit.Assert.assertArrayEquals(
++                new long[] {6, mRestoreClosureTime + 4, 4, mRestoreClosureTime + 2},
++                RecentlyClosedEntriesManager.getRecentlyClosedWindowSnapshot(mProfile, 2));
++    }
++
++    @Test
++    public void testClosedWindowSnapshotClampsOversizedRequestToTwentyFive() {
++        setUpWindowRestore();
++        createRecentlyClosedWindows(30);
++
++        long[] snapshot =
++                RecentlyClosedEntriesManager.getRecentlyClosedWindowSnapshot(
++                        mProfile, Integer.MAX_VALUE);
++
++        assertEquals(50, snapshot.length);
++        for (int i = 0; i < 25; i++) {
++            assertEquals(60 - 2 * i, snapshot[2 * i]);
++            assertEquals(mRestoreClosureTime + 58 - 2 * i, snapshot[2 * i + 1]);
++        }
++    }
++
++    @Test
++    public void testClosedWindowSnapshotRejectsZeroAndNegativeEntryLimits() {
++        setUpWindowRestore();
++
++        assertEquals(
++                0,
++                RecentlyClosedEntriesManager.getRecentlyClosedWindowSnapshot(mProfile, 0).length);
++        assertEquals(
++                0,
++                RecentlyClosedEntriesManager.getRecentlyClosedWindowSnapshot(mProfile, -1).length);
++        assertEquals(
++                0,
++                RecentlyClosedEntriesManager.getRecentlyClosedWindowSnapshot(
++                                mProfile, Integer.MIN_VALUE)
++                        .length);
++        verify(mTabWindowManager, never()).requestSelectorWithoutActivity(anyInt(), any());
++    }
++
++    @Test
++    public void testClosedWindowSnapshotEmptyPersistedListReturnsEmptyArray() {
++        setUpWindowRestore();
++        createRecentlyClosedWindows(0);
++
++        assertEquals(
++                0,
++                RecentlyClosedEntriesManager.getRecentlyClosedWindowSnapshot(mProfile, 25).length);
++    }
++
++    @Test
++    public void testClosedWindowSnapshotDoesNotLoadInactiveSelectors() {
++        setUpWindowRestore();
++        when(mTabWindowManager.getTabModelSelectorById(RESTORE_WINDOW_ID)).thenReturn(null);
++
++        org.junit.Assert.assertArrayEquals(
++                new long[] {RESTORE_WINDOW_ID, mRestoreClosureTime},
++                RecentlyClosedEntriesManager.getRecentlyClosedWindowSnapshot(mProfile, 25));
++
++        verify(mTabWindowManager, never()).requestSelectorWithoutActivity(anyInt(), any());
++        verify(mRecentlyClosedTabManager, never()).getRecentlyClosedEntries(anyInt());
++        verify(mMultiInstanceManager, never()).openWindow(anyInt(), anyInt());
++    }
++
++    @Test
++    public void testClosedWindowSnapshotWithoutManagerReturnsEmptyArray() {
++        setUpWindowRestore();
++        RecentlyClosedEntriesManagerTrackerFactory.getInstance()
++                .destroy(mRecentlyClosedEntriesManager);
++
++        assertEquals(
++                0,
++                RecentlyClosedEntriesManager.getRecentlyClosedWindowSnapshot(mProfile, 25).length);
++    }
++
++    @Test
++    public void testClosedWindowSnapshotDoesNotReadAnotherProfilesManager() {
++        setUpWindowRestore();
++        Profile otherProfile = mock(Profile.class);
++
++        assertEquals(
++                0,
++                RecentlyClosedEntriesManager.getRecentlyClosedWindowSnapshot(otherProfile, 25)
++                        .length);
++        verify(mMultiInstanceManager, never()).getRecentlyClosedInstances();
++    }
++
++    @Test
++    public void testClosedWindowSnapshotRejectsOffTheRecordProfile() {
++        setUpWindowRestore();
++        when(mProfile.isOffTheRecord()).thenReturn(true);
++
++        assertEquals(
++                0,
++                RecentlyClosedEntriesManager.getRecentlyClosedWindowSnapshot(mProfile, 25).length);
++        verify(mMultiInstanceManager, never()).getRecentlyClosedInstances();
++    }
++
++    @Test
++    public void testClosedWindowSnapshotRejectsProfileShutdown() {
++        setUpWindowRestore();
++        when(mProfile.shutdownStarted()).thenReturn(true);
++
++        assertEquals(
++                0,
++                RecentlyClosedEntriesManager.getRecentlyClosedWindowSnapshot(mProfile, 25).length);
++        verify(mMultiInstanceManager, never()).getRecentlyClosedInstances();
++    }
++
++    @Test
++    public void testClosedWindowSnapshotUsesLastAccessedTimeForLegacyClosureRecord() {
++        setUpWindowRestore();
++        when(mMultiInstanceManager.getRecentlyClosedInstances())
++                .thenReturn(
++                        List.of(
++                                new InstanceInfo(
++                                        7,
++                                        0,
++                                        InstanceInfo.Type.OTHER,
++                                        "",
++                                        "",
++                                        null,
++                                        1,
++                                        0,
++                                        false,
++                                        mRestoreClosureTime + 2,
++                                        0),
++                                new InstanceInfo(
++                                        9,
++                                        0,
++                                        InstanceInfo.Type.OTHER,
++                                        "",
++                                        "",
++                                        null,
++                                        1,
++                                        0,
++                                        false,
++                                        mRestoreClosureTime - 1,
++                                        mRestoreClosureTime + 3)));
++
++        org.junit.Assert.assertArrayEquals(
++                new long[] {9, mRestoreClosureTime + 3, 7, mRestoreClosureTime + 2},
++                RecentlyClosedEntriesManager.getRecentlyClosedWindowSnapshot(mProfile, 25));
++    }
++
++    @Test
++    public void testClosedWindowMetadataRejectsReusedInstanceBeforeLoadingSelector() {
++        setUpWindowRestore();
++        long[] snapshot = RecentlyClosedEntriesManager.getRecentlyClosedWindowSnapshot(mProfile, 1);
++        when(mTabWindowManager.getTabModelSelectorById(RESTORE_WINDOW_ID)).thenReturn(null);
++        mFakeTimeTestRule.advanceMillis(1);
++        createRecentlyClosedWindows(1);
++        JniOnceCallback<RecentlyClosedWindowMetadata> callback = mock();
++
++        RecentlyClosedEntriesManager.getRecentlyClosedWindow(
++                mProfile, (int) snapshot[0], snapshot[1], callback);
++        idleRestoreChecks();
++
++        verify(callback).onResult(null);
++        verifyNoMoreInteractions(callback);
++        verify(mTabWindowManager, never()).requestSelectorWithoutActivity(anyInt(), any());
++    }
++
++    @Test
++    public void testClosedWindowMetadataAcceptsExactSnapshotTimestamp() {
++        setUpWindowRestore();
++        long[] snapshot = RecentlyClosedEntriesManager.getRecentlyClosedWindowSnapshot(mProfile, 1);
++        JniOnceCallback<RecentlyClosedWindowMetadata> callback = mock();
++
++        RecentlyClosedEntriesManager.getRecentlyClosedWindow(
++                mProfile, (int) snapshot[0], snapshot[1], callback);
++        idleRestoreChecks();
++
++        ArgumentCaptor<RecentlyClosedWindowMetadata> metadata =
++                ArgumentCaptor.forClass(RecentlyClosedWindowMetadata.class);
++        verify(callback).onResult(metadata.capture());
++        assertEquals(snapshot[0], metadata.getValue().instanceId);
++        assertEquals(snapshot[1], metadata.getValue().timestamp);
++        assertEquals(mTabModel, metadata.getValue().tabModel);
++        verifyNoMoreInteractions(callback);
++    }
++
++    @Test
++    public void testClosedWindowMetadataHandleCancelBeforeReadinessCompletesNullOnce() {
++        setUpWindowRestore();
++        when(mClosedRestoreSelector.isTabStateInitialized()).thenReturn(false);
++        JniOnceCallback<RecentlyClosedWindowMetadata> callback = mock();
++        RecentlyClosedEntriesManager.RestoreOperation operation =
++                RecentlyClosedEntriesManager.getRecentlyClosedWindow(
++                        mProfile, RESTORE_WINDOW_ID, mRestoreClosureTime, callback);
++        assertNotNull(operation);
++        TabModelSelectorObserver observer = closedMetadataObserver();
++        verifyNoInteractions(callback);
++
++        RecentlyClosedEntriesManager.cancelRestoreOperation(operation);
++        RecentlyClosedEntriesManager.cancelRestoreOperation(operation);
++        when(mClosedRestoreSelector.isTabStateInitialized()).thenReturn(true);
++        observer.onTabStateInitialized();
++        observer.onDestroyed();
++        idleRestoreChecks();
++        Shadows.shadowOf(Looper.getMainLooper()).idleFor(1, TimeUnit.MINUTES);
++
++        verify(callback).onResult(null);
++        verifyNoMoreInteractions(callback);
++        verify(mClosedRestoreSelector).removeObserver(observer);
++    }
++
++    @Test
++    public void testClosedWindowMetadataHandleCancelBeforePostedReadyResultCompletesNullOnce() {
++        setUpWindowRestore();
++        JniOnceCallback<RecentlyClosedWindowMetadata> callback = mock();
++        RecentlyClosedEntriesManager.RestoreOperation operation =
++                RecentlyClosedEntriesManager.getRecentlyClosedWindow(
++                        mProfile, RESTORE_WINDOW_ID, mRestoreClosureTime, callback);
++        assertNotNull(operation);
++        TabModelSelectorObserver observer = closedMetadataObserver();
++        verifyNoInteractions(callback);
++
++        RecentlyClosedEntriesManager.cancelRestoreOperation(operation);
++        idleRestoreChecks();
++        Shadows.shadowOf(Looper.getMainLooper()).idleFor(1, TimeUnit.MINUTES);
++
++        verify(callback).onResult(null);
++        verifyNoMoreInteractions(callback);
++        verify(mClosedRestoreSelector).removeObserver(observer);
++    }
++
++    @Test
++    public void testClosedWindowMetadataTimeoutIgnoresLateInitializationAndCancellation() {
++        setUpWindowRestore();
++        when(mClosedRestoreSelector.isTabStateInitialized()).thenReturn(false);
++        JniOnceCallback<RecentlyClosedWindowMetadata> callback = mock();
++        RecentlyClosedEntriesManager.RestoreOperation operation =
++                RecentlyClosedEntriesManager.getRecentlyClosedWindow(
++                        mProfile, RESTORE_WINDOW_ID, mRestoreClosureTime, callback);
++        assertNotNull(operation);
++        TabModelSelectorObserver observer = closedMetadataObserver();
++
++        Shadows.shadowOf(Looper.getMainLooper()).idleFor(1, TimeUnit.MINUTES);
++        verify(callback).onResult(null);
++        when(mClosedRestoreSelector.isTabStateInitialized()).thenReturn(true);
++        observer.onTabStateInitialized();
++        RecentlyClosedEntriesManager.cancelRestoreOperation(operation);
++        Shadows.shadowOf(Looper.getMainLooper()).idleFor(1, TimeUnit.MINUTES);
++
++        verifyNoMoreInteractions(callback);
++        verify(mClosedRestoreSelector).removeObserver(observer);
++    }
++
++    @Test
++    public void testClosedWindowMetadataCallbackMayCancelItsHandleAndDestroyManager() {
++        setUpWindowRestore();
++        JniOnceCallback<RecentlyClosedWindowMetadata> callback = mock();
++        RecentlyClosedEntriesManager.RestoreOperation operation =
++                RecentlyClosedEntriesManager.getRecentlyClosedWindow(
++                        mProfile, RESTORE_WINDOW_ID, mRestoreClosureTime, callback);
++        assertNotNull(operation);
++        TabModelSelectorObserver observer = closedMetadataObserver();
++        doAnswer(
++                        invocation -> {
++                            RecentlyClosedWindowMetadata metadata = invocation.getArgument(0);
++                            assertNotNull(metadata);
++                            assertEquals(mTabModel, metadata.tabModel);
++                            verify(mClosedRestoreSelector).removeObserver(observer);
++                            RecentlyClosedEntriesManager.cancelRestoreOperation(operation);
++                            RecentlyClosedEntriesManagerTrackerFactory.getInstance()
++                                    .destroy(mRecentlyClosedEntriesManager);
++                            return null;
++                        })
++                .when(callback)
++                .onResult(any());
++
++        idleRestoreChecks();
++        Shadows.shadowOf(Looper.getMainLooper()).idleFor(1, TimeUnit.MINUTES);
++        observer.onDestroyed();
++
++        verify(callback).onResult(any());
++        verifyNoMoreInteractions(callback);
++    }
++
++    @Test
++    public void testClosedWindowMetadataImmediateStaleErrorReturnsNullHandle() {
++        setUpWindowRestore();
++        JniOnceCallback<RecentlyClosedWindowMetadata> callback = mock();
++
++        RecentlyClosedEntriesManager.RestoreOperation operation =
++                RecentlyClosedEntriesManager.getRecentlyClosedWindow(
++                        mProfile, RESTORE_WINDOW_ID, mRestoreClosureTime + 1, callback);
++        assertNull(operation);
++        RecentlyClosedEntriesManager.cancelRestoreOperation(operation);
++        Shadows.shadowOf(Looper.getMainLooper()).idleFor(1, TimeUnit.MINUTES);
++
++        verify(callback).onResult(null);
++        verifyNoMoreInteractions(callback);
++        verify(mClosedRestoreSelector, never()).addObserver(any());
++        verify(mTabWindowManager, never()).requestSelectorWithoutActivity(anyInt(), any());
++    }
++
++    @Test
++    public void testClosedWindowMetadataSuccessfulHandleRetiresTimeoutAndLateEvents() {
++        setUpWindowRestore();
++        JniOnceCallback<RecentlyClosedWindowMetadata> callback = mock();
++        RecentlyClosedEntriesManager.RestoreOperation operation =
++                RecentlyClosedEntriesManager.getRecentlyClosedWindow(
++                        mProfile, RESTORE_WINDOW_ID, mRestoreClosureTime, callback);
++        assertNotNull(operation);
++        TabModelSelectorObserver observer = closedMetadataObserver();
++
++        idleRestoreChecks();
++        ArgumentCaptor<RecentlyClosedWindowMetadata> metadata =
++                ArgumentCaptor.forClass(RecentlyClosedWindowMetadata.class);
++        verify(callback).onResult(metadata.capture());
++        assertEquals(mTabModel, metadata.getValue().tabModel);
++        assertEquals(mRestoreClosureTime, metadata.getValue().timestamp);
++        Shadows.shadowOf(Looper.getMainLooper()).idleFor(2, TimeUnit.MINUTES);
++        observer.onTabStateInitialized();
++        observer.onDestroyed();
++        RecentlyClosedEntriesManager.cancelRestoreOperation(operation);
++        idleRestoreChecks();
++
++        verifyNoMoreInteractions(callback);
++        verify(mClosedRestoreSelector).removeObserver(observer);
++    }
++
+     private static long getDaysAgoMillis(int numDaysAgo) {
+         return TimeUtils.currentTimeMillis() - TimeUnit.DAYS.toMillis(numDaysAgo);
++    }
++
++    // This plain reader fake retains the original fixture name and regression assertions.
++    public static class ShadowClosedWindowTabStore
++            implements RecentlyClosedEntriesManager.ClosedWindowTabReader {
++        static final List<Callback<List<ClosedWindowTabInfo>>> sCallbacks = new ArrayList<>();
++        static List<ClosedWindowTabInfo> sSyncResult = Collections.emptyList();
++        static int sSyncReads;
++
++        @Override
++        public void getTabListForClosedWindow(
++                int instanceId, Callback<List<ClosedWindowTabInfo>> callback) {
++            sCallbacks.add(callback);
++        }
++
++        @Override
++        public List<ClosedWindowTabInfo> getTabListForClosedWindow(int instanceId) {
++            sSyncReads++;
++            return sSyncResult;
++        }
++
++        public static void reset() {
++            sCallbacks.clear();
++            sSyncResult = Collections.emptyList();
++            sSyncReads = 0;
++        }
++    }
++
++    private void setUpClosedWindowTabStore() {
++        ShadowClosedWindowTabStore.reset();
++        mRecentlyClosedEntriesManager.setClosedWindowTabReaderForTesting(
++                new ShadowClosedWindowTabStore());
++    }
++
++    private static RecentlyClosedWindow closedWindowForPrefetch(long timestamp, String title) {
++        return new RecentlyClosedWindow(
++                timestamp, 42, "https://current.example/", "Window", title, 1);
++    }
++
++    private static List<ClosedWindowTabInfo> closedWindowTabInfo(int id, String url) {
++        return List.of(new ClosedWindowTabInfo(id, new GURL(url), true));
++    }
++
++    private void assertInvalidatedPrefetchCannotFillNewRequest(boolean restoreWindow) {
++        RecentlyClosedWindow oldWindow = closedWindowForPrefetch(1000L, "Old active title");
++        RecentlyClosedWindow currentWindow = closedWindowForPrefetch(2000L, "Current active title");
++        mRecentlyClosedEntriesManager.preFetchTabsForWindow(oldWindow);
++        if (restoreWindow) {
++            mRecentlyClosedEntriesManager.onWindowRestored(42);
++        } else {
++            mRecentlyClosedEntriesManager.clearTabListCache();
++        }
++        mRecentlyClosedEntriesManager.preFetchTabsForWindow(currentWindow);
++        assertEquals(2, ShadowClosedWindowTabStore.sCallbacks.size());
++
++        // Complete the invalidated read while its replacement is pending, then the current read.
++        ShadowClosedWindowTabStore.sCallbacks.get(0)
++                .onResult(closedWindowTabInfo(10, "https://old.example/"));
++        ShadowClosedWindowTabStore.sCallbacks.get(1)
++                .onResult(closedWindowTabInfo(20, "https://current.example/"));
++        List<RecentlyClosedTab> tabs =
++                mRecentlyClosedEntriesManager.getTabsForClosedWindow(currentWindow);
++        assertEquals(0, ShadowClosedWindowTabStore.sSyncReads);
++        assertEquals(1, tabs.size());
++        assertEquals(20, tabs.get(0).getSessionId());
++        assertEquals("https://current.example/", tabs.get(0).getUrl().getSpec());
++        assertEquals("Current active title", tabs.get(0).getTitle());
++        assertEquals(2000L, tabs.get(0).getTimestamp());
++    }
++
++    @Test
++    public void testPrefetchAfterWindowRestoreIgnoresInvalidatedCallback() {
++        setUpClosedWindowTabStore();
++        assertInvalidatedPrefetchCannotFillNewRequest(/* restoreWindow= */ true);
++    }
++
++    @Test
++    public void testPrefetchAfterCacheClearIgnoresInvalidatedCallback() {
++        setUpClosedWindowTabStore();
++        assertInvalidatedPrefetchCannotFillNewRequest(/* restoreWindow= */ false);
++    }
++
++    @Test
++    public void testPendingPrefetchCannotReplaceSynchronousFallback() {
++        setUpClosedWindowTabStore();
++        RecentlyClosedWindow window = closedWindowForPrefetch(2000L, "Current active title");
++        mRecentlyClosedEntriesManager.preFetchTabsForWindow(window);
++        ShadowClosedWindowTabStore.sSyncResult =
++                closedWindowTabInfo(20, "https://current.example/");
++        List<RecentlyClosedTab> tabs = mRecentlyClosedEntriesManager.getTabsForClosedWindow(window);
++        assertEquals(1, ShadowClosedWindowTabStore.sSyncReads);
++        assertEquals(20, tabs.get(0).getSessionId());
++
++        ShadowClosedWindowTabStore.sCallbacks.get(0)
++                .onResult(closedWindowTabInfo(10, "https://old.example/"));
++        tabs = mRecentlyClosedEntriesManager.getTabsForClosedWindow(window);
++        assertEquals(1, ShadowClosedWindowTabStore.sSyncReads);
++        assertEquals(20, tabs.get(0).getSessionId());
++        assertEquals("https://current.example/", tabs.get(0).getUrl().getSpec());
++    }
++
++    @Test
++    public void testDestroyedManagerRejectsPendingAndNewPrefetch() {
++        setUpClosedWindowTabStore();
++        RecentlyClosedWindow window = closedWindowForPrefetch(2000L, "Current active title");
++        mRecentlyClosedEntriesManager.preFetchTabsForWindow(window);
++        RecentlyClosedEntriesManagerTrackerFactory.getInstance()
++                .destroy(mRecentlyClosedEntriesManager);
++        ShadowClosedWindowTabStore.sCallbacks.get(0)
++                .onResult(closedWindowTabInfo(10, "https://old.example/"));
++        mRecentlyClosedEntriesManager.preFetchTabsForWindow(window);
++        assertEquals(1, ShadowClosedWindowTabStore.sCallbacks.size());
++        assertTrue(mRecentlyClosedEntriesManager.getTabsForClosedWindow(window).isEmpty());
++        assertEquals(0, ShadowClosedWindowTabStore.sSyncReads);
++    }
++
++    @Test
++    public void testProfileShutdownRejectsPendingAndNewPrefetch() {
++        setUpClosedWindowTabStore();
++        RecentlyClosedWindow window = closedWindowForPrefetch(2000L, "Current active title");
++        mRecentlyClosedEntriesManager.preFetchTabsForWindow(window);
++        when(mProfile.shutdownStarted()).thenReturn(true);
++        ShadowClosedWindowTabStore.sCallbacks.get(0)
++                .onResult(closedWindowTabInfo(10, "https://old.example/"));
++        mRecentlyClosedEntriesManager.preFetchTabsForWindow(window);
++        assertEquals(1, ShadowClosedWindowTabStore.sCallbacks.size());
++        assertTrue(mRecentlyClosedEntriesManager.getTabsForClosedWindow(window).isEmpty());
++        assertEquals(0, ShadowClosedWindowTabStore.sSyncReads);
+     }
+ 
+     @Test

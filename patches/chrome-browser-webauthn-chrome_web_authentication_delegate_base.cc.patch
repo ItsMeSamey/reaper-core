@@ -1,0 +1,123 @@
+diff --git a/chrome/browser/webauthn/chrome_web_authentication_delegate_base.cc b/chrome/browser/webauthn/chrome_web_authentication_delegate_base.cc
+index f1ba93e06cc28a1fbb04a559c0e1a95fed4f306d..688ca4e4c32fed1fc4522137c2c10bef3efeef21 100644
+--- a/chrome/browser/webauthn/chrome_web_authentication_delegate_base.cc
++++ b/chrome/browser/webauthn/chrome_web_authentication_delegate_base.cc
+@@ -14,8 +14,75 @@
+ #include "chrome/browser/webauthn/webauthn_switches.h"
+ #include "chrome/common/pref_names.h"
+ #include "components/prefs/pref_service.h"
++#include "extensions/buildflags/buildflags.h"
++
++#if BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_EXTENSIONS_CORE)
++#include "base/strings/strcat.h"
++#include "base/strings/string_util.h"
++#include "chrome/browser/extensions/api/web_authentication_proxy/web_authentication_proxy_service.h"
++#include "extensions/browser/extension_registry.h"
++#include "extensions/common/constants.h"
++#include "extensions/common/extension.h"
++#include "extensions/common/permissions/permissions_data.h"
++#include "net/base/registry_controlled_domains/registry_controlled_domain.h"
++#include "net/base/url_util.h"
++#include "url/gurl.h"
++#include "url/url_constants.h"
++#endif
+ 
+ namespace {
++
++#if BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_EXTENSIONS_CORE)
++// Returns true if |extension| is allowed to create and assert |rp_id|.
++bool ExtensionCanAssertRpId(const extensions::Extension& extension,
++                            const std::string& rp_id) {
++  // Extensions are always allowed to assert their own extension identifier.
++  // This has special handling in
++  // ChromeWebAuthenticationDelegate::MaybeGetRelyingPartyIdOverride, the
++  // RP ID will be prefixed with the extension scheme to isolate it from web
++  // origins.
++  if (extension.id() == rp_id) {
++    return true;
++  }
++
++  // Extensions may not claim eTLDs as RP IDs, even if WebAuthn does not
++  // forbid origins from doing so if they are eTLDs themselves.
++  if (!net::registry_controlled_domains::HostHasRegistryControlledDomain(
++          base::TrimString(rp_id, ".", base::TrimPositions::TRIM_TRAILING),
++          net::registry_controlled_domains::INCLUDE_UNKNOWN_REGISTRIES,
++          net::registry_controlled_domains::INCLUDE_PRIVATE_REGISTRIES) &&
++      !net::HostStringIsLocalhost(rp_id)) {
++    return false;
++  }
++
++  // http origins are allowed to claim localhost, so this needs special
++  // handling.
++  if (rp_id == "localhost" && extension.permissions_data()->HasHostPermission(
++                                  GURL("http://localhost"))) {
++    return true;
++  }
++
++  // Extension permissions logic operates on URLs. Convert the RP ID into a
++  // https URL, and make sure the host matches the rp_id (to disallow RP IDs
++  // like example.com/site).
++  GURL rp_id_url(
++      base::StrCat({url::kHttpsScheme, url::kStandardSchemeSeparator, rp_id}));
++  if (!rp_id_url.is_valid() || rp_id_url.host() != rp_id) {
++    return false;
++  }
++
++  // RP IDs must not be IP origins.
++  if (rp_id_url.HostIsIPAddress()) {
++    return false;
++  }
++
++  // Allow claiming an RP ID if an extension can access this page. This is more
++  // restrictive than WebAuthn on the web:
++  // * Subdomains are not allowed to claim domains up.
++  // * Non-default ports are not allowed to claim their domains.
++  return extension.permissions_data()->HasHostPermission(rp_id_url);
++}
++#endif  // BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+ 
+ bool IsCmdlineAllowedOrigin(const url::Origin& caller_origin) {
+   if (!base::CommandLine::ForCurrentProcess()->HasSwitch(
+@@ -133,8 +200,25 @@
+         content::BrowserContext* browser_context,
+         const url::Origin& caller_origin,
+         const std::string& relying_party_id) {
+-  NOTIMPLEMENTED();
+-  return false;
++#if BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_EXTENSIONS_CORE)
++  // Allow chrome-extensions:// origins to make WebAuthn requests.
++  // `MaybeGetRelyingPartyId` will override the RP ID if it matches the
++  // extension origin.
++  if (caller_origin.scheme() != extensions::kExtensionScheme) {
++    return false;
++  }
++  const extensions::Extension* extension =
++      extensions::ExtensionRegistry::Get(browser_context)
++          ->enabled_extensions()
++          .GetByID(caller_origin.host());
++  if (!extension) {
++    return false;
++  }
++  return ExtensionCanAssertRpId(*extension, relying_party_id);
++#else
++  NOTIMPLEMENTED();
++  return false;
++#endif
+ }
+ std::optional<std::string>
+ ChromeWebAuthenticationDelegateBase::MaybeGetRelyingPartyIdOverride(
+@@ -171,8 +255,14 @@
+ ChromeWebAuthenticationDelegateBase::MaybeGetRequestProxy(
+     content::BrowserContext* browser_context,
+     const url::Origin& caller_origin) {
++#if BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_EXTENSIONS_CORE)
++  auto* service = extensions::WebAuthenticationProxyService::GetIfProxyAttached(
++      Profile::FromBrowserContext(browser_context));
++  return service && service->IsActive(caller_origin) ? service : nullptr;
++#else
+   NOTIMPLEMENTED();
+   return nullptr;
++#endif
+ }
+ void ChromeWebAuthenticationDelegateBase::PasskeyUnrecognized(
+     content::WebContents* web_contents,

@@ -1,0 +1,109 @@
+diff --git a/chrome/browser/download/download_offline_content_provider_unittest.cc b/chrome/browser/download/download_offline_content_provider_unittest.cc
+--- a/chrome/browser/download/download_offline_content_provider_unittest.cc
++++ b/chrome/browser/download/download_offline_content_provider_unittest.cc
+@@ -32,7 +32,7 @@
+ #include "components/safe_browsing/core/common/proto/csd.pb.h"
+ #endif
+ 
+-#if BUILDFLAG(ENABLE_DESKTOP_ANDROID_EXTENSIONS)
++#if BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+ #include "chrome/browser/download/download_core_service.h"
+ #include "chrome/browser/download/download_core_service_factory.h"
+ #endif
+@@ -46,6 +46,7 @@
+ using ::testing::ReturnRefOfCopy;
+ 
+ namespace {
++using OfflineItemState = offline_items_collection::OfflineItemState;
+ using ScopedMockObserver = offline_items_collection::
+     ScopedMockOfflineContentProvider::ScopedMockObserver;
+ 
+@@ -332,9 +333,11 @@
+ }
+ #endif  // BUILDFLAG(SAFE_BROWSING_DOWNLOAD_PROTECTION) && BUILDFLAG(IS_ANDROID)
+ 
+-#if BUILDFLAG(ENABLE_DESKTOP_ANDROID_EXTENSIONS)
+-// Tests that when the UI is hidden by an extension updates do not show.
+-TEST_F(DownloadOfflineContentProviderTest, DoNotShowHiddenByExtension) {
++#if BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_EXTENSIONS_CORE)
++// Optional UI policy must never hide real updates from notification/continuity
++// observers.
++TEST_F(DownloadOfflineContentProviderTest,
++       DeliverUpdatesWhileOptionalUiHidden) {
+   DownloadCoreService* service =
+       DownloadCoreServiceFactory::GetForBrowserContext(&profile_);
+   service->SetDownloadUiEnabledForTest(false);
+@@ -344,10 +347,69 @@
+       CreateMockDownloadItem(guid);
+ 
+   ScopedMockObserver observer{&provider_};
+-  EXPECT_CALL(observer, OnItemUpdated(_, _)).Times(0);
+-
+-  InitializeDownloads(true);
+-  provider_.OnDownloadUpdated(item.get());
++  EXPECT_CALL(observer, OnItemUpdated(_, _)).Times(1);
++
++  InitializeDownloads(true);
++  provider_.OnDownloadUpdated(item.get());
++  RunUntilMainThreadIdle();
++}
++
++TEST_F(DownloadOfflineContentProviderTest,
++       DisabledDuringProgressStillCompletes) {
++  auto* service = DownloadCoreServiceFactory::GetForBrowserContext(&profile_);
++  const std::string guid = base::Uuid::GenerateRandomV4().AsLowercaseString();
++  auto item = CreateMockDownloadItem(guid);
++  ScopedMockObserver observer{&provider_};
++  EXPECT_CALL(observer, OnItemRemoved(_)).Times(0);
++  EXPECT_CALL(observer,
++              OnItemUpdated(
++                  Field(&OfflineItem::state, OfflineItemState::IN_PROGRESS), _))
++      .Times(1);
++  InitializeDownloads(true);
++  provider_.OnDownloadStarted(item.get());
++  RunUntilMainThreadIdle();
++
++  service->SetDownloadUiEnabledForTest(false);
++  ON_CALL(*item, GetState()).WillByDefault(Return(DownloadItem::COMPLETE));
++  EXPECT_CALL(
++      observer,
++      OnItemUpdated(Field(&OfflineItem::state, OfflineItemState::COMPLETE),
++                    Optional(Field(&UpdateDelta::state_changed, true))))
++      .Times(1);
++  item->NotifyObserversDownloadUpdated();
++  RunUntilMainThreadIdle();
++
++  // Terminal cleanup must detach the provider from the real observer list.
++  item->NotifyObserversDownloadUpdated();
++  RunUntilMainThreadIdle();
++}
++
++TEST_F(DownloadOfflineContentProviderTest, DisabledDuringProgressStillCancels) {
++  auto* service = DownloadCoreServiceFactory::GetForBrowserContext(&profile_);
++  const std::string guid = base::Uuid::GenerateRandomV4().AsLowercaseString();
++  auto item = CreateMockDownloadItem(guid);
++  ScopedMockObserver observer{&provider_};
++  EXPECT_CALL(observer, OnItemRemoved(_)).Times(0);
++  EXPECT_CALL(observer,
++              OnItemUpdated(
++                  Field(&OfflineItem::state, OfflineItemState::IN_PROGRESS), _))
++      .Times(1);
++  InitializeDownloads(true);
++  provider_.OnDownloadStarted(item.get());
++  RunUntilMainThreadIdle();
++
++  service->SetDownloadUiEnabledForTest(false);
++  ON_CALL(*item, GetState()).WillByDefault(Return(DownloadItem::CANCELLED));
++  EXPECT_CALL(
++      observer,
++      OnItemUpdated(Field(&OfflineItem::state, OfflineItemState::CANCELLED),
++                    Optional(Field(&UpdateDelta::state_changed, true))))
++      .Times(1);
++  item->NotifyObserversDownloadUpdated();
++  RunUntilMainThreadIdle();
++
++  // Terminal cleanup must detach the provider from the real observer list.
++  item->NotifyObserversDownloadUpdated();
+   RunUntilMainThreadIdle();
+ }
+ 

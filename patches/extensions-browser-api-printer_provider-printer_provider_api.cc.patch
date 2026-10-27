@@ -1,0 +1,89 @@
+diff --git a/extensions/browser/api/printer_provider/printer_provider_api.cc b/extensions/browser/api/printer_provider/printer_provider_api.cc
+--- a/extensions/browser/api/printer_provider/printer_provider_api.cc
++++ b/extensions/browser/api/printer_provider/printer_provider_api.cc
+@@ -30,7 +30,10 @@
+ #include "extensions/browser/api/printer_provider/printer_provider_internal_api.h"
+ #include "extensions/browser/api/printer_provider/printer_provider_internal_api_observer.h"
+ #include "extensions/browser/api/printer_provider/printer_provider_print_job.h"
++#include "build/build_config.h"
++#if !BUILDFLAG(IS_ANDROID)
+ #include "extensions/browser/api/usb/usb_device_manager.h"
++#endif
+ #include "extensions/browser/event_router.h"
+ #include "extensions/browser/extension_registry.h"
+ #include "extensions/browser/extension_registry_observer.h"
+@@ -206,6 +209,10 @@
+   int Add(PrinterProviderPrintJob job,
+           PrinterProviderAPI::PrintCallback callback);
+ 
++#if BUILDFLAG(IS_ANDROID)
++  bool Cancel(const base::UnguessableToken& client_token);
++#endif
++
+   // Gets print job associated with a request.
+   const PrinterProviderPrintJob* GetPrintJob(int request_id) const;
+ 
+@@ -269,6 +276,9 @@
+                                       GetCapabilityCallback callback) override;
+   void DispatchPrintRequested(PrinterProviderPrintJob job,
+                               PrintCallback callback) override;
++#if BUILDFLAG(IS_ANDROID)
++  void CancelPrintJob(const base::UnguessableToken& client_token) override;
++#endif
+   const PrinterProviderPrintJob* GetPrintJob(const Extension* extension,
+                                              int request_id) const override;
+   void DispatchGetUsbPrinterInfoRequested(
+@@ -488,6 +498,18 @@
+   return &it->second.job;
+ }
+ 
++#if BUILDFLAG(IS_ANDROID)
++bool PendingPrintRequests::Cancel(const base::UnguessableToken& client_token) {
++  if (client_token.is_empty()) return false;
++  for (const auto& [id, request] : pending_requests_) {
++    if (request.job.client_token == client_token) {
++      return Complete(id, api::printer_provider::PrintError::kFailed);
++    }
++  }
++  return false;
++}
++#endif
++
+ void PendingPrintRequests::FailAll() {
+   for (auto& request : pending_requests_) {
+     std::move(request.second.callback)
+@@ -652,6 +674,15 @@
+   event_router->DispatchEventToExtension(extension_id, std::move(event));
+ }
+ 
++#if BUILDFLAG(IS_ANDROID)
++void PrinterProviderAPIImpl::CancelPrintJob(
++    const base::UnguessableToken& client_token) {
++  for (auto& [extension_id, requests] : pending_print_requests_) {
++    if (requests.Cancel(client_token)) return;
++  }
++}
++#endif
++
+ const PrinterProviderPrintJob* PrinterProviderAPIImpl::GetPrintJob(
+     const Extension* extension,
+     int request_id) const {
+@@ -665,6 +696,10 @@
+     const ExtensionId& extension_id,
+     const device::mojom::UsbDeviceInfo& device,
+     GetPrinterInfoCallback callback) {
++#if BUILDFLAG(IS_ANDROID)
++  // chrome.usb and ChromeOS USB printer discovery are not Android APIs.
++  std::move(callback).Run(base::DictValue());
++#else
+   EventRouter* event_router = EventRouter::Get(browser_context_);
+   if (!event_router->ExtensionHasEventListener(
+           extension_id,
+@@ -688,6 +723,7 @@
+       api::printer_provider::OnGetUsbPrinterInfoRequested::kEventName,
+       std::move(internal_args));
+   event_router->DispatchEventToExtension(extension_id, std::move(event));
++#endif
+ }
+ 
+ void PrinterProviderAPIImpl::OnGetPrintersResult(

@@ -14,7 +14,6 @@ public abstract class BraveFeatureList {
     public static final String FORCE_WEB_CONTENTS_DARK_MODE = "WebContentsForceDark";
     public static final String ENABLE_FORCE_DARK = "enable-force-dark";
     public static final String ENABLE_PARALLEL_DOWNLOADING = "enable-parallel-downloading";
-    public static final String BRAVE_SEARCH_OMNIBOX_BANNER = "BraveSearchOmniboxBanner";
     public static final String BRAVE_BACKGROUND_VIDEO_PLAYBACK = "BraveBackgroundVideoPlayback";
     public static final String BRAVE_PICTURE_IN_PICTURE_FOR_YOUTUBE_VIDEOS =
             "BravePictureInPictureForYouTubeVideos";
@@ -23,12 +22,9 @@ public abstract class BraveFeatureList {
             "BraveVPNLinkSubscriptionAndroidUI";
     public static final String DEBOUNCE = "BraveDebounce";
     public static final String BRAVE_GOOGLE_SIGN_IN_PERMISSION = "BraveGoogleSignInPermission";
-    public static final String BRAVE_PLAYLIST = "Playlist";
     public static final String HTTPS_BY_DEFAULT = "HttpsByDefault";
     public static final String BRAVE_FORGET_FIRST_PARTY_STORAGE = "BraveForgetFirstPartyStorage";
     public static final String BRAVE_REQUEST_OTR_TAB = "BraveRequestOTRTab";
-    public static final String AI_CHAT = "AIChat";
-    public static final String AI_CHAT_HISTORY = "AIChatHistory";
     public static final String BRAVE_SHOW_STRICT_FINGERPRINTING_MODE =
             "BraveShowStrictFingerprintingMode";
     public static final String BRAVE_DAY_ZERO_EXPERIMENT = "BraveDayZeroExperiment";
@@ -37,15 +33,11 @@ public abstract class BraveFeatureList {
     public static final String BRAVE_FALLBACK_DOH_PROVIDER = "BraveFallbackDoHProvider";
     public static final String BRAVE_BLOCK_ALL_COOKIES_TOGGLE = "BlockAllCookiesToggle";
     public static final String BRAVE_SHIELDS_ELEMENT_PICKER = "BraveShieldsElementPicker";
-    public static final String BRAVE_WEB_DISCOVERY_NATIVE = "BraveWebDiscoveryNative";
     public static final String BRAVE_INCOGNITO_SCREENSHOT = "incognito-screenshot";
-    public static final String BRAVE_ACCOUNT = "BraveAccount";
     public static final String BRAVE_ANDROID_DYNAMIC_COLORS_BY_DEFAULT =
             "BraveAndroidDynamicColorsByDefault";
-    public static final String BRAVE_ORIGIN = "BraveOrigin";
     public static final String BRAVE_SHRED = "BraveShredFeature";
     public static final String EMAIL_ALIASES = "EmailAliases";
     public static final String BRAVE_CUSTOM_SEARCH_ENGINES = "BraveCustomSearchEngines";
-    public static final String BRAVE_SYNC_AI_CHAT = "BraveSyncAIChat";
     public static final String BRAVE_ANDROID_TAB_GROUPS_SETTINGS = "BraveAndroidTabGroupsSettings";
 }

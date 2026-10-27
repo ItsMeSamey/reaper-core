@@ -1,0 +1,629 @@
+diff --git a/chrome/test/data/webui/extensions/manager_unit_test.ts b/chrome/test/data/webui/extensions/manager_unit_test.ts
+--- a/chrome/test/data/webui/extensions/manager_unit_test.ts
++++ b/chrome/test/data/webui/extensions/manager_unit_test.ts
+@@ -12,6 +12,11 @@
+ import {navigation, Page, Service} from 'chrome://extensions/extensions.js';
+ import {getDeepActiveElement} from 'chrome://resources/js/util.js';
+ import {assertEquals, assertFalse, assertTrue} from 'chrome://webui-test/chai_assert.js';
++// <if expr="is_android">
++import type {ServiceInterface} from 'chrome://extensions/extensions.js';
++import type {CrButtonElement} from 'chrome://resources/cr_elements/cr_button/cr_button.js';
++import {MockTimer} from 'chrome://webui-test/mock_timer.js';
++// </if>
+ import {eventToPromise, microtasksFinished} from 'chrome://webui-test/test_util.js';
+ 
+ import {TestService} from './test_service.js';
+@@ -21,7 +26,7 @@
+   let manager: ExtensionsManagerElement;
+   let service: TestService;
+ 
+-  setup(function() {
++  setup(async function() {
+     document.body.innerHTML = window.trustedTypes!.emptyHTML;
+ 
+     service = new TestService();
+@@ -32,11 +37,215 @@
+ 
+     // Wait until Manager calls fetches data and initializes itself before
+     // making any assertions.
+-    return Promise.all([
++    await Promise.all([
+       service.whenCalled('getExtensionsInfo'),
+       service.whenCalled('getProfileConfiguration'),
+     ]);
+-  });
++    // <if expr="is_android">
++    // Call notifications precede the initialization promise callbacks.
++    await microtasksFinished();
++    // </if>
++  });
++
++  // <if expr="is_android">
++  test('AndroidInitializationCompletesAcrossDetachAndReattach', async () => {
++    manager.remove();
++    service = new TestService();
++    Service.setInstance(service);
++    const api: ServiceInterface = service;
++    const profile = await api.getProfileConfiguration();
++    let resolveProfile!: (value: chrome.developerPrivate.ProfileInfo) => void;
++    let resolveList!: (value: chrome.developerPrivate.ExtensionInfo[]) => void;
++    const profileResult = new Promise<chrome.developerPrivate.ProfileInfo>(yes => {
++      resolveProfile = yes;
++    });
++    const listResult = new Promise<chrome.developerPrivate.ExtensionInfo[]>(yes => {
++      resolveList = yes;
++    });
++    let profileCalls = 0;
++    let listCalls = 0;
++    api.getProfileConfiguration = () => { ++profileCalls; return profileResult; };
++    api.getExtensionsInfo = () => { ++listCalls; return listResult; };
++    manager = document.createElement('extensions-manager');
++    document.body.appendChild(manager);
++    await microtasksFinished();
++    manager.remove();
++    resolveProfile(profile);
++    resolveList([createExtensionInfo({id: 'a'.repeat(32), name: 'Loaded while detached'})]);
++    await microtasksFinished();
++    document.body.appendChild(manager);
++    await microtasksFinished();
++    assertFalse(manager.$.itemsList.hidden);
++    assertEquals(1, manager.$.itemsList.extensions.length);
++    assertTrue(manager.shadowRoot.querySelector<HTMLElement>('#initializationStatus')!.hidden);
++    assertEquals(1, profileCalls);
++    assertEquals(1, listCalls);
++    simulateExtensionInstall(createExtensionInfo({id: 'b'.repeat(32), name: 'After reconnect'}));
++    await microtasksFinished();
++    assertEquals(2, manager.$.itemsList.extensions.length);
++  });
++
++  test('AndroidInitializationFailureRetryPreservesSuccessfulData', async () => {
++    for (const failedCall of ['list', 'profile']) {
++      manager.remove();
++      service = new TestService();
++      Service.setInstance(service);
++      const api: ServiceInterface = service;
++      const profile = await api.getProfileConfiguration();
++      const extensions = failedCall === 'profile' ?
++          [createExtensionInfo({id: 'a'.repeat(32), name: 'Retained extension'})] : [];
++      let resolveProfile!: (value: chrome.developerPrivate.ProfileInfo) => void;
++      let rejectProfile!: (error: Error) => void;
++      let resolveList!: (value: chrome.developerPrivate.ExtensionInfo[]) => void;
++      let rejectList!: (error: Error) => void;
++      let profileResult = new Promise<chrome.developerPrivate.ProfileInfo>((yes, no) => {
++        resolveProfile = yes;
++        rejectProfile = no;
++      });
++      let listResult = new Promise<chrome.developerPrivate.ExtensionInfo[]>((yes, no) => {
++        resolveList = yes;
++        rejectList = no;
++      });
++      let profileCalls = 0;
++      let listCalls = 0;
++      api.getProfileConfiguration = () => { ++profileCalls; return profileResult; };
++      api.getExtensionsInfo = () => { ++listCalls; return listResult; };
++      manager = document.createElement('extensions-manager');
++      document.body.appendChild(manager);
++      await microtasksFinished();
++      const status = manager.shadowRoot.querySelector<HTMLElement>('#initializationStatus')!;
++      const retry = manager.shadowRoot.querySelector<CrButtonElement>('#initializationRetry')!;
++      assertEquals('true', status.getAttribute('aria-busy'));
++      assertFalse(status.hidden);
++      assertTrue(retry.hidden);
++      assertTrue(manager.$.itemsList.hidden);
++      assertEquals(1, listCalls);
++      assertEquals(1, profileCalls);
++      const internalError = new Error('Internal API request denied');
++      if (failedCall === 'list') {
++        resolveProfile(profile);
++        rejectList(internalError);
++      } else {
++        resolveList(extensions);
++        rejectProfile(internalError);
++      }
++      await microtasksFinished();
++      assertEquals('false', status.getAttribute('aria-busy'));
++      assertFalse(retry.hidden);
++      assertFalse(retry.disabled);
++      assertEquals(manager.i18n('managerLoadError'),
++          status.querySelector('[role="alert"]')!.textContent!.trim());
++      assertFalse(status.textContent!.includes(internalError.message));
++      assertEquals(extensions.length, manager.$.itemsList.extensions.length);
++      assertEquals(failedCall === 'list', manager.$.itemsList.hidden);
++
++      // A second failed attempt must neither start an automatic loop nor
++      // erase the data/listener supplied by the other successful query.
++      let rejectRetry!: (error: Error) => void;
++      if (failedCall === 'list') {
++        listResult = new Promise((_yes, no) => { rejectRetry = no; });
++      } else {
++        profileResult = new Promise((_yes, no) => { rejectRetry = no; });
++      }
++      retry.focus();
++      retry.click();
++      retry.click();
++      await microtasksFinished();
++      assertTrue(retry.disabled);
++      assertEquals('true', status.getAttribute('aria-busy'));
++      assertEquals(failedCall === 'list' ? 2 : 1, listCalls);
++      assertEquals(failedCall === 'profile' ? 2 : 1, profileCalls);
++      rejectRetry(internalError);
++      await microtasksFinished();
++      assertFalse(retry.disabled);
++      assertEquals(extensions.length, manager.$.itemsList.extensions.length);
++      assertEquals(failedCall === 'list' ? 2 : 1, listCalls);
++      assertEquals(failedCall === 'profile' ? 2 : 1, profileCalls);
++      assertEquals(retry, manager.shadowRoot.activeElement);
++      const retryNative = getDeepActiveElement();
++      assertTrue(retryNative instanceof HTMLButtonElement);
++      assertFalse(retryNative.disabled);
++
++      // Only the explicit retry reissues the failed API. Empty success is a
++      // valid loaded list, distinct from pending or failed initialization.
++      listResult = Promise.resolve(extensions);
++      profileResult = Promise.resolve(profile);
++      retry.click();
++      await microtasksFinished();
++      assertTrue(status.hidden);
++      assertFalse(manager.$.itemsList.hidden);
++      assertEquals(extensions.length, manager.$.itemsList.extensions.length);
++      assertEquals(failedCall === 'list' ? 3 : 1, listCalls);
++      assertEquals(failedCall === 'profile' ? 3 : 1, profileCalls);
++      assertTrue(manager.$.toolbar.isSearchFocused());
++      simulateExtensionInstall(createExtensionInfo({id: 'b'.repeat(32), name: 'New extension'}));
++      await microtasksFinished();
++      assertEquals(extensions.length + 1, manager.$.itemsList.extensions.length);
++    }
++
++    // Completion must not take focus from a newer search or modal interaction.
++    for (const focusOwner of ['search', 'dialog']) {
++      for (const succeeds of [false, true]) {
++        manager.remove();
++        service = new TestService();
++        Service.setInstance(service);
++        const api: ServiceInterface = service;
++        const profile = await api.getProfileConfiguration();
++        api.getProfileConfiguration = () =>
++            Promise.reject(new Error('Initial profile failure'));
++        manager = document.createElement('extensions-manager');
++        document.body.appendChild(manager);
++        await microtasksFinished();
++        const retry = manager.shadowRoot.querySelector<CrButtonElement>(
++            '#initializationRetry')!;
++        let resolve!: (value: chrome.developerPrivate.ProfileInfo) => void;
++        let reject!: (error: Error) => void;
++        api.getProfileConfiguration = () => new Promise((yes, no) => {
++          resolve = yes;
++          reject = no;
++        });
++        retry.focus();
++        assertTrue(retry.matches(':focus-within'));
++        retry.click();
++        await microtasksFinished();
++        assertTrue(retry.disabled);
++
++        const dialog = document.createElement('dialog');
++        const dialogButton = document.createElement('button');
++        dialogButton.textContent = 'Newer dialog action';
++        dialog.appendChild(dialogButton);
++        try {
++          if (focusOwner === 'dialog') {
++            document.body.appendChild(dialog);
++            dialog.showModal();
++            dialogButton.focus();
++          } else {
++            manager.$.toolbar.focusSearchInput();
++          }
++          await microtasksFinished();
++          const chosenFocus = getDeepActiveElement();
++          assertTrue(focusOwner === 'dialog' ?
++              chosenFocus === dialogButton : manager.$.toolbar.isSearchFocused());
++          if (succeeds) {
++            resolve(profile);
++          } else {
++            reject(new Error('Retry profile failure'));
++          }
++          await microtasksFinished();
++          assertEquals(chosenFocus, getDeepActiveElement());
++          assertFalse(retry.disabled);
++          assertEquals(succeeds, retry.hidden);
++          assertEquals(focusOwner === 'dialog', dialog.open);
++        } finally {
++          if (dialog.open) {
++            dialog.close();
++          }
++          dialog.remove();
++        }
++      }
++    }
++  });
++  // </if>
+ 
+   /**
+    * Trigger an event that indicates that an extension was installed.
+@@ -280,6 +489,14 @@
+     assertEquals(3, getExtensions().length);
+ 
+     const itemList = manager.$.itemsList;
++    // <if expr="is_android">
++    // Exercise lost-focus recovery without retaining a recycled item's button.
++    const focusedElement = getDeepActiveElement();
++    if (focusedElement instanceof HTMLElement) {
++      focusedElement.blur();
++    }
++    assertEquals(document.body, getDeepActiveElement());
++    // </if>
+ 
+     service.itemStateChangedTarget.callListeners({
+       event_type: chrome.developerPrivate.EventType.UNINSTALLED,
+@@ -332,6 +549,371 @@
+     assertTrue(manager.$.toolbar.isSearchFocused());
+   });
+ 
++  // <if expr="is_android">
++  test('AndroidDetailsAndErrorsReturnFocusToVisibleItem', async () => {
++    const id = 'a'.repeat(32);
++    const extension = createExtensionInfo({
++      id,
++      manifestErrors: [{
++        id: 1,
++        type: chrome.developerPrivate.ErrorType.MANIFEST,
++        extensionId: id,
++        fromIncognito: false,
++        source: 'manifest.json',
++        message: 'Test manifest error',
++        manifestKey: 'name',
++      }],
++    });
++    manager.inDevMode = true;
++    simulateExtensionInstall(extension);
++    await microtasksFinished();
++
++    const list = manager.$.itemsList;
++    for (const page of [Page.DETAILS, Page.ERRORS]) {
++      const button = page === Page.DETAILS ? list.getDetailsButton(id) :
++                                           list.getErrorsButton(id);
++      assertTrue(!!button);
++      assertTrue(list.classList.contains('active'));
++      assertTrue(button.getClientRects().length > 0);
++      button.focus();
++      assertTrue(button.matches(':focus-within'));
++      const focusedButton = getDeepActiveElement();
++      assertTrue(!!focusedButton);
++      button.click();
++      await microtasksFinished();
++      assertEquals(page, navigation.getCurrentPage().page);
++      assertFalse(list.classList.contains('active'));
++      assertEquals(0, button.getClientRects().length);
++
++      const view = manager.$.viewManager.querySelector<HTMLElement>('.active')!;
++      const close = view.shadowRoot!.querySelector<HTMLElement>('#closeButton')!;
++      assertTrue(!!close);
++      close.focus();
++      assertEquals(close, getDeepActiveElement());
++      close.click();
++      await microtasksFinished();
++
++      assertEquals(Page.LIST, navigation.getCurrentPage().page);
++      assertTrue(list.classList.contains('active'));
++      assertTrue(button.getClientRects().length > 0);
++      assertTrue(button.matches(':focus-within'));
++      assertEquals(focusedButton, getDeepActiveElement());
++    }
++
++    const search = manager.$.toolbar.$.toolbar.getSearchField();
++    const input = search.getSearchInput();
++    for (const page of [Page.DETAILS, Page.ERRORS]) {
++      for (const query of [extension.name, 'No matching extension']) {
++        search.setValue('');
++        await microtasksFinished();
++        const button = page === Page.DETAILS ? list.getDetailsButton(id) :
++                                             list.getErrorsButton(id);
++        assertTrue(!!button);
++        button.click();
++        await microtasksFinished();
++        assertEquals(page, navigation.getCurrentPage().page);
++        assertFalse(list.classList.contains('active'));
++
++        await search.showAndFocus();
++        assertEquals(input, getDeepActiveElement());
++        // Use the real search control's change event and normal routing.
++        search.setValue(query);
++        await microtasksFinished();
++
++        assertEquals(Page.LIST, navigation.getCurrentPage().page);
++        assertTrue(list.classList.contains('active'));
++        assertEquals(query, list.filter);
++        assertEquals(query, input.value);
++        assertTrue(input.isConnected);
++        assertTrue(input.getClientRects().length > 0);
++        assertEquals(input, getDeepActiveElement());
++        assertTrue(manager.$.toolbar.isSearchFocused());
++        assertFalse(list.matches(':focus-within'));
++        testVisible(list, '#no-search-results', query !== extension.name);
++        assertEquals(query === extension.name, !!list.getDetailsButton(id));
++      }
++    }
++    search.setValue('');
++    await microtasksFinished();
++
++    // A different destination must not return focus to the hidden item card.
++    list.getDetailsButton(id)!.click();
++    await microtasksFinished();
++    navigation.navigateTo({page: Page.SHORTCUTS});
++    await microtasksFinished();
++    assertEquals(Page.SHORTCUTS, navigation.getCurrentPage().page);
++    assertFalse(list.classList.contains('active'));
++    assertFalse(list.matches(':focus-within'));
++    navigation.navigateTo({page: Page.LIST});
++    await microtasksFinished();
++
++    // Removing the Details item returns through history to an empty list.
++    list.getDetailsButton(id)!.click();
++    await microtasksFinished();
++    const removedView =
++        manager.$.viewManager.querySelector<HTMLElement>('.active')!;
++    const removedClose =
++        removedView.shadowRoot!.querySelector<HTMLElement>('#closeButton')!;
++    assertTrue(removedClose.getClientRects().length > 0);
++    removedClose.focus();
++    assertEquals(removedClose, getDeepActiveElement());
++    const whenRemoved = eventToPromise('popstate', window);
++    service.itemStateChangedTarget.callListeners({
++      event_type: chrome.developerPrivate.EventType.UNINSTALLED,
++      item_id: id,
++    });
++    await whenRemoved;
++    await microtasksFinished();
++    assertEquals(Page.LIST, navigation.getCurrentPage().page);
++    assertTrue(list.classList.contains('active'));
++    assertEquals(0, getExtensions().length);
++    assertFalse(!!list.getDetailsButton(id));
++    assertTrue(search.showingSearch);
++    assertTrue(input.isConnected);
++    assertTrue(input.getClientRects().length > 0);
++    assertEquals(input, getDeepActiveElement());
++    assertFalse(removedView.matches(':focus-within'));
++
++    // A different history entry uses synchronous routing. A newer focus claim
++    // while the search field renders must win over the removal fallback.
++    const recovery = createExtensionInfo({name: 'Bravo', id: 'b'.repeat(32)});
++    simulateExtensionInstall(recovery);
++    await microtasksFinished();
++    search.showingSearch = false;
++    await search.updateComplete;
++    navigation.navigateTo({page: Page.SHORTCUTS});
++    navigation.navigateTo({page: Page.DETAILS, extensionId: recovery.id});
++    await microtasksFinished();
++    const recoveryView =
++        manager.$.viewManager.querySelector<HTMLElement>('.active')!;
++    const recoveryClose =
++        recoveryView.shadowRoot!.querySelector<HTMLElement>('#closeButton')!;
++    assertTrue(recoveryClose.getClientRects().length > 0);
++    recoveryClose.focus();
++    assertEquals(recoveryClose, getDeepActiveElement());
++    const descriptor = Object.getOwnPropertyDescriptor(search, 'updateComplete');
++    let finishRender: (result: boolean) => void = () => {};
++    const pendingRender = new Promise<boolean>(resolve => finishRender = resolve);
++    Object.defineProperty(search, 'updateComplete', {
++      configurable: true,
++      get: () => pendingRender,
++    });
++    try {
++      service.itemStateChangedTarget.callListeners({
++        event_type: chrome.developerPrivate.EventType.UNINSTALLED,
++        item_id: recovery.id,
++      });
++      await microtasksFinished();
++      assertEquals(Page.LIST, navigation.getCurrentPage().page);
++      assertTrue(list.classList.contains('active'));
++      assertEquals(0, getExtensions().length);
++      // The new fallback has reached its search-render await.
++      assertTrue(search.showingSearch);
++      assertFalse(manager.$.toolbar.isSearchFocused());
++      const chosen = focusUninstallToolbarControl();
++      finishRender(true);
++      await microtasksFinished();
++      assertEquals(chosen, getDeepActiveElement());
++      assertFalse(manager.$.toolbar.isSearchFocused());
++    } finally {
++      finishRender(true);
++      if (descriptor) {
++        Object.defineProperty(search, 'updateComplete', descriptor);
++      } else {
++        Reflect.deleteProperty(search, 'updateComplete');
++      }
++    }
++  });
++
++  function focusUninstallToolbarControl(): HTMLInputElement {
++    const button = manager.$.toolbar.$.devMode;
++    assertFalse(button.disabled);
++    button.focus();
++    assertEquals(button, getDeepActiveElement());
++    return button;
++  }
++
++  async function flushUninstallFocus(timer: MockTimer) {
++    await manager.updateComplete;
++    await manager.$.itemsList.updateComplete;
++    await Promise.resolve();
++    timer.tick(0);
++    await Promise.resolve();
++  }
++
++  test('AndroidUninstallTimerPreservesNewToolbarFocus', async () => {
++    const first = createExtensionInfo({name: 'Alpha', id: 'a'.repeat(32)});
++    const second = createExtensionInfo({name: 'Bravo', id: 'b'.repeat(32)});
++    const third = createExtensionInfo({name: 'Charlie', id: 'c'.repeat(32)});
++    simulateExtensionInstall(first);
++    simulateExtensionInstall(second);
++    simulateExtensionInstall(third);
++    await microtasksFinished();
++    const list = manager.$.itemsList;
++    const timer = new MockTimer();
++    timer.install();
++    try {
++      list.getRemoveButton(first.id)!.focus();
++      service.itemStateChangedTarget.callListeners({
++        event_type: chrome.developerPrivate.EventType.UNINSTALLED,
++        item_id: first.id,
++      });
++      await flushUninstallFocus(timer);
++      // The original next-card fallback still moves actual focus.
++      assertTrue(list.getRemoveButton(second.id)!.matches(':focus-within'));
++      assertEquals(2, getExtensions().length);
++
++      service.itemStateChangedTarget.callListeners({
++        event_type: chrome.developerPrivate.EventType.UNINSTALLED,
++        item_id: second.id,
++      });
++      const chosen = focusUninstallToolbarControl();
++      await flushUninstallFocus(timer);
++      assertEquals(chosen, getDeepActiveElement());
++      assertEquals(1, getExtensions().length);
++      assertEquals(third.id, getExtension(0).id);
++      assertFalse(manager.$.toolbar.isSearchFocused());
++
++      // A removal arriving from another manager must preserve an unaffected card.
++      const fourth = createExtensionInfo({name: 'Delta', id: 'd'.repeat(32)});
++      simulateExtensionInstall(fourth);
++      await manager.updateComplete;
++      await list.updateComplete;
++      simulateExtensionInstall(first);
++      await manager.updateComplete;
++      await list.updateComplete;
++      const unaffectedItem = list.shadowRoot.querySelector(`#${third.id}`)!;
++      const unaffected = list.getDetailsButton(third.id)!;
++      unaffected.focus();
++      assertTrue(unaffected.matches(':focus-within'));
++      const unaffectedFocus = getDeepActiveElement();
++      // Removing an earlier card must not rebind the focused middle slot to Delta.
++      service.itemStateChangedTarget.callListeners({
++        event_type: chrome.developerPrivate.EventType.UNINSTALLED,
++        item_id: first.id,
++      });
++      await flushUninstallFocus(timer);
++      assertEquals(2, getExtensions().length);
++      assertEquals(third.id, getExtension(0).id);
++      assertEquals(fourth.id, getExtension(1).id);
++      assertEquals(unaffectedItem, list.shadowRoot.querySelector(`#${third.id}`));
++      assertEquals(unaffected, list.getDetailsButton(third.id));
++      assertEquals(unaffectedFocus, getDeepActiveElement());
++
++      // Removing a later card must preserve the same host, control and deep focus.
++      service.itemStateChangedTarget.callListeners({
++        event_type: chrome.developerPrivate.EventType.UNINSTALLED,
++        item_id: fourth.id,
++      });
++      await flushUninstallFocus(timer);
++      assertEquals(unaffectedItem, list.shadowRoot.querySelector(`#${third.id}`));
++      assertEquals(unaffected, list.getDetailsButton(third.id));
++      assertEquals(unaffectedFocus, getDeepActiveElement());
++      assertEquals(1, getExtensions().length);
++      assertEquals(third.id, getExtension(0).id);
++
++      // Keep a real matching card available so a mistaken next-card focus is visible.
++      simulateExtensionInstall(fourth);
++      await manager.updateComplete;
++      await list.updateComplete;
++      const search = manager.$.toolbar.$.toolbar.getSearchField();
++      search.setValue('a');
++      await manager.updateComplete;
++      await list.updateComplete;
++      await search.showAndFocus();
++      const input = search.getSearchInput();
++      assertEquals(input, getDeepActiveElement());
++      assertTrue(list.getRemoveButton(fourth.id)!.getClientRects().length > 0);
++      service.itemStateChangedTarget.callListeners({
++        event_type: chrome.developerPrivate.EventType.UNINSTALLED,
++        item_id: third.id,
++      });
++      await flushUninstallFocus(timer);
++      assertEquals(input, getDeepActiveElement());
++      assertEquals('a', input.value);
++      assertEquals('a', list.filter);
++      assertEquals(1, getExtensions().length);
++      assertEquals(fourth.id, getExtension(0).id);
++
++      // The final-item fallback must also respect a pre-existing toolbar focus.
++      const existingToolbarFocus = focusUninstallToolbarControl();
++      service.itemStateChangedTarget.callListeners({
++        event_type: chrome.developerPrivate.EventType.UNINSTALLED,
++        item_id: fourth.id,
++      });
++      await flushUninstallFocus(timer);
++      assertEquals(0, getExtensions().length);
++      assertEquals(existingToolbarFocus, getDeepActiveElement());
++      assertFalse(manager.$.toolbar.isSearchFocused());
++    } finally {
++      timer.uninstall();
++    }
++  });
++
++  test('AndroidUninstallSearchRenderPreservesNewToolbarFocus', async () => {
++    const extension = createExtensionInfo({name: 'Alpha', id: 'a'.repeat(32)});
++    simulateExtensionInstall(extension);
++    await microtasksFinished();
++    manager.$.itemsList.getRemoveButton(extension.id)!.focus();
++    const search = manager.$.toolbar.$.toolbar.getSearchField();
++    const descriptor = Object.getOwnPropertyDescriptor(search, 'updateComplete');
++    let finishRender: (result: boolean) => void = () => {};
++    const pendingRender = new Promise<boolean>(resolve => finishRender = resolve);
++    Object.defineProperty(search, 'updateComplete', {
++      configurable: true,
++      get: () => pendingRender,
++    });
++    const restoreDescriptor = () => {
++      if (descriptor) {
++        Object.defineProperty(search, 'updateComplete', descriptor);
++      } else {
++        Reflect.deleteProperty(search, 'updateComplete');
++      }
++    };
++    const timer = new MockTimer();
++    timer.install();
++    try {
++      service.itemStateChangedTarget.callListeners({
++        event_type: chrome.developerPrivate.EventType.UNINSTALLED,
++        item_id: extension.id,
++      });
++      await flushUninstallFocus(timer);
++      assertTrue(search.showingSearch);
++      assertEquals(0, getExtensions().length);
++      const chosen = focusUninstallToolbarControl();
++      finishRender(true);
++      await Promise.resolve();
++      await Promise.resolve();
++      assertEquals(chosen, getDeepActiveElement());
++      assertFalse(manager.$.toolbar.isSearchFocused());
++
++      restoreDescriptor();
++      await search.updateComplete;
++      // Removing the focused final card still recovers focus to search.
++      const recovery = createExtensionInfo({name: 'Bravo', id: 'b'.repeat(32)});
++      simulateExtensionInstall(recovery);
++      await manager.updateComplete;
++      await manager.$.itemsList.updateComplete;
++      const recoveryButton = manager.$.itemsList.getRemoveButton(recovery.id)!;
++      recoveryButton.focus();
++      assertTrue(recoveryButton.matches(':focus-within'));
++      service.itemStateChangedTarget.callListeners({
++        event_type: chrome.developerPrivate.EventType.UNINSTALLED,
++        item_id: recovery.id,
++      });
++      await flushUninstallFocus(timer);
++      await search.updateComplete;
++      await Promise.resolve();
++      assertEquals(0, getExtensions().length);
++      assertTrue(manager.$.toolbar.isSearchFocused());
++      assertEquals(search.getSearchInput(), getDeepActiveElement());
++    } finally {
++      finishRender(true);
++      restoreDescriptor();
++      timer.uninstall();
++    }
++  });
++  // </if>
+   test('UninstallRaceCondition', async () => {
+     assertEquals(0, getExtensions().length);
+ 

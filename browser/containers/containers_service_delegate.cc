@@ -19,14 +19,24 @@
 #include "base/task/thread_pool.h"
 #include "base/types/to_address.h"
 #include "brave/components/containers/content/browser/storage_partition_utils.h"
+#include "build/build_config.h"
 #include "chrome/browser/profiles/profile.h"
+#if BUILDFLAG(IS_ANDROID)
+#include "brave/browser/containers/android/containers_bridge.h"
+#include "brave/browser/containers/containers_service_factory.h"
+#include "brave/components/containers/core/mojom/containers.mojom.h"
+#include "chrome/browser/android/tab_android.h"
+#include "chrome/browser/ui/android/tab_model/tab_model.h"
+#include "chrome/browser/ui/android/tab_model/tab_model_list.h"
+#else
 #include "chrome/browser/ui/tab_contents/tab_contents_iterator.h"
+#include "components/tabs/public/tab_interface.h"
+#endif
 #include "chrome/common/buildflags.h"
 #include "components/sessions/core/serialized_navigation_entry.h"
 #include "components/sessions/core/session_types.h"
 #include "components/sessions/core/tab_restore_service.h"
 #include "components/sessions/core/tab_restore_types.h"
-#include "components/tabs/public/tab_interface.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/storage_partition.h"
 #include "content/public/browser/storage_partition_config.h"
@@ -67,6 +77,23 @@ void AppendOpenTabReferencedContainerIds(Profile* profile,
   if (!profile) {
     return;
   }
+#if BUILDFLAG(IS_ANDROID)
+  for (const auto& model : TabModelList::models()) {
+    if (!model || model->GetProfile() != profile) {
+      continue;
+    }
+    for (int i = 0; i < model->GetTabCount(); ++i) {
+      auto* tab = model->GetTabAt(i);
+      if (!tab) {
+        continue;
+      }
+      const auto id = tab->GetContainerId();
+      if (!id.empty() && containers::android::IsContainerIdWellFormed(id)) {
+        ids.insert(id);
+      }
+    }
+  }
+#else
   tabs::ForEachTabInterface([&](tabs::TabInterface* tab) -> bool {
     content::WebContents* const contents = tab->GetContents();
     if (!contents) {
@@ -81,6 +108,7 @@ void AppendOpenTabReferencedContainerIds(Profile* profile,
     }
     return true;
   });
+#endif
 }
 
 // Appends the container ids referenced by the serialized navigation entries to
@@ -181,6 +209,17 @@ ContainersServiceDelegate::~ContainersServiceDelegate() = default;
 void ContainersServiceDelegate::GetReferencedContainerIds(
     OnReferencedContainerIdsReadyCallback callback) {
   on_referenced_container_ids_loaded_ = std::move(callback);
+#if BUILDFLAG(IS_ANDROID)
+  got_persistent_container_references_ = false;
+  containers::android::InvalidatePersistentContainerReferences(
+      base::to_address(profile_));
+  containers::android::GetPersistentContainerReferences(
+      base::to_address(profile_),
+      base::BindOnce(&ContainersServiceDelegate::OnAndroidReferencesReady,
+                     weak_factory_.GetWeakPtr()));
+  containers::android::RefreshPersistentContainerReferences(
+      base::to_address(profile_));
+#endif
 
   // Last-session and tab-restore work proceeds in parallel; each path calls
   // MaybeRunOnReferencedContainerIdsLoaded() when its prerequisite is
@@ -194,47 +233,99 @@ void ContainersServiceDelegate::GetReferencedContainerIds(
 void ContainersServiceDelegate::DeleteContainerStorage(
     const std::string& id,
     DeleteContainerStorageCallback callback) {
+#if BUILDFLAG(IS_ANDROID)
+  containers::android::InvalidatePersistentContainerReferences(
+      base::to_address(profile_));
+  containers::android::GetPersistentContainerReferences(
+      base::to_address(profile_),
+      base::BindOnce(&ContainersServiceDelegate::OnAndroidDeleteReferencesReady,
+                     weak_factory_.GetWeakPtr(), id, std::move(callback)));
+  containers::android::RefreshPersistentContainerReferences(
+      base::to_address(profile_));
+#else
+  DeleteUnreferencedContainerStorage(id, std::move(callback));
+#endif
+}
+
+void ContainersServiceDelegate::DeleteUnreferencedContainerStorage(
+    const std::string& id,
+    DeleteContainerStorageCallback callback) {
   const content::StoragePartitionConfig config =
       content::StoragePartitionConfig::Create(
           base::to_address(profile_),
           containers::kContainersStoragePartitionDomain, id,
           profile_->IsOffTheRecord());
 
-  // Get the path to the storage partition for the container. Chromium keeps all
-  // storage partitions in the profile directory even if they are not used. We
-  // need to delete the directory for the container on our own.
-  base::FilePath partition_path =
-      GetContainerStoragePartitionPath(base::to_address(profile_), id);
-
   // can_create=false: never instantiate a partition we are trying to remove.
   if (content::StoragePartition* partition =
           profile_->GetStoragePartition(config, /*can_create=*/false)) {
-    // Clear in-memory/live storage first; the hash-named directory may still
-    // remain until we delete it explicitly below.
+    // ClearData does not retire the partition or its storage contexts. Keep
+    // their backing directory while the Profile still owns the partition;
+    // the callback reports logical clearing, not physical directory removal.
     partition->ClearData(
         content::StoragePartition::REMOVE_DATA_MASK_ALL,
         /*filter_builder=*/nullptr,
         /*storage_key_policy_matcher=*/base::NullCallback(),
         /*cookie_deletion_filter=*/network::mojom::CookieDeletionFilter::New(),
         /*perform_storage_cleanup=*/true, base::Time(), base::Time::Max(),
-        base::BindOnce(
-            [](base::FilePath path, base::OnceCallback<void(bool)> callback) {
-              base::ThreadPool::PostTaskAndReplyWithResult(
-                  FROM_HERE, {base::MayBlock()},
-                  base::BindOnce(&DeletePathRecursively, path),
-                  base::BindOnce(std::move(callback)));
-            },
-            std::move(partition_path), std::move(callback)));
+        base::BindOnce(std::move(callback), true));
     return;
   }
 
   // No live partition object (e.g. never opened in this session); still remove
   // any leftover on-disk directory from a prior run.
+  const base::FilePath partition_path =
+      GetContainerStoragePartitionPath(base::to_address(profile_), id);
   base::ThreadPool::PostTaskAndReplyWithResult(
       FROM_HERE, {base::MayBlock()},
       base::BindOnce(&DeletePathRecursively, partition_path),
       std::move(callback));
 }
+
+#if BUILDFLAG(IS_ANDROID)
+void ContainersServiceDelegate::OnAndroidReferencesReady(
+    const base::flat_set<std::string>& ids) {
+  pending_referenced_container_ids_.insert(ids.begin(), ids.end());
+  got_persistent_container_references_ = true;
+  MaybeRunOnReferencedContainerIdsLoaded();
+}
+
+void ContainersServiceDelegate::OnAndroidDeleteReferencesReady(
+    const std::string& id,
+    DeleteContainerStorageCallback callback,
+    const base::flat_set<std::string>& persisted_ids) {
+  base::flat_set<std::string> referenced_ids = persisted_ids;
+  // Sync may restore an entry while the asynchronous disk scan is in flight.
+  // Recheck the current configured list before authorizing irreversible clear.
+  auto* service = ContainersServiceFactory::GetForProfile(
+      base::to_address(profile_));
+  if (!service) {
+    std::move(callback).Run(false);
+    return;
+  }
+  for (const auto& container : service->GetContainers()) {
+    referenced_ids.insert(container->id);
+  }
+  AppendOpenTabReferencedContainerIds(base::to_address(profile_),
+                                      referenced_ids);
+  // A tab may have closed into Android history since the discovery snapshot.
+  if (tab_restore_service_) {
+    if (!tab_restore_service_->IsLoaded()) {
+      std::move(callback).Run(false);
+      return;
+    }
+    for (const auto& entry : tab_restore_service_->entries()) {
+      AddReferencedContainerIdsFromEntry(*entry, referenced_ids);
+    }
+  }
+  if (!containers::android::IsContainerIdWellFormed(id) || id.empty() ||
+      referenced_ids.contains(id)) {
+    std::move(callback).Run(false);
+    return;
+  }
+  DeleteUnreferencedContainerStorage(id, std::move(callback));
+}
+#endif
 
 #if BUILDFLAG(ENABLE_SESSION_SERVICE)
 void ContainersServiceDelegate::OnDestroying(SessionServiceBase* service) {
@@ -312,7 +403,11 @@ void ContainersServiceDelegate::MaybeRunOnReferencedContainerIdsLoaded() {
 #else
       true;
 #endif
-  if (!tab_restore_ready || !last_session_ready) {
+  if (!tab_restore_ready || !last_session_ready
+#if BUILDFLAG(IS_ANDROID)
+      || !got_persistent_container_references_
+#endif
+  ) {
     return;
   }
 

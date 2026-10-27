@@ -1,0 +1,693 @@
+diff --git a/chrome/browser/ui/android/omnibox/java/src/org/chromium/chrome/browser/omnibox/suggestions/AutocompleteMediator.java b/chrome/browser/ui/android/omnibox/java/src/org/chromium/chrome/browser/omnibox/suggestions/AutocompleteMediator.java
+--- a/chrome/browser/ui/android/omnibox/java/src/org/chromium/chrome/browser/omnibox/suggestions/AutocompleteMediator.java
++++ b/chrome/browser/ui/android/omnibox/java/src/org/chromium/chrome/browser/omnibox/suggestions/AutocompleteMediator.java
+@@ -38,18 +38,11 @@
+ import org.chromium.chrome.browser.lifecycle.PauseResumeWithNativeObserver;
+ import org.chromium.chrome.browser.lifecycle.TopResumedActivityChangedObserver;
+ import org.chromium.chrome.browser.omnibox.DeferredIMEWindowInsetApplicationCallback;
+-import org.chromium.chrome.browser.omnibox.FuseboxSessionState;
+ import org.chromium.chrome.browser.omnibox.LocationBarDataProvider;
+ import org.chromium.chrome.browser.omnibox.LocationBarEmbedderUiOverrides;
+ import org.chromium.chrome.browser.omnibox.OmniboxMetrics;
+ import org.chromium.chrome.browser.omnibox.R;
+ import org.chromium.chrome.browser.omnibox.UrlBarEditingTextStateProvider;
+-import org.chromium.chrome.browser.omnibox.fusebox.ComposeboxQueryControllerBridge;
+-import org.chromium.chrome.browser.omnibox.fusebox.FuseboxAttachmentModelList;
+-import org.chromium.chrome.browser.omnibox.fusebox.FuseboxAttachmentModelList.FuseboxAttachmentChangeListener;
+-import org.chromium.chrome.browser.omnibox.fusebox.FuseboxCoordinator;
+-import org.chromium.chrome.browser.omnibox.fusebox.FuseboxCoordinator.FuseboxLayoutMode;
+-import org.chromium.chrome.browser.omnibox.fusebox.FuseboxCoordinator.FuseboxState;
+ import org.chromium.chrome.browser.omnibox.styles.OmniboxResourceProvider;
+ import org.chromium.chrome.browser.omnibox.suggestions.AutocompleteController.OnSuggestionsReceivedListener;
+ import org.chromium.chrome.browser.omnibox.suggestions.AutocompleteCoordinator.OmniboxSuggestionsVisualStateObserver;
+@@ -87,7 +80,6 @@
+ import org.chromium.components.omnibox.OmniboxFocusReason;
+ import org.chromium.components.omnibox.OmniboxSuggestionType;
+ import org.chromium.components.omnibox.PageClassificationUtils;
+-import org.chromium.components.omnibox.ToolModeUtils;
+ import org.chromium.components.omnibox.action.OmniboxAction;
+ import org.chromium.components.search_engines.StarterPackId;
+ import org.chromium.components.search_engines.TemplateUrl;
+@@ -110,22 +102,11 @@
+ import java.util.function.Supplier;
+ 
+ /**
+- * Mediator for the autocomplete component.
++ * Mediator for ordinary omnibox suggestions.
+  *
+- * <p>The Mediator is responsible for observing the {@link FuseboxSessionState} and providing
+- * suggestions to the omnibox. It receives the {@link AutocompleteController} from the {@link
+- * FuseboxSessionState} and handles all interactions with it.
+- *
+- * <p>The lifecycle of this component is tied to an omnibox input session, which begins with {@link
+- * #beginInput(FuseboxSessionState)} and ends with {@link #endInput()}. When an input session is
+- * active, this Mediator will listen for text changes and forward them to the {@link
+- * AutocompleteController} to retrieve suggestions. The suggestions are then processed and passed to
+- * the {@link AutocompleteCoordinator} to be displayed to the user.
+- *
+- * <p>This component's design is simplified by the guarantees provided by {@link
+- * FuseboxSessionState}. It is guaranteed to have a valid {@link Profile} and {@link
+- * AutocompleteController} whenever an input session is active, removing the need to handle
+- * pre-native or pre-profile edge cases.
++ * <p>The owning location bar supplies an {@link AutocompleteInput}, its ready {@link Profile} and
++ * profile-keyed {@link AutocompleteController}. Ending input detaches observers and releases the
++ * captured per-session context without destroying the shared controller.
+  */
+ @NullMarked
+ class AutocompleteMediator
+@@ -134,7 +115,6 @@
+                 OmniboxSuggestionsDropdownScrollListener,
+                 TopResumedActivityChangedObserver,
+                 PauseResumeWithNativeObserver,
+-                FuseboxAttachmentChangeListener,
+                 SuggestionHost,
+                 SideUiObserver {
+ 
+@@ -166,8 +146,9 @@
+             mDeferredIMEWindowInsetApplicationCallback;
+     private final OmniboxSuggestionsDropdownEmbedder mEmbedder;
+     private @Nullable AutocompleteInput mAutocompleteInput;
+-    private @Nullable FuseboxSessionState mSessionState;
+-    private @Nullable FuseboxAttachmentModelList mFuseboxAttachmentModelList;
++    private @Nullable AutocompleteInput mRejectedInput;
++    private @Nullable Profile mSessionProfile;
++    private @Nullable WebContents mSessionWebContents;
+     private final LocationBarEmbedderUiOverrides mUiOverrides;
+     private final SettableNonNullObservableSupplier<Integer> mRoundSidesSupplier =
+             ObservableSuppliers.createNonNull(RoundSides.TOP_AND_BOTTOM);
+@@ -177,7 +158,6 @@
+             this::onAutocompleteRequestTypeChanged;
+     private final Callback<@Nullable SiteSearchData> mOnSiteSearchDataChanged =
+             this::onSiteSearchDataChanged;
+-    private final Callback<Integer> mOnFuseboxStateChanged = this::onFuseboxStateChanged;
+     private final Callback<String> mOnUserTextChanged = text -> onInputChanged();
+     private final Callback<Boolean> mOnShouldAutocompleteChanged = state -> onInputChanged();
+     private final Callback<@AutocompleteState Integer> mOnAutocompleteStateChanged =
+@@ -224,7 +204,6 @@
+ 
+     // Observer watching for changes to the visual state of the omnibox suggestions.
+     private @Nullable OmniboxSuggestionsVisualStateObserver mOmniboxSuggestionsVisualStateObserver;
+-    private final FuseboxCoordinator mFuseboxCoordinator;
+     private @Nullable SideUiStateProvider mSideUiStateProvider;
+     private final Callback<@Nullable SideUiStateProvider> mSideUiStateProviderObserver =
+             this::setSideUiStateProvider;
+@@ -248,7 +227,6 @@
+             OmniboxSuggestionsDropdownEmbedder embedder,
+             WindowAndroid windowAndroid,
+             DeferredIMEWindowInsetApplicationCallback deferredIMEWindowInsetApplicationCallback,
+-            FuseboxCoordinator fuseboxCoordinator,
+             LocationBarEmbedderUiOverrides uiOverrides) {
+         mContext = context;
+         mResourceProvider = resourceProvider;
+@@ -259,7 +237,6 @@
+         mHandler = handler;
+         mDataProvider = locationBarDataProvider;
+         mBringTabGroupToFrontCallback = bringTabGroupToFrontCallback;
+-        mFuseboxCoordinator = fuseboxCoordinator;
+         mSuggestionModels = mListPropertyModel.get(SuggestionListProperties.SUGGESTION_MODELS);
+         mOmniboxActionDelegate = omniboxActionDelegate;
+         mOmniboxActionDelegate.setOnKeywordModeEnteredCb(this::onKeywordModeEntered);
+@@ -291,9 +268,7 @@
+ 
+         mAnimationDriver = initializeAnimationDriver();
+ 
+-        mFuseboxCoordinator
+-                .getFuseboxStateSupplier()
+-                .addSyncObserverAndCallIfNonNull(mOnFuseboxStateChanged);
++        updateSuggestionGeometry();
+ 
+         mDataProvider
+                 .getToolbarPositionSupplier()
+@@ -329,7 +304,6 @@
+         endInput();
+         mDataProvider.getToolbarPositionSupplier().removeObserver(mToolbarPositionChangedCallback);
+ 
+-        mFuseboxCoordinator.getFuseboxStateSupplier().removeObserver(mOnFuseboxStateChanged);
+         mUiOverrides.getSideUiStateProviderSupplier().removeObserver(mSideUiStateProviderObserver);
+         setSideUiStateProvider(null);
+         mHandler.removeCallbacksAndMessages(null);
+@@ -413,15 +387,19 @@
+      * @param brandedColorScheme The {@link @BrandedColorScheme}.
+      */
+     void updateVisualsForState(@BrandedColorScheme int brandedColorScheme) {
+-        @FuseboxLayoutMode int fuseboxLayoutMode = getFuseboxLayoutMode();
++        updateSuggestionGeometry();
+         mListPropertyModel.set(SuggestionListProperties.COLOR_SCHEME, brandedColorScheme);
+-        mListPropertyModel.set(SuggestionListProperties.FUSEBOX_LAYOUT_MODE, fuseboxLayoutMode);
+         mDropdownViewInfoListManager.setBrandedColorScheme(brandedColorScheme);
+-        mDropdownViewInfoListManager.setFuseboxLayoutMode(fuseboxLayoutMode);
+         if (mOmniboxSuggestionsVisualStateObserver != null) {
+             mOmniboxSuggestionsVisualStateObserver.onOmniboxSuggestionsBackgroundColorChanged(
+                     mResourceProvider.getSuggestionsDropdownBackgroundColor());
+         }
++    }
++
++    private void updateSuggestionGeometry() {
++        boolean suggestionsSeparated = !mEmbedder.isPhoneStyleWindow();
++        mListPropertyModel.set(SuggestionListProperties.ROUND_TOP_CORNERS, suggestionsSeparated);
++        mListPropertyModel.set(SuggestionListProperties.DRAW_OVER_ANCHOR, suggestionsSeparated);
+     }
+ 
+     /** Kicks off a zero-suggest request. */
+@@ -455,7 +433,10 @@
+      * @param input The AutocompleteInput for which to show cached suggestions.
+      */
+     public void serveCachedZeroSuggest(AutocompleteInput input) {
+-        if (input == null || !input.isInCacheableContext()) {
++        if (input == null
++                || input == mRejectedInput
++                || !input.isInCacheableContext()
++                || (mSessionProfile != null && mSessionProfile.shutdownStarted())) {
+             return;
+         }
+ 
+@@ -488,31 +469,28 @@
+      * setting up the {@link AutocompleteInput}, attaching necessary observers, and triggering the
+      * initial zero-prefix suggestion request.
+      *
+-     * @param session The session state for this session. A new session may be applied without going
+-     *     through the endInput() (valid -> valid). This is the case for tab switching.
+-     */
+-    void beginInput(FuseboxSessionState session) {
+-        boolean alreadyInInput = mSessionState != null;
+-
+-        // Allow resuming session with no AutocompleteController for cases where suggestions are
+-        // not wanted (e.g. cobrowse).
+-        //
+-        // The contract outlined in FuseboxSessionState file outlines that all the instances of the
+-        // State object are to be considered `final` between the `beginInput()` and `endInput()`
+-        // calls. This means we should assume Autocomplete to be completely suppressed if the
+-        // corresponding Controller instance is unavailable, and expect this to be final.
+-        if (session.getAutocompleteController() == null) {
+-            // This is it. The end of the road for Autocomplete. The input session was started, but
+-            // the caller explicitly disallows suggestions. This is binding until the next call to
+-            // beginInput().
++     * @param input The current draft. A new draft may be applied without going through the
++     *     endInput() (valid -> valid). This is the case for tab switching.
++     */
++    void beginInput(
++            AutocompleteInput input,
++            @Nullable AutocompleteController autocomplete,
++            Profile profile) {
++        boolean alreadyInInput = isInInputSession();
++
++        // Missing controllers explicitly suppress suggestions, including cobrowse surfaces.
++        if (autocomplete == null || profile.shutdownStarted()) {
+             endInput();
++            mRejectedInput = input;
+             return;
+         }
+ 
+-        setAutocompleteInput(session.getAutocompleteInput());
+-        setAutocompleteController(session.getAutocompleteController());
+-        mSessionState = session;
+-        setFuseboxAttachmentModelList(mSessionState.getFuseboxAttachmentModelList());
++        mRejectedInput = null;
++        cancelAutocompleteRequests();
++        mSessionProfile = profile;
++        mSessionWebContents = mDataProvider.getWebContents();
++        setAutocompleteInput(input);
++        setAutocompleteController(autocomplete);
+ 
+         if (!alreadyInInput) {
+             // Propagate the information about omnibox session state change to all the processors
+@@ -560,6 +538,7 @@
+      * the mediator's state.
+      */
+     void endInput() {
++        mRejectedInput = null;
+         // Always terminate animation driver in case Cached Suggestions were shown.
+         mAnimationDriver.onOmniboxSessionStateChange(false);
+ 
+@@ -569,16 +548,13 @@
+         // per-session state (e.g. cached suggestion images in the image supplier).
+         mDropdownViewInfoListBuilder.onOmniboxSessionStateChange(false);
+ 
+-        mFuseboxCoordinator.notifyOmniboxSessionEnded(mOmniboxFocusResultedInNavigation);
+         mDeferredIMEWindowInsetApplicationCallback.detach();
+         stopMeasuringSuggestionRequestToUiModelTime();
+         cancelAutocompleteRequests();
+ 
+         if (isInInputSession()) {
+             OmniboxMetrics.recordOmniboxFocusResultedInNavigation(
+-                    mAutocompleteInput.getRequestType(),
+-                    mOmniboxFocusResultedInNavigation,
+-                    hasAttachments());
++                    mOmniboxFocusResultedInNavigation);
+             OmniboxMetrics.recordRefineActionUsage(mAutocompleteInput.getRefineActionUsage());
+ 
+             OmniboxMetrics.recordSuggestionsListScrolled(
+@@ -604,8 +580,8 @@
+         setAutocompleteInput(null);
+         setAutocompleteController(null);
+ 
+-        mSessionState = null;
+-        setFuseboxAttachmentModelList(null);
++        mSessionProfile = null;
++        mSessionWebContents = null;
+     }
+ 
+     OmniboxAnimator setupSuggestionsListShowAnimation() {
+@@ -616,12 +592,10 @@
+                     @Override
+                     public void onAnimationStart(Animator animation) {
+                         propagateOmniboxSessionStateChange(true);
+-                        if (!shouldAnimateFuseboxPopover()) {
+-                            if (mAutocompleteInput == null
+-                                    || mAutocompleteInput.getAutocompleteState()
+-                                            != AutocompleteState.STANDBY_NO_FOCUS) {
+-                                mDelegate.setKeyboardVisibility(true, false);
+-                            }
++                        if (mAutocompleteInput == null
++                                || mAutocompleteInput.getAutocompleteState()
++                                        != AutocompleteState.STANDBY_NO_FOCUS) {
++                            mDelegate.setKeyboardVisibility(true, false);
+                         }
+                     }
+ 
+@@ -682,6 +656,11 @@
+             mAutocompleteInput
+                     .getSiteSearchDataSupplier()
+                     .addSyncObserver(mOnSiteSearchDataChanged);
++            // Restore the chip without requesting suggestions from the previous controller.
++            SiteSearchData siteSearchData = mAutocompleteInput.getSiteSearchData();
++            if (siteSearchData != null) {
++                mUrlBarEditingTextProvider.setSiteSearchChip(siteSearchData.fullName);
++            }
+             // Don't call onTextChange right away, wait for the user text supplier to be added.
+             mAutocompleteInput
+                     .getShouldAllowUserTextAutocompletionSupplier()
+@@ -735,12 +714,11 @@
+         String keyword = suggestion.getAssociatedKeyword();
+         if (keyword == null) return false;
+ 
+-        if (mSessionState.getProfile() == null) {
++        if (mSessionProfile == null) {
+             return false;
+         }
+ 
+-        TemplateUrlService service =
+-                TemplateUrlServiceFactory.getForProfile(mSessionState.getProfile());
++        TemplateUrlService service = TemplateUrlServiceFactory.getForProfile(mSessionProfile);
+         if (service == null || !service.isLoaded()) return false;
+ 
+         String name = service.getFullNameFromTemplateUrl(keyword);
+@@ -832,8 +810,7 @@
+                 new TimeUtils.UptimeMillisTimer(eventTime).getElapsedMillis());
+ 
+         boolean wasPrefetchStarted =
+-                mAutocomplete.onSuggestionTouchDown(
+-                        mSessionState.getContextualTasksWebContents(), suggestion, matchIndex);
++                mAutocomplete.onSuggestionTouchDown(mSessionWebContents, suggestion, matchIndex);
+         if (wasPrefetchStarted) {
+             mNumPrefetchesStartedInOmniboxSession++;
+             mLastPrefetchStartedSuggestion = suggestion;
+@@ -1137,18 +1114,6 @@
+             return;
+         }
+ 
+-        if (ToolModeUtils.isAimRequest(mAutocompleteInput.getRequestType())
+-                && mDataProvider.isIncognitoBranded()) {
+-            stopAutocomplete(AutocompleteStopReason.CLOBBERED);
+-
+-            // Since we are not querying native autocomplete, onSuggestionsReceived() will not be
+-            // called. Explicitly push an empty result to clear any existing suggestions and
+-            // remove inline autocompletion from the URL bar.
+-            showSuggestions(
+-                    mAutocompleteInput, AutocompleteResult.EMPTY_RESULT, /* isFinal= */ true);
+-            return;
+-        }
+-
+         // Always re-set the list's final state when we're about to request new suggestions.
+         // This avoids a problem, where the property does not get an explicit update that the list
+         // is final, which, in turn, may suppress certain functionality from getting invoked if the
+@@ -1156,13 +1121,12 @@
+         mListPropertyModel.set(SuggestionListProperties.LIST_IS_FINAL, false);
+         mIgnoreOmniboxItemSelection = true;
+         boolean isInZeroPrefixContext = mAutocompleteInput.isInZeroPrefixContext();
+-        boolean isUnconventional = !mAutocompleteInput.isConventionalRequestType();
+         boolean hasDesktopExperience = OmniboxCapabilities.hasDesktopExperience(mContext);
+         @TraversalMode int selectionMode;
+         if (mAutocompleteInput.getPageClassification()
+                 == PageClassification.ANDROID_TAB_SEARCH_OVERLAY) {
+             selectionMode = TraversalMode.SATURATING_WITH_SENTINEL;
+-        } else if (!hasDesktopExperience || isUnconventional) {
++        } else if (!hasDesktopExperience) {
+             selectionMode = TraversalMode.WRAPPING_WITH_SENTINEL;
+         } else if (isInZeroPrefixContext) {
+             // In desktop experiences, we use SENTINEL_THEN_WRAPPING to match the behavior of the
+@@ -1203,7 +1167,7 @@
+                         startMeasuringSuggestionRequestToUiModelTime();
+                         if (isInInputSession()) {
+                             mAutocomplete.start(
+-                                    mSessionState.getContextualTasksWebContents(),
++                                    mSessionWebContents,
+                                     mAutocompleteInput,
+                                     cursorPosition,
+                                     preventAutocomplete);
+@@ -1257,7 +1221,8 @@
+ 
+         // If the defaultMatch is null, but user text is non-empty, then we've just focused the url
+         // bar on a webpage on desktop. In that case, we don't want to overwrite the preview url
+-        // set by FuseboxSessionState#activate. If the default match is null, and the user text is
++        // set when the location bar activates its draft. If the default match is null, and the user
++        // text is
+         // empty, then the only reasonable preview url is the default match, and given that's null,
+         // the preview url should be null. Currently, this happens when the user deletes their query
+         // on desktop.
+@@ -1275,19 +1240,12 @@
+         }
+ 
+         mListPropertyModel.set(SuggestionListProperties.LIST_IS_FINAL, isFinal);
+-        boolean shouldApplyVerticalPadding =
+-                input.getRequestType() != AutocompleteRequestType.AI_MODE
+-                        || getFuseboxLayoutMode() != FuseboxLayoutMode.SUGGESTIONS_POPOVER;
+-        mListPropertyModel.set(
+-                SuggestionListProperties.APPLY_VERTICAL_PADDING, shouldApplyVerticalPadding);
++        mListPropertyModel.set(SuggestionListProperties.APPLY_VERTICAL_PADDING, true);
+         measureSuggestionRequestToUiModelTime(isFinal);
+     }
+ 
+     private @Nullable GURL getPreviewMatchUrl(@Nullable AutocompleteMatch defaultMatch) {
+         if (mAutocompleteInput == null) return null;
+-
+-        // Non-conventional modes will not have site favicons.
+-        if (!mAutocompleteInput.isConventionalRequestType()) return null;
+ 
+         // Zero suggest is always considered Search, there may be a match, but we shouldn't show it.
+         if (TextUtils.isEmpty(mAutocompleteInput.getUserText())) return null;
+@@ -1311,16 +1269,12 @@
+             return false;
+         }
+ 
+-        if (ToolModeUtils.isAimRequest(mAutocompleteInput.getRequestType())) {
+-            return false;
+-        }
+-
+         // If a site search is already active, do not trigger another site search.
+         if (mAutocompleteInput.getSiteSearchData() != null) {
+             return false;
+         }
+ 
+-        Profile profile = mSessionState.getProfile();
++        Profile profile = mSessionProfile;
+         if (profile == null) {
+             return false;
+         }
+@@ -1455,34 +1409,6 @@
+         }
+     }
+ 
+-    private void onFuseboxStateChanged(@FuseboxState int fuseboxState) {
+-        boolean suggestionsSeparated =
+-                !mEmbedder.isPhoneStyleWindow()
+-                        && (fuseboxState == FuseboxState.DISABLED
+-                                || getFuseboxLayoutMode() == FuseboxLayoutMode.SUGGESTIONS_POPOVER);
+-
+-        mListPropertyModel.set(SuggestionListProperties.ROUND_TOP_CORNERS, suggestionsSeparated);
+-        mListPropertyModel.set(SuggestionListProperties.DRAW_OVER_ANCHOR, suggestionsSeparated);
+-        mRoundSidesSupplier.set(calculateRoundSides());
+-    }
+-
+-    boolean shouldAnimateFuseboxPopover() {
+-        return mFuseboxCoordinator.getFuseboxStateSupplier().get() != FuseboxState.DISABLED
+-                && mEmbedder.isWideWindow()
+-                && !OmniboxCapabilities.isDesktopPlatform();
+-    }
+-
+-    private @FuseboxLayoutMode int getFuseboxLayoutMode() {
+-        return mFuseboxCoordinator.getFuseboxLayoutModeSupplier().get();
+-    }
+-
+-    private @RoundSides int calculateRoundSides() {
+-        if (getFuseboxLayoutMode() == FuseboxLayoutMode.SUGGESTIONS_POPOVER) {
+-            return RoundSides.NONE;
+-        }
+-        return RoundSides.TOP_AND_BOTTOM;
+-    }
+-
+     /**
+      * Navigate using the current typed omnibox text.
+      *
+@@ -1508,12 +1434,7 @@
+                 // pressing enter, do not return.
+             }
+ 
+-            if (TextUtils.isEmpty(urlText)
+-                    && mFuseboxCoordinator.getHasAttachmentsSupplier().get()) {
+-                loadUrlAttachmentsOnly(eventTime, openInNewTab, openInNewWindow);
+-            } else {
+-                findMatchAndLoadUrl(urlText, eventTime, openInNewTab, openInNewWindow);
+-            }
++            findMatchAndLoadUrl(urlText, eventTime, openInNewTab, openInNewWindow);
+         }
+     }
+ 
+@@ -1673,62 +1594,9 @@
+                 mDelegate.maybeShowDefaultBrowserPromo();
+             }
+ 
+-            final int finalTransition = transition;
+-            Callback<GURL> onUrlReady =
+-                    (finalUrl) -> {
+-                        finishLoadUrlForOmniboxMatch(
+-                                suggestion,
+-                                finalUrl,
+-                                inputStart,
+-                                openInNewTab,
+-                                openInNewWindow,
+-                                finalTransition);
+-                    };
+-
+-            adjustGurlForRequestType(url, onUrlReady);
+-        }
+-    }
+-
+-    private void loadUrlAttachmentsOnly(
+-            long eventTime, boolean openInNewTab, boolean openInNewWindow) {
+-        Callback<GURL> onUrlReady =
+-                (finalUrl) -> {
+-                    mDelegate.loadUrl(
+-                            new OmniboxLoadUrlParams.Builder(
+-                                            finalUrl.getSpec(), PageTransition.TYPED)
+-                                    .setInputStartTimestamp(eventTime)
+-                                    .setOpenInNewTab(openInNewTab)
+-                                    .setOpenInNewWindow(openInNewWindow)
+-                                    .build());
+-                    mHandler.post(this::finishInteraction);
+-                };
+-        adjustGurlForRequestType(GURL.emptyGURL(), onUrlReady);
+-    }
+-
+-    /**
+-     * Potentially adjust the given URL based on the input state, and invoke the callback with that
+-     * URL.
+-     *
+-     * @param url The base {@link GURL} to potentially be adjusted.
+-     * @param callback The callback to be invoked with the potentially adjusted URL.
+-     */
+-    @VisibleForTesting
+-    /* package */ void adjustGurlForRequestType(GURL url, Callback<GURL> callback) {
+-        if (!isInInputSession()) {
+-            callback.onResult(url);
+-            return;
+-        }
+-
+-        @Nullable ComposeboxQueryControllerBridge bridge =
+-                mSessionState.getComposeboxQueryControllerBridge();
+-        @AutocompleteRequestType int requestType = mAutocompleteInput.getRequestType();
+-
+-        if (bridge == null || ToolModeUtils.isConventionalRequest(requestType)) {
+-            callback.onResult(url);
+-            return;
+-        }
+-
+-        bridge.getAimUrlFromInputState(url, callback);
++            finishLoadUrlForOmniboxMatch(
++                    suggestion, url, inputStart, openInNewTab, openInNewWindow, transition);
++        }
+     }
+ 
+     private void finishLoadUrlForOmniboxMatch(
+@@ -1760,6 +1628,8 @@
+             mDelegate.loadUrl(
+                     new OmniboxLoadUrlParams.Builder(url.getSpec(), transition)
+                             .setInputStartTimestamp(inputStart)
++                            .setIsExtensionKeywordSuggestion(
++                                    suggestion.isExtensionKeywordSuggestion())
+                             .setPostData(suggestion.getPostData())
+                             .setOpenInNewTab(openInNewTab)
+                             .setOpenInNewWindow(openInNewWindow)
+@@ -1784,7 +1654,6 @@
+         // TODO(b/542187860) Preferably, we avoid using a fallback profile by always initializing
+         // a session before this function is called.
+         final Profile profile;
+-        final @AutocompleteRequestType int requestType;
+         final @Nullable AutocompleteController autocomplete;
+ 
+         if (!isInInputSession()) {
+@@ -1792,28 +1661,24 @@
+             if (fallbackProfile == null) return;
+             profile = fallbackProfile;
+             autocomplete = AutocompleteController.getForProfile(profile);
+-            requestType = AutocompleteRequestType.SEARCH;
+         } else {
+-            @Nullable Profile sessionProfile = mSessionState.getProfile();
++            @Nullable Profile sessionProfile = mSessionProfile;
+             if (sessionProfile == null) return;
+             profile = sessionProfile;
+             autocomplete = mAutocomplete;
+-            requestType = mAutocompleteInput.getRequestType();
+-        }
+-
+-        @Nullable AutocompleteMatch match =
+-                autocomplete != null ? autocomplete.classify(query) : null;
++        }
++
++        @Nullable
++        AutocompleteMatch match = autocomplete != null ? autocomplete.classify(query) : null;
+ 
+         GURL url;
+-        if (match == null
+-                || match.isSearchSuggestion()
+-                || ToolModeUtils.isAimRequest(requestType)) {
++        if (match == null || match.isSearchSuggestion()) {
+             url = TemplateUrlServiceFactory.getForProfile(profile).getUrlForVoiceSearchQuery(query);
+         } else {
+             url = match.getUrl();
+         }
+ 
+-        adjustGurlForRequestType(url, this::finishLoadUrlFromVoice);
++        finishLoadUrlFromVoice(url);
+     }
+ 
+     private void finishLoadUrlFromVoice(GURL url) {
+@@ -1860,8 +1725,7 @@
+         startMeasuringSuggestionRequestToUiModelTime();
+ 
+         if (!isInInputSession()) return;
+-        mAutocomplete.startZeroSuggest(
+-                mSessionState.getContextualTasksWebContents(), mAutocompleteInput);
++        mAutocomplete.startZeroSuggest(mSessionWebContents, mAutocompleteInput);
+     }
+ 
+     /** Update whether the Omnibox session is active. */
+@@ -1963,12 +1827,11 @@
+     @VisibleForTesting
+     void updateModel() {
+         if (!isInInputSession()) return;
++        updateSuggestionGeometry();
+         mListPropertyModel.set(
+                 SuggestionListProperties.CONTAINER_ALWAYS_VISIBLE,
+-                PageClassificationUtils.isHubOrTabSearch(mAutocompleteInput.getPageClassification())
+-                        // The popover contains UI elements other than suggestions, e.g. the omnibox
+-                        // itself and must always remain visible.
+-                        || getFuseboxLayoutMode() == FuseboxLayoutMode.SUGGESTIONS_POPOVER);
++                PageClassificationUtils.isHubOrTabSearch(
++                        mAutocompleteInput.getPageClassification()));
+         mListPropertyModel.set(
+                 SuggestionListProperties.IS_LARGE_SCREEN,
+                 !mUiOverrides.isForcedPhoneStyleOmnibox()
+@@ -1984,8 +1847,7 @@
+         if (!isInInputSession()) return;
+         stopAutocomplete(AutocompleteStopReason.INACTIVITY);
+         mAutocompleteInput.setUserText(query);
+-        mAutocomplete.start(
+-                mSessionState.getContextualTasksWebContents(), mAutocompleteInput, -1, false);
++        mAutocomplete.start(mSessionWebContents, mAutocompleteInput, -1, false);
+     }
+ 
+     /**
+@@ -2051,7 +1913,7 @@
+ 
+             if (mAutocomplete != null) {
+                 mAutocomplete.onSuggestionSelected(
+-                        mSessionState.getContextualTasksWebContents(),
++                        mSessionWebContents,
+                         match,
+                         suggestionLine,
+                         disposition,
+@@ -2180,7 +2042,6 @@
+                 () -> propagateOmniboxSessionStateChange(mAutocompleteInput != null),
+                 mDelegate::isToolbarBottomAnchored,
+                 mEmbedder::getVerticalTranslationForAnimation,
+-                this::shouldAnimateFuseboxPopover,
+                 mContext);
+     }
+ 
+@@ -2192,27 +2053,6 @@
+             // built.
+             onInputChanged();
+         }
+-    }
+-
+-    /**
+-     * @see FuseboxAttachmentChangeListener#onAttachmentListChanged()
+-     */
+-    @Override
+-    public void onAttachmentListChanged() {
+-        if (!isInInputSession()) return;
+-        // Re-request ZPS in the event of attachments being removed/replaced.
+-        onInputChanged();
+-    }
+-
+-    /**
+-     * @see FuseboxAttachmentChangeListener#onAttachmentUploadStatusChanged()
+-     */
+-    @Override
+-    public void onAttachmentUploadStatusChanged() {
+-        if (!isInInputSession()) return;
+-
+-        // Re-request ZPS in the event of new attachments being uploaded.
+-        onInputChanged();
+     }
+ 
+     @Override
+@@ -2255,10 +2095,13 @@
+      *     current activity window is active.
+      */
+     @EnsuresNonNullIf(
+-            value = {"mAutocompleteInput", "mSessionState", "mAutocomplete"},
++            value = {"mAutocompleteInput", "mSessionProfile", "mAutocomplete"},
+             result = true)
+     /* package */ boolean isInInputSession() {
+-        return mSessionState != null && mAutocompleteInput != null && mAutocomplete != null;
++        return mSessionProfile != null
++                && !mSessionProfile.shutdownStarted()
++                && mAutocompleteInput != null
++                && mAutocomplete != null;
+     }
+ 
+     @Override
+@@ -2308,28 +2151,12 @@
+         // Retrieve suggestions related to the most recently visited page.
+         // This is a best-effort action and may not always work (e.g. if Chrome gets killed or
+         // swiped away before we manage to retrieve and persist the information).
+-        mAutocomplete.startZeroSuggest(mSessionState.getContextualTasksWebContents(), input);
+-    }
+-
+-    private void setFuseboxAttachmentModelList(
+-            @Nullable FuseboxAttachmentModelList fuseboxAttachmentModelList) {
+-        if (mFuseboxAttachmentModelList != null) {
+-            mFuseboxAttachmentModelList.removeAttachmentChangeListener(this);
+-        }
+-        mFuseboxAttachmentModelList = fuseboxAttachmentModelList;
+-        if (mFuseboxAttachmentModelList != null) {
+-            mFuseboxAttachmentModelList.addAttachmentChangeListener(this);
+-        }
+-    }
+-
+-    private boolean hasAttachments() {
+-        if (!isInInputSession()) return false;
+-        FuseboxAttachmentModelList attachments = mSessionState.getFuseboxAttachmentModelList();
+-        return attachments != null && !attachments.isEmpty();
++        mAutocomplete.startZeroSuggest(mSessionWebContents, input);
+     }
+ 
+     /** Returns the current AutocompleteInput instance. */
+-    @Nullable AutocompleteInput getAutocompleteInputForTesting() {
++    @Nullable
++    AutocompleteInput getAutocompleteInputForTesting() {
+         return mAutocompleteInput;
+     }
+ 

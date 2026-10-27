@@ -1,0 +1,68 @@
+# Copyright (c) 2026 The Reaper Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+substitutions:
+- description: Android CPU milliseconds normalization and parser regression coverage (1).
+  regex:
+    re_pattern: '//\ found\ in\ the\ LICENSE\ file\.\
+
+      \
+
+      \#include\ "chrome/browser/extensions/extension_apitest\.h"\
+
+      \#include\ "content/public/test/browser_test\.h"\
+
+      \#include\ "extensions/browser/api/system_cpu/cpu_info_provider\.h"\
+
+      \#include\ "extensions/buildflags/buildflags\.h"\
+
+      '
+    replace: '// found in the LICENSE file.
+
+
+      #include "chrome/browser/extensions/extension_apitest.h"
+
+
+      #include <string>
+
+      #include <vector>
+
+
+      #include "build/build_config.h"
+
+      #include "content/public/test/browser_test.h"
+
+      #include "extensions/browser/api/system_cpu/cpu_info_provider.h"
+
+      #include "extensions/buildflags/buildflags.h"
+
+      '
+- description: Android CPU milliseconds normalization and parser regression coverage (2).
+  regex:
+    re_pattern: '\ \ MockCpuInfoProviderImpl\(\)\ =\ default;\
+
+      \ \ MockCpuInfoProviderImpl\(const\ MockCpuInfoProviderImpl\&\)\ =\ delete;\
+
+      \ \ MockCpuInfoProviderImpl\&\ operator=\(const\ MockCpuInfoProviderImpl\&\)\ =\ delete;\
+
+      \
+
+      \ \ bool\ QueryInfo\(\)\ override\ \{\
+
+      \ \ \ \ info_\.num_of_processors\ =\ 4;\
+
+      '
+    replace: "  MockCpuInfoProviderImpl() = default;\n  MockCpuInfoProviderImpl(const MockCpuInfoProviderImpl&) = delete;\n  MockCpuInfoProviderImpl& operator=(const MockCpuInfoProviderImpl&) = delete;\n\n#if BUILDFLAG(IS_ANDROID)\n  static bool ParseAndroidCpuTime(\n      const std::string& contents,\n      long ticks_per_second,\n      std::vector<api::system_cpu::ProcessorInfo>* infos) {\n    return ParseCpuTimeForAndroid(contents, ticks_per_second, infos);\n  }\n#endif\n\n  bool QueryInfo() override {\n    info_.num_of_processors = 4;\n"
+- description: Android CPU milliseconds normalization and parser regression coverage (3).
+  regex:
+    re_pattern: '\ \ ASSERT_TRUE\(RunExtensionTest\("system_cpu"\)\)\ <<\ message_;\
+
+      \}\
+
+      \
+
+      \}\ \ //\ namespace\ extensions\
+
+      '
+    replace: "  ASSERT_TRUE(RunExtensionTest(\"system_cpu\")) << message_;\n}\n\n#if BUILDFLAG(IS_ANDROID)\n// These cases use the production parser, not the mock QueryInfo result above.\nIN_PROC_BROWSER_TEST_F(SystemCpuApiTest, AndroidCpuTimesAreMilliseconds) {\n  std::vector<api::system_cpu::ProcessorInfo> infos(1);\n  ASSERT_TRUE(MockCpuInfoProviderImpl::ParseAndroidCpuTime(\n      \"cpu 123 7 20 70\\\\ncpu0 123 7 20 70 0 0 0 0\\\\nintr 123\\\\n\", 100,\n      &infos));\n  EXPECT_DOUBLE_EQ(1300.0, infos[0].usage.user);\n  EXPECT_DOUBLE_EQ(200.0, infos[0].usage.kernel);\n  EXPECT_DOUBLE_EQ(700.0, infos[0].usage.idle);\n  EXPECT_DOUBLE_EQ(2200.0, infos[0].usage.total);\n}\n\nIN_PROC_BROWSER_TEST_F(SystemCpuApiTest, AndroidCpuTimesUseActualClockFrequency) {\n  std::vector<api::system_cpu::ProcessorInfo> infos(1);\n  ASSERT_TRUE(MockCpuInfoProviderImpl::ParseAndroidCpuTime(\n      \"cpu 16 16 128 864\\\\ncpu0 16 16 128 864\\\\n\", 1024, &infos));\n  EXPECT_DOUBLE_EQ(31.25, infos[0].usage.user);\n  EXPECT_DOUBLE_EQ(125.0, infos[0].usage.kernel);\n  EXPECT_DOUBLE_EQ(843.75, infos[0].usage.idle);\n  EXPECT_DOUBLE_EQ(1000.0, infos[0].usage.total);\n}\n\nIN_PROC_BROWSER_TEST_F(SystemCpuApiTest, AndroidCpuTimesKeepOfflineProcessorsZero) {\n  std::vector<api::system_cpu::ProcessorInfo> infos(4);\n  ASSERT_TRUE(MockCpuInfoProviderImpl::ParseAndroidCpuTime(\n      \"cpu 2 4 6 8\\\\ncpu0 1 2 3 4\\\\ncpu3 1 2 3 4\\\\n\", 100, &infos));\n  for (size_t index : {0u, 3u}) {\n    EXPECT_DOUBLE_EQ(30.0, infos[index].usage.user);\n    EXPECT_DOUBLE_EQ(30.0, infos[index].usage.kernel);\n    EXPECT_DOUBLE_EQ(40.0, infos[index].usage.idle);\n    EXPECT_DOUBLE_EQ(100.0, infos[index].usage.total);\n  }\n  for (size_t index : {1u, 2u}) {\n    EXPECT_DOUBLE_EQ(0.0, infos[index].usage.user);\n    EXPECT_DOUBLE_EQ(0.0, infos[index].usage.kernel);\n    EXPECT_DOUBLE_EQ(0.0, infos[index].usage.idle);\n    EXPECT_DOUBLE_EQ(0.0, infos[index].usage.total);\n  }\n}\n\nIN_PROC_BROWSER_TEST_F(SystemCpuApiTest, AndroidCpuTimesRejectInvalidFrequency) {\n  std::vector<api::system_cpu::ProcessorInfo> infos(1);\n  for (long frequency : {0L, -1L}) {\n    EXPECT_FALSE(MockCpuInfoProviderImpl::ParseAndroidCpuTime(\n        \"cpu 1 2 3 4\\\\ncpu0 1 2 3 4\\\\n\", frequency, &infos));\n    EXPECT_DOUBLE_EQ(0.0, infos[0].usage.total);\n  }\n}\n\nIN_PROC_BROWSER_TEST_F(SystemCpuApiTest, AndroidCpuTimesRejectMalformedRows) {\n  std::vector<api::system_cpu::ProcessorInfo> infos(1);\n  EXPECT_FALSE(MockCpuInfoProviderImpl::ParseAndroidCpuTime(\n      \"cpu 1 2 3 4\\\\ncpu0 1 2 bad 4\\\\n\", 100, &infos));\n  EXPECT_FALSE(MockCpuInfoProviderImpl::ParseAndroidCpuTime(\n      \"cpu 1 2 3 4\\\\ncpu1 1 2 3 4\\\\n\", 100, &infos));\n}\n\nIN_PROC_BROWSER_TEST_F(SystemCpuApiTest, AndroidCpuTimesDoNotWrapCounterSums) {\n  std::vector<api::system_cpu::ProcessorInfo> infos(1);\n  ASSERT_TRUE(MockCpuInfoProviderImpl::ParseAndroidCpuTime(\n      \"cpu 0 0 0 0\\\\ncpu0 18446744073709551615 1 0 0\\\\n\", 1000, &infos));\n  EXPECT_DOUBLE_EQ(18446744073709551616.0, infos[0].usage.user);\n  EXPECT_DOUBLE_EQ(18446744073709551616.0, infos[0].usage.total);\n}\n#endif  // BUILDFLAG(IS_ANDROID)\n\n}  // namespace extensions\n"

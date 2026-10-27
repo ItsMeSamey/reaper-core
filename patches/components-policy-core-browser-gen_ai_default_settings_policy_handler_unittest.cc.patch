@@ -1,0 +1,150 @@
+diff --git a/components/policy/core/browser/gen_ai_default_settings_policy_handler_unittest.cc b/components/policy/core/browser/gen_ai_default_settings_policy_handler_unittest.cc
+index ec68514fc252721414c6c55b66847b9c3a268834..bdc97e83e39dc63d17b49651b15e56b4dbdd3caa 100644
+--- a/components/policy/core/browser/gen_ai_default_settings_policy_handler_unittest.cc
++++ b/components/policy/core/browser/gen_ai_default_settings_policy_handler_unittest.cc
+@@ -9,6 +9,7 @@
+ 
+ #include "base/test/scoped_feature_list.h"
+ #include "base/values.h"
++#include "components/policy/core/browser/configuration_policy_handler_list.h"
+ #include "components/policy/core/browser/policy_error_map.h"
+ #include "components/policy/core/common/policy_map.h"
+ #include "components/policy/core/common/policy_types.h"
+@@ -389,4 +390,137 @@ TEST_F(GenAiDefaultSettingsPolicyHandlerTest, OverriddenPolicyIsNotSet) {
+   EXPECT_EQ(kDefaultValue, pref_value);
+ }
+ 
++// The production Android factory keeps only this ordinary policy mapping.
++// The literal matches contextual_search::kSearchContentSharingSettings; keeping
++// it local avoids a components/policy -> contextual_search dependency cycle.
++class SearchContentSharingDefaultPolicyHandlerTest : public testing::Test {
++ protected:
++  static constexpr char kContentSharingPref[] =
++      "contextual_search.search_content_sharing_settings";
++
++  std::unique_ptr<GenAiDefaultSettingsPolicyHandler> MakeDefaultHandler() {
++    std::vector<GenAiDefaultSettingsPolicyHandler::GenAiPolicyDetails> policies;
++    policies.emplace_back(
++        key::kSearchContentSharingSettings, kContentSharingPref,
++        GenAiDefaultSettingsPolicyHandler::PolicyValueToPrefMap(
++            {{0, 0}, {1, 0}, {2, 1}}));
++    return std::make_unique<GenAiDefaultSettingsPolicyHandler>(
++        std::move(policies));
++  }
++
++  void ApplyPolicies(PrefValueMap* prefs, bool default_first = true) {
++    ConfigurationPolicyHandlerList handlers({}, {}, true);
++    auto fallback = MakeDefaultHandler();
++    auto specific = std::make_unique<SimplePolicyHandler>(
++        key::kSearchContentSharingSettings, kContentSharingPref,
++        base::Value::Type::INTEGER);
++    if (default_first) {
++      handlers.AddHandler(std::move(fallback));
++      handlers.AddHandler(std::move(specific));
++    } else {
++      handlers.AddHandler(std::move(specific));
++      handlers.AddHandler(std::move(fallback));
++    }
++    handlers.ApplyPolicySettings(policies_, prefs, nullptr, nullptr, nullptr);
++  }
++
++  void SetDefault(base::Value value) {
++    policies_.Set(key::kGenAiDefaultSettings, POLICY_LEVEL_MANDATORY,
++                  POLICY_SCOPE_USER, POLICY_SOURCE_CLOUD, std::move(value),
++                  nullptr);
++  }
++
++  void SetSpecific(base::Value value, PolicyLevel level) {
++    policies_.Set(key::kSearchContentSharingSettings, level, POLICY_SCOPE_USER,
++                  POLICY_SOURCE_CLOUD, std::move(value), nullptr);
++  }
++
++  PolicyMap policies_;
++  base::test::ScopedFeatureList scoped_feature_list_;
++};
++
++TEST_F(SearchContentSharingDefaultPolicyHandlerTest,
++       DefaultsPreserveOrdinaryContentSharingValues) {
++  for (int default_value : {0, 1, 2}) {
++    SCOPED_TRACE(default_value);
++    SetDefault(base::Value(default_value));
++    PolicyErrorMap errors;
++    ASSERT_TRUE(MakeDefaultHandler()->CheckPolicySettings(policies_, &errors));
++    PrefValueMap prefs;
++    ApplyPolicies(&prefs);
++    int value = -1;
++    ASSERT_TRUE(prefs.GetInteger(kContentSharingPref, &value));
++    EXPECT_EQ(default_value == 2 ? 1 : 0, value);
++    EXPECT_EQ(1u, prefs.AsDict().size());
++  }
++}
++
++TEST_F(SearchContentSharingDefaultPolicyHandlerTest,
++       SpecificPolicyWinsRegardlessOfHandlerOrderOrLevel) {
++  for (PolicyLevel level : {POLICY_LEVEL_MANDATORY, POLICY_LEVEL_RECOMMENDED}) {
++    for (int value : {0, 1}) {
++      for (bool default_first : {false, true}) {
++        SCOPED_TRACE(value);
++        SetDefault(base::Value(value == 0 ? 2 : 0));
++        SetSpecific(base::Value(value), level);
++        PrefValueMap prefs;
++        ApplyPolicies(&prefs, default_first);
++        int actual = -1;
++        ASSERT_TRUE(prefs.GetInteger(kContentSharingPref, &actual));
++        EXPECT_EQ(value, actual);
++        EXPECT_EQ(1u, prefs.AsDict().size());
++      }
++    }
++  }
++}
++
++TEST_F(SearchContentSharingDefaultPolicyHandlerTest,
++       MissingDefaultDoesNotSetAnOrdinaryPreference) {
++  PrefValueMap prefs;
++  ApplyPolicies(&prefs);
++  EXPECT_TRUE(prefs.empty());
++}
++
++TEST_F(SearchContentSharingDefaultPolicyHandlerTest,
++       InvalidDefaultDoesNotSetAnOrdinaryPreference) {
++  SetDefault(base::Value("invalid"));
++  PolicyErrorMap errors;
++  EXPECT_FALSE(MakeDefaultHandler()->CheckPolicySettings(policies_, &errors));
++  PrefValueMap prefs;
++  ApplyPolicies(&prefs);
++  EXPECT_TRUE(prefs.empty());
++  for (int value : {-1, 3}) {
++    SetDefault(base::Value(value));
++    ApplyPolicies(&prefs);
++    EXPECT_TRUE(prefs.empty());
++  }
++}
++
++TEST_F(SearchContentSharingDefaultPolicyHandlerTest,
++       InvalidSpecificPolicyStillSuppressesTheFallback) {
++  SetDefault(base::Value(2));
++  SetSpecific(base::Value("invalid"), POLICY_LEVEL_MANDATORY);
++  PrefValueMap prefs;
++  ApplyPolicies(&prefs);
++  EXPECT_TRUE(prefs.empty());
++}
++
++TEST_F(SearchContentSharingDefaultPolicyHandlerTest,
++       DefaultPolicyKillSwitchPreservesUnsetPreference) {
++  scoped_feature_list_.InitFromCommandLine("", "ApplyGenAiPolicyDefaults");
++  SetDefault(base::Value(2));
++  PrefValueMap prefs;
++  ApplyPolicies(&prefs);
++  EXPECT_TRUE(prefs.empty());
++}
++
++TEST_F(SearchContentSharingDefaultPolicyHandlerTest,
++       MappingKillSwitchPreservesUnsetPreference) {
++  scoped_feature_list_.InitFromCommandLine("", "GenAiPolicyDefaultsUsePrefMap");
++  SetDefault(base::Value(2));
++  PrefValueMap prefs;
++  ApplyPolicies(&prefs);
++  EXPECT_TRUE(prefs.empty());
++}
++
+ }  // namespace policy

@@ -1,0 +1,366 @@
+# Preserve extension side-panel compositor isolation and dialog window routing.
+substitutions:
+- description: Assert actual owner separation and lifecycle
+  count: 1
+  regex:
+    re_pattern: import\ static\ org\.junit\.Assert\.assertNull;
+    replace: 'import static org.junit.Assert.assertNull;
+
+      import static org.junit.Assert.assertFalse;
+
+      import static org.junit.Assert.assertNotSame;
+
+      import static org.junit.Assert.assertSame;
+
+      import static org.junit.Assert.assertTrue;'
+- description: Capture the real isolated window given to WebContents
+  count: 1
+  regex:
+    re_pattern: import\ org\.mockito\.Mock;
+    replace: 'import org.mockito.Mock;
+
+      import org.mockito.ArgumentCaptor;'
+- description: Verify modal routing identity without manufacturing a second manager
+  count: 1
+  regex:
+    re_pattern: import\ org\.chromium\.ui\.base\.WindowAndroid;
+    replace: 'import org.chromium.ui.base.WindowAndroid;
+
+      import org.chromium.ui.modaldialog.ModalDialogManager;'
+- description: Track the real owner manager and created panel cleanup
+  count: 1
+  regex:
+    re_pattern: \ \ \ \ private\ ActivityWindowAndroid\ mWindowAndroid;
+    replace: "    private ActivityWindowAndroid mWindowAndroid;\n    private final ModalDialogManager mModalDialogManager = mock(ModalDialogManager.class);\n    private ExtensionSidePanelContents mContents;"
+- description: Give the real browser window a recognizable modal manager
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ /\*\ occlusionTrackingAllowed=\ \*/\ false\);\
+
+      \ \ \ \ \ \ \ \ ThinWebViewFactory'
+    replace: "                        /* occlusionTrackingAllowed= */ false) {\n                    @Override\n                    public ModalDialogManager getModalDialogManager() {\n                        return mModalDialogManager;\n                    }\n                };\n        ThinWebViewFactory"
+- description: Clean up both independently owned windows and inspect the actual attached one
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ public\ void\ tearDown\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ if\ \(mWindowAndroid\ !=\ null\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mWindowAndroid\.destroy\(\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \}'
+    replace: "    public void tearDown() {\n        if (mContents != null) mContents.destroy();\n        if (mWindowAndroid != null && !mWindowAndroid.isDestroyed()) {\n            mWindowAndroid.destroy();\n        }\n    }\n\n    private ExtensionSidePanelContents createContents(WindowAndroid window) {\n        mContents = ExtensionSidePanelContents.create(mWebContents, window);\n        return mContents;\n    }\n\n    private WindowAndroid capturedNewWindow() {\n        ArgumentCaptor<WindowAndroid> window = ArgumentCaptor.forClass(WindowAndroid.class);\n        verify(mWebContents).setDelegates(any(), any(ViewAndroidDelegate.class),\n                any(ContentView.class), window.capture(), any());\n        return window.getValue();\n    }"
+- description: Keep null-context test cleanup consistent
+  count: 1
+  regex:
+    re_pattern: ExtensionSidePanelContents\.create\(mWebContents,\ mockWindow\)
+    replace: createContents(mockWindow)
+- description: Keep missing-tracker test cleanup consistent
+  count: 1
+  regex:
+    re_pattern: ExtensionSidePanelContents\.create\(mWebContents,\ windowWithoutTracker\)
+    replace: createContents(windowWithoutTracker)
+- description: Track successful panels for complete teardown
+  count: 4
+  regex:
+    re_pattern: ExtensionSidePanelContents\.create\(mWebContents,\ mWindowAndroid\)
+    replace: createContents(mWindowAndroid)
+- description: Require isolated compositor ownership with exact browser dialog and intent routing
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ verify\(mWebContents\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \.setDelegates\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ any\(\),\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ any\(ViewAndroidDelegate\.class\),\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ any\(ContentView\.class\),\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ eq\(mWindowAndroid\),\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ any\(\)\);'
+    replace: "        WindowAndroid panelWindow = capturedNewWindow();\n        assertNotSame(mWindowAndroid, panelWindow);\n        assertSame(mModalDialogManager, panelWindow.getModalDialogManager());\n        assertSame(mIntentRequestTracker, panelWindow.getIntentRequestTracker());\n        assertSame(mActivity, panelWindow.getActivity().get());"
+- description: Check the same isolated-window contract when reusing a content delegate
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ verify\(mWebContents\)\.setTopLevelNativeWindow\(mWindowAndroid\);\
+
+      \ \ \ \ \ \ \ \ assertNotNull\(delegate\.getContainerView\(\)\);'
+    replace: "        ArgumentCaptor<WindowAndroid> window = ArgumentCaptor.forClass(WindowAndroid.class);\n        verify(mWebContents).setTopLevelNativeWindow(window.capture());\n        assertNotSame(mWindowAndroid, window.getValue());\n        assertSame(mModalDialogManager, window.getValue().getModalDialogManager());\n        assertSame(mIntentRequestTracker, window.getValue().getIntentRequestTracker());\n        assertNotNull(delegate.getContainerView());"
+- description: Regress once-only teardown, authorized-owner destruction and invalid Activity setup
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ @Test\
+
+      \ \ \ \ public\ void\ testDestroy_webContentsAlreadyDestroyed_onlyDestroysThinWebView\(\)\ \{'
+    replace: "    @Test\n    public void testDestroy_isolatedWindowReleasedOnceAndBrowserWindowSurvives() {\n        ExtensionSidePanelContents contents = createContents(mWindowAndroid);\n        assertNotNull(contents);\n        WindowAndroid panelWindow = capturedNewWindow();\n        contents.destroy();\n        contents.destroy();\n        verify(mThinWebView).destroy();\n        assertTrue(panelWindow.isDestroyed());\n        assertNull(panelWindow.getModalDialogManager());\n        assertFalse(mWindowAndroid.isDestroyed());\n        assertSame(mModalDialogManager, mWindowAndroid.getModalDialogManager());\n        verify(mModalDialogManager, never()).destroy();\n    }\n\n    @Test\n    public void testBrowserWindowDestroyed_doesNotForwardDeadDialogManager() {\n        ExtensionSidePanelContents contents = createContents(mWindowAndroid);\n        assertNotNull(contents);\n        WindowAndroid panelWindow = capturedNewWindow();\n        mWindowAndroid.destroy();\n        assertNull(panelWindow.getModalDialogManager());\n        contents.destroy();\n        assertTrue(panelWindow.isDestroyed());\n    }\n\n    @Test\n    public void testCreate_finishingActivity_returnsNull() {\n        mActivity.finish();\n        assertNull(createContents(mWindowAndroid));\n        verify(mThinWebView, never()).attachWebContents(any(), any(), any());\n    }\n\n    @Test\n    public void testDestroy_webContentsAlreadyDestroyed_onlyDestroysThinWebView() {"
+- description: Format changed Java with the pinned Chromium formatter
+  count: 1
+  regex:
+    re_pattern: '\
+
+      package\ org\.chromium\.chrome\.browser\.ui\.extensions\.side_panel;\
+
+      \
+
+      import\ static\ org\.junit\.Assert\.assertEquals;\
+
+      import\ static\ org\.junit\.Assert\.assertNotNull;\
+
+      import\ static\ org\.junit\.Assert\.assertNull;\
+
+      import\ static\ org\.junit\.Assert\.assertFalse;\
+
+      import\ static\ org\.junit\.Assert\.assertNotSame;\
+
+      import\ static\ org\.junit\.Assert\.assertSame;\
+
+      import\ static\ org\.junit\.Assert\.assertTrue;\
+
+      import\ static\ org\.mockito\.ArgumentMatchers\.any;\
+
+      import\ static\ org\.mockito\.ArgumentMatchers\.eq;\
+
+      '
+    replace: '
+
+      package org.chromium.chrome.browser.ui.extensions.side_panel;
+
+
+      import static org.junit.Assert.assertEquals;
+
+      import static org.junit.Assert.assertFalse;
+
+      import static org.junit.Assert.assertNotNull;
+
+      import static org.junit.Assert.assertNotSame;
+
+      import static org.junit.Assert.assertNull;
+
+      import static org.junit.Assert.assertSame;
+
+      import static org.junit.Assert.assertTrue;
+
+      import static org.mockito.ArgumentMatchers.any;
+
+      import static org.mockito.ArgumentMatchers.eq;
+
+      '
+- description: Format changed Java with the pinned Chromium formatter
+  count: 1
+  regex:
+    re_pattern: 'import\ org\.junit\.Before;\
+
+      import\ org\.junit\.Rule;\
+
+      import\ org\.junit\.Test;\
+
+      import\ org\.junit\.runner\.RunWith;\
+
+      import\ org\.mockito\.Mock;\
+
+      import\ org\.mockito\.ArgumentCaptor;\
+
+      import\ org\.mockito\.junit\.MockitoJUnit;\
+
+      import\ org\.mockito\.junit\.MockitoRule;\
+
+      import\ org\.robolectric\.Robolectric;\
+
+      \
+
+      '
+    replace: 'import org.junit.Before;
+
+      import org.junit.Rule;
+
+      import org.junit.Test;
+
+      import org.junit.runner.RunWith;
+
+      import org.mockito.ArgumentCaptor;
+
+      import org.mockito.Mock;
+
+      import org.mockito.junit.MockitoJUnit;
+
+      import org.mockito.junit.MockitoRule;
+
+      import org.robolectric.Robolectric;
+
+
+      '
+- description: Format changed Java with the pinned Chromium formatter
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ \}\
+
+      \
+
+      \ \ \ \ private\ WindowAndroid\ capturedNewWindow\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ ArgumentCaptor<WindowAndroid>\ window\ =\ ArgumentCaptor\.forClass\(WindowAndroid\.class\);\
+
+      \ \ \ \ \ \ \ \ verify\(mWebContents\)\.setDelegates\(any\(\),\ any\(ViewAndroidDelegate\.class\),\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ any\(ContentView\.class\),\ window\.capture\(\),\ any\(\)\);\
+
+      \ \ \ \ \ \ \ \ return\ window\.getValue\(\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ @Test\
+
+      \ \ \ \ public\ void\ testCreate_nullContext_returnsNull\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ WindowAndroid\ mockWindow\ =\ mock\(WindowAndroid\.class\);\
+
+      \ \ \ \ \ \ \ \ when\(mockWindow\.getContext\(\)\)\.thenReturn\(new\ WeakReference<Context>\(null\)\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ ExtensionSidePanelContents\ contents\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ createContents\(mockWindow\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ assertNull\(contents\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      '
+    replace: "    }\n\n    private WindowAndroid capturedNewWindow() {\n        ArgumentCaptor<WindowAndroid> window = ArgumentCaptor.forClass(WindowAndroid.class);\n        verify(mWebContents)\n                .setDelegates(\n                        any(),\n                        any(ViewAndroidDelegate.class),\n                        any(ContentView.class),\n                        window.capture(),\n                        any());\n        return window.getValue();\n    }\n\n    @Test\n    public void testCreate_nullContext_returnsNull() {\n        WindowAndroid mockWindow = mock(WindowAndroid.class);\n        when(mockWindow.getContext()).thenReturn(new WeakReference<Context>(null));\n\n        ExtensionSidePanelContents contents = createContents(mockWindow);\n\n        assertNull(contents);\n    }\n\n"
+- description: Format changed Java with the pinned Chromium formatter
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ public\ void\ testCreate_nullIntentRequestTracker_returnsNull\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ WindowAndroid\ windowWithoutTracker\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ new\ WindowAndroid\(mActivity,\ /\*\ occlusionTrackingAllowed=\ \*/\ false\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ ExtensionSidePanelContents\ contents\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ createContents\(windowWithoutTracker\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ assertNull\(contents\);\
+
+      \ \ \ \ \ \ \ \ windowWithoutTracker\.destroy\(\);\
+
+      \ \ \ \ \}\
+
+      '
+    replace: "    public void testCreate_nullIntentRequestTracker_returnsNull() {\n        WindowAndroid windowWithoutTracker =\n                new WindowAndroid(mActivity, /* occlusionTrackingAllowed= */ false);\n\n        ExtensionSidePanelContents contents = createContents(windowWithoutTracker);\n\n        assertNull(contents);\n        windowWithoutTracker.destroy();\n    }\n"
+- description: Format changed Java with the pinned Chromium formatter
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ public\ void\ testCreate_success_setsDelegatesAndAttachesThinWebView\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ when\(mThinWebView\.getView\(\)\)\.thenReturn\(mThinWebViewUnderlyingView\);\
+
+      \ \ \ \ \ \ \ \ when\(mWebContents\.getViewAndroidDelegate\(\)\)\.thenReturn\(null\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ ExtensionSidePanelContents\ contents\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ createContents\(mWindowAndroid\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ assertNotNull\(contents\);\
+
+      \ \ \ \ \ \ \ \ assertEquals\(mWebContents,\ contents\.getWebContents\(\)\);\
+
+      \ \ \ \ \ \ \ \ assertEquals\(mThinWebViewUnderlyingView,\ contents\.getView\(\)\);\
+
+      '
+    replace: "    public void testCreate_success_setsDelegatesAndAttachesThinWebView() {\n        when(mThinWebView.getView()).thenReturn(mThinWebViewUnderlyingView);\n        when(mWebContents.getViewAndroidDelegate()).thenReturn(null);\n\n        ExtensionSidePanelContents contents = createContents(mWindowAndroid);\n\n        assertNotNull(contents);\n        assertEquals(mWebContents, contents.getWebContents());\n        assertEquals(mThinWebViewUnderlyingView, contents.getView());\n"
+- description: Format changed Java with the pinned Chromium formatter
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ public\ void\ testCreate_existingDelegate_updatesWindowAndContainer\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ ViewAndroidDelegate\ delegate\ =\ ViewAndroidDelegate\.createBasicDelegate\(null\);\
+
+      \ \ \ \ \ \ \ \ when\(mWebContents\.getViewAndroidDelegate\(\)\)\.thenReturn\(delegate\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ ExtensionSidePanelContents\ contents\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ createContents\(mWindowAndroid\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ assertNotNull\(contents\);\
+
+      \ \ \ \ \ \ \ \ ArgumentCaptor<WindowAndroid>\ window\ =\ ArgumentCaptor\.forClass\(WindowAndroid\.class\);\
+
+      \ \ \ \ \ \ \ \ verify\(mWebContents\)\.setTopLevelNativeWindow\(window\.capture\(\)\);\
+
+      '
+    replace: "    public void testCreate_existingDelegate_updatesWindowAndContainer() {\n        ViewAndroidDelegate delegate = ViewAndroidDelegate.createBasicDelegate(null);\n        when(mWebContents.getViewAndroidDelegate()).thenReturn(delegate);\n\n        ExtensionSidePanelContents contents = createContents(mWindowAndroid);\n\n        assertNotNull(contents);\n        ArgumentCaptor<WindowAndroid> window = ArgumentCaptor.forClass(WindowAndroid.class);\n        verify(mWebContents).setTopLevelNativeWindow(window.capture());\n"
+- description: Format changed Java with the pinned Chromium formatter
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ ViewAndroidDelegate\ delegate\ =\ ViewAndroidDelegate\.createBasicDelegate\(null\);\
+
+      \ \ \ \ \ \ \ \ when\(mWebContents\.isDestroyed\(\)\)\.thenReturn\(false\);\
+
+      \ \ \ \ \ \ \ \ when\(mWebContents\.getViewAndroidDelegate\(\)\)\.thenReturn\(delegate\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ ExtensionSidePanelContents\ contents\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ createContents\(mWindowAndroid\);\
+
+      \ \ \ \ \ \ \ \ assertNotNull\(contents\);\
+
+      \ \ \ \ \ \ \ \ assertNotNull\(delegate\.getContainerView\(\)\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ contents\.destroy\(\);\
+
+      '
+    replace: "        ViewAndroidDelegate delegate = ViewAndroidDelegate.createBasicDelegate(null);\n        when(mWebContents.isDestroyed()).thenReturn(false);\n        when(mWebContents.getViewAndroidDelegate()).thenReturn(delegate);\n\n        ExtensionSidePanelContents contents = createContents(mWindowAndroid);\n        assertNotNull(contents);\n        assertNotNull(delegate.getContainerView());\n\n        contents.destroy();\n"
+- description: Format changed Java with the pinned Chromium formatter
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ @Test\
+
+      \ \ \ \ public\ void\ testDestroy_webContentsAlreadyDestroyed_onlyDestroysThinWebView\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ when\(mWebContents\.isDestroyed\(\)\)\.thenReturn\(true\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ ExtensionSidePanelContents\ contents\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ createContents\(mWindowAndroid\);\
+
+      \ \ \ \ \ \ \ \ assertNotNull\(contents\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ contents\.destroy\(\);\
+
+      \
+
+      '
+    replace: "    @Test\n    public void testDestroy_webContentsAlreadyDestroyed_onlyDestroysThinWebView() {\n        when(mWebContents.isDestroyed()).thenReturn(true);\n\n        ExtensionSidePanelContents contents = createContents(mWindowAndroid);\n        assertNotNull(contents);\n\n        contents.destroy();\n\n"

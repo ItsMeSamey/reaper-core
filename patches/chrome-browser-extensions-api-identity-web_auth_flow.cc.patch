@@ -1,5 +1,5 @@
 diff --git a/chrome/browser/extensions/api/identity/web_auth_flow.cc b/chrome/browser/extensions/api/identity/web_auth_flow.cc
-index 3c1c43e46137dc1320f6b70382ba566cc04de89b..014ddef123398e20733c4ca959fc51a0a2d9464b 100644
+index 3c1c43e46137dc1320f6b70382ba566cc04de89b..9bec9e12eb0af5add740c5c0d63d29ba98e7d806 100644
 --- a/chrome/browser/extensions/api/identity/web_auth_flow.cc
 +++ b/chrome/browser/extensions/api/identity/web_auth_flow.cc
 @@ -51,7 +51,7 @@
@@ -11,7 +11,19 @@ index 3c1c43e46137dc1320f6b70382ba566cc04de89b..014ddef123398e20733c4ca959fc51a0
  #include "base/functional/callback_forward.h"
  #include "base/functional/callback_helpers.h"
  #include "chrome/browser/android/tab_android.h"
-@@ -235,7 +235,7 @@ void WebAuthFlow::CloseInfoBar() {
+@@ -148,6 +148,11 @@
+ 
+ void WebAuthFlow::DetachDelegateAndDelete() {
+   delegate_ = nullptr;
++#if BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_EXTENSIONS_CORE)
++  // Window creation can finish before the deferred deletion below. It must not
++  // invoke a detached delegate or attach the cancelled authentication contents.
++  weak_factory_.InvalidateWeakPtrs();
++#endif
+ 
+   // WebAuthFlow must be destroyed asynchronously to avoid reentrancy issues.
+   //
+@@ -235,9 +240,10 @@
    }
  }
  
@@ -19,8 +31,11 @@ index 3c1c43e46137dc1320f6b70382ba566cc04de89b..014ddef123398e20733c4ca959fc51a0
 +#if BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_EXTENSIONS_CORE)
  void WebAuthFlow::OnBrowserWindowInterfaceInitialized(
      BrowserWindowInterface* browser) {
++  popup_creation_pending_ = false;
    if (!browser) {
-@@ -286,7 +286,7 @@ bool WebAuthFlow::DisplayAuthPageInPopupWindow() {
+     delegate_->OnAuthFlowFailure(WebAuthFlow::Failure::CANNOT_CREATE_WINDOW);
+     return;
+@@ -286,16 +292,30 @@
  
    browser->GetWindow()->Show();
  #else
@@ -29,3 +44,52 @@ index 3c1c43e46137dc1320f6b70382ba566cc04de89b..014ddef123398e20733c4ca959fc51a0
    BrowserWindowCreateParams params(BrowserWindowInterface::TYPE_POPUP,
                                     *profile_, user_gesture_);
    if (popup_bounds_.has_value()) {
+     params.initial_bounds = popup_bounds_.value();
+   }
+ 
+-  base::OnceCallback<void(BrowserWindowInterface*)> callback =
+-      base::BindOnce(&WebAuthFlow::OnBrowserWindowInterfaceInitialized,
+-                     weak_factory_.GetWeakPtr());
++  base::OnceCallback<void(BrowserWindowInterface*)> callback = base::BindOnce(
++      [](base::WeakPtr<WebAuthFlow> flow, BrowserWindowInterface* browser) {
++        // This completion owns the result of this fresh TYPE_POPUP request.
++        // Cancelling the flow must still retire its late-created window.
++        if (!flow || !flow->delegate_ || !flow->profile_ ||
++            flow->profile_->ShutdownStarted()) {
++          if (browser) {
++            browser->GetWindow()->Close();
++          }
++          return;
++        }
++        flow->OnBrowserWindowInterfaceInitialized(browser);
++      },
++      weak_factory_.GetWeakPtr());
++  // Keep ownership of the auth contents until the asynchronous window is ready,
++  // but do not let another completed navigation request a second window.
++  popup_creation_pending_ = true;
+   CreateBrowserWindow(std::move(params), std::move(callback));
+ #endif
+ 
+@@ -326,6 +346,12 @@
+     }
+     return;
+   }
++
++#if BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_EXTENSIONS_CORE)
++  if (popup_creation_pending_) {
++    return;
++  }
++#endif
+ 
+   // If `web_contents_` is nullptr, this means that the interactive tab has
+   // already been opened once.
+@@ -478,6 +504,9 @@
+   // destroyed" notification to the delegate, but all the current delegates
+   // already observe Profile destruction, so we can just be silent here.
+   delegate_ = nullptr;
++#if BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_EXTENSIONS_CORE)
++  weak_factory_.InvalidateWeakPtrs();
++#endif
+ 
+   BrowserWindowInterface* popup_browser =
+       web_contents()

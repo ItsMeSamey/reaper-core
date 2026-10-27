@@ -1,0 +1,111 @@
+diff --git a/chrome/browser/ui/android/tab_model/tab_model_observer_jni_bridge.h b/chrome/browser/ui/android/tab_model/tab_model_observer_jni_bridge.h
+--- a/chrome/browser/ui/android/tab_model/tab_model_observer_jni_bridge.h
++++ b/chrome/browser/ui/android/tab_model/tab_model_observer_jni_bridge.h
+@@ -11,14 +11,16 @@
+ 
+ #include "base/android/jni_weak_ref.h"
+ #include "base/android/scoped_java_ref.h"
+-#include "base/memory/raw_ref.h"
++#include "base/functional/callback.h"
++#include "base/memory/raw_ptr.h"
++#include "base/memory/ref_counted.h"
++#include "base/memory/weak_ptr.h"
+ #include "base/observer_list.h"
+ #include "chrome/browser/tab_list/tab_list_interface_observer.h"
+ #include "chrome/browser/ui/android/tab_model/tab_model_observer.h"
+ 
+ class TabAndroid;
+ class TabModel;
+-class TabAndroid;
+ 
+ namespace base {
+ class Token;
+@@ -27,24 +29,23 @@
+ // Bridges calls between the C++ and the Java TabModelObservers. Functions in
+ // this class do little more than translating between Java TabModelObserver
+ // notifications to native TabModelObserver notifications.
+-class TabModelObserverJniBridge {
++class TabModelObserverJniBridge
++    : public base::RefCounted<TabModelObserverJniBridge> {
+  public:
+   TabModelObserverJniBridge(
+       JNIEnv* env,
+       const base::android::JavaRef<jobject>& java_tab_model,
+-      TabModel& tab_model);
++      TabModel& tab_model,
++      base::RepeatingClosure on_empty);
+ 
+   TabModelObserverJniBridge(const TabModelObserverJniBridge&) = delete;
+   TabModelObserverJniBridge& operator=(const TabModelObserverJniBridge&) =
+       delete;
+ 
+-  ~TabModelObserverJniBridge();
+-
+-  void Destroy(JNIEnv* env);
+-
+   // The following functions are called by JNI.
+ 
+   void DidSelectTab(JNIEnv* env, TabAndroid* tab, int type, int last_id);
++  void DidChangeSplit(JNIEnv* env, const std::vector<int>& affected_tab_ids);
+ 
+   void WillCloseTabs(JNIEnv* env,
+                      const std::vector<TabAndroid*>& tabs,
+@@ -115,17 +116,53 @@
+   }
+ 
+  private:
+-  // This object's Java counterpart. This objects controls its lifetime.
++  friend class base::RefCounted<TabModelObserverJniBridge>;
++  friend class TabModelObserverJniBridgeTest;
++
++  // Native-only constructor for the real dispatcher regression fixture.
++  TabModelObserverJniBridge(TabModel& tab_model,
++                            base::RepeatingClosure on_empty);
++  ~TabModelObserverJniBridge();
++
++  // Each nested dispatch retains the bridge. The owner releases its reference
++  // only after the outermost scope and both observer lists become empty.
++  class ScopedDispatch {
++   public:
++    explicit ScopedDispatch(TabModelObserverJniBridge* bridge);
++    ScopedDispatch(const ScopedDispatch&) = delete;
++    ScopedDispatch& operator=(const ScopedDispatch&) = delete;
++    ~ScopedDispatch();
++
++   private:
++    scoped_refptr<TabModelObserverJniBridge> bridge_;
++  };
++  void ReleaseOwnerIfEmpty();
++  void DetachFromJava();
++
++  size_t dispatch_depth_ = 0;
++  bool shutting_down_ = false;
++  base::RepeatingClosure on_empty_;
++
++  // The Java observer is detached before model shutdown or final release.
+   base::android::ScopedJavaGlobalRef<jobject> java_object_;
+ 
+   // TabModelObservers attached to this bridge.
+-  base::ObserverList<TabModelObserver>::Unchecked model_observers_;
++  base::ObserverList<TabModelObserver,
++                     false,
++                     base::ObserverListReentrancyPolicy::kAllowReentrancy>::
++      Unchecked model_observers_;
+ 
+-  // The C++ TabModel. Owns this object, so is guaranteed to outlive it.
+-  base::raw_ref<TabModel> tab_model_;
++  // Cleared by NotifyShutdown while the model is still alive. An outer
++  // dispatch can retain this bridge after a callback destroys the model.
++  raw_ptr<TabModel> tab_model_;
+ 
+   // TabListInterfaceObservers attached to this bridge.
+-  base::ObserverList<TabListInterfaceObserver> interface_observers_;
++  base::ObserverList<TabListInterfaceObserver,
++                     false,
++                     base::ObserverListReentrancyPolicy::kAllowReentrancy>
++      interface_observers_;
++
++  base::WeakPtrFactory<TabModelObserverJniBridge> weak_factory_{this};
+ };
+ 
+ #endif  // CHROME_BROWSER_UI_ANDROID_TAB_MODEL_TAB_MODEL_OBSERVER_JNI_BRIDGE_H_

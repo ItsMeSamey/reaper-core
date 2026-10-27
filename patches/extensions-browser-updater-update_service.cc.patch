@@ -1,0 +1,80 @@
+diff --git a/extensions/browser/updater/update_service.cc b/extensions/browser/updater/update_service.cc
+--- a/extensions/browser/updater/update_service.cc
++++ b/extensions/browser/updater/update_service.cc
+@@ -16,6 +16,7 @@
+ #include "base/functional/callback.h"
+ #include "base/functional/callback_helpers.h"
+ #include "base/metrics/histogram_functions.h"
++#include "build/build_config.h"
+ #include "components/update_client/crx_update_item.h"
+ #include "components/update_client/protocol_definition.h"
+ #include "components/update_client/update_client.h"
+@@ -71,6 +72,11 @@
+
+ void UpdateService::Shutdown() {
+   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
++#if BUILDFLAG(IS_ANDROID)
++  // Backend work may outlive this keyed-service shutdown. Retire its UI
++  // callbacks before clearing the context and releasing our client reference.
++  weak_ptr_factory_.InvalidateWeakPtrs();
++#endif
+   if (update_data_provider_) {
+     update_data_provider_->Shutdown();
+     update_data_provider_ = nullptr;
+@@ -79,6 +85,7 @@
+   browser_context_ = nullptr;
+ }
+
++#if !BUILDFLAG(IS_ANDROID)
+ void UpdateService::SendUninstallPing(const std::string& id,
+                                       const base::Version& version,
+                                       int reason) {
+@@ -101,6 +108,7 @@
+                      ExtensionsBrowserClient::Get()->CreateUpdaterKeepAlive(
+                          browser_context_)));
+ }
++#endif  // !BUILDFLAG(IS_ANDROID)
+
+ void UpdateService::OnCrxStateChange(UpdateFoundCallback update_found_callback,
+                                      const update_client::CrxUpdateItem& item) {
+@@ -116,7 +124,16 @@
+     case update_client::ComponentState::kCanUpdate:
+       should_perform_action_on_omaha_attributes = true;
+       if (update_found_callback) {
++#if BUILDFLAG(IS_ANDROID)
++        auto weak_this = weak_ptr_factory_.GetWeakPtr();
++#endif
+         update_found_callback.Run(item.id, item.next_version);
++#if BUILDFLAG(IS_ANDROID)
++        // The notification may retire this service or its browser context.
++        if (!weak_this) {
++          return;
++        }
++#endif
+       }
+       break;
+     case update_client::ComponentState::kNew:
+@@ -241,6 +258,9 @@
+ void UpdateService::UpdateCheckComplete(InProgressUpdate update) {
+   VLOG(2) << "UpdateService::UpdateCheckComplete";
+   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
++#if BUILDFLAG(IS_ANDROID)
++  auto weak_this = weak_ptr_factory_.GetWeakPtr();
++#endif
+
+   // When no update is found or there's an update error, a previous update
+   // check might have queued an update for this extension because it was in
+@@ -253,6 +273,13 @@
+       if (delayed_install_manager->GetPendingExtensionUpdate(extension_id)) {
+         delayed_install_manager->FinishDelayedInstallationIfReady(
+             extension_id, /*install_immediately=*/true);
++#if BUILDFLAG(IS_ANDROID)
++        // Installing a delayed update notifies external observers. Stop before
++        // using their retired manager or delivering another completion.
++        if (!weak_this) {
++          return;
++        }
++#endif
+       }
+     }
+   }

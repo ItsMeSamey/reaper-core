@@ -1,0 +1,50 @@
+diff --git a/extensions/browser/api/permissions/permissions_api.cc b/extensions/browser/api/permissions/permissions_api.cc
+--- a/extensions/browser/api/permissions/permissions_api.cc
++++ b/extensions/browser/api/permissions/permissions_api.cc
+@@ -12,6 +12,7 @@
+ #include "base/functional/bind.h"
+ #include "base/notimplemented.h"
+ #include "base/strings/string_number_conversions.h"
++#include "build/build_config.h"
+ #include "content/public/browser/web_contents.h"
+ #include "extensions/browser/api/permissions/permissions_api_helpers.h"
+ #include "extensions/browser/extension_api_frame_id_map.h"
+@@ -32,6 +33,10 @@
+ #include "extensions/common/permissions/permissions_info.h"
+ #include "extensions/common/url_pattern.h"
+ #include "extensions/common/url_pattern_set.h"
++
++#if BUILDFLAG(IS_ANDROID)
++#include "extensions/browser/extension_registry.h"
++#endif
+
+ namespace extensions {
+
+@@ -499,6 +504,27 @@
+     Respond(ArgumentList(api::permissions::Request::Results::Create(false)));
+     return;
+   }
++#if BUILDFLAG(IS_ANDROID)
++  // Consent belongs to the enabled extension instance that requested it. A
++  // reload or reinstall must not grant through a retired instance into ID-keyed
++  // preferences or the replacement renderer's permissions.
++  if (!browser_context() || ExtensionRegistry::Get(browser_context())
++                                    ->enabled_extensions()
++                                    .GetByID(extension_id()) != extension()) {
++    Respond(ArgumentList(api::permissions::Request::Results::Create(false)));
++    return;
++  }
++  // Management policy may change while the consent dialog is open. Check the
++  // current policy before committing either optional or withheld permissions.
++  std::unique_ptr<const PermissionSet> requested_permissions =
++      PermissionSet::CreateUnion(*requested_withheld_, *requested_optional_);
++  if (!ExtensionsBrowserClient::Get()
++           ->GetExtensionManagementClient(browser_context())
++           ->IsPermissionSetAllowed(extension(), *requested_permissions)) {
++    Respond(Error(kBlockedByEnterprisePolicy));
++    return;
++  }
++#endif  // BUILDFLAG(IS_ANDROID)
+   PermissionsUpdater permissions_updater(browser_context());
+   requesting_withheld_permissions_ = !requested_withheld_->IsEmpty();
+   requesting_optional_permissions_ = !requested_optional_->IsEmpty();

@@ -26,13 +26,10 @@ import org.chromium.url.GURL;
 
 import java.lang.ref.WeakReference;
 import java.util.Arrays;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
 public class BraveMediaSessionHelper implements MediaImageCallback {
-    private static final List<String> sBraveTalkHosts =
-            Arrays.asList("talk.brave.com", "talk.bravesoftware.com", "talk.brave.software");
     private static final List<String> sBackgroundPlaybackHosts =
             Arrays.asList(
                     "music.youtube.com",
@@ -87,35 +84,13 @@ public class BraveMediaSessionHelper implements MediaImageCallback {
         return pictureInPictureWebContents;
     }
 
-    public static boolean isBraveTalk(WebContents webContents) {
-        if (webContents == null) {
-            return false;
-        }
-        GURL pageUrl = webContents.getLastCommittedUrl();
-        if (pageUrl.isValid()
-                && pageUrl.getScheme().equals(UrlConstants.HTTPS_SCHEME)
-                && sBraveTalkHosts.contains(pageUrl.getHost())) {
-            return true;
-        }
-
-        return false;
-    }
-
     private @Nullable WebContents getMediaSessionWebContents() {
         return (WebContents)
                 BraveReflectionUtil.getField(MediaSessionHelper.class, "mWebContents", this);
     }
 
-    private boolean shouldSuppressMediaNotificationActions() {
-        return isBraveTalk(getMediaSessionWebContents());
-    }
-
     @VisibleForTesting
     boolean shouldSuppressMediaPause(@Nullable WebContents webContents) {
-        if (isBraveTalk(webContents)) {
-            return true;
-        }
-
         if (!isBackgroundPlaybackHost(webContents)) {
             return false;
         }
@@ -125,14 +100,13 @@ public class BraveMediaSessionHelper implements MediaImageCallback {
     // While the screen is locked, the media session transiently reports itself as not
     // controllable and paused when the current track ends. If that paused state reaches the
     // upstream helper, the media notification leaves its playback state and YouTube never
-    // advances to the next track (brave-browser#53077), so Brave Talk and background playback
+    // advances to the next track (brave-browser#53077), so background playback
     // must report the session as still playing. An active Brave PiP session with background
     // playback disabled is deliberately excluded: its pause-on-lock flow relies on the real
     // paused state so SystemUI shows the correct action after unlock.
     @VisibleForTesting
     boolean shouldForcePlayingState(@Nullable WebContents webContents) {
-        return isBraveTalk(webContents)
-                || (isBackgroundPlaybackHost(webContents) && isBackgroundVideo());
+        return isBackgroundPlaybackHost(webContents) && isBackgroundVideo();
     }
 
     @VisibleForTesting
@@ -188,31 +162,6 @@ public class BraveMediaSessionHelper implements MediaImageCallback {
     @Override
     public void onImageDownloaded(Bitmap image) {}
 
-    public void showNotification() {
-        MediaNotificationInfo.Builder notificationInfoBuilder =
-                (MediaNotificationInfo.Builder)
-                        BraveReflectionUtil.getField(
-                                MediaSessionHelper.class, "mNotificationInfoBuilder", this);
-        if (notificationInfoBuilder != null && shouldSuppressMediaNotificationActions()) {
-            notificationInfoBuilder.setActions(0);
-            HashSet<Integer> actionSet = new HashSet<Integer>();
-            actionSet.add(0);
-            notificationInfoBuilder.setMediaSessionActions(actionSet);
-            // The reflected field MediaSessionHelper#mMediaSessionActions is declared as
-            // Set<Integer>, but getField returns Object so the cast is unverifiable at compile
-            // time due to generic erasure.
-            @SuppressWarnings("unchecked")
-            Set<Integer> mediaSessionActions =
-                    (Set<Integer>)
-                            BraveReflectionUtil.getField(
-                                    MediaSessionHelper.class, "mMediaSessionActions", this);
-            if (mediaSessionActions != null) {
-                mediaSessionActions = actionSet;
-            }
-        }
-        BraveReflectionUtil.invokeMethod(MediaSessionHelper.class, this, "showNotification");
-    }
-
     protected MediaSessionObserver createMediaSessionObserver(MediaSession mediaSession) {
         MediaSessionObserver mediaSessionObserver =
                 (MediaSessionObserver)
@@ -235,7 +184,7 @@ public class BraveMediaSessionHelper implements MediaImageCallback {
             private boolean mHasControllableSession;
 
             // True when Brave kept controls that Chromium would otherwise hide. A new document
-            // must clear these old controls, except for the existing Brave Talk behavior.
+            // must clear these old controls.
             private boolean mIsPreservingMediaSession;
 
             @Override
@@ -243,7 +192,7 @@ public class BraveMediaSessionHelper implements MediaImageCallback {
                 boolean wasPreservingMediaSession = mIsPreservingMediaSession;
                 mHasControllableSession = false;
                 mIsPreservingMediaSession = false;
-                if (wasPreservingMediaSession && !isBraveTalk(getMediaSessionWebContents())) {
+                if (wasPreservingMediaSession) {
                     mediaSessionObserver.mediaSessionStateChanged(false, true);
                 }
             }
@@ -257,17 +206,16 @@ public class BraveMediaSessionHelper implements MediaImageCallback {
             public void mediaSessionStateChanged(boolean isControllable, boolean isPaused) {
                 if (isControllable) mHasControllableSession = true;
                 mIsPreservingMediaSession = false;
-                // Keep the Android media controls alive for Brave Talk, background YouTube audio,
-                // and the active Brave-managed YouTube PiP session when the page transiently
-                // reports itself as not controllable. For Brave Talk and background playback the
+                // Keep the Android media controls alive for background YouTube audio and the
+                // active Brave-managed YouTube PiP session when the page transiently reports
+                // itself as not controllable. For background playback the
                 // session is also reported as playing so the next track can start while the
                 // screen is locked (see shouldForcePlayingState); the PiP-only case preserves
                 // the real paused state so SystemUI shows the correct action and forwards the
                 // right command after wake/restore transitions.
                 if (!isControllable) {
                     WebContents webContents = getMediaSessionWebContents();
-                    if (shouldSuppressMediaPause(webContents)
-                            && (mHasControllableSession || isBraveTalk(webContents))) {
+                    if (shouldSuppressMediaPause(webContents) && mHasControllableSession) {
                         mIsPreservingMediaSession = true;
                         isControllable = true;
                         if (shouldForcePlayingState(webContents)) {

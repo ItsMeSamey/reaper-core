@@ -1,0 +1,588 @@
+diff --git a/chrome/test/data/webui/extensions/options_dialog_test.ts b/chrome/test/data/webui/extensions/options_dialog_test.ts
+index 3c3743c..85d01bc 100644
+--- a/chrome/test/data/webui/extensions/options_dialog_test.ts
++++ b/chrome/test/data/webui/extensions/options_dialog_test.ts
+@@ -9,6 +9,11 @@
+ import {OptionsDialogMaxHeight, OptionsDialogMinWidth, Service} from 'chrome://extensions/extensions.js';
+ import {assertEquals, assertFalse, assertGE, assertLE, assertTrue} from 'chrome://webui-test/chai_assert.js';
+ import {eventToPromise} from 'chrome://webui-test/test_util.js';
++// <if expr="is_android">
++import type {ExtensionsManagerElement} from 'chrome://extensions/extensions.js';
++import {Dialog, navigation, Page} from 'chrome://extensions/extensions.js';
++import {MockTimer} from 'chrome://webui-test/mock_timer.js';
++// </if>
+ 
+ suite('ExtensionOptionsDialogTests', function() {
+   let optionsDialog: ExtensionsOptionsDialogElement;
+@@ -30,6 +35,435 @@
+     const rect = dialogElement.getBoundingClientRect();
+     return rect.width * rect.height > 0;
+   }
++
++  // <if expr="is_android">
++  test('AndroidOversizedDialogFitsViewport', async () => {
++    // Exercise the actual native dialog's layout without depending on guest
++    // extension load timing (the existing guest-backed Layout test is flaky).
++    optionsDialog.$.dialog.style.setProperty('--dialog-width', '10000px');
++    optionsDialog.$.dialog.style.setProperty('--dialog-height', '200px');
++    await optionsDialog.$.dialog.showModal();
++    const rect = optionsDialog.$.dialog.getNative().getBoundingClientRect();
++    assertTrue(rect.width > 0);
++    assertLE(rect.width, window.innerWidth - 32);
++    assertGE(rect.left, 0);
++    assertLE(rect.right, window.innerWidth);
++  });
++
++  test('AndroidHeightFitsShrunkViewportWithResizeWithheld', async () => {
++    // Use a real child viewport so CSS receives new vh units while resize
++    // delivery is held. Keep the previous JS-requested height unchanged.
++    const viewport = document.createElement('iframe');
++    viewport.style.cssText =
++        'display: block; width: 600px; height: 700px; border: 0';
++    const loaded = eventToPromise('load', viewport);
++    document.body.appendChild(viewport);
++    try {
++      await loaded;
++      const viewportWindow = viewport.contentWindow!;
++      const viewportDocument = viewport.contentDocument!;
++      await optionsDialog.updateComplete;
++      await optionsDialog.$.dialog.updateComplete;
++
++      // Constructed sheets cannot follow nodes into another document. Copy
++      // their real compiled rules, including nested cr-dialog/close styles,
++      // before adopting the existing component; do not mock its layout CSS.
++      const sheets = new Map<ShadowRoot, string>();
++      const rememberSheets = (root: ShadowRoot): void => {
++        sheets.set(root, root.adoptedStyleSheets.map(
++            sheet => Array.from(sheet.cssRules, rule => rule.cssText).join('\n'))
++                             .join('\n'));
++        for (const element of root.querySelectorAll('*')) {
++          if (element.shadowRoot) {
++            rememberSheets(element.shadowRoot);
++          }
++        }
++      };
++      rememberSheets(optionsDialog.shadowRoot);
++      viewportDocument.body.appendChild(optionsDialog);
++      for (const [root, css] of sheets) {
++        const style = viewportDocument.createElement('style');
++        style.textContent = css;
++        root.appendChild(style);
++      }
++
++      const dialog = optionsDialog.$.dialog;
++      dialog.style.setProperty('--dialog-width', '410px');
++      dialog.style.setProperty('--dialog-height', '500px');
++      dialog.style.setProperty('--dialog-opacity', '1');
++      await dialog.showModal();
++      await new Promise<void>(resolve => {
++        viewportWindow.requestAnimationFrame(() => resolve());
++      });
++      const nativeDialog = dialog.getNative();
++      assertEquals(500, nativeDialog.getBoundingClientRect().height);
++      assertEquals(700, viewportWindow.innerHeight);
++
++      let deliveredResizes = 0;
++      const onResize = () => ++deliveredResizes;
++      let resizeBlocked: () => void = () => {};
++      const blockedResize = new Promise<void>(resolve => {
++        resizeBlocked = resolve;
++      });
++      const holdResize = (event: Event) => {
++        event.stopImmediatePropagation();
++        resizeBlocked();
++      };
++      viewportWindow.addEventListener('resize', holdResize, true);
++      viewportWindow.addEventListener('resize', onResize);
++      try {
++        viewport.style.height = '240px';
++        await blockedResize;
++        assertEquals(240, viewportWindow.innerHeight);
++        assertEquals(0, deliveredResizes);
++        assertEquals(
++            '500px', dialog.style.getPropertyValue('--dialog-height'));
++        const rect = nativeDialog.getBoundingClientRect();
++        assertTrue(rect.height > 0);
++        assertLE(rect.height, viewportWindow.innerHeight - 32);
++        assertGE(rect.top, 0);
++        assertLE(rect.bottom, viewportWindow.innerHeight);
++        const close = dialog.shadowRoot.querySelector<HTMLElement>('#close');
++        assertTrue(!!close);
++        const closeRect = close.getBoundingClientRect();
++        assertTrue(closeRect.height > 0);
++        assertGE(closeRect.top, rect.top);
++        assertLE(closeRect.bottom, rect.bottom);
++      } finally {
++        viewportWindow.removeEventListener('resize', holdResize, true);
++        viewportWindow.removeEventListener('resize', onResize);
++      }
++    } finally {
++      optionsDialog.remove();
++      viewport.remove();
++    }
++  });
++  // </if>
++
++  // <if expr="is_android">
++  interface ControlledOptionsGuest extends HTMLElement {
++    extension: string;
++    onclose: () => void;
++    onpreferredsizechanged:
++        ((e: {height: number, width: number}) => void)|null;
++  }
++
++  // Use the real dialog and lifecycle. Hold only document readiness and the
++  // native guest element boundary so callback ordering is deterministic.
++  function controlOptionsGuest(initialReadyState: DocumentReadyState) {
++    const originalCreate = document.createElement.bind(document);
++    const descriptors = new Map([
++      ['createElement', Object.getOwnPropertyDescriptor(document, 'createElement')],
++      ['readyState', Object.getOwnPropertyDescriptor(document, 'readyState')],
++    ]);
++    const guest: ControlledOptionsGuest = Object.assign(originalCreate('div'), {
++      extension: '',
++      onclose: () => {},
++      onpreferredsizechanged: null,
++    });
++    let readyState = initialReadyState;
++    let creations = 0;
++    const timer = new MockTimer();
++    timer.install();
++    Object.defineProperty(document, 'readyState', {
++      configurable: true,
++      get: () => readyState,
++    });
++    Object.defineProperty(document, 'createElement', {
++      configurable: true,
++      value: (name: string, options?: ElementCreationOptions) => {
++        if (name.toLowerCase() === 'extensionoptions') {
++          ++creations;
++          return guest;
++        }
++        return originalCreate(name, options);
++      },
++    });
++    return {
++      guest,
++      timer,
++      creations: () => creations,
++      finishDocument: () => {
++        readyState = 'complete';
++        document.dispatchEvent(new Event('readystatechange'));
++      },
++      restore: () => {
++        optionsDialog.remove();
++        timer.uninstall();
++        for (const [key, descriptor] of descriptors) {
++          if (descriptor) {
++            Object.defineProperty(document, key, descriptor);
++          } else {
++            Reflect.deleteProperty(document, key);
++          }
++        }
++      },
++    };
++  }
++
++  test('AndroidCancelBeforeDocumentReadyDoesNotCreateOptionsGuest', async () => {
++    const control = controlOptionsGuest('loading');
++    try {
++      optionsDialog.show(data);
++      optionsDialog.cancelPendingShow();
++      control.finishDocument();
++      await Promise.resolve();
++      assertEquals(0, control.creations());
++      assertFalse(optionsDialog.open);
++    } finally {
++      control.restore();
++    }
++  });
++
++  test('AndroidUnmountBeforeDocumentReadyDoesNotCreateOptionsGuest', async () => {
++    const control = controlOptionsGuest('loading');
++    try {
++      optionsDialog.show(data);
++      optionsDialog.remove();
++      control.finishDocument();
++      await Promise.resolve();
++      assertEquals(0, control.creations());
++      assertFalse(optionsDialog.open);
++    } finally {
++      control.restore();
++    }
++  });
++
++  test('AndroidLatestDocumentReadyRequestOwnsGuest', async () => {
++    const control = controlOptionsGuest('loading');
++    try {
++      const second = {...data, id: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'};
++      optionsDialog.show(data);
++      optionsDialog.show(second);
++      control.finishDocument();
++      await Promise.resolve();
++      assertEquals(1, control.creations());
++      assertEquals(second.id, control.guest.extension);
++    } finally {
++      control.restore();
++    }
++  });
++
++  test('AndroidOldGuestCallbacksCannotOpenOrCloseNewOptions', async () => {
++    const control = controlOptionsGuest('complete');
++    try {
++      optionsDialog.show(data);
++      await Promise.resolve();
++      const oldSize = control.guest.onpreferredsizechanged!;
++      const oldClose = control.guest.onclose;
++      const second = {...data, id: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'};
++      optionsDialog.show(second);
++      await Promise.resolve();
++      assertEquals(1, control.creations());
++      assertEquals(second.id, control.guest.extension);
++
++      oldSize({width: 300, height: 120});
++      assertFalse(optionsDialog.open);
++      control.guest.onpreferredsizechanged!({width: 320, height: 120});
++      assertTrue(optionsDialog.open);
++      oldClose();
++      assertTrue(optionsDialog.open);
++      control.guest.onclose();
++      assertFalse(optionsDialog.open);
++    } finally {
++      control.restore();
++    }
++  });
++
++  test('AndroidResizeBeforeGuestSizeAndCloseBeforeDebounce', async () => {
++    const control = controlOptionsGuest('complete');
++    try {
++      optionsDialog.show(data);
++      await Promise.resolve();
++      // Capture actual listener exceptions explicitly, including the old null
++      // preferred-size dereference, rather than depending on Mocha's globals.
++      const errors: ErrorEvent[] = [];
++      const onError = (event: ErrorEvent) => {
++        errors.push(event);
++        event.preventDefault();
++      };
++      window.addEventListener('error', onError);
++      try {
++        window.dispatchEvent(new Event('resize'));
++      } finally {
++        window.removeEventListener('error', onError);
++      }
++      assertEquals(0, errors.length);
++      assertFalse(optionsDialog.open);
++      assertEquals(
++          '', optionsDialog.$.dialog.style.getPropertyValue('--dialog-opacity'));
++
++      control.guest.onpreferredsizechanged!({width: 410, height: 120});
++      control.timer.tick(50);
++      assertTrue(optionsDialog.open);
++      const width =
++          optionsDialog.$.dialog.style.getPropertyValue('--dialog-width');
++      assertEquals(
++          '1', optionsDialog.$.dialog.style.getPropertyValue('--dialog-opacity'));
++      control.guest.onpreferredsizechanged!({width: 550, height: 240});
++      control.guest.onclose();
++      control.timer.tick(50);
++      assertFalse(optionsDialog.open);
++      assertEquals(
++          width, optionsDialog.$.dialog.style.getPropertyValue('--dialog-width'));
++    } finally {
++      control.restore();
++    }
++  });
++
++  test('AndroidGuestCallbacksAfterUnmountAreInert', async () => {
++    const control = controlOptionsGuest('complete');
++    try {
++      optionsDialog.show(data);
++      await Promise.resolve();
++      const size = control.guest.onpreferredsizechanged!;
++      const close = control.guest.onclose;
++      optionsDialog.remove();
++      size({width: 320, height: 120});
++      close();
++      control.timer.tick(50);
++      assertFalse(optionsDialog.open);
++      assertEquals(1, control.creations());
++    } finally {
++      control.restore();
++    }
++  });
++  test('AndroidClosingDialogIgnoresLateGuestSize', async () => {
++    const previousPage = navigation.getCurrentPage();
++    const control = controlOptionsGuest('complete');
++    let closes = 0;
++    const onClose = () => ++closes;
++    optionsDialog.addEventListener('close', onClose);
++    try {
++      for (const {closeMode, sizeAfterReshow} of [
++        {closeMode: 'guest', sizeAfterReshow: true},
++        {closeMode: 'cancel', sizeAfterReshow: true},
++        {closeMode: 'close', sizeAfterReshow: true},
++        {closeMode: 'cancel', sizeAfterReshow: false},
++        {closeMode: 'close', sizeAfterReshow: false},
++      ]) {
++        navigation.replaceWith({
++          page: Page.DETAILS,
++          extensionId: data.id,
++          subpage: Dialog.OPTIONS,
++        });
++        optionsDialog.show(data);
++        await Promise.resolve();
++        let size = control.guest.onpreferredsizechanged!;
++        size({width: 410, height: 120});
++        control.timer.tick(50);
++        assertTrue(optionsDialog.open);
++
++        // Re-show on the same already open native dialog. Its new request must
++        // still remember that this show has opened before an ordinary close.
++        optionsDialog.show(data);
++        await Promise.resolve();
++        size = control.guest.onpreferredsizechanged!;
++        assertTrue(optionsDialog.open);
++        if (sizeAfterReshow) {
++          size({width: 410, height: 120});
++          control.timer.tick(50);
++          assertTrue(optionsDialog.open);
++        }
++
++        if (closeMode === 'guest') {
++          // A prevented native cancel must leave this already open dialog live.
++          // Dispatch only cancel; do not fabricate a native default close.
++          const cancelForwarded = eventToPromise('cancel', optionsDialog);
++          const nativeDialog = optionsDialog.$.dialog.getNative();
++          nativeDialog.addEventListener(
++              'cancel', event => event.preventDefault(), {once: true});
++          const cancel = new Event('cancel', {cancelable: true});
++          nativeDialog.dispatchEvent(cancel);
++          await cancelForwarded;
++          assertTrue(cancel.defaultPrevented);
++          assertTrue(nativeDialog.open);
++          assertTrue(optionsDialog.open);
++          size({width: 430, height: 130});
++          control.timer.tick(50);
++          assertEquals(
++              '430px',
++              optionsDialog.$.dialog.style.getPropertyValue('--dialog-width'));
++          assertEquals(Dialog.OPTIONS, navigation.getCurrentPage().subpage);
++        }
++
++        const width =
++            optionsDialog.$.dialog.style.getPropertyValue('--dialog-width');
++        if (sizeAfterReshow) {
++          size({width: 550, height: 240});
++        }
++        const closed = eventToPromise('close', optionsDialog);
++        if (closeMode === 'guest') {
++          control.guest.onclose();
++        } else if (closeMode === 'cancel') {
++          optionsDialog.$.dialog.cancel();
++        } else {
++          optionsDialog.$.dialog.close();
++        }
++        assertFalse(optionsDialog.open);
++        assertFalse(optionsDialog.$.dialog.getNative().open);
++        // Keep the valid close owner until the actual native event is delivered.
++        assertEquals(Dialog.OPTIONS, navigation.getCurrentPage().subpage);
++        size({width: 610, height: 300});
++        control.timer.tick(50);
++        assertFalse(optionsDialog.open);
++        assertEquals(
++            width, optionsDialog.$.dialog.style.getPropertyValue('--dialog-width'));
++        await closed;
++        const route = navigation.getCurrentPage();
++        assertEquals(Page.DETAILS, route.page);
++        assertEquals(data.id, route.extensionId);
++        assertEquals(undefined, route.subpage);
++        assertFalse(optionsDialog.open);
++      }
++      assertEquals(5, closes);
++    } finally {
++      optionsDialog.removeEventListener('close', onClose);
++      control.restore();
++      navigation.replaceWith(previousPage);
++    }
++  });
++
++  test('AndroidGuestCloseBeforeSizeRetiresOptionsRoute', async () => {
++    const previousPage = navigation.getCurrentPage();
++    const control = controlOptionsGuest('complete');
++    let closes = 0;
++    const onClose = () => ++closes;
++    optionsDialog.addEventListener('close', onClose);
++    try {
++      navigation.replaceWith({
++        page: Page.DETAILS,
++        extensionId: data.id,
++        subpage: Dialog.OPTIONS,
++      });
++      optionsDialog.show(data);
++      await Promise.resolve();
++      const size = control.guest.onpreferredsizechanged!;
++      const close = control.guest.onclose;
++      const closed = eventToPromise('close', optionsDialog);
++      assertFalse(optionsDialog.open);
++      close();
++      const route = navigation.getCurrentPage();
++      assertEquals(Page.DETAILS, route.page);
++      assertEquals(data.id, route.extensionId);
++      assertEquals(undefined, route.subpage);
++      assertEquals(null, control.guest.onpreferredsizechanged);
++      size({width: 610, height: 300});
++      close();
++      control.timer.tick(50);
++      await closed;
++      assertFalse(optionsDialog.open);
++      assertFalse(optionsDialog.$.dialog.getNative().open);
++      assertEquals(1, closes);
++      assertEquals(
++          '', optionsDialog.$.dialog.style.getPropertyValue('--dialog-opacity'));
++    } finally {
++      optionsDialog.removeEventListener('close', onClose);
++      control.restore();
++      navigation.replaceWith(previousPage);
++    }
++  });
++  // </if>
+ 
+   test('Layout', async function() {
+     // Try showing the dialog.
+@@ -43,7 +477,13 @@
+ 
+     const dialogElement = optionsDialog.$.dialog.getNative();
+     const rect = dialogElement.getBoundingClientRect();
++    // <if expr="is_android">
++    assertGE(rect.width, Math.min(OptionsDialogMinWidth, window.innerWidth - 32));
++    assertLE(rect.width, window.innerWidth - 32);
++    // </if>
++    // <if expr="not is_android">
+     assertGE(rect.width, OptionsDialogMinWidth);
++    // </if>
+     assertLE(rect.height, OptionsDialogMaxHeight);
+     // This is the header height with default font size.
+     assertGE(rect.height, 68);
+@@ -53,3 +493,121 @@
+     assertEquals(data.name, nameElement.textContent.trim());
+   });
+ });
++
++// <if expr="is_android">
++suite('ExtensionRealOptionsGuestTests', function() {
++  async function beforeDeadline<T>(signal: Promise<T>): Promise<T> {
++    let deadline = 0;
++    try {
++      return await Promise.race([
++        signal,
++        new Promise<T>((_resolve, reject) => {
++          deadline = window.setTimeout(
++              () => reject(new Error('Timed out waiting for real options guest')),
++              10000);
++        }),
++      ]);
++    } finally {
++      window.clearTimeout(deadline);
++    }
++  }
++
++  test('AndroidDirectOptionsGuestRendersAndCloses', async () => {
++    const previousPage = navigation.getCurrentPage();
++    const testWindow: Window&{
++      reaperOptionsGuestReady?: Promise<boolean>,
++    } = window;
++    const manager: ExtensionsManagerElement =
++        document.createElement('extensions-manager');
++    const cleanup: {sizeObserver?: MutationObserver} = {};
++    try {
++      document.body.innerHTML = window.trustedTypes!.emptyHTML;
++      navigation.replaceWith({page: Page.LIST});
++      document.body.appendChild(manager);
++      await beforeDeadline(manager.whenPageInitializedForTest());
++      await manager.updateComplete;
++      const info = await beforeDeadline(Service.getInstance().getExtensionsInfo());
++      assertEquals(1, info.length);
++      const data = info[0]!;
++      assertTrue(!!data.optionsPage);
++      assertFalse(data.optionsPage.openInTab);
++      const opened = eventToPromise('cr-dialog-open', manager);
++      navigation.navigateTo({
++        page: Page.DETAILS,
++        extensionId: data.id,
++        subpage: Dialog.OPTIONS,
++      });
++      assertTrue(await beforeDeadline(testWindow.reaperOptionsGuestReady!));
++      await beforeDeadline(opened);
++      const optionsDialog = manager.shadowRoot.querySelector(
++          'extensions-options-dialog');
++      assertTrue(!!optionsDialog);
++      const guest = optionsDialog.$.body.querySelector<
++          HTMLElement&{extension: string}>('extensionoptions');
++      assertTrue(!!guest);
++      assertEquals('extensionoptions', guest.localName);
++      assertEquals(data.id, guest.extension);
++      assertTrue(guest.isConnected);
++      const dialog = optionsDialog.$.dialog;
++      const nativeDialog = dialog.getNative();
++      let onRendered: () => void = () => {};
++      const rendered = new Promise<void>(resolve => {
++        onRendered = resolve;
++      });
++      const check = () => {
++        const rect = nativeDialog.getBoundingClientRect();
++        if (nativeDialog.open && rect.width > 0 && rect.height > 0 &&
++            dialog.style.getPropertyValue('--dialog-opacity') === '1') {
++          cleanup.sizeObserver?.disconnect();
++          onRendered();
++        }
++      };
++      cleanup.sizeObserver = new MutationObserver(check);
++      cleanup.sizeObserver.observe(dialog, {
++        attributes: true,
++        attributeFilter: ['style'],
++      });
++      check();
++      await beforeDeadline(rendered);
++      const rect = nativeDialog.getBoundingClientRect();
++      assertGE(rect.width, Math.min(OptionsDialogMinWidth, window.innerWidth - 32));
++      assertLE(rect.width, window.innerWidth - 32);
++      assertLE(rect.height, OptionsDialogMaxHeight);
++      assertGE(rect.left, 0);
++      assertLE(rect.right, window.innerWidth);
++      assertGE(rect.top, 0);
++      assertLE(rect.bottom, window.innerHeight);
++      const guestRect = guest.getBoundingClientRect();
++      assertTrue(guestRect.width > 0);
++      assertTrue(guestRect.height > 0);
++      assertGE(guestRect.left, rect.left);
++      assertLE(guestRect.right, rect.right);
++      assertGE(guestRect.top, rect.top);
++      assertLE(guestRect.bottom, rect.bottom);
++      assertGE(guestRect.left, 0);
++      assertLE(guestRect.right, window.innerWidth);
++      assertGE(guestRect.top, 0);
++      assertLE(guestRect.bottom, window.innerHeight);
++      const closed = eventToPromise('close', optionsDialog);
++      const closeButton = dialog.shadowRoot.querySelector<HTMLElement>('#close');
++      assertTrue(!!closeButton);
++      closeButton.click();
++      await beforeDeadline(closed);
++      await manager.updateComplete;
++      assertFalse(nativeDialog.open);
++      assertFalse(guest.isConnected);
++      assertEquals(null, manager.shadowRoot.querySelector('extensions-options-dialog'));
++      const route = navigation.getCurrentPage();
++      assertEquals(Page.DETAILS, route.page);
++      assertEquals(data.id, route.extensionId);
++      assertEquals(undefined, route.subpage);
++    } finally {
++      cleanup.sizeObserver?.disconnect();
++      manager.remove();
++      navigation.replaceWith(previousPage);
++      Reflect.deleteProperty(window, 'reaperOptionsGuestReady');
++      Reflect.deleteProperty(window, 'reaperResolveOptionsGuestReady');
++    }
++  });
++});
++// </if>

@@ -1,0 +1,309 @@
+diff --git a/components/metrics_services_manager/metrics_services_manager.cc b/components/metrics_services_manager/metrics_services_manager.cc
+--- a/components/metrics_services_manager/metrics_services_manager.cc
++++ b/components/metrics_services_manager/metrics_services_manager.cc
+@@ -11,18 +11,33 @@
+ #include "base/check_is_test.h"
+ #include "base/functional/bind.h"
+ #include "base/notreached.h"
++#include "build/build_config.h"
++#if !BUILDFLAG(IS_ANDROID)
+ #include "components/metrics/dwa/dwa_recorder.h"
++#endif
++#if !BUILDFLAG(IS_ANDROID)
+ #include "components/metrics/dwa/dwa_service.h"
++#endif
+ #include "components/metrics/enabled_state_provider.h"
++#if !BUILDFLAG(IS_ANDROID)
+ #include "components/metrics/metrics_service.h"
++#endif
+ #include "components/metrics/metrics_service_client.h"
+ #include "components/metrics/metrics_state_manager.h"
+ #include "components/metrics/metrics_switches.h"
++#if !BUILDFLAG(IS_ANDROID)
+ #include "components/metrics/private_metrics/puma_service.h"
++#endif
++#if !BUILDFLAG(IS_ANDROID)
+ #include "components/metrics/reporting_service.h"
++#endif
++#if !BUILDFLAG(IS_ANDROID)
+ #include "components/metrics/structured/structured_metrics_service.h"  // nogncheck
++#endif
+ #include "components/metrics_services_manager/metrics_services_manager_client.h"
++#if !BUILDFLAG(IS_ANDROID)
+ #include "components/ukm/ukm_service.h"
++#endif
+ #include "components/variations/service/variations_service.h"
+ #include "components/variations/synthetic_trial_registry.h"
+ #include "services/network/public/cpp/shared_url_loader_factory.h"
+@@ -37,6 +52,18 @@
+ 
+ MetricsServicesManager::~MetricsServicesManager() = default;
+ 
++bool MetricsServicesManager::WasLastShutdownClean() const {
++  DCHECK(thread_checker_.CalledOnValidThread());
++  return client_->GetMetricsStateManager()
++      ->clean_exit_beacon()
++      ->exited_cleanly();
++}
++
++void MetricsServicesManager::LogHasSessionShutdownCleanly(bool clean) {
++  DCHECK(thread_checker_.CalledOnValidThread());
++  client_->GetMetricsStateManager()->LogHasSessionShutdownCleanly(clean);
++}
++
+ void MetricsServicesManager::InstantiateFieldTrialList() const {
+   client_->GetMetricsStateManager()->InstantiateFieldTrialList();
+ }
+@@ -52,34 +79,62 @@
+ }
+ 
+ metrics::MetricsService* MetricsServicesManager::GetMetricsService() {
++#if BUILDFLAG(IS_ANDROID)
++  DCHECK(thread_checker_.CalledOnValidThread());
++  return nullptr;
++#else
+   DCHECK(thread_checker_.CalledOnValidThread());
+   return GetMetricsServiceClient()->GetMetricsService();
++#endif  // BUILDFLAG(IS_ANDROID)
+ }
+ 
+ ukm::UkmService* MetricsServicesManager::GetUkmService() {
++#if BUILDFLAG(IS_ANDROID)
++  DCHECK(thread_checker_.CalledOnValidThread());
++  return nullptr;
++#else
+   DCHECK(thread_checker_.CalledOnValidThread());
+   return GetMetricsServiceClient()->GetUkmService();
++#endif  // BUILDFLAG(IS_ANDROID)
+ }
+ 
+ metrics::structured::StructuredMetricsService*
+ MetricsServicesManager::GetStructuredMetricsService() {
++#if BUILDFLAG(IS_ANDROID)
++  DCHECK(thread_checker_.CalledOnValidThread());
++  return nullptr;
++#else
+   DCHECK(thread_checker_.CalledOnValidThread());
+   return GetMetricsServiceClient()->GetStructuredMetricsService();
++#endif  // BUILDFLAG(IS_ANDROID)
+ }
+ 
+ metrics::dwa::DwaService* MetricsServicesManager::GetDwaService() {
++#if BUILDFLAG(IS_ANDROID)
++  DCHECK(thread_checker_.CalledOnValidThread());
++  return nullptr;
++#else
+   DCHECK(thread_checker_.CalledOnValidThread());
+   return GetMetricsServiceClient()->GetDwaService();
++#endif  // BUILDFLAG(IS_ANDROID)
+ }
+ 
+ metrics::private_metrics::PumaService*
+ MetricsServicesManager::GetPumaService() {
++#if BUILDFLAG(IS_ANDROID)
++  DCHECK(thread_checker_.CalledOnValidThread());
++  return nullptr;
++#else
+   DCHECK(thread_checker_.CalledOnValidThread());
+   return GetMetricsServiceClient()->GetPumaService();
++#endif  // BUILDFLAG(IS_ANDROID)
+ }
+ 
+ metrics::ReportingService* MetricsServicesManager::GetReportingService(
+     metrics::MetricsLogUploader::MetricServiceType service_type) {
++#if BUILDFLAG(IS_ANDROID)
++  return nullptr;
++#else
+   switch (service_type) {
+     case metrics::MetricsLogUploader::MetricServiceType::UMA: {
+       auto* service = GetMetricsService();
+@@ -102,6 +157,7 @@
+       return service ? service->reporting_service() : nullptr;
+     }
+   }
++#endif  // BUILDFLAG(IS_ANDROID)
+ }
+ 
+ variations::VariationsService* MetricsServicesManager::GetVariationsService() {
+@@ -153,6 +209,10 @@
+ 
+ metrics::MetricsServiceClient*
+ MetricsServicesManager::GetMetricsServiceClient() {
++#if BUILDFLAG(IS_ANDROID)
++  DCHECK(thread_checker_.CalledOnValidThread());
++  return nullptr;
++#else
+   DCHECK(thread_checker_.CalledOnValidThread());
+   if (!metrics_service_client_) {
+     metrics_service_client_ =
+@@ -163,11 +223,18 @@
+                             base::Unretained(this)));
+   }
+   return metrics_service_client_.get();
++#endif  // BUILDFLAG(IS_ANDROID)
+ }
+ 
+ void MetricsServicesManager::UpdatePermissions(bool current_may_record,
+                                                bool current_consent_given,
+                                                bool current_may_upload) {
++#if BUILDFLAG(IS_ANDROID)
++  DCHECK(thread_checker_.CalledOnValidThread());
++  may_record_ = false;
++  consent_given_ = false;
++  may_upload_ = false;
++#else
+   DCHECK(thread_checker_.CalledOnValidThread());
+   // If the user has opted out of metrics, delete local UMA, UKM and DWA states.
+   // TODO(crbug.com/40267999): The purges clean up the logs in the local state
+@@ -234,23 +301,34 @@
+   consent_given_ = current_consent_given;
+   may_upload_ = current_may_upload;
+   UpdateRunningServices();
++#endif  // BUILDFLAG(IS_ANDROID)
+ }
+ 
+ void MetricsServicesManager::LoadingStateChanged(bool is_loading) {
++#if BUILDFLAG(IS_ANDROID)
++  DCHECK(thread_checker_.CalledOnValidThread());
++#else
+   DCHECK(thread_checker_.CalledOnValidThread());
+   GetMetricsServiceClient()->LoadingStateChanged(is_loading);
+   if (is_loading) {
+     GetMetricsService()->OnPageLoadStarted();
+   }
+-}
+-
++#endif  // BUILDFLAG(IS_ANDROID)
++}
+ 
+ void MetricsServicesManager::OnRendererUnresponsive() {
++#if BUILDFLAG(IS_ANDROID)
++  DCHECK(thread_checker_.CalledOnValidThread());
++#else
+   DCHECK(thread_checker_.CalledOnValidThread());
+   GetMetricsService()->OnApplicationNotIdle();
++#endif  // BUILDFLAG(IS_ANDROID)
+ }
+ 
+ void MetricsServicesManager::UpdateRunningServices() {
++#if BUILDFLAG(IS_ANDROID)
++  DCHECK(thread_checker_.CalledOnValidThread());
++#else
+   DCHECK(thread_checker_.CalledOnValidThread());
+   metrics::MetricsService* metrics = GetMetricsService();
+ 
+@@ -276,9 +354,13 @@
+   UpdateStructuredMetricsService();
+   UpdateDwaService();
+   UpdatePumaService();
++#endif  // BUILDFLAG(IS_ANDROID)
+ }
+ 
+ void MetricsServicesManager::UpdateUkmService() {
++#if BUILDFLAG(IS_ANDROID)
++  DCHECK(thread_checker_.CalledOnValidThread());
++#else
+   ukm::UkmService* ukm = GetUkmService();
+   if (!ukm) {
+     return;
+@@ -301,9 +383,13 @@
+     ukm->DisableRecording();
+     ukm->DisableReporting();
+   }
++#endif  // BUILDFLAG(IS_ANDROID)
+ }
+ 
+ void MetricsServicesManager::UpdateStructuredMetricsService() {
++#if BUILDFLAG(IS_ANDROID)
++  DCHECK(thread_checker_.CalledOnValidThread());
++#else
+   metrics::structured::StructuredMetricsService* service =
+       GetStructuredMetricsService();
+   if (!service) {
+@@ -322,9 +408,13 @@
+     service->DisableRecording();
+     service->DisableReporting();
+   }
++#endif  // BUILDFLAG(IS_ANDROID)
+ }
+ 
+ void MetricsServicesManager::UpdateDwaService() {
++#if BUILDFLAG(IS_ANDROID)
++  DCHECK(thread_checker_.CalledOnValidThread());
++#else
+   metrics::dwa::DwaService* dwa = GetDwaService();
+   if (!dwa) {
+     return;
+@@ -352,9 +442,13 @@
+       metrics::dwa::DwaRecorder::Get()->Purge();
+     }
+   }
++#endif  // BUILDFLAG(IS_ANDROID)
+ }
+ 
+ void MetricsServicesManager::UpdatePumaService() {
++#if BUILDFLAG(IS_ANDROID)
++  DCHECK(thread_checker_.CalledOnValidThread());
++#else
+   metrics::private_metrics::PumaService* puma_service = GetPumaService();
+   if (!puma_service) {
+     return;
+@@ -366,9 +460,18 @@
+   } else {
+     puma_service->DisableReporting();
+   }
++#endif  // BUILDFLAG(IS_ANDROID)
+ }
+ 
+ void MetricsServicesManager::UpdateUploadPermissions(bool may_upload) {
++#if BUILDFLAG(IS_ANDROID)
++  DCHECK(thread_checker_.CalledOnValidThread());
++  // No reporting service exists in Android, including when force switches or
++  // managed preferences request collection.
++  may_record_ = false;
++  consent_given_ = false;
++  may_upload_ = false;
++#else
+   if (metrics_service_client_->IsMetricsReportingForceEnabled()) {
+     UpdatePermissions(/*current_may_record=*/true,
+                       /*current_consent_given=*/true,
+@@ -381,22 +484,39 @@
+       /*current_may_record=*/enable_state_provider.IsReportingEnabled(),
+       /*current_consent_given=*/enable_state_provider.IsConsentGiven(),
+       may_upload);
++#endif  // BUILDFLAG(IS_ANDROID)
+ }
+ 
+ bool MetricsServicesManager::IsMetricsReportingEnabled() const {
++#if BUILDFLAG(IS_ANDROID)
++  return false;
++#else
+   return client_->GetEnabledStateProvider().IsReportingEnabled();
++#endif  // BUILDFLAG(IS_ANDROID)
+ }
+ 
+ bool MetricsServicesManager::IsMetricsConsentGiven() const {
++#if BUILDFLAG(IS_ANDROID)
++  return false;
++#else
+   return client_->GetEnabledStateProvider().IsConsentGiven();
++#endif  // BUILDFLAG(IS_ANDROID)
+ }
+ 
+ bool MetricsServicesManager::IsUkmAllowedForAllProfiles() {
++#if BUILDFLAG(IS_ANDROID)
++  return false;
++#else
+   return metrics_service_client_->IsUkmAllowedForAllProfiles();
++#endif  // BUILDFLAG(IS_ANDROID)
+ }
+ 
+ bool MetricsServicesManager::IsDwaAllowedForAllProfiles() {
++#if BUILDFLAG(IS_ANDROID)
++  return false;
++#else
+   return metrics_service_client_->IsDwaAllowedForAllProfiles();
++#endif  // BUILDFLAG(IS_ANDROID)
+ }
+ 
+ }  // namespace metrics_services_manager

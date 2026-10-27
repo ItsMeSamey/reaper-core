@@ -1,0 +1,449 @@
+# Android modal dialog static-analysis corrections.
+substitutions:
+- description: Import Android pane dialog dependencies
+  regex:
+    re_pattern: import\ android\.app\.Activity;
+    replace: 'import android.app.Activity;
+
+      import android.graphics.drawable.Drawable;'
+- description: Import Android pane dialog dependencies
+  regex:
+    re_pattern: import\ android\.view\.ViewStub;
+    replace: 'import android.view.ViewStub;
+
+      import android.widget.FrameLayout;'
+- description: Import Android pane dialog dependencies
+  regex:
+    re_pattern: import\ androidx\.core\.content\.ContextCompat;
+    replace: 'import androidx.activity.ComponentDialog;
+
+      import androidx.core.content.ContextCompat;'
+- description: Import Android pane dialog dependencies
+  regex:
+    re_pattern: import\ org\.chromium\.base\.supplier\.MonotonicObservableSupplier;
+    replace: 'import org.chromium.base.Callback;
+
+      import org.chromium.base.ThreadUtils;
+
+      import org.chromium.base.supplier.MonotonicObservableSupplier;'
+- description: Import Android pane dialog dependencies
+  regex:
+    re_pattern: import\ org\.chromium\.chrome\.browser\.fullscreen\.FullscreenManager;
+    replace: 'import org.chromium.chrome.browser.compositor.SplitTabCoordinator;
+
+      import org.chromium.chrome.browser.fullscreen.FullscreenManager;'
+- description: Import Android pane dialog dependencies
+  regex:
+    re_pattern: import\ org\.chromium\.chrome\.browser\.tab\.TabObscuringHandler;
+    replace: 'import org.chromium.chrome.browser.tab.TabObscuringHandler;
+
+      import org.chromium.chrome.browser.tab.TabObserver;
+
+      import org.chromium.chrome.browser.tab.TabUtils;'
+- description: Import Android pane dialog dependencies
+  regex:
+    re_pattern: import\ org\.chromium\.ui\.UiUtils;
+    replace: 'import org.chromium.ui.UiUtils;
+
+      import org.chromium.ui.modaldialog.DialogDismissalCause;
+
+      import org.chromium.ui.modaldialog.ModalDialogProperties;'
+- description: Import Android pane dialog dependencies
+  regex:
+    re_pattern: import\ org\.chromium\.ui\.modelutil\.PropertyModel;
+    replace: 'import org.chromium.ui.modelutil.PropertyModel;
+
+      import org.chromium.url.GURL;'
+- description: Retain and observe the requesting tab independently of active-pane selection
+  regex:
+    re_pattern: '\ \ \ \ private\ @Nullable\ PropertyModel\ mScrimModel;\
+
+      '
+    replace: "    private @Nullable PropertyModel mScrimModel;\n\n    private @Nullable ViewGroup mDefaultContainerParent;\n    private @Nullable MarginLayoutParams mDefaultContainerLayoutParams;\n    private @Nullable Drawable mDefaultContainerBackground;\n    private int mDefaultContainerIndex;\n    private boolean mDialogViewAdded;\n    private boolean mDestroyed;\n    private @Nullable Tab mDialogOwnerTab;\n    private @Nullable WebContents mDialogOwnerContents;\n    private @Nullable SplitTabCoordinator mSplitCoordinator;\n    private final Runnable mPaneUnavailable =\n            () -> dismissCurrentDialog(DialogDismissalCause.TAB_SWITCHED);\n    private final TabObserver mDialogOwnerObserver = new TabObserver() {\n        @Override\n        public void onDestroyed(Tab tab) {\n            if (tab == mDialogOwnerTab) {\n                dismissCurrentDialog(DialogDismissalCause.TAB_DESTROYED);\n            }\n        }\n\n        @Override\n        public void onPageLoadStarted(Tab tab, GURL url) {\n            if (tab == mDialogOwnerTab) {\n                dismissCurrentDialog(DialogDismissalCause.NAVIGATE);\n            }\n        }\n\n        @Override\n        public void onContentChanged(Tab tab) {\n            if (tab == mDialogOwnerTab && tab.getWebContents() != mDialogOwnerContents) {\n                dismissCurrentDialog(DialogDismissalCause.WEB_CONTENTS_DESTROYED);\n            }\n        }\n    };\n"
+- description: Preserve initial bottom-control insets before the first observer update
+  regex:
+    re_pattern: \ \ \ \ \ \ \ \ mBrowserControlsVisibilityManager\ =\ browserControlsVisibilityManager;
+    replace: "        mBrowserControlsVisibilityManager = browserControlsVisibilityManager;\n        mBottomControlsHeight = browserControlsVisibilityManager.getBottomControlsHeight();"
+- description: Validate owner window/profile and preserve pane-local dialogs across peer activation
+  regex:
+    re_pattern: '\ \ \ \ public\ void\ destroy\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ mBrowserControlsVisibilityManager\.removeObserver\(this\);\
+
+      \ \ \ \ \}'
+    replace: "    public void destroy() {\n        mDestroyed = true;\n        if (getDialogModel() != null) {\n            dismissCurrentDialog(DialogDismissalCause.ACTIVITY_DESTROYED);\n        }\n        mBrowserControlsVisibilityManager.removeObserver(this);\n    }\n\n    @Override\n    protected void addDialogView(\n            PropertyModel model,\n            @Nullable Callback<ComponentDialog> onDialogCreatedCallback,\n            @Nullable Callback<View> onDialogShownCallback) {\n        mDialogViewAdded = false;\n        if (mDestroyed) {\n            dismissUnavailableModel(model);\n            return;\n        }\n        Tab current = mTabModelSelector.getCurrentTab();\n        Object requestedOwner = model.containsKey(ModalDialogProperties.TAB_MODAL_OWNER)\n                ? model.get(ModalDialogProperties.TAB_MODAL_OWNER) : null;\n        Tab owner = requestedOwner instanceof WebContents contents && !contents.isDestroyed()\n                ? TabUtils.fromWebContents(contents) : requestedOwner == null ? current : null;\n        if (owner == null || owner.isDestroyed() || current == null || current.isDestroyed()\n                || requestedOwner != null\n                        && mTabModelSelector.getCurrentModel().getTabById(owner.getId()) != owner) {\n            dismissUnavailableModel(model);\n            return;\n        }\n        WebContents contents = owner.getWebContents();\n        if (requestedOwner != null\n                && (contents == null || contents != requestedOwner || contents.isDestroyed())) {\n            dismissUnavailableModel(model);\n            return;\n        }\n        SplitTabCoordinator coordinator = contents == null\n                ? null : SplitTabCoordinator.fromWebContents(contents);\n        if (coordinator != null\n                && (contents == null || coordinator.getDialogHost(contents) == null)) {\n            dismissUnavailableModel(model);\n            return;\n        }\n        WebContents currentContents = current.getWebContents();\n        if (owner != current && (coordinator == null || currentContents == null\n                || !coordinator.contains(currentContents))) {\n            dismissUnavailableModel(model);\n            return;\n        }\n        if (requestedOwner == null && contents != null\n                && model.containsKey(ModalDialogProperties.TAB_MODAL_OWNER)) {\n            // Preserve legacy selected-tab ownership if this dialog is later suspended.\n            model.set(ModalDialogProperties.TAB_MODAL_OWNER, contents);\n        }\n        mDialogOwnerTab = owner;\n        mDialogOwnerContents = contents;\n        mSplitCoordinator = coordinator;\n        mDialogViewAdded = true;\n        owner.addObserver(mDialogOwnerObserver);\n        // Registration cannot reenter with an unavailable pane after the above\n        // same-thread validation. Teardown later dismisses before removing its host.\n        if (coordinator != null && contents != null) {\n            coordinator.addPaneUnavailableObserver(contents, mPaneUnavailable);\n        }\n        super.addDialogView(model, onDialogCreatedCallback, onDialogShownCallback);\n    }\n\n    private void dismissUnavailableModel(PropertyModel model) {\n        // The manager must finish assigning the presenter before its ordinary\n        // denial callback can remove a model for which no view was constructed.\n        ThreadUtils.postOnUiThread(() -> {\n            if (getDialogModel() == model) {\n                dismissCurrentDialog(mDestroyed ? DialogDismissalCause.ACTIVITY_DESTROYED\n                        : DialogDismissalCause.NOT_ATTACHED_TO_WINDOW);\n            }\n        });\n    }\n\n    boolean canKeepDialogForTab(@Nullable Tab tab) {\n        WebContents contents = tab == null ? null : tab.getWebContents();\n        return getDialogModel() != null && tab != null\n                && (mDialogOwnerTab == tab || mSplitCoordinator != null && contents != null\n                        && mSplitCoordinator.contains(contents));\n    }\n\n    boolean shouldHandleBackPress() {\n        return mSplitCoordinator == null || mDialogOwnerContents != null\n                && mSplitCoordinator.isActive(mDialogOwnerContents);\n    }"
+- description: Keep the original full-tab container parent and layout for unsplit dialogs
+  regex:
+    re_pattern: \ \ \ \ \ \ \ \ mContainerParent\ =\ \(ViewGroup\)\ dialogContainer\.getParent\(\);
+    replace: "        mContainerParent = (ViewGroup) dialogContainer.getParent();\n        mDefaultContainerParent = mContainerParent;\n        mDefaultContainerIndex = mContainerParent.indexOfChild(dialogContainer);\n        mDefaultContainerLayoutParams = (MarginLayoutParams) dialogContainer.getLayoutParams();\n        mDefaultContainerBackground = dialogContainer.getBackground();"
+- description: Host the dialog and its scrim within only the requesting pane
+  regex:
+    re_pattern: '\ \ \ \ protected\ void\ showDialogContainer\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ maybeUpdateDialogLayout\(\);'
+    replace: "    protected void showDialogContainer() {\n        ViewGroup container = assumeNonNull(getDialogContainer());\n        if (mSplitCoordinator != null && mDialogOwnerContents != null) {\n            ViewGroup host = assumeNonNull(\n                    mSplitCoordinator.getDialogHost(mDialogOwnerContents));\n            if (container.getParent() != host) {\n                UiUtils.removeViewFromParent(container);\n                host.addView(container, new FrameLayout.LayoutParams(\n                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));\n            }\n            mContainerParent = host;\n            container.setBackgroundColor(\n                    ContextCompat.getColor(mActivity, R.color.modal_dialog_scrim_color_lff));\n            mSplitCoordinator.setDialogShowing(mDialogOwnerContents, true);\n            if (BrowserControlsUtils.areBrowserControlsFullyVisible(\n                    mBrowserControlsVisibilityManager)) {\n                runEnterAnimation();\n            } else {\n                mRunEnterAnimationOnCallback = true;\n            }\n            return;\n        }\n        ViewGroup parent = assumeNonNull(mDefaultContainerParent);\n        if (container.getParent() != parent) {\n            UiUtils.removeViewFromParent(container);\n            parent.addView(container, Math.min(mDefaultContainerIndex, parent.getChildCount()),\n                    assumeNonNull(mDefaultContainerLayoutParams));\n            mContainerIsAtFront = false;\n        }\n        mContainerParent = parent;\n        container.setBackground(mDefaultContainerBackground);\n        mShouldUpdateContainerLayoutParams = true;\n        maybeUpdateDialogLayout();"
+- description: Apply modal tab state to the actual requester rather than the selected peer
+  regex:
+    re_pattern: \ \ \ \ \ \ \ \ \ \ \ \ mActiveTab\ =\ mTabModelSelector\.getCurrentTab\(\);
+    replace: "            mActiveTab = mDialogOwnerTab != null\n                    ? mDialogOwnerTab : mTabModelSelector.getCurrentTab();"
+- description: Keep browser controls usable for the other split pane
+  regex:
+    re_pattern: \ \ \ \ \ \ \ \ \ \ \ \ setMenuButtonEnabled\(false\);
+    replace: '            if (mSplitCoordinator == null) setMenuButtonEnabled(false);'
+- description: Restore only the affected pane and retire lifecycle observers before completion
+  regex:
+    re_pattern: '\ \ \ \ protected\ void\ removeDialogView\(@Nullable\ PropertyModel\ model\)\ \{\
+
+      \ \ \ \ \ \ \ \ assumeNonNull\(mTabObscuringToken\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ mRunEnterAnimationOnCallback\ =\ false;\
+
+      \ \ \ \ \ \ \ \ mTabObscuringHandlerSupplier\.get\(\)\.unobscure\(mTabObscuringToken\);\
+
+      \ \ \ \ \ \ \ \ mTabObscuringToken\ =\ null;'
+    replace: "    protected void removeDialogView(@Nullable PropertyModel model) {\n        if (!mDialogViewAdded) return;\n        if (mDialogOwnerTab != null) mDialogOwnerTab.removeObserver(mDialogOwnerObserver);\n        if (mSplitCoordinator != null && mDialogOwnerContents != null) {\n            mSplitCoordinator.removePaneUnavailableObserver(mDialogOwnerContents, mPaneUnavailable);\n            mSplitCoordinator.setDialogShowing(mDialogOwnerContents, false);\n        }\n        mRunEnterAnimationOnCallback = false;\n        if (mTabObscuringToken != null) {\n            mTabObscuringHandlerSupplier.get().unobscure(mTabObscuringToken);\n            mTabObscuringToken = null;\n        }"
+- description: Clear requester state after the existing dialog teardown
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ super\.removeDialogView\(model\);\
+
+      \ \ \ \ \}'
+    replace: "        super.removeDialogView(model);\n        mDialogViewAdded = false;\n        mDialogOwnerTab = null;\n        mDialogOwnerContents = null;\n        mSplitCoordinator = null;\n    }"
+- description: Keep dialog ordering inside the pane below the browser controls
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ super\.updateContainerHierarchy\(toFront\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ if\ \(toFront\ ==\ mContainerIsAtFront\)\ return;'
+    replace: "        if (!mDialogViewAdded) return;\n        super.updateContainerHierarchy(toFront);\n        if (mSplitCoordinator != null) {\n            if (toFront && getDialogContainer() != null) getDialogContainer().bringToFront();\n            return;\n        }\n\n        if (toFront == mContainerIsAtFront) return;"
+- description: Let the coordinator resize split hosts without whole-window margins
+  regex:
+    re_pattern: '\ \ \ \ private\ void\ maybeUpdateDialogLayout\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ if\ \(mShouldUpdateContainerLayoutParams'
+    replace: "    private void maybeUpdateDialogLayout() {\n        if (mSplitCoordinator != null) {\n            mShouldUpdateContainerLayoutParams = false;\n            return;\n        }\n        if (mShouldUpdateContainerLayoutParams"
+- description: Format changed Java with the pinned Chromium formatter
+  regex:
+    re_pattern: '\ \ \ \ private\ @Nullable\ WebContents\ mDialogOwnerContents;\
+
+      \ \ \ \ private\ @Nullable\ SplitTabCoordinator\ mSplitCoordinator;\
+
+      \ \ \ \ private\ final\ Runnable\ mPaneUnavailable\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \(\)\ \->\ dismissCurrentDialog\(DialogDismissalCause\.TAB_SWITCHED\);\
+
+      \ \ \ \ private\ final\ TabObserver\ mDialogOwnerObserver\ =\ new\ TabObserver\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ @Override\
+
+      \ \ \ \ \ \ \ \ public\ void\ onDestroyed\(Tab\ tab\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(tab\ ==\ mDialogOwnerTab\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ dismissCurrentDialog\(DialogDismissalCause\.TAB_DESTROYED\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ @Override\
+
+      \ \ \ \ \ \ \ \ public\ void\ onPageLoadStarted\(Tab\ tab,\ GURL\ url\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(tab\ ==\ mDialogOwnerTab\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ dismissCurrentDialog\(DialogDismissalCause\.NAVIGATE\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ @Override\
+
+      \ \ \ \ \ \ \ \ public\ void\ onContentChanged\(Tab\ tab\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(tab\ ==\ mDialogOwnerTab\ \&\&\ tab\.getWebContents\(\)\ !=\ mDialogOwnerContents\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ dismissCurrentDialog\(DialogDismissalCause\.WEB_CONTENTS_DESTROYED\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \};\
+
+      \
+
+      \ \ \ \ /\*\*\
+
+      \ \ \ \ \ \*\ Constructor\ for\ initializing\ dialog\ container\.\
+
+      \ \ \ \ \ \*\
+
+      '
+    replace: "    private @Nullable WebContents mDialogOwnerContents;\n    private @Nullable SplitTabCoordinator mSplitCoordinator;\n    private final Runnable mPaneUnavailable =\n            () -> dismissCurrentDialog(DialogDismissalCause.TAB_SWITCHED);\n    private final TabObserver mDialogOwnerObserver =\n            new TabObserver() {\n                @Override\n                public void onDestroyed(Tab tab) {\n                    if (tab == mDialogOwnerTab) {\n                        dismissCurrentDialog(DialogDismissalCause.TAB_DESTROYED);\n                    }\n                }\n\n                @Override\n                public void onPageLoadStarted(Tab tab, GURL url) {\n                    if (tab == mDialogOwnerTab) {\n                        dismissCurrentDialog(DialogDismissalCause.NAVIGATE);\n                    }\n                }\n\n                @Override\n                public void onContentChanged(Tab tab) {\n                    if (tab == mDialogOwnerTab && tab.getWebContents() != mDialogOwnerContents) {\n                        dismissCurrentDialog(DialogDismissalCause.WEB_CONTENTS_DESTROYED);\n                    }\n                }\n            };\n\n    /**\n     * Constructor for initializing dialog container.\n     *\n"
+- description: Format changed Java with the pinned Chromium formatter
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ dismissUnavailableModel\(model\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ return;\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ Tab\ current\ =\ mTabModelSelector\.getCurrentTab\(\);\
+
+      \ \ \ \ \ \ \ \ Object\ requestedOwner\ =\ model\.containsKey\(ModalDialogProperties\.TAB_MODAL_OWNER\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \?\ model\.get\(ModalDialogProperties\.TAB_MODAL_OWNER\)\ :\ null;\
+
+      \ \ \ \ \ \ \ \ Tab\ owner\ =\ requestedOwner\ instanceof\ WebContents\ contents\ \&\&\ !contents\.isDestroyed\(\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \?\ TabUtils\.fromWebContents\(contents\)\ :\ requestedOwner\ ==\ null\ \?\ current\ :\ null;\
+
+      \ \ \ \ \ \ \ \ if\ \(owner\ ==\ null\ \|\|\ owner\.isDestroyed\(\)\ \|\|\ current\ ==\ null\ \|\|\ current\.isDestroyed\(\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \|\|\ requestedOwner\ !=\ null\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \&\&\ mTabModelSelector\.getCurrentModel\(\)\.getTabById\(owner\.getId\(\)\)\ !=\ owner\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ dismissUnavailableModel\(model\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ return;\
+
+      '
+    replace: "            dismissUnavailableModel(model);\n            return;\n        }\n        Tab current = mTabModelSelector.getCurrentTab();\n        Object requestedOwner =\n                model.containsKey(ModalDialogProperties.TAB_MODAL_OWNER)\n                        ? model.get(ModalDialogProperties.TAB_MODAL_OWNER)\n                        : null;\n        Tab owner =\n                requestedOwner instanceof WebContents contents && !contents.isDestroyed()\n                        ? TabUtils.fromWebContents(contents)\n                        : requestedOwner == null ? current : null;\n        if (owner == null\n                || owner.isDestroyed()\n                || current == null\n                || current.isDestroyed()\n                || requestedOwner != null\n                        && mTabModelSelector.getCurrentModel().getTabById(owner.getId()) != owner) {\n            dismissUnavailableModel(model);\n            return;\n"
+- description: Format changed Java with the pinned Chromium formatter
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \&\&\ \(contents\ ==\ null\ \|\|\ contents\ !=\ requestedOwner\ \|\|\ contents\.isDestroyed\(\)\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ dismissUnavailableModel\(model\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ return;\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ SplitTabCoordinator\ coordinator\ =\ contents\ ==\ null\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \?\ null\ :\ SplitTabCoordinator\.fromWebContents\(contents\);\
+
+      \ \ \ \ \ \ \ \ if\ \(coordinator\ !=\ null\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \&\&\ \(contents\ ==\ null\ \|\|\ coordinator\.getDialogHost\(contents\)\ ==\ null\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ dismissUnavailableModel\(model\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ return;\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ WebContents\ currentContents\ =\ current\.getWebContents\(\);\
+
+      \ \ \ \ \ \ \ \ if\ \(owner\ !=\ current\ \&\&\ \(coordinator\ ==\ null\ \|\|\ currentContents\ ==\ null\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \|\|\ !coordinator\.contains\(currentContents\)\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ dismissUnavailableModel\(model\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ return;\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ if\ \(requestedOwner\ ==\ null\ \&\&\ contents\ !=\ null\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \&\&\ model\.containsKey\(ModalDialogProperties\.TAB_MODAL_OWNER\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ //\ Preserve\ legacy\ selected\-tab\ ownership\ if\ this\ dialog\ is\ later\ suspended\.\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ model\.set\(ModalDialogProperties\.TAB_MODAL_OWNER,\ contents\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      '
+    replace: "                && (contents == null || contents != requestedOwner || contents.isDestroyed())) {\n            dismissUnavailableModel(model);\n            return;\n        }\n        SplitTabCoordinator coordinator =\n                contents == null ? null : SplitTabCoordinator.fromWebContents(contents);\n        if (coordinator != null\n                && (contents == null || coordinator.getDialogHost(contents) == null)) {\n            dismissUnavailableModel(model);\n            return;\n        }\n        WebContents currentContents = current.getWebContents();\n        if (owner != current\n                && (coordinator == null\n                        || currentContents == null\n                        || !coordinator.contains(currentContents))) {\n            dismissUnavailableModel(model);\n            return;\n        }\n        if (requestedOwner == null\n                && contents != null\n                && model.containsKey(ModalDialogProperties.TAB_MODAL_OWNER)) {\n            // Preserve legacy selected-tab ownership if this dialog is later suspended.\n            model.set(ModalDialogProperties.TAB_MODAL_OWNER, contents);\n        }\n"
+- description: Format changed Java with the pinned Chromium formatter
+  regex:
+    re_pattern: '\
+
+      \ \ \ \ private\ void\ dismissUnavailableModel\(PropertyModel\ model\)\ \{\
+
+      \ \ \ \ \ \ \ \ //\ The\ manager\ must\ finish\ assigning\ the\ presenter\ before\ its\ ordinary\
+
+      \ \ \ \ \ \ \ \ //\ denial\ callback\ can\ remove\ a\ model\ for\ which\ no\ view\ was\ constructed\.\
+
+      \ \ \ \ \ \ \ \ ThreadUtils\.postOnUiThread\(\(\)\ \->\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(getDialogModel\(\)\ ==\ model\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ dismissCurrentDialog\(mDestroyed\ \?\ DialogDismissalCause\.ACTIVITY_DESTROYED\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ :\ DialogDismissalCause\.NOT_ATTACHED_TO_WINDOW\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \}\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ boolean\ canKeepDialogForTab\(@Nullable\ Tab\ tab\)\ \{\
+
+      \ \ \ \ \ \ \ \ WebContents\ contents\ =\ tab\ ==\ null\ \?\ null\ :\ tab\.getWebContents\(\);\
+
+      \ \ \ \ \ \ \ \ return\ getDialogModel\(\)\ !=\ null\ \&\&\ tab\ !=\ null\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \&\&\ \(mDialogOwnerTab\ ==\ tab\ \|\|\ mSplitCoordinator\ !=\ null\ \&\&\ contents\ !=\ null\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \&\&\ mSplitCoordinator\.contains\(contents\)\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ boolean\ shouldHandleBackPress\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ return\ mSplitCoordinator\ ==\ null\ \|\|\ mDialogOwnerContents\ !=\ null\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \&\&\ mSplitCoordinator\.isActive\(mDialogOwnerContents\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ /\*\*\
+
+      \ \ \ \ \ \*\ @return\ The\ browser\ controls\ visibility\ delegate\ associated\ with\ tab\ modal\ dialogs\.\
+
+      '
+    replace: "\n    private void dismissUnavailableModel(PropertyModel model) {\n        // The manager must finish assigning the presenter before its ordinary\n        // denial callback can remove a model for which no view was constructed.\n        ThreadUtils.postOnUiThread(\n                () -> {\n                    if (getDialogModel() == model) {\n                        dismissCurrentDialog(\n                                mDestroyed\n                                        ? DialogDismissalCause.ACTIVITY_DESTROYED\n                                        : DialogDismissalCause.NOT_ATTACHED_TO_WINDOW);\n                    }\n                });\n    }\n\n    boolean canKeepDialogForTab(@Nullable Tab tab) {\n        WebContents contents = tab == null ? null : tab.getWebContents();\n        return getDialogModel() != null\n                && tab != null\n                && (mDialogOwnerTab == tab\n                        || mSplitCoordinator != null\n                                && contents != null\n                                && mSplitCoordinator.contains(contents));\n    }\n\n    boolean shouldHandleBackPress() {\n        return mSplitCoordinator == null\n                || mDialogOwnerContents != null && mSplitCoordinator.isActive(mDialogOwnerContents);\n    }\n\n    /**\n     * @return The browser controls visibility delegate associated with tab modal dialogs.\n"
+- description: Format changed Java with the pinned Chromium formatter
+  regex:
+    re_pattern: '\ \ \ \ @Override\
+
+      \ \ \ \ protected\ void\ showDialogContainer\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ ViewGroup\ container\ =\ assumeNonNull\(getDialogContainer\(\)\);\
+
+      \ \ \ \ \ \ \ \ if\ \(mSplitCoordinator\ !=\ null\ \&\&\ mDialogOwnerContents\ !=\ null\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ ViewGroup\ host\ =\ assumeNonNull\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mSplitCoordinator\.getDialogHost\(mDialogOwnerContents\)\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(container\.getParent\(\)\ !=\ host\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ UiUtils\.removeViewFromParent\(container\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ host\.addView\(container,\ new\ FrameLayout\.LayoutParams\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ ViewGroup\.LayoutParams\.MATCH_PARENT,\ ViewGroup\.LayoutParams\.MATCH_PARENT\)\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mContainerParent\ =\ host;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ container\.setBackgroundColor\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ ContextCompat\.getColor\(mActivity,\ R\.color\.modal_dialog_scrim_color_lff\)\);\
+
+      '
+    replace: "    @Override\n    protected void showDialogContainer() {\n        ViewGroup container = assumeNonNull(getDialogContainer());\n        if (mSplitCoordinator != null && mDialogOwnerContents != null) {\n            ViewGroup host = assumeNonNull(mSplitCoordinator.getDialogHost(mDialogOwnerContents));\n            if (container.getParent() != host) {\n                UiUtils.removeViewFromParent(container);\n                host.addView(\n                        container,\n                        new FrameLayout.LayoutParams(\n                                ViewGroup.LayoutParams.MATCH_PARENT,\n                                ViewGroup.LayoutParams.MATCH_PARENT));\n            }\n            mContainerParent = host;\n            container.setBackgroundColor(\n                    ContextCompat.getColor(mActivity, R.color.modal_dialog_scrim_color_lff));\n"
+- description: Format changed Java with the pinned Chromium formatter
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ ViewGroup\ parent\ =\ assumeNonNull\(mDefaultContainerParent\);\
+
+      \ \ \ \ \ \ \ \ if\ \(container\.getParent\(\)\ !=\ parent\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ UiUtils\.removeViewFromParent\(container\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ parent\.addView\(container,\ Math\.min\(mDefaultContainerIndex,\ parent\.getChildCount\(\)\),\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ assumeNonNull\(mDefaultContainerLayoutParams\)\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mContainerIsAtFront\ =\ false;\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ mContainerParent\ =\ parent;\
+
+      '
+    replace: "        }\n        ViewGroup parent = assumeNonNull(mDefaultContainerParent);\n        if (container.getParent() != parent) {\n            UiUtils.removeViewFromParent(container);\n            parent.addView(\n                    container,\n                    Math.min(mDefaultContainerIndex, parent.getChildCount()),\n                    assumeNonNull(mDefaultContainerLayoutParams));\n            mContainerIsAtFront = false;\n        }\n        mContainerParent = parent;\n"
+- description: Format changed Java with the pinned Chromium formatter
+  regex:
+    re_pattern: '\
+
+      \ \ \ \ @Override\
+
+      \ \ \ \ protected\ void\ setBrowserControlsAccess\(boolean\ restricted\)\ \{\
+
+      \ \ \ \ \ \ \ \ if\ \(restricted\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mActiveTab\ =\ mDialogOwnerTab\ !=\ null\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \?\ mDialogOwnerTab\ :\ mTabModelSelector\.getCurrentTab\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ assert\ mActiveTab\ !=\ null\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ :\ "Tab\ modal\ dialogs\ should\ be\ shown\ on\ top\ of\ an\ active\ tab\.";\
+
+      \
+
+      \ \ \ \ \ \ \ \ \ \ \ \ //\ Hide\ contextual\ search\ panel\ so\ that\ bottom\ toolbar\ will\ not\ be\
+
+      '
+    replace: "\n    @Override\n    protected void setBrowserControlsAccess(boolean restricted) {\n        if (restricted) {\n            mActiveTab =\n                    mDialogOwnerTab != null ? mDialogOwnerTab : mTabModelSelector.getCurrentTab();\n            assert mActiveTab != null\n                    : \"Tab modal dialogs should be shown on top of an active tab.\";\n\n            // Hide contextual search panel so that bottom toolbar will not be\n"
+- description: Group the existing explicit-owner membership conjunction without changing null guards
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \|\|\ requestedOwner\ !=\ null\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \&\&\ mTabModelSelector\.getCurrentModel\(\)\.getTabById\(owner\.getId\(\)\)\ !=\ owner\)\ \{'
+    replace: "                || (requestedOwner != null\n                        && mTabModelSelector.getCurrentModel().getTabById(owner.getId()) != owner)) {"
+- description: Make the existing split-peer keep condition explicit without changing evaluation order
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \|\|\ mSplitCoordinator\ !=\ null\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \&\&\ contents\ !=\ null\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \&\&\ mSplitCoordinator\.contains\(contents\)\);'
+    replace: "                        || (mSplitCoordinator != null\n                                && contents != null\n                                && mSplitCoordinator.contains(contents)));"
+- description: Group the existing active-owner back-press condition without changing behavior
+  regex:
+    re_pattern: \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \|\|\ mDialogOwnerContents\ !=\ null\ \&\&\ mSplitCoordinator\.isActive\(mDialogOwnerContents\);
+    replace: "                || (mDialogOwnerContents != null\n                        && mSplitCoordinator.isActive(mDialogOwnerContents));"
+- description: Format changed Java with the pinned Chromium formatter
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \|\|\ owner\.isDestroyed\(\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \|\|\ current\ ==\ null\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \|\|\ current\.isDestroyed\(\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \|\|\ \(requestedOwner\ !=\ null\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \&\&\ mTabModelSelector\.getCurrentModel\(\)\.getTabById\(owner\.getId\(\)\)\ !=\ owner\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ dismissUnavailableModel\(model\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ return;\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ WebContents\ contents\ =\ owner\.getWebContents\(\);\
+
+      '
+    replace: "                || owner.isDestroyed()\n                || current == null\n                || current.isDestroyed()\n                || (requestedOwner != null\n                        && mTabModelSelector.getCurrentModel().getTabById(owner.getId())\n                                != owner)) {\n            dismissUnavailableModel(model);\n            return;\n        }\n        WebContents contents = owner.getWebContents();\n"
+
+# Reaper Android ordinary Omnibox caller closure after physical AI purge.
+- description: Rename actual functional ordinary session operations in all selected
+    consumers and Brave override
+  regex:
+    re_pattern: endFuseboxInput
+    replace: endInput

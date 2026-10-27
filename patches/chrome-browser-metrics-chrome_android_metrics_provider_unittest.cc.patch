@@ -1,0 +1,156 @@
+diff --git a/chrome/browser/metrics/chrome_android_metrics_provider_unittest.cc b/chrome/browser/metrics/chrome_android_metrics_provider_unittest.cc
+index 6e95ea7ea57c6bc08effbc88bbed0f0cc5a81317..8b73dae075350d45fe03c233a320488993f0d60b 100644
+--- a/chrome/browser/metrics/chrome_android_metrics_provider_unittest.cc
++++ b/chrome/browser/metrics/chrome_android_metrics_provider_unittest.cc
+@@ -10,6 +10,7 @@
+ #include "base/test/scoped_feature_list.h"
+ #include "base/test/task_environment.h"
+ #include "base/test/test_simple_task_runner.h"
++#include "build/build_config.h"
+ #include "chrome/browser/flags/android/chrome_session_state.h"
+ #include "components/metrics/android_metrics_helper.h"
+ #include "components/metrics/metrics_reporting_choice_service.h"
+@@ -57,7 +58,9 @@
+         orig_activity_type_(GetInitialActivityTypeForTesting()),
+         task_runner_(base::MakeRefCounted<base::TestSimpleTaskRunner>()) {
+     ChromeAndroidMetricsProvider::RegisterPrefs(pref_service_.registry());
++#if !BUILDFLAG(IS_ANDROID)
+     ukm::UkmService::RegisterPrefs(pref_service_.registry());
++#endif  // !BUILDFLAG(IS_ANDROID)
+   }
+   ~ChromeAndroidMetricsProviderTest() override {
+     // In case the test played with the activity type, restore it to what it
+@@ -80,6 +83,7 @@
+   scoped_refptr<base::TestSimpleTaskRunner> task_runner_;
+ };
+ 
++#if !BUILDFLAG(IS_ANDROID)
+ class MockDemographicMetricsProvider
+     : public metrics::UkmDemographicMetricsProvider {
+  public:
+@@ -89,9 +93,11 @@
+   MOCK_METHOD1(ProvideSyncedUserNoisedBirthYearAndGenderToReport,
+                void(ukm::Report* report));
+ };
++#endif  // !BUILDFLAG(IS_ANDROID)
+ 
+ }  // namespace
+ 
++#if !BUILDFLAG(IS_ANDROID)
+ int GetPersistedLogCount(TestingPrefServiceSimple& prefs) {
+   return prefs.GetList(ukm::prefs::kUkmUnsentLogStore).size();
+ }
+@@ -130,6 +136,8 @@
+   EXPECT_TRUE(uma_proto_.system_profile().hardware().has_full_hardware_class());
+ }
+ 
++#endif  // !BUILDFLAG(IS_ANDROID)
++
+ TEST_F(ChromeAndroidMetricsProviderTest,
+        ProvideCurrentSessionData_MultiWindowMode) {
+   metrics_provider_.ProvideCurrentSessionData(&uma_proto_);
+@@ -216,25 +224,27 @@
+   histogram_tester_.ExpectTotalCount("Android.ChromeActivity.Type", 0);
+ }
+ 
+-// Tests initial transition from kPreFirstTab to !kPreFirstTab.
++// Tests startup activity state without registering the removed metrics pref.
+ TEST_P(ChromeAndroidMetricsProviderTest, SetActivityType_CustomTabs) {
+   // kPreFirstTab -> kPreFirstTab is not a valid scenario. Early exit.
+   if (activity_type() == ActivityType::kPreFirstTab) {
+     return;
+   }
+ 
+-  // Validating startup, so seed the activity type to kPreFirstTab,
++  constexpr char kLastActivityTypePref[] =
++      "user_experience_metrics.last_activity_type";
++  TestingPrefServiceSimple unregistered_local_state;
++  ASSERT_EQ(nullptr,
++            unregistered_local_state.FindPreference(kLastActivityTypePref));
++
+   SetInitialActivityTypeForTesting(ActivityType::kPreFirstTab);
+-
+-  // Set the activity type as if a new tab was created..
+-  SetActivityType(&pref_service_, activity_type());
+-
+-  // Emission of Actiity type histograms has been deferred until now. So we
+-  // should see activity type samples.
+-  histogram_tester_.ExpectUniqueSample(
+-      "CustomTabs.Visible", GetCustomTabsVisibleValue(activity_type()), 1);
+-  histogram_tester_.ExpectUniqueSample("Android.ChromeActivity.Type",
+-                                       activity_type(), 1);
++  SetActivityType(&unregistered_local_state, activity_type());
++
++  EXPECT_EQ(activity_type(), GetActivityType());
++  EXPECT_EQ(nullptr,
++            unregistered_local_state.FindPreference(kLastActivityTypePref));
++  histogram_tester_.ExpectTotalCount("CustomTabs.Visible", 0);
++  histogram_tester_.ExpectTotalCount("Android.ChromeActivity.Type", 0);
+ }
+ 
+ // Tests initial warmup records, no tab becomes visible
+@@ -286,8 +296,25 @@
+   SetActivityType(&pref_service_, activity_type());
+   metrics_provider_.ProvideCurrentSessionData(&uma_proto_);
+ 
+-  // Only two samples issued over lifetime of first record, one undeclared and
+-  // one for the tested activity type.
++  // Only the initial metrics-log callback emits a sample. Updating the
++  // activity state does not emit another one.
++  histogram_tester_.ExpectTotalCount("CustomTabs.Visible", 1);
++  histogram_tester_.ExpectBucketCount(
++      "CustomTabs.Visible",
++      GetCustomTabsVisibleValue(ActivityType::kPreFirstTab), 1);
++  histogram_tester_.ExpectBucketCount(
++      "CustomTabs.Visible", GetCustomTabsVisibleValue(activity_type()), 0);
++  histogram_tester_.ExpectTotalCount("Android.ChromeActivity.Type", 1);
++  histogram_tester_.ExpectBucketCount("Android.ChromeActivity.Type",
++                                      ActivityType::kPreFirstTab, 1);
++  histogram_tester_.ExpectBucketCount("Android.ChromeActivity.Type",
++                                      activity_type(), 0);
++
++  // ... and a second record is opened/closed
++  metrics_provider_.OnDidCreateMetricsLog();
++  metrics_provider_.ProvideCurrentSessionData(&uma_proto_);
++
++  // One additional sample issued over lifetime of second record.
+   histogram_tester_.ExpectTotalCount("CustomTabs.Visible", 2);
+   histogram_tester_.ExpectBucketCount(
+       "CustomTabs.Visible",
+@@ -299,23 +326,6 @@
+                                       ActivityType::kPreFirstTab, 1);
+   histogram_tester_.ExpectBucketCount("Android.ChromeActivity.Type",
+                                       activity_type(), 1);
+-
+-  // ... and a second record is opened/closed
+-  metrics_provider_.OnDidCreateMetricsLog();
+-  metrics_provider_.ProvideCurrentSessionData(&uma_proto_);
+-
+-  // One additional sample issued over lifetime of second record.
+-  histogram_tester_.ExpectTotalCount("CustomTabs.Visible", 3);
+-  histogram_tester_.ExpectBucketCount(
+-      "CustomTabs.Visible",
+-      GetCustomTabsVisibleValue(ActivityType::kPreFirstTab), 1);
+-  histogram_tester_.ExpectBucketCount(
+-      "CustomTabs.Visible", GetCustomTabsVisibleValue(activity_type()), 2);
+-  histogram_tester_.ExpectTotalCount("Android.ChromeActivity.Type", 3);
+-  histogram_tester_.ExpectBucketCount("Android.ChromeActivity.Type",
+-                                      ActivityType::kPreFirstTab, 1);
+-  histogram_tester_.ExpectBucketCount("Android.ChromeActivity.Type",
+-                                      activity_type(), 2);
+ }
+ 
+ // Tests initial transition from kPreFirstTab to !kPreFirstTab.
+@@ -349,9 +359,9 @@
+   metrics_provider_.ProvideCurrentSessionData(&uma_proto_);
+   metrics_provider_.OnDidCreateMetricsLog();
+ 
+-  // Two records were created for the first activity.
+-  histogram_tester_.ExpectBucketCount("Android.ChromeActivity.Type",
+-                                      first_activity_type, 2);
++  // The explicit metrics-log callback emits once for the first activity.
++  histogram_tester_.ExpectBucketCount("Android.ChromeActivity.Type",
++                                      first_activity_type, 1);
+ 
+   // One additional record created for second activity..
+   histogram_tester_.ExpectBucketCount("Android.ChromeActivity.Type",

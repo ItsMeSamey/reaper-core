@@ -1,0 +1,82 @@
+diff --git a/chrome/browser/tabpersistence/android/java/src/org/chromium/chrome/browser/tabpersistence/FlatBufferTabStateSerializer.java b/chrome/browser/tabpersistence/android/java/src/org/chromium/chrome/browser/tabpersistence/FlatBufferTabStateSerializer.java
+index 5a69d1180e77f95a49b2191d8f372d62dff858af..9b5c530f23807bb218d673594d53647abd957dd7 100644
+--- a/chrome/browser/tabpersistence/android/java/src/org/chromium/chrome/browser/tabpersistence/FlatBufferTabStateSerializer.java
++++ b/chrome/browser/tabpersistence/android/java/src/org/chromium/chrome/browser/tabpersistence/FlatBufferTabStateSerializer.java
+@@ -14,6 +14,7 @@ import org.chromium.base.Token;
+ import org.chromium.base.metrics.RecordHistogram;
+ import org.chromium.build.annotations.NullMarked;
+ import org.chromium.build.annotations.Nullable;
++import org.chromium.chrome.browser.tab.Tab;
+ import org.chromium.chrome.browser.tab.TabLaunchType;
+ import org.chromium.chrome.browser.tab.TabState;
+ import org.chromium.chrome.browser.tab.TabUserAgent;
+@@ -67,6 +68,9 @@ public class FlatBufferTabStateSerializer implements TabStateSerializer {
+ 
+     @Override
+     public ByteBuffer serialize(TabState state) {
++        if (!Tab.isContainerIdWellFormed(state.containerId)) {
++            throw new IllegalArgumentException("Malformed storage-container UUID");
++        }
+         FlatBufferBuilder fbb = new FlatBufferBuilder();
+         ByteBuffer contentsStateBuffer =
+                 state.contentsState == null
+@@ -78,6 +82,7 @@ public class FlatBufferTabStateSerializer implements TabStateSerializer {
+         int openerAppId =
+                 fbb.createString(state.openerAppId == null ? NULL_STR : state.openerAppId);
+         int url = fbb.createString(state.url == null ? NULL_STR : state.url.getSpec());
++        int containerId = fbb.createString(state.containerId);
+         TabStateFlatBufferV1.startTabStateFlatBufferV1(fbb);
+         TabStateFlatBufferV1.addParentId(fbb, state.parentId);
+         TabStateFlatBufferV1.addRootId(fbb, state.rootId);
+@@ -100,8 +105,21 @@ public class FlatBufferTabStateSerializer implements TabStateSerializer {
+                 fbb, TabGroupIdToken.createTabGroupIdToken(fbb, tokenHigh, tokenLow));
+         TabStateFlatBufferV1.addTabHasSensitiveContent(fbb, state.tabHasSensitiveContent);
+         TabStateFlatBufferV1.addIsPinned(fbb, state.isPinned);
++        Token splitToken = state.splitTabId;
++        if (Tab.SplitData.isValid(
++                splitToken, state.splitLayout, state.splitRatio, state.splitPosition)) {
++            assert splitToken != null;
++            TabStateFlatBufferV1.addSplitTabId(
++                    fbb,
++                    TabGroupIdToken.createTabGroupIdToken(
++                            fbb, splitToken.getHigh(), splitToken.getLow()));
++            TabStateFlatBufferV1.addSplitLayout(fbb, state.splitLayout);
++            TabStateFlatBufferV1.addSplitRatio(fbb, state.splitRatio);
++            TabStateFlatBufferV1.addSplitPosition(fbb, state.splitPosition);
++        }
+ 
+         TabStateFlatBufferV1.addUrl(fbb, url);
++        TabStateFlatBufferV1.addContainerId(fbb, containerId);
+         int r = TabStateFlatBufferV1.endTabStateFlatBufferV1(fbb);
+         fbb.finish(r);
+         return fbb.dataBuffer();
+@@ -115,6 +133,11 @@ public class FlatBufferTabStateSerializer implements TabStateSerializer {
+ 
+             TabState state = new TabState();
+             state.isIncognito = mIsEncrypted;
++            String containerId = tabStateFlatBuffer.containerId();
++            state.containerId = containerId == null ? "" : containerId;
++            if (!Tab.isContainerIdWellFormed(state.containerId)) {
++                throw new IllegalArgumentException("Malformed storage-container UUID");
++            }
+             state.parentId = tabStateFlatBuffer.parentId();
+             state.rootId = tabStateFlatBuffer.rootId();
+             String openerAppId = tabStateFlatBuffer.openerAppId();
+@@ -136,6 +159,17 @@ public class FlatBufferTabStateSerializer implements TabStateSerializer {
+             state.themeColor = tabStateFlatBuffer.themeColor();
+             state.tabHasSensitiveContent = tabStateFlatBuffer.tabHasSensitiveContent();
+             state.isPinned = tabStateFlatBuffer.isPinned();
++            var split = tabStateFlatBuffer.splitTabId();
++            Token splitToken = split == null ? null : new Token(split.high(), split.low());
++            int layout = tabStateFlatBuffer.splitLayout();
++            double ratio = tabStateFlatBuffer.splitRatio();
++            int position = tabStateFlatBuffer.splitPosition();
++            if (Tab.SplitData.isValid(splitToken, layout, ratio, position)) {
++                state.splitTabId = splitToken;
++                state.splitLayout = layout;
++                state.splitRatio = ratio;
++                state.splitPosition = position;
++            }
+ 
+             String url = tabStateFlatBuffer.url();
+             state.url = NULL_STR.equals(url) ? null : new GURL(url);

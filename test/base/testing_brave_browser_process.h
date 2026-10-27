@@ -11,6 +11,8 @@
 #ifndef BRAVE_TEST_BASE_TESTING_BRAVE_BROWSER_PROCESS_H_
 #define BRAVE_TEST_BASE_TESTING_BRAVE_BROWSER_PROCESS_H_
 
+#include "build/build_config.h"
+
 #include <stdint.h>
 
 #include <memory>
@@ -67,8 +69,12 @@ class TestingBraveBrowserProcess : public BraveBrowserProcess {
   tor::BraveTorPluggableTransportUpdater* tor_pluggable_transport_updater()
       override;
 #endif
+#if !BUILDFLAG(IS_ANDROID)
   p3a::P3AService* p3a_service() override;
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
   brave::BraveReferralsService* brave_referrals_service() override;
+#endif  // !BUILDFLAG(IS_ANDROID)
 #if BUILDFLAG(ENABLE_BRAVE_STATS_UPDATER)
   brave_stats::BraveStatsUpdater* brave_stats_updater() override;
 #endif
@@ -76,8 +82,10 @@ class TestingBraveBrowserProcess : public BraveBrowserProcess {
   brave_ads::BraveStatsHelper* ads_brave_stats_helper() override;
   brave_ads::ResourceComponent* resource_component() override;
 #endif  // BUILDFLAG(ENABLE_BRAVE_ADS)
+#if BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
   ntp_background_images::NTPBackgroundImagesService*
   ntp_background_images_service() override;
+#endif  // BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
 #if BUILDFLAG(ENABLE_SPEEDREADER)
   speedreader::SpeedreaderRewriterService* speedreader_rewriter_service()
       override;
@@ -87,7 +95,9 @@ class TestingBraveBrowserProcess : public BraveBrowserProcess {
   void SetBraveVPNConnectionManagerForTesting(
       std::unique_ptr<brave_vpn::BraveVPNConnectionManager> manager);
 #endif
+#if !BUILDFLAG(IS_ANDROID)
   misc_metrics::ProcessMiscMetrics* process_misc_metrics() override;
+#endif  // !BUILDFLAG(IS_ANDROID)
 
   // Populate the mock process with services. Consumer is responsible for
   // cleaning these up after completion of a test.

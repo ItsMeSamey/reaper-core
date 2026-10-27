@@ -1,0 +1,112 @@
+diff --git a/ui/base/accelerators/global_accelerator_listener/global_accelerator_listener_android.cc b/ui/base/accelerators/global_accelerator_listener/global_accelerator_listener_android.cc
+--- a/ui/base/accelerators/global_accelerator_listener/global_accelerator_listener_android.cc
++++ b/ui/base/accelerators/global_accelerator_listener/global_accelerator_listener_android.cc
+@@ -4,8 +4,12 @@
+ 
+ #include "ui/base/accelerators/global_accelerator_listener/global_accelerator_listener_android.h"
+ 
++#include <utility>
++
++#include "base/functional/bind.h"
+ #include "base/memory/ptr_util.h"
+ #include "base/no_destructor.h"
++#include "base/task/sequenced_task_runner.h"
+ #include "content/public/browser/browser_thread.h"
+ #include "ui/base/accelerators/accelerator.h"
+ 
+@@ -35,16 +39,93 @@
+ 
+ GlobalAcceleratorListenerAndroid::~GlobalAcceleratorListenerAndroid() = default;
+ 
++bool GlobalAcceleratorListenerAndroid::AttachBackend(
++    const void* owner,
++    RegistrationCallback callback) {
++  CHECK(BrowserThread::CurrentlyOn(BrowserThread::UI));
++  if (!owner || !callback || backend_owner_)
++    return false;
++  backend_owner_ = owner;
++  registration_callback_ = std::move(callback);
++  RefreshBackendRegistrations();
++  return backend_owner_ == owner;
++}
++
++void GlobalAcceleratorListenerAndroid::DetachBackend(const void* owner) {
++  CHECK(BrowserThread::CurrentlyOn(BrowserThread::UI));
++  if (backend_owner_ != owner || !owner)
++    return;
++  backend_owner_ = nullptr;
++  registration_callback_.Reset();
++  registered_accelerators_.clear();
++  RefreshBackendRegistrations();
++}
++
++bool GlobalAcceleratorListenerAndroid::HasBackend() const {
++  return backend_owner_ && registration_callback_;
++}
++
++base::CallbackListSubscription
++GlobalAcceleratorListenerAndroid::AddBackendObserver(
++    base::RepeatingClosure callback) {
++  return backend_observers_.Add(std::move(callback));
++}
++
++void GlobalAcceleratorListenerAndroid::RefreshBackendRegistrations() {
++  CHECK(BrowserThread::CurrentlyOn(BrowserThread::UI));
++  if (refresh_pending_)
++    return;
++  refresh_pending_ = true;
++  // The base listener can hold map iterators while calling the platform
++  // registration callback. Never rebuild browser registrations on that stack.
++  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++      FROM_HERE, base::BindOnce(
++                     [](base::WeakPtr<GlobalAcceleratorListenerAndroid> self) {
++                       if (!self)
++                         return;
++                       self->refresh_pending_ = false;
++                       self->backend_observers_.Notify();
++                     },
++                     weak_factory_.GetWeakPtr()));
++}
++
++bool GlobalAcceleratorListenerAndroid::DispatchAccelerator(
++    const void* owner,
++    const Accelerator& accelerator) {
++  CHECK(BrowserThread::CurrentlyOn(BrowserThread::UI));
++  if (!HasBackend() || backend_owner_ != owner ||
++      IsShortcutHandlingSuspended() ||
++      !registered_accelerators_.contains(accelerator))
++    return false;
++  // Dispatch may synchronously unregister or destroy the browser observer.
++  // This process-wide UI listener survives; do not access the observer again.
++  NotifyKeyPressed(accelerator);
++  return true;
++}
++
+ void GlobalAcceleratorListenerAndroid::StartListening() {}
+ 
+ void GlobalAcceleratorListenerAndroid::StopListening() {}
+ 
+ bool GlobalAcceleratorListenerAndroid::StartListeningForAccelerator(
+     const ui::Accelerator& accelerator) {
+-  return false;
++  if (!HasBackend())
++    return false;
++  const void* owner = backend_owner_;
++  auto callback = registration_callback_;
++  if (!callback.Run(accelerator, true) || backend_owner_ != owner)
++    return false;
++  registered_accelerators_.insert(accelerator);
++  return true;
+ }
+ 
+ void GlobalAcceleratorListenerAndroid::StopListeningForAccelerator(
+-    const ui::Accelerator& accelerator) {}
++    const ui::Accelerator& accelerator) {
++  registered_accelerators_.erase(accelerator);
++  if (HasBackend()) {
++    auto callback = registration_callback_;
++    callback.Run(accelerator, false);
++  }
++}
+ 
+ }  // namespace ui

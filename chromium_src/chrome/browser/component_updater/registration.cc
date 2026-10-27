@@ -3,6 +3,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+#include "build/build_config.h"
+
 #include "chrome/browser/component_updater/registration.h"
 
 #include "base/feature_list.h"
@@ -15,8 +17,12 @@
 #include "brave/components/brave_wallet/common/buildflags/buildflags.h"
 #include "brave/components/extension_malware_blocklist/browser/extension_malware_blocklist_component_installer.h"
 #include "brave/components/local_ai/buildflags/buildflags.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/p3a/component_installer.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/p3a/p3a_service.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/psst/buildflags/buildflags.h"
 #include "brave/components/query_filter/browser/query_filter_component_installer.h"
 #include "chrome/browser/browser_process.h"
@@ -69,7 +75,9 @@ void RegisterBraveComponentsForUpdate() {
     web_mcp::RegisterWebMcpComponent(cus);
   }
 #endif
+#if !BUILDFLAG(IS_ANDROID)
   p3a::MaybeToggleP3AComponent(cus, g_brave_browser_process->p3a_service());
+#endif  // !BUILDFLAG(IS_ANDROID)
 #if BUILDFLAG(IS_ANDROID)
   // Currently behind !BUILDFLAG(IS_ANDROID) in upstream.
   RegisterZxcvbnDataComponent(cus);

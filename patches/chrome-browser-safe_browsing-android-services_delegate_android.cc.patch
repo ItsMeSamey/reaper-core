@@ -1,0 +1,71 @@
+diff --git a/chrome/browser/safe_browsing/android/services_delegate_android.cc b/chrome/browser/safe_browsing/android/services_delegate_android.cc
+--- a/chrome/browser/safe_browsing/android/services_delegate_android.cc
++++ b/chrome/browser/safe_browsing/android/services_delegate_android.cc
+@@ -5,16 +5,20 @@
+ #include "chrome/browser/safe_browsing/android/services_delegate_android.h"
+ 
+ #include "base/check_op.h"
++#include "base/functional/bind.h"
+ #include "base/memory/ptr_util.h"
+ #include "base/notreached.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/safe_browsing/download_protection/download_protection_delegate_android.h"
+ #include "chrome/browser/safe_browsing/download_protection/download_protection_service.h"
++#include "chrome/browser/safe_browsing/safe_browsing_service.h"
+ #include "chrome/browser/safe_browsing/telemetry/android/android_telemetry_service.h"
+ #include "components/safe_browsing/android/remote_database_manager.h"
+ #include "components/safe_browsing/buildflags.h"
+ #include "components/safe_browsing/core/common/features.h"
+ #include "content/public/browser/browser_context.h"
++#include "content/public/browser/browser_task_traits.h"
++#include "components/safe_browsing/core/browser/db/sb_local_database_manager.h"
+ #include "content/public/browser/browser_thread.h"
+ #include "content/public/browser/download_manager.h"
+ #include "services/network/public/cpp/shared_url_loader_factory.h"
+@@ -58,7 +62,28 @@
+   return database_manager_;
+ }
+ 
++#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
++const scoped_refptr<SafeBrowsingDatabaseManager>&
++ServicesDelegateAndroid::extension_database_manager() const {
++  return extension_database_manager_;
++}
++
++ExtendedReportingLevel
++ServicesDelegateAndroid::GetEstimatedExtendedReportingLevel() const {
++  return safe_browsing_service_->estimated_extended_reporting_by_prefs();
++}
++#endif
++
+ void ServicesDelegateAndroid::Initialize() {
++#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
++  extension_database_manager_ =
++      SBLocalDatabaseManager::CreateForExtensionBlocklist(
++          SafeBrowsingServiceImpl::GetBaseFilename().AppendASCII("Extensions"),
++          content::GetUIThreadTaskRunner({}), content::GetIOThreadTaskRunner({}),
++          base::BindRepeating(
++              &ServicesDelegateAndroid::GetEstimatedExtendedReportingLevel,
++              base::Unretained(this)));
++#endif
+   if (!database_manager_set_for_tests_) {
+     database_manager_ =
+         base::WrapRefCounted(new RemoteSafeBrowsingDatabaseManager());
+@@ -109,10 +134,17 @@
+     scoped_refptr<network::SharedURLLoaderFactory> browser_url_loader_factory,
+     const SBProtocolConfig& v4_config) {
+   database_manager_->StartOnUIThread(browser_url_loader_factory, v4_config);
++#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
++  extension_database_manager_->StartOnUIThread(browser_url_loader_factory,
++                                               v4_config);
++#endif
+ }
+ 
+ void ServicesDelegateAndroid::StopOnUIThread(bool shutdown) {
+   database_manager_->StopOnUIThread(shutdown);
++#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
++  extension_database_manager_->StopOnUIThread(shutdown);
++#endif
+ }
+ 
+ void ServicesDelegateAndroid::CreateTelemetryService(Profile* profile) {

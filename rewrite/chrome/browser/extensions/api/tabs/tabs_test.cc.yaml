@@ -1,0 +1,382 @@
+# Android pending Android tab lifecycle shutdown ownership.
+substitutions:
+- description: Use the existing pending-commit interceptor for Android discard refusal regression
+  regex:
+    re_pattern: \#include\ "content/public/test/browser_test_utils\.h"
+    replace: '#include "content/public/test/browser_test_utils.h"
+
+      #if BUILDFLAG(IS_ANDROID)
+
+      #include "base/test/bind.h"
+
+      #include "content/public/test/commit_message_delayer.h"
+
+      #endif'
+- description: Run actual frozen-state query and event regression on Android
+  regex:
+    re_pattern: '\#if\ BUILDFLAG\(ENABLE_EXTENSIONS\)\
+
+      \
+
+      IN_PROC_BROWSER_TEST_F\(ExtensionTabsTest,\ Freezing\)\ \{'
+    replace: '#if BUILDFLAG(ENABLE_EXTENSIONS) || BUILDFLAG(IS_ANDROID)
+
+
+      IN_PROC_BROWSER_TEST_F(ExtensionTabsTest, Freezing) {'
+- description: Reuse Android TabListInterface for the existing freezing regression
+  regex:
+    re_pattern: 'IN_PROC_BROWSER_TEST_F\(ExtensionTabsTest,\ Freezing\)\ \{\
+
+      \ \ //\ Create\ a\ background\ tab\.\
+
+      \ \ ui_test_utils::NavigateToURLWithDisposition\('
+    replace: "IN_PROC_BROWSER_TEST_F(ExtensionTabsTest, Freezing) {\n  // Create a background tab.\n#if BUILDFLAG(IS_ANDROID)\n  GetTabListInterface()->OpenTab(GURL(url::kAboutBlankURL), -1,\n                                /*foreground=*/false);\n  ASSERT_TRUE(content::WaitForLoadStop(\n      GetTabListInterface()->GetTab(1)->GetContents()));\n#else\n  ui_test_utils::NavigateToURLWithDisposition("
+- description: Preserve desktop browser setup while testing Android frozen pages
+  regex:
+    re_pattern: '\ \ \ \ \ \ ui_test_utils::BROWSER_TEST_WAIT_FOR_LOAD_STOP\);\
+
+      \ \ content::WebContents\*\ web_contents\ =\
+
+      \ \ \ \ \ \ GetTabListInterface\(\)\->GetTab\(1\)\->GetContents\(\);\
+
+      \
+
+      \ \ //\ Create\ an\ extension\.'
+    replace: "      ui_test_utils::BROWSER_TEST_WAIT_FOR_LOAD_STOP);\n#endif\n  content::WebContents* web_contents =\n      GetTabListInterface()->GetTab(1)->GetContents();\n\n  // Create an extension."
+- description: Run the existing complete auto-discardable query/update/response regression on Android
+  regex:
+    re_pattern: 'IN_PROC_BROWSER_TEST_F\(ExtensionTabsTest,\ AutoDiscardableProperty\)\ \{\
+
+      \ \ //\ Create\ two\ additional\ tabs\.\
+
+      \ \ content::OpenURLParams\ params\ ='
+    replace: "IN_PROC_BROWSER_TEST_F(ExtensionTabsTest, AutoDiscardableProperty) {\n  // Create two additional tabs.\n#if BUILDFLAG(IS_ANDROID)\n  constexpr ExtensionTabUtil::ScrubTabBehavior kDontScrubBehavior = {\n      ExtensionTabUtil::kDontScrubTab, ExtensionTabUtil::kDontScrubTab};\n  content::WebContents* web_contents_a =\n      GetTabListInterface()->OpenTab(GURL(url::kAboutBlankURL), -1,\n                                    /*foreground=*/false)->GetContents();\n  content::WebContents* web_contents_b =\n      GetTabListInterface()->OpenTab(GURL(url::kAboutBlankURL), -1,\n                                    /*foreground=*/false)->GetContents();\n  ASSERT_TRUE(content::WaitForLoadStop(web_contents_a));\n  ASSERT_TRUE(content::WaitForLoadStop(web_contents_b));\n#else\n  content::OpenURLParams params ="
+- description: Keep desktop tab construction unchanged
+  regex:
+    re_pattern: '\ \ \ \ \ \ browser\(\)\->OpenURL\(params,\ /\*navigation_handle_callback=\*/\{\}\);\
+
+      \
+
+      \ \ //\ Creates\ Tab\ object\ to\ ensure\ the\ property\ is\ correct\ for\ the\ extension\.'
+    replace: "      browser()->OpenURL(params, /*navigation_handle_callback=*/{});\n#endif\n\n  // Creates Tab object to ensure the property is correct for the extension."
+- description: Regress discarded true and false filters against an actual Android discard
+  regex:
+    re_pattern: '\#endif\ \ //\ BUILDFLAG\(ENABLE_EXTENSIONS\)\
+
+      \
+
+      //\ Tester\ class\ for\ the\ tabs\.zoom\*\ api\ functions\.'
+    replace: "#endif  // BUILDFLAG(ENABLE_EXTENSIONS) || BUILDFLAG(IS_ANDROID)\n\n#if BUILDFLAG(IS_ANDROID)\nIN_PROC_BROWSER_TEST_F(ExtensionTabsTest, AndroidDiscardedQueryFilters) {\n  content::WebContents* contents =\n      GetTabListInterface()->OpenTab(GURL(url::kAboutBlankURL), -1,\n                                    /*foreground=*/false)->GetContents();\n  ASSERT_TRUE(content::WaitForLoadStop(contents));\n  const int tab_id = ExtensionTabUtil::GetTabId(contents);\n  auto extension = ExtensionBuilder(\"Android lifecycle filters\")\n                       .SetManifestVersion(3).Build();\n  EXPECT_TRUE(RunQueryFunction(extension.get(),\n                              R\"([{\"discarded\":true}])\").empty());\n  auto discard = base::MakeRefCounted<TabsDiscardFunction>();\n  discard->set_extension(extension.get());\n  auto result = utils::RunFunctionAndReturnSingleResult(\n      discard.get(), base::StringPrintf(\"[%d]\", tab_id), profile());\n  ASSERT_TRUE(result);\n  ASSERT_TRUE(contents->WasDiscarded());\n  auto discarded = RunQueryFunction(extension.get(),\n                                    R\"([{\"discarded\":true}])\");\n  ASSERT_EQ(1u, discarded.size());\n  EXPECT_EQ(tab_id, api_test_utils::GetInteger(discarded[0].GetDict(), \"id\"));\n  EXPECT_TRUE(api_test_utils::GetBoolean(discarded[0].GetDict(), \"discarded\"));\n  auto loaded = RunQueryFunction(extension.get(),\n                                R\"([{\"discarded\":false}])\");\n  ASSERT_EQ(1u, loaded.size());\n  EXPECT_NE(tab_id, api_test_utils::GetInteger(loaded[0].GetDict(), \"id\"));\n}\n#endif\n\n// Tester class for the tabs.zoom* api functions."
+- description: Regress canceled restore and refused-discard event accuracy with real navigation state
+  regex:
+    re_pattern: //\ Tester\ class\ for\ the\ tabs\.zoom\*\ api\ functions\.
+    replace: "#if BUILDFLAG(IS_ANDROID)\nstd::vector<bool> AndroidDiscardedChangesForTab(\n    const TestEventRouterObserver& observer,\n    Profile* profile,\n    const Extension* extension,\n    int tab_id) {\n  std::vector<bool> changes;\n  for (const auto& event : observer.all_events()) {\n    if (event->event_name != api::tabs::OnUpdated::kEventName) {\n      continue;\n    }\n    std::optional<base::ListValue> args;\n    mojom::EventFilteringInfoPtr filtering;\n    if (!event->will_dispatch_callback.Run(\n            profile, mojom::ContextType::kUnprivilegedExtension, extension,\n            nullptr, args, filtering, nullptr)) {\n      continue;\n    }\n    if (!args || args->size() != 3u) {\n      ADD_FAILURE() << \"Unexpected tabs.onUpdated arguments\";\n      continue;\n    }\n    if ((*args)[0].GetInt() != tab_id) {\n      continue;\n    }\n    const auto discarded = (*args)[1].GetDict().FindBool(\"discarded\");\n    if (discarded.has_value()) {\n      changes.push_back(*discarded);\n    }\n  }\n  return changes;\n}\n\nIN_PROC_BROWSER_TEST_F(ExtensionTabsTest,\n                       AndroidCanceledRestoreReportsDiscardedOnce) {\n  net::test_server::ControllableHttpResponse response(embedded_test_server(),\n                                                     \"/pending-restore\");\n  ASSERT_TRUE(embedded_test_server()->Start());\n  content::WebContents* contents =\n      GetTabListInterface()->OpenTab(GURL(url::kAboutBlankURL), -1,\n                                    /*foreground=*/false)->GetContents();\n  ASSERT_TRUE(content::WaitForLoadStop(contents));\n  const GURL committed_url = contents->GetLastCommittedURL();\n  const int tab_id = ExtensionTabUtil::GetTabId(contents);\n  auto extension = ExtensionBuilder(\"Canceled restore\")\n                       .SetManifestVersion(3).Build();\n  TabsWindowsAPI::Get(profile())->InitTabsEventRouter();\n  auto discard = base::MakeRefCounted<TabsDiscardFunction>();\n  discard->set_extension(extension.get());\n  ASSERT_TRUE(utils::RunFunctionAndReturnSingleResult(\n      discard.get(), base::StringPrintf(\"[%d]\", tab_id), profile()));\n  ASSERT_TRUE(contents->WasDiscarded());\n\n  TestEventRouterObserver observer(EventRouter::Get(profile()));\n  content::NavigationController::LoadURLParams params(\n      embedded_test_server()->GetURL(\"/pending-restore\"));\n  contents->GetController().LoadURLWithParams(params);\n  response.WaitForRequest();\n  ASSERT_FALSE(contents->WasDiscarded());\n  ASSERT_EQ(committed_url, contents->GetLastCommittedURL());\n  EXPECT_EQ(std::vector<bool>({false}), AndroidDiscardedChangesForTab(\n      observer, profile(), extension.get(), tab_id));\n\n  contents->Stop();\n  ASSERT_TRUE(content::WaitForLoadStop(contents));\n  EXPECT_EQ(committed_url, contents->GetLastCommittedURL());\n  EXPECT_FALSE(contents->WasDiscarded());\n  EXPECT_TRUE(RunQueryFunction(extension.get(),\n                              R\"([{\"discarded\":true}])\").empty());\n  EXPECT_EQ(std::vector<bool>({false}), AndroidDiscardedChangesForTab(\n      observer, profile(), extension.get(), tab_id));\n}\n\nIN_PROC_BROWSER_TEST_F(ExtensionTabsTest,\n                       AndroidRefusedDiscardDoesNotReportStateChange) {\n  ASSERT_TRUE(embedded_test_server()->Start());\n  content::WebContents* contents =\n      GetTabListInterface()->OpenTab(\n          embedded_test_server()->GetURL(\"a.test\", \"/title1.html\"), -1,\n          /*foreground=*/false)->GetContents();\n  ASSERT_TRUE(content::WaitForLoadStop(contents));\n  const int tab_id = ExtensionTabUtil::GetTabId(contents);\n  auto extension = ExtensionBuilder(\"Refused discard\")\n                       .SetManifestVersion(3).Build();\n  TabsWindowsAPI::Get(profile())->InitTabsEventRouter();\n  TestEventRouterObserver observer(EventRouter::Get(profile()));\n  const GURL new_url = embedded_test_server()->GetURL(\"b.test\", \"/title2.html\");\n  bool attempted = false;\n  content::CommitMessageDelayer commit_delayer(\n      contents, new_url,\n      base::BindLambdaForTesting([&](content::RenderFrameHost*) {\n        // This callback runs before the speculative frame's commit IPC is\n        // processed. FrameTree refuses the discard while that commit is pending.\n        attempted = true;\n        observer.ClearEvents();\n        auto discard = base::MakeRefCounted<TabsDiscardFunction>();\n        discard->set_extension(extension.get());\n        EXPECT_EQ(base::StringPrintf(\"Cannot discard tab with id: %d.\", tab_id),\n                  utils::RunFunctionAndReturnError(\n                      discard.get(), base::StringPrintf(\"[%d]\", tab_id),\n                      profile()));\n        EXPECT_FALSE(contents->WasDiscarded());\n        EXPECT_TRUE(AndroidDiscardedChangesForTab(\n            observer, profile(), extension.get(), tab_id).empty());\n      }));\n  contents->GetController().LoadURLWithParams(\n      content::NavigationController::LoadURLParams(new_url));\n  commit_delayer.Wait();\n  ASSERT_TRUE(content::WaitForLoadStop(contents));\n  EXPECT_TRUE(attempted);\n  EXPECT_EQ(new_url, contents->GetLastCommittedURL());\n  EXPECT_FALSE(contents->WasDiscarded());\n  EXPECT_TRUE(AndroidDiscardedChangesForTab(\n      observer, profile(), extension.get(), tab_id).empty());\n}\n#endif  // BUILDFLAG(IS_ANDROID)\n\n// Tester class for the tabs.zoom* api functions."
+- description: Format modified Android tab lifecycle declarations and implementation
+  regex:
+    re_pattern: 'IN_PROC_BROWSER_TEST_F\(ExtensionTabsTest,\ Freezing\)\ \{\
+
+      \ \ //\ Create\ a\ background\ tab\.\
+
+      \#if\ BUILDFLAG\(IS_ANDROID\)\
+
+      \ \ GetTabListInterface\(\)\->OpenTab\(GURL\(url::kAboutBlankURL\),\ \-1,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ /\*foreground=\*/false\);\
+
+      \ \ ASSERT_TRUE\(content::WaitForLoadStop\(\
+
+      \ \ \ \ \ \ GetTabListInterface\(\)\->GetTab\(1\)\->GetContents\(\)\)\);\
+
+      \#else\
+
+      \ \ ui_test_utils::NavigateToURLWithDisposition\(\
+
+      '
+    replace: "IN_PROC_BROWSER_TEST_F(ExtensionTabsTest, Freezing) {\n  // Create a background tab.\n#if BUILDFLAG(IS_ANDROID)\n  GetTabListInterface()->OpenTab(GURL(url::kAboutBlankURL), -1,\n                                 /*foreground=*/false);\n  ASSERT_TRUE(content::WaitForLoadStop(\n      GetTabListInterface()->GetTab(1)->GetContents()));\n#else\n  ui_test_utils::NavigateToURLWithDisposition(\n"
+- description: Format modified Android tab lifecycle declarations and implementation
+  regex:
+    re_pattern: '\#if\ BUILDFLAG\(IS_ANDROID\)\
+
+      \ \ constexpr\ ExtensionTabUtil::ScrubTabBehavior\ kDontScrubBehavior\ =\ \{\
+
+      \ \ \ \ \ \ ExtensionTabUtil::kDontScrubTab,\ ExtensionTabUtil::kDontScrubTab\};\
+
+      \ \ content::WebContents\*\ web_contents_a\ =\
+
+      \ \ \ \ \ \ GetTabListInterface\(\)\->OpenTab\(GURL\(url::kAboutBlankURL\),\ \-1,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ /\*foreground=\*/false\)\->GetContents\(\);\
+
+      \ \ content::WebContents\*\ web_contents_b\ =\
+
+      \ \ \ \ \ \ GetTabListInterface\(\)\->OpenTab\(GURL\(url::kAboutBlankURL\),\ \-1,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ /\*foreground=\*/false\)\->GetContents\(\);\
+
+      \ \ ASSERT_TRUE\(content::WaitForLoadStop\(web_contents_a\)\);\
+
+      \ \ ASSERT_TRUE\(content::WaitForLoadStop\(web_contents_b\)\);\
+
+      \#else\
+
+      \ \ content::OpenURLParams\ params\ =\
+
+      '
+    replace: "#if BUILDFLAG(IS_ANDROID)\n  constexpr ExtensionTabUtil::ScrubTabBehavior kDontScrubBehavior = {\n      ExtensionTabUtil::kDontScrubTab, ExtensionTabUtil::kDontScrubTab};\n  content::WebContents* web_contents_a =\n      GetTabListInterface()\n          ->OpenTab(GURL(url::kAboutBlankURL), -1,\n                    /*foreground=*/false)\n          ->GetContents();\n  content::WebContents* web_contents_b =\n      GetTabListInterface()\n          ->OpenTab(GURL(url::kAboutBlankURL), -1,\n                    /*foreground=*/false)\n          ->GetContents();\n  ASSERT_TRUE(content::WaitForLoadStop(web_contents_a));\n  ASSERT_TRUE(content::WaitForLoadStop(web_contents_b));\n#else\n  content::OpenURLParams params =\n"
+- description: Format modified Android tab lifecycle declarations and implementation
+  regex:
+    re_pattern: '\#endif\ \ //\ BUILDFLAG\(ENABLE_EXTENSIONS\)\ \|\|\ BUILDFLAG\(IS_ANDROID\)\
+
+      \
+
+      \#if\ BUILDFLAG\(IS_ANDROID\)\
+
+      IN_PROC_BROWSER_TEST_F\(ExtensionTabsTest,\ AndroidDiscardedQueryFilters\)\ \{\
+
+      \ \ content::WebContents\*\ contents\ =\
+
+      \ \ \ \ \ \ GetTabListInterface\(\)\->OpenTab\(GURL\(url::kAboutBlankURL\),\ \-1,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ /\*foreground=\*/false\)\->GetContents\(\);\
+
+      \ \ ASSERT_TRUE\(content::WaitForLoadStop\(contents\)\);\
+
+      \ \ const\ int\ tab_id\ =\ ExtensionTabUtil::GetTabId\(contents\);\
+
+      \ \ auto\ extension\ =\ ExtensionBuilder\("Android\ lifecycle\ filters"\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \.SetManifestVersion\(3\)\.Build\(\);\
+
+      \ \ EXPECT_TRUE\(RunQueryFunction\(extension\.get\(\),\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ R"\(\[\{"discarded":true\}\]\)"\)\.empty\(\)\);\
+
+      \ \ auto\ discard\ =\ base::MakeRefCounted<TabsDiscardFunction>\(\);\
+
+      \ \ discard\->set_extension\(extension\.get\(\)\);\
+
+      \ \ auto\ result\ =\ utils::RunFunctionAndReturnSingleResult\(\
+
+      \ \ \ \ \ \ discard\.get\(\),\ base::StringPrintf\("\[%d\]",\ tab_id\),\ profile\(\)\);\
+
+      \ \ ASSERT_TRUE\(result\);\
+
+      \ \ ASSERT_TRUE\(contents\->WasDiscarded\(\)\);\
+
+      \ \ auto\ discarded\ =\ RunQueryFunction\(extension\.get\(\),\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ R"\(\[\{"discarded":true\}\]\)"\);\
+
+      \ \ ASSERT_EQ\(1u,\ discarded\.size\(\)\);\
+
+      \ \ EXPECT_EQ\(tab_id,\ api_test_utils::GetInteger\(discarded\[0\]\.GetDict\(\),\ "id"\)\);\
+
+      \ \ EXPECT_TRUE\(api_test_utils::GetBoolean\(discarded\[0\]\.GetDict\(\),\ "discarded"\)\);\
+
+      \ \ auto\ loaded\ =\ RunQueryFunction\(extension\.get\(\),\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ R"\(\[\{"discarded":false\}\]\)"\);\
+
+      \ \ ASSERT_EQ\(1u,\ loaded\.size\(\)\);\
+
+      \ \ EXPECT_NE\(tab_id,\ api_test_utils::GetInteger\(loaded\[0\]\.GetDict\(\),\ "id"\)\);\
+
+      \}\
+
+      \#endif\
+
+      '
+    replace: "#endif  // BUILDFLAG(ENABLE_EXTENSIONS) || BUILDFLAG(IS_ANDROID)\n\n#if BUILDFLAG(IS_ANDROID)\nIN_PROC_BROWSER_TEST_F(ExtensionTabsTest, AndroidDiscardedQueryFilters) {\n  content::WebContents* contents = GetTabListInterface()\n                                       ->OpenTab(GURL(url::kAboutBlankURL), -1,\n                                                 /*foreground=*/false)\n                                       ->GetContents();\n  ASSERT_TRUE(content::WaitForLoadStop(contents));\n  const int tab_id = ExtensionTabUtil::GetTabId(contents);\n  auto extension = ExtensionBuilder(\"Android lifecycle filters\")\n                       .SetManifestVersion(3)\n                       .Build();\n  EXPECT_TRUE(\n      RunQueryFunction(extension.get(), R\"([{\"discarded\":true}])\").empty());\n  auto discard = base::MakeRefCounted<TabsDiscardFunction>();\n  discard->set_extension(extension.get());\n  auto result = utils::RunFunctionAndReturnSingleResult(\n      discard.get(), base::StringPrintf(\"[%d]\", tab_id), profile());\n  ASSERT_TRUE(result);\n  ASSERT_TRUE(contents->WasDiscarded());\n  auto discarded = RunQueryFunction(extension.get(), R\"([{\"discarded\":true}])\");\n  ASSERT_EQ(1u, discarded.size());\n  EXPECT_EQ(tab_id, api_test_utils::GetInteger(discarded[0].GetDict(), \"id\"));\n  EXPECT_TRUE(api_test_utils::GetBoolean(discarded[0].GetDict(), \"discarded\"));\n  auto loaded = RunQueryFunction(extension.get(), R\"([{\"discarded\":false}])\");\n  ASSERT_EQ(1u, loaded.size());\n  EXPECT_NE(tab_id, api_test_utils::GetInteger(loaded[0].GetDict(), \"id\"));\n}\n#endif\n"
+- description: Format modified Android tab lifecycle declarations and implementation
+  regex:
+    re_pattern: '\
+
+      IN_PROC_BROWSER_TEST_F\(ExtensionTabsTest,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ AndroidCanceledRestoreReportsDiscardedOnce\)\ \{\
+
+      \ \ net::test_server::ControllableHttpResponse\ response\(embedded_test_server\(\),\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ "/pending\-restore"\);\
+
+      \ \ ASSERT_TRUE\(embedded_test_server\(\)\->Start\(\)\);\
+
+      \ \ content::WebContents\*\ contents\ =\
+
+      \ \ \ \ \ \ GetTabListInterface\(\)\->OpenTab\(GURL\(url::kAboutBlankURL\),\ \-1,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ /\*foreground=\*/false\)\->GetContents\(\);\
+
+      \ \ ASSERT_TRUE\(content::WaitForLoadStop\(contents\)\);\
+
+      \ \ const\ GURL\ committed_url\ =\ contents\->GetLastCommittedURL\(\);\
+
+      \ \ const\ int\ tab_id\ =\ ExtensionTabUtil::GetTabId\(contents\);\
+
+      \ \ auto\ extension\ =\ ExtensionBuilder\("Canceled\ restore"\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \.SetManifestVersion\(3\)\.Build\(\);\
+
+      \ \ TabsWindowsAPI::Get\(profile\(\)\)\->InitTabsEventRouter\(\);\
+
+      \ \ auto\ discard\ =\ base::MakeRefCounted<TabsDiscardFunction>\(\);\
+
+      \ \ discard\->set_extension\(extension\.get\(\)\);\
+
+      \ \ ASSERT_TRUE\(utils::RunFunctionAndReturnSingleResult\(\
+
+      '
+    replace: "\nIN_PROC_BROWSER_TEST_F(ExtensionTabsTest,\n                       AndroidCanceledRestoreReportsDiscardedOnce) {\n  net::test_server::ControllableHttpResponse response(embedded_test_server(),\n                                                      \"/pending-restore\");\n  ASSERT_TRUE(embedded_test_server()->Start());\n  content::WebContents* contents = GetTabListInterface()\n                                       ->OpenTab(GURL(url::kAboutBlankURL), -1,\n                                                 /*foreground=*/false)\n                                       ->GetContents();\n  ASSERT_TRUE(content::WaitForLoadStop(contents));\n  const GURL committed_url = contents->GetLastCommittedURL();\n  const int tab_id = ExtensionTabUtil::GetTabId(contents);\n  auto extension =\n      ExtensionBuilder(\"Canceled restore\").SetManifestVersion(3).Build();\n  TabsWindowsAPI::Get(profile())->InitTabsEventRouter();\n  auto discard = base::MakeRefCounted<TabsDiscardFunction>();\n  discard->set_extension(extension.get());\n  ASSERT_TRUE(utils::RunFunctionAndReturnSingleResult(\n"
+- description: Format modified Android tab lifecycle declarations and implementation
+  regex:
+    re_pattern: '\ \ contents\->GetController\(\)\.LoadURLWithParams\(params\);\
+
+      \ \ response\.WaitForRequest\(\);\
+
+      \ \ ASSERT_FALSE\(contents\->WasDiscarded\(\)\);\
+
+      \ \ ASSERT_EQ\(committed_url,\ contents\->GetLastCommittedURL\(\)\);\
+
+      \ \ EXPECT_EQ\(std::vector<bool>\(\{false\}\),\ AndroidDiscardedChangesForTab\(\
+
+      \ \ \ \ \ \ observer,\ profile\(\),\ extension\.get\(\),\ tab_id\)\);\
+
+      \
+
+      \ \ contents\->Stop\(\);\
+
+      \ \ ASSERT_TRUE\(content::WaitForLoadStop\(contents\)\);\
+
+      \ \ EXPECT_EQ\(committed_url,\ contents\->GetLastCommittedURL\(\)\);\
+
+      \ \ EXPECT_FALSE\(contents\->WasDiscarded\(\)\);\
+
+      \ \ EXPECT_TRUE\(RunQueryFunction\(extension\.get\(\),\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ R"\(\[\{"discarded":true\}\]\)"\)\.empty\(\)\);\
+
+      \ \ EXPECT_EQ\(std::vector<bool>\(\{false\}\),\ AndroidDiscardedChangesForTab\(\
+
+      \ \ \ \ \ \ observer,\ profile\(\),\ extension\.get\(\),\ tab_id\)\);\
+
+      \}\
+
+      \
+
+      IN_PROC_BROWSER_TEST_F\(ExtensionTabsTest,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ AndroidRefusedDiscardDoesNotReportStateChange\)\ \{\
+
+      \ \ ASSERT_TRUE\(embedded_test_server\(\)\->Start\(\)\);\
+
+      \ \ content::WebContents\*\ contents\ =\
+
+      \ \ \ \ \ \ GetTabListInterface\(\)\->OpenTab\(\
+
+      \ \ \ \ \ \ \ \ \ \ embedded_test_server\(\)\->GetURL\("a\.test",\ "/title1\.html"\),\ \-1,\
+
+      \ \ \ \ \ \ \ \ \ \ /\*foreground=\*/false\)\->GetContents\(\);\
+
+      \ \ ASSERT_TRUE\(content::WaitForLoadStop\(contents\)\);\
+
+      \ \ const\ int\ tab_id\ =\ ExtensionTabUtil::GetTabId\(contents\);\
+
+      \ \ auto\ extension\ =\ ExtensionBuilder\("Refused\ discard"\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \.SetManifestVersion\(3\)\.Build\(\);\
+
+      \ \ TabsWindowsAPI::Get\(profile\(\)\)\->InitTabsEventRouter\(\);\
+
+      \ \ TestEventRouterObserver\ observer\(EventRouter::Get\(profile\(\)\)\);\
+
+      \ \ const\ GURL\ new_url\ =\ embedded_test_server\(\)\->GetURL\("b\.test",\ "/title2\.html"\);\
+
+      \ \ bool\ attempted\ =\ false;\
+
+      \ \ content::CommitMessageDelayer\ commit_delayer\(\
+
+      \ \ \ \ \ \ contents,\ new_url,\
+
+      \ \ \ \ \ \ base::BindLambdaForTesting\(\[\&\]\(content::RenderFrameHost\*\)\ \{\
+
+      \ \ \ \ \ \ \ \ //\ This\ callback\ runs\ before\ the\ speculative\ frame''s\ commit\ IPC\ is\
+
+      \ \ \ \ \ \ \ \ //\ processed\.\ FrameTree\ refuses\ the\ discard\ while\ that\ commit\ is\ pending\.\
+
+      \ \ \ \ \ \ \ \ attempted\ =\ true;\
+
+      \ \ \ \ \ \ \ \ observer\.ClearEvents\(\);\
+
+      \ \ \ \ \ \ \ \ auto\ discard\ =\ base::MakeRefCounted<TabsDiscardFunction>\(\);\
+
+      \ \ \ \ \ \ \ \ discard\->set_extension\(extension\.get\(\)\);\
+
+      \ \ \ \ \ \ \ \ EXPECT_EQ\(base::StringPrintf\("Cannot\ discard\ tab\ with\ id:\ %d\.",\ tab_id\),\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ utils::RunFunctionAndReturnError\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ discard\.get\(\),\ base::StringPrintf\("\[%d\]",\ tab_id\),\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ profile\(\)\)\);\
+
+      \ \ \ \ \ \ \ \ EXPECT_FALSE\(contents\->WasDiscarded\(\)\);\
+
+      \ \ \ \ \ \ \ \ EXPECT_TRUE\(AndroidDiscardedChangesForTab\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ observer,\ profile\(\),\ extension\.get\(\),\ tab_id\)\.empty\(\)\);\
+
+      \ \ \ \ \ \ \}\)\);\
+
+      \ \ contents\->GetController\(\)\.LoadURLWithParams\(\
+
+      \ \ \ \ \ \ content::NavigationController::LoadURLParams\(new_url\)\);\
+
+      \ \ commit_delayer\.Wait\(\);\
+
+      \ \ ASSERT_TRUE\(content::WaitForLoadStop\(contents\)\);\
+
+      \ \ EXPECT_TRUE\(attempted\);\
+
+      \ \ EXPECT_EQ\(new_url,\ contents\->GetLastCommittedURL\(\)\);\
+
+      \ \ EXPECT_FALSE\(contents\->WasDiscarded\(\)\);\
+
+      \ \ EXPECT_TRUE\(AndroidDiscardedChangesForTab\(\
+
+      \ \ \ \ \ \ observer,\ profile\(\),\ extension\.get\(\),\ tab_id\)\.empty\(\)\);\
+
+      \}\
+
+      \#endif\ \ //\ BUILDFLAG\(IS_ANDROID\)\
+
+      \
+
+      //\ Tester\ class\ for\ the\ tabs\.zoom\*\ api\ functions\.\
+
+      '
+    replace: "  contents->GetController().LoadURLWithParams(params);\n  response.WaitForRequest();\n  ASSERT_FALSE(contents->WasDiscarded());\n  ASSERT_EQ(committed_url, contents->GetLastCommittedURL());\n  EXPECT_EQ(std::vector<bool>({false}),\n            AndroidDiscardedChangesForTab(observer, profile(), extension.get(),\n                                          tab_id));\n\n  contents->Stop();\n  ASSERT_TRUE(content::WaitForLoadStop(contents));\n  EXPECT_EQ(committed_url, contents->GetLastCommittedURL());\n  EXPECT_FALSE(contents->WasDiscarded());\n  EXPECT_TRUE(\n      RunQueryFunction(extension.get(), R\"([{\"discarded\":true}])\").empty());\n  EXPECT_EQ(std::vector<bool>({false}),\n            AndroidDiscardedChangesForTab(observer, profile(), extension.get(),\n                                          tab_id));\n}\n\nIN_PROC_BROWSER_TEST_F(ExtensionTabsTest,\n                       AndroidRefusedDiscardDoesNotReportStateChange) {\n  ASSERT_TRUE(embedded_test_server()->Start());\n  content::WebContents* contents =\n      GetTabListInterface()\n          ->OpenTab(embedded_test_server()->GetURL(\"a.test\", \"/title1.html\"),\n                    -1,\n                    /*foreground=*/false)\n          ->GetContents();\n  ASSERT_TRUE(content::WaitForLoadStop(contents));\n  const int tab_id = ExtensionTabUtil::GetTabId(contents);\n  auto extension =\n      ExtensionBuilder(\"Refused discard\").SetManifestVersion(3).Build();\n  TabsWindowsAPI::Get(profile())->InitTabsEventRouter();\n  TestEventRouterObserver observer(EventRouter::Get(profile()));\n  const GURL new_url = embedded_test_server()->GetURL(\"b.test\", \"/title2.html\");\n  bool attempted = false;\n  content::CommitMessageDelayer commit_delayer(\n      contents, new_url,\n      base::BindLambdaForTesting([&](content::RenderFrameHost*) {\n        // This callback runs before the speculative frame's commit IPC is\n        // processed. FrameTree refuses the discard while that commit is\n        // pending.\n        attempted = true;\n        observer.ClearEvents();\n        auto discard = base::MakeRefCounted<TabsDiscardFunction>();\n        discard->set_extension(extension.get());\n        EXPECT_EQ(\n            base::StringPrintf(\"Cannot discard tab with id: %d.\", tab_id),\n            utils::RunFunctionAndReturnError(\n                discard.get(), base::StringPrintf(\"[%d]\", tab_id), profile()));\n        EXPECT_FALSE(contents->WasDiscarded());\n        EXPECT_TRUE(AndroidDiscardedChangesForTab(observer, profile(),\n                                                  extension.get(), tab_id)\n                        .empty());\n      }));\n  contents->GetController().LoadURLWithParams(\n      content::NavigationController::LoadURLParams(new_url));\n  commit_delayer.Wait();\n  ASSERT_TRUE(content::WaitForLoadStop(contents));\n  EXPECT_TRUE(attempted);\n  EXPECT_EQ(new_url, contents->GetLastCommittedURL());\n  EXPECT_FALSE(contents->WasDiscarded());\n  EXPECT_TRUE(AndroidDiscardedChangesForTab(observer, profile(),\n                                            extension.get(), tab_id)\n                  .empty());\n}\n#endif  // BUILDFLAG(IS_ANDROID)\n\n// Tester class for the tabs.zoom* api functions.\n"
+
+- description: Use a real Android placeholder tab and an isolated window for capture regression.
+  regex:
+    pattern: '#if BUILDFLAG(IS_ANDROID)
+
+      #include "base/test/bind.h"'
+    replace: '#if BUILDFLAG(IS_ANDROID)
+
+      #include "base/test/bind.h"
+
+      #include "chrome/browser/android/tab_android.h"
+
+      #include "chrome/browser/tab_list/mock_tab_list_interface.h"
+
+      #include "chrome/browser/ui/browser_window/test/mock_browser_window_interface.h"
+
+      #include "ui/base/unowned_user_data/scoped_unowned_user_data.h"'
+- description: Exercise the real screenshot API for a missing tab or missing Android contents.
+  regex:
+    pattern: '#if BUILDFLAG(IS_CHROMEOS)
+
+      // Ensure tabs.captureVisibleTab respects any Data Leak Prevention restrictions.'
+    replace: "#if BUILDFLAG(IS_ANDROID)\nIN_PROC_BROWSER_TEST_F(ExtensionTabsTest, CaptureVisibleTabWithoutWebContents) {\n  auto extension = ExtensionBuilder(\"Screenshot\")\n                       .SetManifestVersion(3)\n                       .AddHostPermission(\"<all_urls>\")\n                       .Build();\n  // Do not detach or destroy the browser's live tab to simulate an unrealized\n  // tab: TabAndroid already has a native test constructor for that state.\n  auto tab = TabAndroid::CreateForTesting(profile(), 1234, nullptr);\n  ASSERT_EQ(nullptr, tab->GetContents());\n  testing::NiceMock<MockBrowserWindowInterface> window;\n  testing::NiceMock<MockTabListInterface> tab_list;\n  const SessionID window_id = SessionID::NewUnique();\n  ON_CALL(window, GetProfile()).WillByDefault(testing::Return(profile()));\n  ON_CALL(window, GetSessionID()).WillByDefault(testing::ReturnRef(window_id));\n  ON_CALL(window, GetType())\n      .WillByDefault(testing::Return(BrowserWindowInterface::TYPE_NORMAL));\n\
+      \  ON_CALL(window, GetWindow())\n      .WillByDefault(testing::Return(browser_window_interface()->GetWindow()));\n  ui::ScopedUnownedUserData<TabListInterface> tab_list_registration(\n      window.GetUnownedUserDataHost(), tab_list);\n  BrowserExtensionWindowController controller(&window);\n  const std::string args = base::StringPrintf(\"[%d]\", window_id.id());\n\n  for (::tabs::TabInterface* active_tab :\n       {static_cast<::tabs::TabInterface*>(nullptr),\n        static_cast<::tabs::TabInterface*>(tab.get())}) {\n    ON_CALL(tab_list, GetActiveTab()).WillByDefault(testing::Return(active_tab));\n    auto function = base::MakeRefCounted<TabsCaptureVisibleTabFunction>();\n    function->set_extension(extension.get());\n    EXPECT_EQ(\"No active web contents to capture\",\n              utils::RunFunctionAndReturnError(function, args, profile()));\n  }\n}\n\nIN_PROC_BROWSER_TEST_F(ExtensionTabsTest,\n                       CaptureVisibleTabStillRequiresHostPermission) {\n  auto extension\
+      \ = ExtensionBuilder(\"Screenshot without permission\")\n                       .SetManifestVersion(3)\n                       .Build();\n  ASSERT_TRUE(GetTabListInterface()->GetActiveTab());\n  ASSERT_TRUE(GetTabListInterface()->GetActiveTab()->GetContents());\n  auto function = base::MakeRefCounted<TabsCaptureVisibleTabFunction>();\n  function->set_extension(extension.get());\n  const std::string args = base::StringPrintf(\n      \"[%d]\", ExtensionTabUtil::GetWindowId(browser_window_interface()));\n  EXPECT_EQ(manifest_errors::kAllURLOrActiveTabNeeded,\n            utils::RunFunctionAndReturnError(function, args, profile()));\n}\n#endif  // BUILDFLAG(IS_ANDROID)\n\n#if BUILDFLAG(IS_CHROMEOS)\n// Ensure tabs.captureVisibleTab respects any Data Leak Prevention restrictions."

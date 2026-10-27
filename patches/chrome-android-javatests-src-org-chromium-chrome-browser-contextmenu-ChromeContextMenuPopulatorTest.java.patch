@@ -1,0 +1,239 @@
+diff --git a/chrome/android/javatests/src/org/chromium/chrome/browser/contextmenu/ChromeContextMenuPopulatorTest.java b/chrome/android/javatests/src/org/chromium/chrome/browser/contextmenu/ChromeContextMenuPopulatorTest.java
+index 858561baea6a85380e83d0f3302566ac016b86a8..899b8a983d51ccaf41640bdb251ecaa58e3160af 100644
+--- a/chrome/android/javatests/src/org/chromium/chrome/browser/contextmenu/ChromeContextMenuPopulatorTest.java
++++ b/chrome/android/javatests/src/org/chromium/chrome/browser/contextmenu/ChromeContextMenuPopulatorTest.java
+@@ -86,11 +86,8 @@
+ import org.chromium.chrome.browser.ephemeraltab.EphemeralTabCoordinator;
+ import org.chromium.chrome.browser.firstrun.FirstRunStatus;
+ import org.chromium.chrome.browser.flags.ChromeFeatureList;
+-import org.chromium.chrome.browser.glic.GlicEnabling;
+ import org.chromium.chrome.browser.gsa.GSAUtils;
+ import org.chromium.chrome.browser.incognito.IncognitoUtils;
+-import org.chromium.chrome.browser.lens.LensEntryPoint;
+-import org.chromium.chrome.browser.lens.LensIntentParams;
+ import org.chromium.chrome.browser.multiwindow.MultiWindowUtils;
+ import org.chromium.chrome.browser.profiles.Profile;
+ import org.chromium.chrome.browser.profiles.ProfileJni;
+@@ -113,7 +110,6 @@
+ import org.chromium.components.externalauth.ExternalAuthUtils;
+ import org.chromium.components.search_engines.TemplateUrlService;
+ import org.chromium.components.signin.identitymanager.IdentityManager;
+-import org.chromium.components.signin.test.util.TestAccounts;
+ import org.chromium.content_public.browser.RenderFrameHost;
+ import org.chromium.content_public.browser.WebContents;
+ import org.chromium.content_public.browser.test.NativeLibraryTestUtils;
+@@ -138,7 +134,6 @@
+ @DisableFeatures({
+     ChromeFeatureList.LENS_OVERLAY_ANDROID,
+     ChromeFeatureList.ENABLE_DOWNLOAD_SAVE_AS_CONTEXT_MENU,
+-    ChromeFeatureList.CLANK_GLIC_CONTEXT_MENU,
+ })
+ public class ChromeContextMenuPopulatorTest {
+     private static final String DATA_URL = "data:encodedstringblahblah";
+@@ -2372,13 +2367,13 @@
+     @Test
+     @SmallTest
+     @UiThreadTest
+-    public void testGetLensIntentParams() {
+-        when(mIdentityManager.getPrimaryAccountInfo()).thenReturn(TestAccounts.ACCOUNT1);
++    @EnableFeatures(ChromeFeatureList.LENS_OVERLAY_ANDROID)
++    public void testSearchByImageUsesNativeWithoutLens() {
+         ContextMenuParams params =
+                 new ContextMenuParams(
+                         0,
+                         mMenuModelBridge,
+-                        ContextMenuDataMediaType.NONE,
++                        ContextMenuDataMediaType.IMAGE,
+                         ContextMenuDataMediaFlags.MEDIA_NONE,
+                         new GURL(PAGE_URL),
+                         new GURL(LINK_URL),
+@@ -2396,58 +2391,22 @@
+                         /* interestForNodeID= */ 0,
+                         /* additionalNavigationParams= */ null);
+ 
+-        // Test Non-Incognito.
+-        when(mItemDelegate.isIncognito()).thenReturn(false);
+-        initializePopulator(ChromeContextMenuPopulator.ContextMenuMode.NORMAL, params);
+-
+-        LensIntentParams lensIntentParams =
+-                mPopulator.getLensIntentParams(
+-                        LensEntryPoint.CONTEXT_MENU_SEARCH_MENU_ITEM,
+-                        Uri.parse(RETRIEVED_IMAGE_URL));
+-        assertEquals(
+-                "Lens intent parameters has incorrect image URI.",
+-                RETRIEVED_IMAGE_URL,
+-                lensIntentParams.getImageUri().toString());
+-        assertFalse(
+-                "Lens intent parameters has incorrect incognito value.",
+-                lensIntentParams.getIsIncognito());
+-        assertEquals(
+-                "Lens intent parameters has incorrect src URL.",
+-                IMAGE_SRC_URL,
+-                lensIntentParams.getSrcUrl());
+-        assertEquals(
+-                "Lens intent parameters has incorrect title or alt text.",
+-                IMAGE_TITLE_TEXT,
+-                lensIntentParams.getImageTitleOrAltText());
+-        assertEquals(
+-                "Lens intent parameters has incorrect page URL.",
+-                PAGE_URL,
+-                lensIntentParams.getPageUrl());
+-        assertEquals(
+-                "Lens intent parameters has incorrect account name.",
+-                TestAccounts.ACCOUNT1.getEmail(),
+-                lensIntentParams.getAccountName());
+-        assertTrue(
+-                "Lens intent parameters should have forceUnlockOrientation true.",
+-                lensIntentParams.getForceUnlockOrientation());
+-
+-        // Test Incognito.
+-        when(mItemDelegate.isIncognito()).thenReturn(true);
+-        when(mProfile.isOffTheRecord()).thenReturn(true);
+-        initializePopulator(ChromeContextMenuPopulator.ContextMenuMode.NORMAL, params);
+-        lensIntentParams =
+-                mPopulator.getLensIntentParams(
+-                        LensEntryPoint.CONTEXT_MENU_SEARCH_MENU_ITEM,
+-                        Uri.parse(RETRIEVED_IMAGE_URL));
+-        assertTrue(
+-                "Lens intent parameters has incorrect incognito value.",
+-                lensIntentParams.getIsIncognito());
+-        assertNull(
+-                "Lens intent parameters should have null account name in incognito.",
+-                lensIntentParams.getAccountName());
+-        assertTrue(
+-                "Lens intent parameters should have forceUnlockOrientation true.",
+-                lensIntentParams.getForceUnlockOrientation());
++        for (boolean isIncognito : new boolean[] {false, true}) {
++            when(mItemDelegate.isIncognito()).thenReturn(isIncognito);
++            when(mProfile.isOffTheRecord()).thenReturn(isIncognito);
++            initializePopulator(ChromeContextMenuPopulator.ContextMenuMode.NORMAL, params);
++            doNothing().when(mPopulator).recordContextMenuSelection(anyInt());
++
++            assertTrue(
++                    "Ordinary image search should use the native image-search path.",
++                    mPopulator.onItemSelected(R.id.contextmenu_search_by_image));
++            assertTrue(
++                    "A legacy Lens image item should fall back to ordinary image search.",
++                    mPopulator.onItemSelected(R.id.contextmenu_search_image_with_google_lens));
++        }
++
++        verify(mNativeDelegate, Mockito.times(4)).searchForImage();
++        verify(mNativeDelegate, never()).retrieveImageForShare(anyInt(), any());
+     }
+ 
+     @Test
+@@ -2605,7 +2564,6 @@
+                 R.id.contextmenu_save_page,
+                 R.id.contextmenu_print_page,
+                 R.id.contextmenu_share_page,
+-                R.id.contextmenu_search_tab_with_google_lens,
+                 R.id.contextmenu_open_in_reading_mode,
+             },
+             {R.id.contextmenu_send_tab_to_self, R.id.contextmenu_create_qr_code},
+@@ -4113,106 +4071,4 @@
+                         .toString());
+     }
+ 
+-    @Test
+-    @SmallTest
+-    @UiThreadTest
+-    @EnableFeatures({ChromeFeatureList.CLANK_GLIC_CONTEXT_MENU, ChromeFeatureList.TAB_BOTTOM_SHEET})
+-    @DisableFeatures(ChromeFeatureList.ENABLE_ANDROID_SIDE_PANEL)
+-    public void testAskGeminiForLinkEligibleWhenFlagEnabled() {
+-        // Bottom sheet (mobile) presentation: side panel disabled.
+-        GlicEnabling.setEnabledForTesting(true);
+-        ContextMenuParams params = getHttpLinkParams();
+-        initializePopulator(ChromeContextMenuPopulator.ContextMenuMode.NORMAL, params);
+-        if (!DeviceInfo.isAutomotive()) {
+-            assertTrue(mPopulator.shouldShowAskGeminiForLink());
+-        }
+-    }
+-
+-    @Test
+-    @SmallTest
+-    @UiThreadTest
+-    @DisableFeatures(ChromeFeatureList.CLANK_GLIC_CONTEXT_MENU)
+-    public void testAskGeminiForLinkIneligibleWhenFlagDisabled() {
+-        ContextMenuParams params = getHttpLinkParams();
+-        initializePopulator(ChromeContextMenuPopulator.ContextMenuMode.NORMAL, params);
+-        assertFalse(mPopulator.shouldShowAskGeminiForLink());
+-    }
+-
+-    @Test
+-    @SmallTest
+-    @UiThreadTest
+-    @EnableFeatures(ChromeFeatureList.CLANK_GLIC_CONTEXT_MENU)
+-    @DisableFeatures({
+-        ChromeFeatureList.ENABLE_ANDROID_SIDE_PANEL,
+-        ChromeFeatureList.TAB_BOTTOM_SHEET
+-    })
+-    public void testAskGeminiForLinkIneligibleWhenBottomSheetDisabled() {
+-        // Neither side panel (desktop Android) nor bottom sheet (mobile) available.
+-        GlicEnabling.setEnabledForTesting(true);
+-        ContextMenuParams params = getHttpLinkParams();
+-        initializePopulator(ChromeContextMenuPopulator.ContextMenuMode.NORMAL, params);
+-        assertFalse(mPopulator.shouldShowAskGeminiForLink());
+-    }
+-
+-    @Test
+-    @SmallTest
+-    @UiThreadTest
+-    @EnableFeatures({
+-        ChromeFeatureList.CLANK_GLIC_CONTEXT_MENU,
+-        ChromeFeatureList.ENABLE_ANDROID_SIDE_PANEL
+-    })
+-    public void testAskGeminiForLinkEligibleOnDesktopSidePanel() {
+-        // Side panel (desktop Android) presentation.
+-        GlicEnabling.setEnabledForTesting(true);
+-        ContextMenuParams params = getHttpLinkParams();
+-        initializePopulator(ChromeContextMenuPopulator.ContextMenuMode.NORMAL, params);
+-        if (!DeviceInfo.isAutomotive()) {
+-            assertTrue(mPopulator.shouldShowAskGeminiForLink());
+-        }
+-    }
+-
+-    @Test
+-    @SmallTest
+-    @UiThreadTest
+-    @EnableFeatures({
+-        ChromeFeatureList.CLANK_GLIC_CONTEXT_MENU + ":show_on_page/true",
+-        ChromeFeatureList.ENABLE_ANDROID_SIDE_PANEL
+-    })
+-    public void testAskGeminiForPageEligibleOnDesktopSidePanel() {
+-        // Side panel (desktop Android) presentation with the page param on.
+-        GlicEnabling.setEnabledForTesting(true);
+-        ContextMenuParams params = getPageParams();
+-        initializePopulator(ChromeContextMenuPopulator.ContextMenuMode.NORMAL, params);
+-        if (!DeviceInfo.isAutomotive()) {
+-            assertTrue(mPopulator.shouldShowAskGeminiForPage());
+-        }
+-    }
+-
+-    @Test
+-    @SmallTest
+-    @UiThreadTest
+-    @EnableFeatures(ChromeFeatureList.CLANK_GLIC_CONTEXT_MENU + ":show_on_page/true")
+-    @DisableFeatures(ChromeFeatureList.ENABLE_ANDROID_SIDE_PANEL)
+-    public void testAskGeminiForPageIneligibleOnMobile() {
+-        // Page entry is desktop-Android (side panel) only.
+-        GlicEnabling.setEnabledForTesting(true);
+-        ContextMenuParams params = getPageParams();
+-        initializePopulator(ChromeContextMenuPopulator.ContextMenuMode.NORMAL, params);
+-        assertFalse(mPopulator.shouldShowAskGeminiForPage());
+-    }
+-
+-    @Test
+-    @SmallTest
+-    @UiThreadTest
+-    @EnableFeatures({
+-        ChromeFeatureList.CLANK_GLIC_CONTEXT_MENU,
+-        ChromeFeatureList.ENABLE_ANDROID_SIDE_PANEL
+-    })
+-    public void testAskGeminiForPageIneligibleWhenPageParamDisabled() {
+-        // Feature on but show_on_page defaults to false.
+-        GlicEnabling.setEnabledForTesting(true);
+-        ContextMenuParams params = getPageParams();
+-        initializePopulator(ChromeContextMenuPopulator.ContextMenuMode.NORMAL, params);
+-        assertFalse(mPopulator.shouldShowAskGeminiForPage());
+-    }
+ }

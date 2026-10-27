@@ -1,0 +1,148 @@
+diff --git a/chrome/browser/extensions/api/messaging/android/java/src/org/chromium/chrome/browser/extensions/api/messaging/NativeMessagingConnection.java b/chrome/browser/extensions/api/messaging/android/java/src/org/chromium/chrome/browser/extensions/api/messaging/NativeMessagingConnection.java
+--- a/chrome/browser/extensions/api/messaging/android/java/src/org/chromium/chrome/browser/extensions/api/messaging/NativeMessagingConnection.java
++++ b/chrome/browser/extensions/api/messaging/android/java/src/org/chromium/chrome/browser/extensions/api/messaging/NativeMessagingConnection.java
+@@ -88,7 +88,11 @@
+         Intent intent = new Intent(ACTION_NATIVE_MESSAGING);
+         intent.setPackage(mPackageName);
+ 
+-        mIsBound = context.bindService(intent, this, Context.BIND_AUTO_CREATE);
++        try {
++            mIsBound = context.bindService(intent, this, Context.BIND_AUTO_CREATE);
++        } catch (SecurityException e) {
++            mIsBound = false;
++        }
+         if (mIsBound) {
+             // Unbind if too much time passes between bindService returning true and
+             // OnServiceConnected returning a `IBrowserNativeMessageService`.
+@@ -115,22 +119,35 @@
+     }
+ 
+     public @Nullable String addPort(
+-            String extensionId, boolean isVerifiedExtension, NativeMessageAndroidPort port) {
++            String extensionId,
++            boolean isVerifiedExtension,
++            boolean requireAuthorizedCompanion,
++            NativeMessageAndroidPort port) {
+         if (!mIsBound) {
+             return getUnableToConnectError(mPackageName);
+         }
+ 
+         ExtensionSession session = mSessions.get(extensionId);
+         if (session == null) {
+-            session = new ExtensionSession(extensionId, isVerifiedExtension, this);
++            session =
++                    new ExtensionSession(
++                            extensionId, isVerifiedExtension, requireAuthorizedCompanion, this);
+             mSessions.put(extensionId, session);
+ 
+-            if (mService != null) {
+-                session.authenticateExtensionAndConnectPorts(mService);
+-            }
+-        }
+-
++        }
++
++        // Attach the port before authentication: a bound service may throw synchronously,
++        // and failure must close this port before removing its session from the connection.
+         session.addPort(port);
++        if (mService != null) {
++            session.authenticateExtensionAndConnectPorts(mService);
++        }
++        // C++ is still constructing this port; its channel is not registered yet. An inline
++        // closeChannel cannot tear down that channel, so propagate a synchronous error instead.
++        if (mSessions.get(extensionId) != session
++                || (!session.mPendingPorts.contains(port) && !session.mActivePorts.contains(port))) {
++            return getUnableToConnectError(mPackageName);
++        }
+         return null;
+     }
+ 
+@@ -194,7 +211,7 @@
+ 
+         mConnectedTimeMs = SystemClock.elapsedRealtime();
+         mService = IBrowserNativeMessageService.Stub.asInterface(service);
+-        for (ExtensionSession session : mSessions.values()) {
++        for (ExtensionSession session : new ArrayList<>(mSessions.values())) {
+             session.authenticateExtensionAndConnectPorts(mService);
+         }
+     }
+@@ -266,6 +283,7 @@
+ 
+         private final String mExtensionId;
+         private final boolean mIsVerifiedExtension;
++        private final boolean mRequireAuthorizedCompanion;
+         private @Nullable IExtensionNativeMessageService mExtensionService;
+         private @ConnectionState int mState = ConnectionState.DISCONNECTED;
+         // Generation counter for idle disconnect tasks. Incremented whenever a port
+@@ -283,9 +301,11 @@
+         public ExtensionSession(
+                 String extensionId,
+                 boolean isVerifiedExtension,
++                boolean requireAuthorizedCompanion,
+                 NativeMessagingConnection connection) {
+             mExtensionId = extensionId;
+             mIsVerifiedExtension = isVerifiedExtension;
++            mRequireAuthorizedCompanion = requireAuthorizedCompanion;
+             mConnection = connection;
+         }
+ 
+@@ -330,7 +350,13 @@
+             info.putBoolean("isVerified", mIsVerifiedExtension);
+             ConnectExtensionCallback callback = new ConnectExtensionCallback();
+             try {
+-                browserService.connectExtension(mExtensionId, info, callback);
++                if (mRequireAuthorizedCompanion) {
++                    // Never fall back to the legacy entry point. Older or rejecting companions
++                    // must fail or time out without an unauthenticated connection.
++                    browserService.connectAuthorizedExtension(mExtensionId, info, callback);
++                } else {
++                    browserService.connectExtension(mExtensionId, info, callback);
++                }
+                 // Report an error and abort the extension connecting if too much time passes
+                 // between the connectExtension call and the external app responding (success or
+                 // error) via `callback`.
+@@ -340,7 +366,7 @@
+                 // disconnected).
+                 PostTask.postDelayedTask(
+                         TaskTraits.UI_DEFAULT, callback::onTimeout, CONNECT_TIMEOUT_MS);
+-            } catch (RemoteException e) {
++            } catch (RemoteException | SecurityException e) {
+                 onConnectExtensionError("RemoteException when calling connectExtension.");
+             }
+         }
+@@ -418,7 +444,7 @@
+                 // - The port was closed or the session was disconnected first.
+                 PostTask.postDelayedTask(
+                         TaskTraits.UI_DEFAULT, callback::onTimeout, CONNECT_TIMEOUT_MS);
+-            } catch (RemoteException e) {
++            } catch (RemoteException | SecurityException e) {
+                 onConnectPortError(port, "RemoteException when calling connectPort.");
+             }
+         }
+@@ -450,7 +476,7 @@
+             if (remotePort != null) {
+                 try {
+                     remotePort.disconnect();
+-                } catch (RemoteException e) {
++                } catch (RemoteException | SecurityException e) {
+                     Log.w(TAG, "Failed to disconnect aborted remote port", e);
+                 }
+             }
+@@ -498,7 +524,7 @@
+             if (service != null) {
+                 try {
+                     service.closeConnection();
+-                } catch (RemoteException e) {
++                } catch (RemoteException | SecurityException e) {
+                     Log.w(TAG, "Failed to call closeConnection() for " + mExtensionId, e);
+                 }
+             }
+@@ -589,7 +615,7 @@
+                     // duplicate `remotePort` if this happens.
+                     try {
+                         remotePort.disconnect();
+-                    } catch (RemoteException e) {
++                    } catch (RemoteException | SecurityException e) {
+                     }
+                 }
+             }

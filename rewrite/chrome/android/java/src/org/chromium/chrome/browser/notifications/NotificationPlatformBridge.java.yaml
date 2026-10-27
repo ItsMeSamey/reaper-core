@@ -1,0 +1,239 @@
+# Android extension notification policy and payload support.
+substitutions:
+- description: Receive the native extension notification payload
+  regex:
+    re_pattern: \ \ \ \ \ \ \ \ \ \ \ \ final\ boolean\ skipUAButtons\)\ \{
+    replace: "            final boolean skipUAButtons,\n            final int extensionProgress,\n            @JniType(\"std::u16string\") final String extensionContext,\n            @JniType(\"std::vector<std::u16string>\") final String[] extensionItemTitles,\n            @JniType(\"std::vector<std::u16string>\") final String[] extensionItemMessages) {"
+- description: Keep extension payload through asynchronous Android channel lookup
+  regex:
+    re_pattern: \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ skipUAButtons\);
+    replace: "                                        skipUAButtons,\n                                        extensionProgress,\n                                        extensionContext,\n                                        extensionItemTitles,\n                                        extensionItemMessages);"
+- description: Retain the extension payload in notification assembly
+  regex:
+    re_pattern: \ \ \ \ \ \ \ \ \ \ \ \ boolean\ skipUAButtons\)\ \{
+    replace: "            boolean skipUAButtons,\n            int extensionProgress,\n            String extensionContext,\n            String[] extensionItemTitles,\n            String[] extensionItemMessages) {"
+- description: Apply extension styles only to extension notifications
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ notificationBuilder\.setContentIntent\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ makePendingIntent\('
+    replace: "        if (identifyingAttributes.notificationType == NotificationType.EXTENSION) {\n            ((StandardNotificationBuilder) notificationBuilder).setExtensionContent(\n                    extensionProgress, extensionContext, extensionItemTitles, extensionItemMessages);\n        }\n\n        notificationBuilder.setContentIntent(\n                makePendingIntent("
+- description: Format modified Android notification Java sources
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ silent,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ actions\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ if\ \(identifyingAttributes\.notificationType\ ==\ NotificationType\.EXTENSION\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \(\(StandardNotificationBuilder\)\ notificationBuilder\)\.setExtensionContent\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ extensionProgress,\ extensionContext,\ extensionItemTitles,\ extensionItemMessages\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ notificationBuilder\.setContentIntent\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ makePendingIntent\(\
+
+      '
+    replace: "                        silent,\n                        actions);\n\n        if (identifyingAttributes.notificationType == NotificationType.EXTENSION) {\n            ((StandardNotificationBuilder) notificationBuilder)\n                    .setExtensionContent(\n                            extensionProgress,\n                            extensionContext,\n                            extensionItemTitles,\n                            extensionItemMessages);\n        }\n\n        notificationBuilder.setContentIntent(\n                makePendingIntent(\n"
+- description: Track only current unfinished notification operations on the existing UI thread
+  regex:
+    pattern: '    private final long mNativeNotificationPlatformBridge;
+
+      '
+    replace: "    private final long mNativeNotificationPlatformBridge;\n\n    // Only unfinished operations are retained.\
+      \ Replacing a token invalidates older callbacks.\n    private final Map<String, Object> mPendingNotificationOperations\
+      \ = new HashMap<>();\n"
+  count: 1
+- description: Invalidate all pending notification callbacks when this bridge is destroyed
+  regex:
+    pattern: "        assert sInstance == this;\n        sInstance = null;\n    }\n"
+    replace: "        assert sInstance == this;\n        mPendingNotificationOperations.clear();\n        sInstance = null;\n\
+      \    }\n\n    private Object beginNotificationOperation(String notificationId) {\n        Object operation = new Object();\n\
+      \        mPendingNotificationOperations.put(notificationId, operation);\n        return operation;\n    }\n\n    private\
+      \ boolean isCurrentNotificationOperation(String notificationId, Object operation) {\n        return sInstance == this\
+      \ && mPendingNotificationOperations.get(notificationId) == operation;\n    }\n\n    private void finishNotificationOperation(String\
+      \ notificationId, Object operation) {\n        // A completed older operation must not remove its replacement.\n   \
+      \     mPendingNotificationOperations.remove(notificationId, operation);\n    }\n"
+  count: 1
+- description: Ignore new display requests on a retired bridge before accessing profile state
+  regex:
+    pattern: "            @JniType(\"std::vector<std::u16string>\") final String[] extensionItemMessages) {\n        final\
+      \ boolean vibrateEnabled =\n"
+    replace: "            @JniType(\"std::vector<std::u16string>\") final String[] extensionItemMessages) {\n        if (sInstance\
+      \ != this) return;\n        final boolean vibrateEnabled =\n"
+  count: 1
+- description: Start the latest display operation and release it if metadata setup fails synchronously
+  regex:
+    pattern: "        CompletableFuture<String> webApkPackage = getWebApkPackage(scopeUrl);\n        CompletableFuture<String>\
+      \ channelId = getChannelIdForOrigin(origin);\n"
+    replace: "        final Object operation = beginNotificationOperation(notificationId);\n        final CompletableFuture<String>\
+      \ webApkPackage;\n        final CompletableFuture<String> channelId;\n        try {\n            webApkPackage = getWebApkPackage(scopeUrl);\n\
+      \            channelId = getChannelIdForOrigin(origin);\n        } catch (RuntimeException e) {\n            finishNotificationOperation(notificationId,\
+      \ operation);\n            throw e;\n        }\n"
+  count: 1
+- description: Check ownership after metadata completion before any native or notification work
+  regex:
+    pattern: "                        () -> {\n                            try {\n                                displayNotificationInternal(\n\
+      \                                        new NotificationIdentifyingAttributes(\n"
+    replace: "                        () -> {\n                            if (!isCurrentNotificationOperation(notificationId,\
+      \ operation)) return;\n                            try {\n                                displayNotificationInternal(\n\
+      \                                        operation,\n                                        new NotificationIdentifyingAttributes(\n"
+  count: 1
+- description: Release failed display operations without removing a later replacement
+  regex:
+    pattern: "                            } catch (Exception e) {\n                                Log.e(TAG, \"Failed to\
+      \ display notification.\", e);\n"
+    replace: "                            } catch (Exception e) {\n                                finishNotificationOperation(notificationId,\
+      \ operation);\n                                Log.e(TAG, \"Failed to display notification.\", e);\n"
+  count: 1
+- description: Ignore superseded metadata failures and release the matching failed operation
+  regex:
+    pattern: "                                error -> {\n                                    Log.e(\n                   \
+      \                         TAG,\n                                            \"Error occured when displaying notification.\"\
+      ,\n"
+    replace: "                                error -> {\n                                    if (!isCurrentNotificationOperation(notificationId,\
+      \ operation)) {\n                                        return null;\n                                    }\n     \
+      \                               finishNotificationOperation(notificationId, operation);\n                          \
+      \          Log.e(\n                                            TAG,\n                                            \"\
+      Error occured when displaying notification.\",\n"
+  count: 1
+- description: Carry the existing display operation through private routing
+  regex:
+    pattern: "    private void displayNotificationInternal(\n            NotificationIdentifyingAttributes identifyingAttributes,\n"
+    replace: "    private void displayNotificationInternal(\n            Object operation,\n            NotificationIdentifyingAttributes\
+      \ identifyingAttributes,\n"
+  count: 1
+- description: Finish local operation tracking after the existing WebAPK delivery handoff
+  regex:
+    pattern: "                            identifyingAttributes.notificationId,\n                            PLATFORM_ID);\n\
+      \            return;\n"
+    replace: "                            identifyingAttributes.notificationId,\n                            PLATFORM_ID);\n\
+      \            finishNotificationOperation(identifyingAttributes.notificationId, operation);\n            return;\n"
+  count: 1
+- description: Finish local operation tracking after the existing TWA delivery handoff
+  regex:
+    pattern: "                            notificationBuilder,\n                            NotificationUmaTracker.getInstance());\n\
+      \            return;\n"
+    replace: "                            notificationBuilder,\n                            NotificationUmaTracker.getInstance());\n\
+      \            finishNotificationOperation(identifyingAttributes.notificationId, operation);\n            return;\n"
+  count: 1
+- description: Check operation ownership again when suspension lookup completes
+  regex:
+    pattern: "                        (suspended) -> {\n                            // If the origin's notifications are suspended\
+      \ and the notification is\n"
+    replace: "                        (suspended) -> {\n                            if (!isCurrentNotificationOperation(\n\
+      \                                    identifyingAttributes.notificationId, operation)) {\n                         \
+      \       return;\n                            }\n                            // If the origin's notifications are suspended\
+      \ and the notification is\n"
+  count: 1
+- description: Remove terminal suspended operations rather than retaining per-ID history
+  regex:
+    pattern: "                            if (suspended && !skipUAButtons) {\n                                return;\n  \
+      \                          }\n"
+    replace: "                            if (suspended && !skipUAButtons) {\n                                finishNotificationOperation(\n\
+      \                                        identifyingAttributes.notificationId, operation);\n                       \
+      \         return;\n                            }\n"
+  count: 1
+- description: Finish successful or failed local delivery and handle suspension rejection without retaining the operation
+  regex:
+    pattern: "                                                + \" corrupted.\");\n                            }\n       \
+      \                 });\n\n        // If Chrome has no app-level notifications permission"
+    replace: "                                                + \" corrupted.\");\n                            } finally {\n\
+      \                                finishNotificationOperation(\n                                        identifyingAttributes.notificationId,\
+      \ operation);\n                            }\n                        },\n                        (error) -> {\n   \
+      \                         if (!isCurrentNotificationOperation(\n                                    identifyingAttributes.notificationId,\
+      \ operation)) {\n                                return;\n                            }\n                          \
+      \  finishNotificationOperation(\n                                    identifyingAttributes.notificationId, operation);\n\
+      \                            Log.e(TAG, \"Failed to check notification suspension.\", error);\n                    \
+      \    });\n\n        // If Chrome has no app-level notifications permission"
+  count: 1
+- description: Close supersedes pending display/close work and carries its own operation through WebAPK lookup
+  regex:
+    pattern: "    @CalledByNative\n    private void closeNotification(\n            final @JniType(\"std::string\") String\
+      \ notificationId,\n            @JniType(\"std::string\") String scopeUrl,\n            boolean hasQueriedWebApkPackage,\n\
+      \            @JniType(\"std::string\") String webApkPackage) {\n        if (!hasQueriedWebApkPackage) {\n          \
+      \  final String webApkPackageFound =\n                    WebApkValidator.queryFirstWebApkPackage(\n               \
+      \             ContextUtils.getApplicationContext(), scopeUrl);\n            if (webApkPackageFound != null) {\n    \
+      \            WebApkIdentityServiceClient.CheckBrowserBacksWebApkCallback callback =\n                        (doesBrowserBackWebApk,\
+      \ _) ->\n                                closeNotificationInternal(\n                                        notificationId,\n\
+      \                                        doesBrowserBackWebApk ? webApkPackageFound : null,\n                      \
+      \                  scopeUrl);\n                ChromeWebApkHost.checkChromeBacksWebApkAsync(webApkPackageFound, callback);\n\
+      \                return;\n            }\n        }\n        closeNotificationInternal(notificationId, webApkPackage,\
+      \ scopeUrl);\n    }\n"
+    replace: "    @CalledByNative\n    private void closeNotification(\n            final @JniType(\"std::string\") String\
+      \ notificationId,\n            @JniType(\"std::string\") String scopeUrl,\n            boolean hasQueriedWebApkPackage,\n\
+      \            @JniType(\"std::string\") String webApkPackage) {\n        if (sInstance != this) return;\n        final\
+      \ Object operation = beginNotificationOperation(notificationId);\n        try {\n            if (!hasQueriedWebApkPackage)\
+      \ {\n                final String webApkPackageFound =\n                        WebApkValidator.queryFirstWebApkPackage(\n\
+      \                                ContextUtils.getApplicationContext(), scopeUrl);\n                if (webApkPackageFound\
+      \ != null) {\n                    WebApkIdentityServiceClient.CheckBrowserBacksWebApkCallback callback =\n         \
+      \                   (doesBrowserBackWebApk, _) ->\n                                    closeNotificationInternal(\n\
+      \                                            notificationId,\n                                            operation,\n\
+      \                                            doesBrowserBackWebApk ? webApkPackageFound : null,\n                  \
+      \                          scopeUrl);\n                    ChromeWebApkHost.checkChromeBacksWebApkAsync(webApkPackageFound,\
+      \ callback);\n                    return;\n                }\n            }\n            closeNotificationInternal(notificationId,\
+      \ operation, webApkPackage, scopeUrl);\n        } catch (RuntimeException e) {\n            finishNotificationOperation(notificationId,\
+      \ operation);\n            throw e;\n        }\n    }\n"
+  count: 1
+- description: Guard delayed close and clean all existing WebAPK/TWA/local or unsubscribe returns
+  regex:
+    pattern: "    private void closeNotificationInternal(\n            String notificationId, @Nullable String webApkPackage,\
+      \ String scopeUrl) {\n        if (!TextUtils.isEmpty(webApkPackage)) {\n            WebApkServiceClient.getInstance()\n\
+      \                    .cancelNotification(webApkPackage, notificationId, PLATFORM_ID);\n            return;\n       \
+      \ }\n\n        if (getTwaClient().twaExistsForScope(Uri.parse(scopeUrl))) {\n            getTwaClient().cancelNotification(Uri.parse(scopeUrl),\
+      \ notificationId, PLATFORM_ID);\n\n            // There's an edge case where a notification was displayed by Chrome,\
+      \ a Trusted Web\n            // Activity is then installed and run then the notification is cancelled by javascript.\n\
+      \            // Chrome will attempt to close the notification through the TWA client and not itself.\n            //\
+      \ Since NotificationManager#cancel is safe to call if the requested notification\n            // isn't being shown,\
+      \ we just call that as well to ensure notifications are cleared.\n        }\n\n        // The \"provisionally unsubscribed\"\
+      \ service notification re-uses the tag of the organic\n        // notification it has replaced. Do not let this service\
+      \ notification be canceled. If the\n        // user clicks `UNDO_UNSUBSCRIBE`, we will still restore the cancelled notification\
+      \ for the\n        // sake of tangibly demonstrating to the user that the unsubscribe action was undone.\n        //\
+      \ TODO(crbug.com/359593412): The organic notification is at this point already deleted from\n        // the NotificationDatabase\
+      \ in response to it being closed by the developer. If we end up\n        // restoring it, user interactions other than\
+      \ \"Unsubscribe\" will not work. Fix this.\n        String origin = getOriginFromNotificationTag(notificationId);\n\
+      \        if (origin != null && sOriginsWithProvisionallyRevokedPermissions.containsKey(origin)) {\n            return;\n\
+      \        }\n\n        mNotificationManager.cancel(notificationId, PLATFORM_ID);\n    }\n"
+    replace: "    private void closeNotificationInternal(\n            String notificationId,\n            Object operation,\n\
+      \            @Nullable String webApkPackage,\n            String scopeUrl) {\n        if (!isCurrentNotificationOperation(notificationId,\
+      \ operation)) return;\n        try {\n            if (!TextUtils.isEmpty(webApkPackage)) {\n                WebApkServiceClient.getInstance()\n\
+      \                        .cancelNotification(webApkPackage, notificationId, PLATFORM_ID);\n                return;\n\
+      \            }\n\n            if (getTwaClient().twaExistsForScope(Uri.parse(scopeUrl))) {\n                getTwaClient().cancelNotification(Uri.parse(scopeUrl),\
+      \ notificationId, PLATFORM_ID);\n\n                // There's an edge case where a notification was displayed by Chrome,\
+      \ a Trusted Web\n                // Activity is then installed and run then the notification is cancelled by javascript.\n\
+      \                // Chrome will attempt to close the notification through the TWA client and not itself.\n         \
+      \       // Since NotificationManager#cancel is safe to call if the requested notification\n                // isn't\
+      \ being shown, we just call that as well to ensure notifications are cleared.\n            }\n\n            // The \"\
+      provisionally unsubscribed\" service notification re-uses the tag of the organic\n            // notification it has\
+      \ replaced. Do not let this service notification be canceled. If the\n            // user clicks `UNDO_UNSUBSCRIBE`,\
+      \ we will still restore the cancelled notification for the\n            // sake of tangibly demonstrating to the user\
+      \ that the unsubscribe action was undone.\n            // TODO(crbug.com/359593412): The organic notification is at\
+      \ this point already deleted from\n            // the NotificationDatabase in response to it being closed by the developer.\
+      \ If we end up\n            // restoring it, user interactions other than \"Unsubscribe\" will not work. Fix this.\n\
+      \            String origin = getOriginFromNotificationTag(notificationId);\n            if (origin != null && sOriginsWithProvisionallyRevokedPermissions.containsKey(origin))\
+      \ {\n                return;\n            }\n\n            mNotificationManager.cancel(notificationId, PLATFORM_ID);\n\
+      \        } finally {\n            finishNotificationOperation(notificationId, operation);\n        }\n    }\n"
+  count: 1
+- description: A processed user dismissal invalidates older queued work before preserving native close event delivery
+  regex:
+    pattern: "    private void onNotificationClosed(\n            NotificationIdentifyingAttributes identifyingAttributes,\
+      \ boolean byUser) {\n        NotificationPlatformBridgeJni.get()\n"
+    replace: "    private void onNotificationClosed(\n            NotificationIdentifyingAttributes identifyingAttributes,\
+      \ boolean byUser) {\n        mPendingNotificationOperations.remove(identifyingAttributes.notificationId);\n        NotificationPlatformBridgeJni.get()\n"
+  count: 1
+- description: Preserve completion and error detail while using the non-Throwable overload for null rejections
+  regex:
+    pattern: '                            Log.e(TAG, "Failed to check notification suspension.", error);
+
+      '
+    replace: "                            if (error != null) {\n                                Log.e(TAG, \"Failed to check\
+      \ notification suspension.\", error);\n                            } else {\n                                Log.e(TAG,\
+      \ \"Failed to check notification suspension.\");\n                            }\n"
+  count: 1

@@ -1,0 +1,698 @@
+diff --git a/extensions/browser/api/alarms/alarms_api_unittest.cc b/extensions/browser/api/alarms/alarms_api_unittest.cc
+index 0f20943c6de48666c330ca68cc04472bd2056f40..bb7672777eba7e9a521106bb2148ace52113f25d 100644
+--- a/extensions/browser/api/alarms/alarms_api_unittest.cc
++++ b/extensions/browser/api/alarms/alarms_api_unittest.cc
+@@ -24,6 +24,7 @@
+ #include "base/test/simple_test_clock.h"
+ #include "base/test/values_test_util.h"
+ #include "base/values.h"
++#include "build/build_config.h"
+ #include "content/public/browser/web_contents.h"
+ #include "content/public/test/fake_local_frame.h"
+ #include "extensions/browser/api/alarms/alarm_manager.h"
+@@ -33,6 +34,33 @@
+ #include "extensions/common/extension_id.h"
+ #include "testing/gmock/include/gmock/gmock.h"
+ #include "testing/gtest/include/gtest/gtest.h"
++
++#if BUILDFLAG(IS_ANDROID)
++#include <algorithm>
++#include <vector>
++
++#include "base/check.h"
++#include "base/functional/callback_helpers.h"
++#include "base/location.h"
++#include "base/synchronization/waitable_event.h"
++#include "base/task/sequenced_task_runner.h"
++#include "base/test/bind.h"
++#include "base/test/test_timeouts.h"
++#include "base/threading/thread_restrictions.h"
++#include "components/value_store/test_value_store_factory.h"
++#include "extensions/browser/event_router.h"
++#include "extensions/browser/event_router_factory.h"
++#include "extensions/browser/extension_file_task_runner.h"
++#include "extensions/browser/extension_function_dispatcher.h"
++#include "extensions/browser/extension_prefs.h"
++#include "extensions/browser/extension_registry.h"
++#include "extensions/browser/extension_system.h"
++#include "extensions/browser/mock_extension_system.h"
++#include "extensions/browser/state_store.h"
++#include "extensions/browser/test_event_router_observer.h"
++#include "extensions/browser/test_extensions_browser_client.h"
++#include "extensions/browser/unloaded_extension_reason.h"
++#endif
+ 
+ typedef extensions::api::alarms::Alarm JsAlarm;
+ 
+@@ -886,6 +914,54 @@
+       alarm_manager_->next_poll_time_.InMillisecondsFSinceUnixEpoch());
+ }
+ 
++#if BUILDFLAG(IS_ANDROID)
++TEST_F(ExtensionAlarmsSchedulingTest,
++       EffectiveRepeatIntervalPreservesRequestedPeriod) {
++  const base::TimeDelta minimum = alarms_api_constants::GetMinimumDelay(
++      Manifest::IsUnpackedLocation(extension()->location()),
++      extension()->manifest_version());
++  ASSERT_GT(minimum, base::TimeDelta());
++  const base::Time start = base::Time::FromSecondsSinceUnixEpoch(10);
++  for (const base::TimeDelta requested :
++       {minimum / 2, minimum, minimum * 2}) {
++    test_clock_.SetNow(start);
++    alarm_manager_->last_poll_times_.clear();
++    alarm_delegate_->alarms_seen.clear();
++
++    api::alarms::AlarmCreateInfo info;
++    info.name = "repeat";
++    info.when = start.InMillisecondsFSinceUnixEpoch();
++    info.period_in_minutes = requested.InSecondsF() / 60.0;
++    const double requested_minutes = *info.period_in_minutes;
++    alarm_manager_->AddAlarm(extension()->id(),
++                             Alarm(info, minimum, test_clock_.Now()),
++                             base::DoNothing());
++    alarm_manager_->PollAlarms();
++    ASSERT_EQ(1u, alarm_delegate_->alarms_seen.size());
++
++    const base::TimeDelta effective = std::max(minimum, requested);
++    base::test::TestFuture<Alarm*> alarm_future;
++    alarm_manager_->GetAlarm(extension()->id(), "repeat",
++                             alarm_future.GetCallback());
++    Alarm* alarm = alarm_future.Get();
++    ASSERT_TRUE(alarm);
++    ASSERT_TRUE(alarm->js_alarm->period_in_minutes);
++    EXPECT_DOUBLE_EQ(requested_minutes, *alarm->js_alarm->period_in_minutes);
++    EXPECT_DOUBLE_EQ((start + effective).InMillisecondsFSinceUnixEpoch(),
++                     alarm->js_alarm->scheduled_time);
++    EXPECT_EQ(start + effective, alarm_manager_->next_poll_time_);
++
++    // A delayed poll skips missed occurrences but retains the original phase.
++    test_clock_.Advance(effective * 2 + effective / 2);
++    alarm_manager_->PollAlarms();
++    EXPECT_EQ(2u, alarm_delegate_->alarms_seen.size());
++    EXPECT_DOUBLE_EQ((start + effective * 3).InMillisecondsFSinceUnixEpoch(),
++                     alarm->js_alarm->scheduled_time);
++    EXPECT_DOUBLE_EQ(requested_minutes, *alarm->js_alarm->period_in_minutes);
++    RemoveAlarm("repeat");
++  }
++}
++#endif  // BUILDFLAG(IS_ANDROID)
+ TEST_F(ExtensionAlarmsSchedulingTest, PerExtensionLastPollTime) {
+   test_clock_.SetNow(base::Time::UnixEpoch());
+ 
+@@ -948,4 +1024,596 @@
+             alarm_manager_->last_poll_times_[extension2->id()]);
+ }
+ 
++#if BUILDFLAG(IS_ANDROID)
++namespace {
++
++class AlarmStateStoreExtensionSystem : public MockExtensionSystem {
++ public:
++  explicit AlarmStateStoreExtensionSystem(content::BrowserContext* context)
++      : MockExtensionSystem(context),
++        state_store_(context,
++                     base::MakeRefCounted<value_store::TestValueStoreFactory>(),
++                     StateStore::BackendType::STATE,
++                     /*deferred_load=*/false) {}
++
++  StateStore* state_store() override { return &state_store_; }
++
++ private:
++  StateStore state_store_;
++};
++
++struct RestoreCallbackResult {
++  int calls = 0;
++  int released = 0;
++  bool has_alarm = false;
++  double scheduled_time = 0;
++};
++
++AlarmManager::GetAlarmCallback ObserveRestoredAlarm(
++    std::shared_ptr<RestoreCallbackResult> result,
++    base::OnceClosure action = {}) {
++  base::ScopedClosureRunner release(base::BindOnce(
++      [](std::shared_ptr<RestoreCallbackResult> result) { ++result->released; },
++      result));
++  return base::BindOnce(
++      [](std::shared_ptr<RestoreCallbackResult> result,
++         base::ScopedClosureRunner release, base::OnceClosure action,
++         Alarm* alarm) {
++        ++result->calls;
++        result->has_alarm = alarm != nullptr;
++        if (alarm) {
++          result->scheduled_time = alarm->js_alarm->scheduled_time;
++        }
++        if (action) {
++          std::move(action).Run();
++        }
++      },
++      std::move(result), std::move(release), std::move(action));
++}
++
++struct RestoreApiResult {
++  int successful_responses = 0;
++  int failed_responses = 0;
++  std::string error;
++  bool destroyed = false;
++  base::ListValue values;
++};
++
++class ObservedAlarmsCreateFunction : public AlarmsCreateFunction {
++ public:
++  explicit ObservedAlarmsCreateFunction(
++      std::shared_ptr<RestoreApiResult> result)
++      : result_(std::move(result)) {}
++
++ protected:
++  ~ObservedAlarmsCreateFunction() override { result_->destroyed = true; }
++
++ private:
++  std::shared_ptr<RestoreApiResult> result_;
++};
++
++// Uses the real AlarmsClearAllFunction::Run and its bound callback ownership.
++class ObservedAlarmsClearAllFunction : public AlarmsClearAllFunction {
++ public:
++  explicit ObservedAlarmsClearAllFunction(
++      std::shared_ptr<RestoreApiResult> result)
++      : result_(std::move(result)) {}
++
++ protected:
++  ~ObservedAlarmsClearAllFunction() override { result_->destroyed = true; }
++
++ private:
++  std::shared_ptr<RestoreApiResult> result_;
++};
++
++}  // namespace
++
++// These tests retain the real StateStore frontend, sequenced backend, registry
++// notifications, AlarmManager and event delegate/router. Only the value-store
++// storage implementation is in memory. No restore callback is invoked directly.
++class ExtensionAlarmsStateStoreTest : public ExtensionsTest {
++ public:
++  ExtensionAlarmsStateStoreTest()
++      : ExtensionsTest(content::BrowserTaskEnvironment::TimeSource::MOCK_TIME) {
++  }
++
++ protected:
++  void SetUp() override {
++    ExtensionsTest::SetUp();
++    extensions_browser_client()->set_extension_system_factory(&system_factory_);
++    store_ = ExtensionSystem::Get(browser_context())->state_store();
++    ASSERT_TRUE(store_);
++    ASSERT_TRUE(store_->IsInitialized());
++
++    auto* router = static_cast<EventRouter*>(
++        EventRouterFactory::GetInstance()->SetTestingFactoryAndUse(
++            browser_context(),
++            base::BindOnce([](content::BrowserContext* context)
++                               -> std::unique_ptr<KeyedService> {
++              return std::make_unique<EventRouter>(
++                  context, ExtensionPrefs::Get(context));
++            })));
++    event_observer_ = std::make_unique<TestEventRouterObserver>(router);
++    manager_ = static_cast<AlarmManager*>(
++        AlarmManager::GetFactoryInstance()->SetTestingFactoryAndUse(
++            browser_context(),
++            base::BindOnce([](content::BrowserContext* context)
++                               -> std::unique_ptr<KeyedService> {
++              return std::make_unique<AlarmManager>(context);
++            })));
++    dispatcher_ =
++        std::make_unique<ExtensionFunctionDispatcher>(browser_context());
++    extension_ = ExtensionBuilder("Persistent alarms")
++                     .SetManifestVersion(3)
++                     .AddAPIPermission("alarms")
++                     .Build();
++  }
++
++  void TearDown() override {
++    // Retire any API callbacks while their extension is actually disabled.
++    std::vector<scoped_refptr<const Extension>> enabled;
++    for (const auto& extension : registry()->enabled_extensions()) {
++      enabled.push_back(extension);
++    }
++    for (const auto& extension : enabled) {
++      Disable(extension);
++    }
++    DestroyManager();
++    task_environment()->RunUntilIdle();
++    dispatcher_.reset();
++    event_observer_.reset();
++    extension_.reset();
++    store_ = nullptr;
++    ExtensionsTest::TearDown();
++  }
++
++  ExtensionRegistry* registry() {
++    return ExtensionRegistry::Get(browser_context());
++  }
++
++  void Enable(const scoped_refptr<const Extension>& extension) {
++    registry()->RemoveDisabled(extension->id());
++    CHECK(registry()->AddEnabled(extension));
++    registry()->TriggerOnLoaded(extension.get());
++  }
++
++  void Disable(const scoped_refptr<const Extension>& extension) {
++    CHECK(registry()->AddDisabled(extension));
++    CHECK(registry()->RemoveEnabled(extension->id()));
++    registry()->TriggerOnUnloaded(extension.get(),
++                                  UnloadedExtensionReason::DISABLE);
++  }
++
++  void DestroyManager() {
++    manager_ = nullptr;
++    AlarmManager::GetFactoryInstance()->SetTestingFactory(browser_context(),
++                                                          {});
++  }
++
++  // Finish backend operations without pumping UI. Thus both GetA and GetB can
++  // own real old snapshots before callbackA runs any queued API action.
++  void FinishBackendWithoutUi() {
++    auto marker = std::make_shared<base::WaitableEvent>();
++    CHECK(GetExtensionFileTaskRunner()->PostTask(
++        FROM_HERE, base::BindOnce(
++                       [](std::shared_ptr<base::WaitableEvent> marker) {
++                         marker->Signal();
++                       },
++                       marker)));
++    base::ScopedAllowBaseSyncPrimitivesForTesting allow_wait;
++    CHECK(marker->TimedWait(TestTimeouts::action_timeout()));
++  }
++
++  void SeedAlarm(const ExtensionId& id, base::Time when) {
++    base::ListValue alarms;
++    alarms.Append(
++        base::DictValue()
++            .Set("name", "stored")
++            .Set("scheduledTime", when.InMillisecondsFSinceUnixEpoch())
++            .Set("persistAcrossSessions", true));
++    store_->SetExtensionValue(id, "alarms", base::Value(std::move(alarms)));
++    FinishBackendWithoutUi();
++  }
++
++  base::ListValue SeedAlarms(int count) {
++    base::ListValue alarms;
++    const double when =
++        (base::Time::Now() + base::Hours(1)).InMillisecondsFSinceUnixEpoch();
++    for (int i = 0; i < count; ++i) {
++      alarms.Append(base::DictValue()
++                        .Set("name", "stored-" + std::to_string(i))
++                        .Set("scheduledTime", when)
++                        .Set("persistAcrossSessions", true));
++    }
++    store_->SetExtensionValue(extension_->id(), "alarms",
++                              base::Value(alarms.Clone()));
++    FinishBackendWithoutUi();
++    return alarms;
++  }
++
++  base::ListValue ReadStoredAlarms(const ExtensionId& id) {
++    base::test::TestFuture<std::optional<base::Value>> value;
++    store_->GetExtensionValue(id, "alarms", value.GetCallback());
++    CHECK(value.Wait());
++    CHECK(value.Get());
++    CHECK(value.Get()->is_list());
++    return value.Get()->GetList().Clone();
++  }
++
++  Alarm* FindAlarm(const ExtensionId& id,
++                   const std::string& name = "stored") {
++    base::test::TestFuture<Alarm*> result;
++    manager_->GetAlarm(id, name, result.GetCallback());
++    return result.Get();
++  }
++
++  void StartApi(scoped_refptr<ExtensionFunction> function,
++                base::ListValue args,
++                std::shared_ptr<RestoreApiResult> result) {
++    function->set_extension(extension_.get());
++    function->SetDispatcher(dispatcher_->AsWeakPtr());
++    function->SetArgs(std::move(args));
++    function->set_has_callback(true);
++    function->set_response_callback(base::BindOnce(
++        [](std::shared_ptr<RestoreApiResult> result,
++           ExtensionFunction::ResponseType response, base::ListValue values,
++           const std::string& error, mojom::ExtraResponseDataPtr extra) {
++          if (response == ExtensionFunction::ResponseType::kSucceeded) {
++            ++result->successful_responses;
++            result->values = std::move(values);
++          } else {
++            ++result->failed_responses;
++            result->error = error;
++          }
++        },
++        std::move(result)));
++    function->RunWithValidation().Execute();
++  }
++
++  MockExtensionSystemFactory<AlarmStateStoreExtensionSystem> system_factory_;
++  raw_ptr<StateStore> store_ = nullptr;
++  raw_ptr<AlarmManager> manager_ = nullptr;
++  std::unique_ptr<TestEventRouterObserver> event_observer_;
++  std::unique_ptr<ExtensionFunctionDispatcher> dispatcher_;
++  scoped_refptr<const Extension> extension_;
++};
++
++TEST_F(ExtensionAlarmsStateStoreTest, CreateChecksQuotaAfterInitialRestore) {
++  const base::ListValue original =
++      SeedAlarms(AlarmManager::kMaxAlarmsPerExtension);
++  Enable(extension_);
++  auto result = std::make_shared<RestoreApiResult>();
++  StartApi(base::MakeRefCounted<AlarmsCreateFunction>(),
++           base::test::ParseJsonList(
++               R"(["extra", {"delayInMinutes": 120}])"),
++           result);
++  EXPECT_EQ(0, result->successful_responses);
++  EXPECT_EQ(0, result->failed_responses);
++  FinishBackendWithoutUi();
++  EXPECT_EQ(0, result->successful_responses);
++  EXPECT_EQ(0, result->failed_responses);
++  task_environment()->RunUntilIdle();
++
++  EXPECT_EQ(0, result->successful_responses);
++  EXPECT_EQ(1, result->failed_responses);
++  EXPECT_EQ("An extension cannot have more than 500 active alarms.",
++            result->error);
++  EXPECT_EQ(AlarmManager::kMaxAlarmsPerExtension,
++            manager_->GetCountForExtension(extension_->id()));
++  EXPECT_FALSE(FindAlarm(extension_->id(), "extra"));
++  EXPECT_EQ(original, ReadStoredAlarms(extension_->id()));
++}
++
++TEST_F(ExtensionAlarmsStateStoreTest, QueuedCreatesShareLastAvailableSlot) {
++  SeedAlarms(AlarmManager::kMaxAlarmsPerExtension - 1);
++  Enable(extension_);
++  auto first = std::make_shared<RestoreApiResult>();
++  auto second = std::make_shared<RestoreApiResult>();
++  StartApi(base::MakeRefCounted<AlarmsCreateFunction>(),
++           base::test::ParseJsonList(R"(["first", {"delayInMinutes": 120}])"),
++           first);
++  StartApi(base::MakeRefCounted<AlarmsCreateFunction>(),
++           base::test::ParseJsonList(R"(["second", {"delayInMinutes": 120}])"),
++           second);
++  FinishBackendWithoutUi();
++  task_environment()->RunUntilIdle();
++
++  EXPECT_EQ(1, first->successful_responses);
++  EXPECT_EQ(0, first->failed_responses);
++  EXPECT_EQ(0, second->successful_responses);
++  EXPECT_EQ(1, second->failed_responses);
++  EXPECT_EQ("An extension cannot have more than 500 active alarms.",
++            second->error);
++  EXPECT_EQ(AlarmManager::kMaxAlarmsPerExtension,
++            manager_->GetCountForExtension(extension_->id()));
++  EXPECT_TRUE(FindAlarm(extension_->id(), "first"));
++  EXPECT_FALSE(FindAlarm(extension_->id(), "second"));
++
++  Disable(extension_);
++  Enable(extension_);
++  task_environment()->RunUntilIdle();
++  EXPECT_EQ(AlarmManager::kMaxAlarmsPerExtension,
++            manager_->GetCountForExtension(extension_->id()));
++  EXPECT_TRUE(FindAlarm(extension_->id(), "first"));
++  EXPECT_FALSE(FindAlarm(extension_->id(), "second"));
++}
++
++TEST_F(ExtensionAlarmsStateStoreTest, ReplacementAtQuotaDoesNotNeedAnotherSlot) {
++  SeedAlarms(AlarmManager::kMaxAlarmsPerExtension);
++  Enable(extension_);
++  task_environment()->RunUntilIdle();
++  const base::Time replacement_time = base::Time::Now() + base::Hours(2);
++  auto result = std::make_shared<RestoreApiResult>();
++  StartApi(base::MakeRefCounted<AlarmsCreateFunction>(),
++           base::test::ParseJsonList(
++               R"(["stored-0", {"delayInMinutes": 120}])"),
++           result);
++
++  EXPECT_EQ(1, result->successful_responses);
++  EXPECT_EQ(0, result->failed_responses);
++  EXPECT_EQ(AlarmManager::kMaxAlarmsPerExtension,
++            manager_->GetCountForExtension(extension_->id()));
++  Alarm* alarm = FindAlarm(extension_->id(), "stored-0");
++  ASSERT_TRUE(alarm);
++  EXPECT_DOUBLE_EQ(replacement_time.InMillisecondsFSinceUnixEpoch(),
++                   alarm->js_alarm->scheduled_time);
++  EXPECT_EQ(static_cast<size_t>(AlarmManager::kMaxAlarmsPerExtension),
++            ReadStoredAlarms(extension_->id()).size());
++}
++
++TEST_F(ExtensionAlarmsStateStoreTest, QueuedClearFreesSlotForFollowingCreate) {
++  SeedAlarms(AlarmManager::kMaxAlarmsPerExtension);
++  Enable(extension_);
++  auto cleared = std::make_shared<RestoreApiResult>();
++  auto created = std::make_shared<RestoreApiResult>();
++  StartApi(base::MakeRefCounted<AlarmsClearFunction>(),
++           base::test::ParseJsonList(R"(["stored-0"])"), cleared);
++  StartApi(base::MakeRefCounted<AlarmsCreateFunction>(),
++           base::test::ParseJsonList(R"(["extra", {"delayInMinutes": 120}])"),
++           created);
++  FinishBackendWithoutUi();
++  task_environment()->RunUntilIdle();
++
++  EXPECT_EQ(1, cleared->successful_responses);
++  EXPECT_EQ(0, cleared->failed_responses);
++  ASSERT_EQ(1u, cleared->values.size());
++  EXPECT_TRUE(cleared->values[0].GetBool());
++  EXPECT_EQ(1, created->successful_responses);
++  EXPECT_EQ(0, created->failed_responses);
++  EXPECT_EQ(AlarmManager::kMaxAlarmsPerExtension,
++            manager_->GetCountForExtension(extension_->id()));
++  EXPECT_FALSE(FindAlarm(extension_->id(), "stored-0"));
++  EXPECT_TRUE(FindAlarm(extension_->id(), "extra"));
++}
++
++TEST_F(ExtensionAlarmsStateStoreTest, UnloadCancelsQueuedQuotaCreate) {
++  SeedAlarms(AlarmManager::kMaxAlarmsPerExtension - 1);
++  Enable(extension_);
++  auto result = std::make_shared<RestoreApiResult>();
++  StartApi(base::MakeRefCounted<ObservedAlarmsCreateFunction>(result),
++           base::test::ParseJsonList(R"(["retired", {"delayInMinutes": 120}])"),
++           result);
++  EXPECT_FALSE(result->destroyed);
++  Disable(extension_);
++  EXPECT_TRUE(result->destroyed);
++  EXPECT_EQ(0, result->successful_responses);
++  // As in UnloadReleasesPendingApiBeforeReenable, destruction may report a
++  // debug-only failure. The old request must never succeed on the new load.
++  Enable(extension_);
++  FinishBackendWithoutUi();
++  task_environment()->RunUntilIdle();
++
++  EXPECT_EQ(0, result->successful_responses);
++  EXPECT_EQ(AlarmManager::kMaxAlarmsPerExtension - 1,
++            manager_->GetCountForExtension(extension_->id()));
++  EXPECT_FALSE(FindAlarm(extension_->id(), "retired"));
++}
++
++TEST_F(ExtensionAlarmsStateStoreTest,
++       OrdinaryRestoreAndReenableKeepPersistence) {
++  const base::Time when = base::Time::Now() + base::Hours(1);
++  SeedAlarm(extension_->id(), when);
++  Enable(extension_);
++  auto restored = std::make_shared<RestoreCallbackResult>();
++  manager_->GetAlarm(extension_->id(), "stored",
++                     ObserveRestoredAlarm(restored));
++  EXPECT_EQ(0, restored->calls);
++  FinishBackendWithoutUi();
++  EXPECT_EQ(0, restored->calls);
++  task_environment()->RunUntilIdle();
++  EXPECT_EQ(1, restored->calls);
++  EXPECT_EQ(1, restored->released);
++  EXPECT_TRUE(restored->has_alarm);
++  EXPECT_DOUBLE_EQ(when.InMillisecondsFSinceUnixEpoch(),
++                   restored->scheduled_time);
++
++  Disable(extension_);
++  EXPECT_EQ(0, manager_->GetCountForExtension(extension_->id()));
++  ASSERT_EQ(1u, ReadStoredAlarms(extension_->id()).size());
++  Enable(extension_);  // Reuses the actual same Extension object.
++  task_environment()->RunUntilIdle();
++  Alarm* alarm = FindAlarm(extension_->id());
++  ASSERT_TRUE(alarm);
++  EXPECT_DOUBLE_EQ(when.InMillisecondsFSinceUnixEpoch(),
++                   alarm->js_alarm->scheduled_time);
++}
++
++TEST_F(ExtensionAlarmsStateStoreTest,
++       DisabledLateRestoreDoesNotConsumeOneShot) {
++  SeedAlarm(extension_->id(), base::Time::Now() - base::Seconds(1));
++  Enable(extension_);
++  Disable(extension_);
++  FinishBackendWithoutUi();
++  task_environment()->RunUntilIdle();
++  task_environment()->FastForwardBy(base::Minutes(1));
++
++  EXPECT_EQ(0, manager_->GetCountForExtension(extension_->id()));
++  // The real default delegate/router is retained. With no enabled listener,
++  // dispatch is not delivery; the regression is silent consumption of storage.
++  EXPECT_TRUE(event_observer_->all_dispatched_events().empty());
++  base::ListValue stored = ReadStoredAlarms(extension_->id());
++  ASSERT_EQ(1u, stored.size());
++  ASSERT_TRUE(stored[0].GetDict().FindString("name"));
++  EXPECT_EQ("stored", *stored[0].GetDict().FindString("name"));
++}
++
++TEST_F(ExtensionAlarmsStateStoreTest,
++       SameObjectReenableClearSurvivesBothReads) {
++  SeedAlarm(extension_->id(), base::Time::Now() + base::Hours(1));
++  Enable(extension_);
++  Disable(extension_);
++  Enable(extension_);
++  auto result = std::make_shared<RestoreApiResult>();
++  StartApi(base::MakeRefCounted<ObservedAlarmsClearAllFunction>(result),
++           base::ListValue(), result);
++  EXPECT_EQ(0, result->successful_responses);
++  FinishBackendWithoutUi();
++  EXPECT_EQ(0, result->successful_responses);
++  task_environment()->RunUntilIdle();
++
++  EXPECT_EQ(1, result->successful_responses);
++  EXPECT_TRUE(result->destroyed);
++  ASSERT_EQ(1u, result->values.size());
++  EXPECT_TRUE(result->values[0].GetBool());
++  EXPECT_FALSE(FindAlarm(extension_->id()));
++  EXPECT_TRUE(ReadStoredAlarms(extension_->id()).empty());
++}
++
++TEST_F(ExtensionAlarmsStateStoreTest,
++       SameObjectReenableReplacementSurvivesBothReads) {
++  const base::Time replacement_time = base::Time::Now() + base::Hours(2);
++  SeedAlarm(extension_->id(), base::Time::Now() + base::Hours(1));
++  Enable(extension_);
++  Disable(extension_);
++  Enable(extension_);
++  auto result = std::make_shared<RestoreApiResult>();
++  StartApi(
++      base::MakeRefCounted<AlarmsCreateFunction>(),
++      base::test::ParseJsonList(
++          R"(["stored", {"delayInMinutes": 120, "persistAcrossSessions": true}])"),
++      result);
++  EXPECT_EQ(0, result->successful_responses);
++  FinishBackendWithoutUi();
++  task_environment()->RunUntilIdle();
++
++  EXPECT_EQ(1, result->successful_responses);
++  Alarm* alarm = FindAlarm(extension_->id());
++  ASSERT_TRUE(alarm);
++  EXPECT_DOUBLE_EQ(replacement_time.InMillisecondsFSinceUnixEpoch(),
++                   alarm->js_alarm->scheduled_time);
++  base::ListValue stored = ReadStoredAlarms(extension_->id());
++  ASSERT_EQ(1u, stored.size());
++  EXPECT_EQ(replacement_time.InMillisecondsFSinceUnixEpoch(),
++            stored[0].GetDict().FindDouble("scheduledTime"));
++}
++
++TEST_F(ExtensionAlarmsStateStoreTest, UnloadingOneIdDoesNotCancelOtherRestore) {
++  auto other = ExtensionBuilder("Other alarms")
++                   .SetManifestVersion(3)
++                   .AddAPIPermission("alarms")
++                   .Build();
++  SeedAlarm(extension_->id(), base::Time::Now() + base::Hours(1));
++  SeedAlarm(other->id(), base::Time::Now() + base::Hours(2));
++  Enable(extension_);
++  Enable(other);
++  auto restored = std::make_shared<RestoreCallbackResult>();
++  manager_->GetAlarm(other->id(), "stored", ObserveRestoredAlarm(restored));
++  Disable(extension_);
++  FinishBackendWithoutUi();
++  task_environment()->RunUntilIdle();
++
++  EXPECT_EQ(0, manager_->GetCountForExtension(extension_->id()));
++  EXPECT_EQ(1, restored->calls);
++  EXPECT_EQ(1, restored->released);
++  EXPECT_TRUE(restored->has_alarm);
++}
++
++TEST_F(ExtensionAlarmsStateStoreTest, ReadyCallbackReenablesWithoutOldActions) {
++  SeedAlarm(extension_->id(), base::Time::Now() + base::Hours(1));
++  Enable(extension_);
++  auto first = std::make_shared<RestoreCallbackResult>();
++  auto retired = std::make_shared<RestoreCallbackResult>();
++  auto replacement = std::make_shared<RestoreCallbackResult>();
++  manager_->GetAlarm(
++      extension_->id(), "stored",
++      ObserveRestoredAlarm(
++          first, base::BindLambdaForTesting([this, replacement]() {
++            Disable(extension_);
++            Enable(extension_);
++            manager_->GetAlarm(extension_->id(), "stored",
++                               ObserveRestoredAlarm(replacement));
++          })));
++  manager_->GetAlarm(extension_->id(), "stored", ObserveRestoredAlarm(retired));
++  FinishBackendWithoutUi();
++  task_environment()->RunUntilIdle();
++
++  EXPECT_EQ(1, first->calls);
++  EXPECT_EQ(1, first->released);
++  EXPECT_EQ(0, retired->calls);
++  EXPECT_EQ(1, retired->released);
++  EXPECT_EQ(1, replacement->calls);
++  EXPECT_EQ(1, replacement->released);
++  EXPECT_TRUE(replacement->has_alarm);
++}
++
++TEST_F(ExtensionAlarmsStateStoreTest, ReadyCallbackCanDestroyManager) {
++  SeedAlarm(extension_->id(), base::Time::Now() + base::Hours(1));
++  Enable(extension_);
++  auto first = std::make_shared<RestoreCallbackResult>();
++  auto retired = std::make_shared<RestoreCallbackResult>();
++  manager_->GetAlarm(
++      extension_->id(), "stored",
++      ObserveRestoredAlarm(
++          first, base::BindLambdaForTesting([this]() { DestroyManager(); })));
++  manager_->GetAlarm(extension_->id(), "stored", ObserveRestoredAlarm(retired));
++  FinishBackendWithoutUi();
++  task_environment()->RunUntilIdle();
++
++  EXPECT_FALSE(manager_);
++  EXPECT_EQ(1, first->calls);
++  EXPECT_EQ(1, first->released);
++  EXPECT_EQ(0, retired->calls);
++  EXPECT_EQ(1, retired->released);
++}
++
++TEST_F(ExtensionAlarmsStateStoreTest, UnloadReleasesPendingApiBeforeReenable) {
++  SeedAlarm(extension_->id(), base::Time::Now() + base::Hours(1));
++  Enable(extension_);
++  auto result = std::make_shared<RestoreApiResult>();
++  StartApi(base::MakeRefCounted<ObservedAlarmsClearAllFunction>(result),
++           base::ListValue(), result);
++  // StartApi has released its external reference; only the real ready action
++  // owns the API function now. Its destruction is legal while disabled.
++  EXPECT_FALSE(result->destroyed);
++  Disable(extension_);
++  EXPECT_TRUE(result->destroyed);
++  EXPECT_EQ(0, result->successful_responses);
++  // DCHECK builds may synthesize a failure in ExtensionFunction's destructor;
++  // this test intentionally does not assert a build-dependent callback count.
++  Enable(extension_);
++  FinishBackendWithoutUi();
++  task_environment()->RunUntilIdle();
++
++  EXPECT_EQ(0, result->successful_responses);
++  EXPECT_TRUE(FindAlarm(extension_->id()));
++  EXPECT_EQ(1u, ReadStoredAlarms(extension_->id()).size());
++}
++
++TEST_F(ExtensionAlarmsStateStoreTest, DestroyedManagerDropsRealPendingRead) {
++  SeedAlarm(extension_->id(), base::Time::Now() + base::Hours(1));
++  Enable(extension_);
++  auto retired = std::make_shared<RestoreCallbackResult>();
++  manager_->GetAlarm(extension_->id(), "stored", ObserveRestoredAlarm(retired));
++  DestroyManager();
++  EXPECT_EQ(0, retired->calls);
++  EXPECT_EQ(1, retired->released);
++  FinishBackendWithoutUi();
++  task_environment()->RunUntilIdle();
++
++  EXPECT_EQ(0, retired->calls);
++  EXPECT_EQ(1, retired->released);
++  EXPECT_EQ(1u, ReadStoredAlarms(extension_->id()).size());
++}
++#endif  // BUILDFLAG(IS_ANDROID)
++
+ }  // namespace extensions

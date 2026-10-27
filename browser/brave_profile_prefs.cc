@@ -3,6 +3,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+#include "build/build_config.h"
+
 #include "brave/browser/brave_profile_prefs.h"
 
 #include <string>
@@ -11,27 +13,39 @@
 #include "brave/browser/brave_browser_features.h"
 #include "brave/browser/brave_shields/brave_shields_web_contents_observer.h"
 #include "brave/browser/new_tab/new_tab_shows_options.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/search_engines/search_engine_tracker.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/translate/brave_translate_prefs_migration.h"
 #include "brave/browser/ui/bookmark/brave_bookmark_prefs.h"
 #include "brave/browser/ui/omnibox/brave_omnibox_client_impl.h"
 #include "brave/common/pref_names.h"
 #include "brave/components/ai_chat/core/common/buildflags/buildflags.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_account/prefs.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_adaptive_captcha/brave_adaptive_captcha_service.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_ads/buildflags/buildflags.h"
 #include "brave/components/brave_news/common/buildflags/buildflags.h"
 #include "brave/components/brave_origin/buildflags/buildflags.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_origin/pref_names.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_perf_predictor/browser/p3a_bandwidth_savings_tracker.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_perf_predictor/browser/perf_predictor_tab_helper.h"
+#include "brave/components/brave_rewards/core/buildflags/buildflags.h"
 #include "brave/components/brave_rewards/core/pref_names.h"
-#include "brave/components/brave_rewards/core/pref_registry.h"
 #include "brave/components/brave_search/browser/brave_search_default_host.h"
 #include "brave/components/brave_search/common/brave_search_utils.h"
 #include "brave/components/brave_search_conversion/utils.h"
 #include "brave/components/brave_shields/content/browser/ad_block_pref_service.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_shields/core/browser/brave_shields_p3a.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_shields/core/browser/brave_shields_settings_service.h"
 #include "brave/components/brave_shields/core/common/pref_names.h"
 #include "brave/components/brave_sync/brave_sync_prefs.h"
@@ -46,20 +60,24 @@
 #include "brave/components/global_privacy_control/pref_names.h"
 #include "brave/components/ipfs/ipfs_prefs.h"
 #include "brave/components/local_ai/buildflags/buildflags.h"
-#include "brave/components/ntp_background_images/browser/view_counter_service.h"
 #include "brave/components/ntp_background_images/buildflags/buildflags.h"
-#include "brave/components/ntp_background_images/common/view_counter_pref_registry.h"
+#if BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
+#include "brave/components/ntp_background_images/browser/view_counter_service.h"
+#endif  // BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
 #include "brave/components/omnibox/browser/brave_omnibox_prefs.h"
 #include "brave/components/psst/buildflags/buildflags.h"
 #include "brave/components/query_filter/common/pref_names.h"
 #include "brave/components/request_otr/common/buildflags/buildflags.h"
 #include "brave/components/search_engines/brave_prepopulated_engines.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/serp_metrics/pref_names.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/speedreader/common/buildflags/buildflags.h"
 #include "brave/components/tor/buildflags/buildflags.h"
 #include "brave/components/web_discovery/buildflags/buildflags.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/webcompat_reporter/common/pref_names.h"
-#include "build/build_config.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "chrome/browser/new_tab_page/prefs/ntp_pref_names.h"
 #include "chrome/browser/prefetch/pref_names.h"
 #include "chrome/browser/prefs/session_startup_pref.h"
@@ -85,6 +103,10 @@
 #include "extensions/buildflags/buildflags.h"
 #include "third_party/widevine/cdm/buildflags.h"
 
+#if !BUILDFLAG(IS_ANDROID) || BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
+#include "brave/components/ntp_background_images/common/view_counter_pref_registry.h"
+#endif
+
 #if BUILDFLAG(ENABLE_BRAVE_NEWS)
 #include "brave/components/brave_news/browser/brave_news_controller.h"
 #include "brave/components/brave_news/browser/brave_news_p3a.h"
@@ -92,6 +114,10 @@
 #include "brave/components/brave_news/common/p3a_pref_names.h"
 #include "brave/components/brave_news/common/pref_names.h"
 #endif  // BUILDFLAG(ENABLE_BRAVE_NEWS)
+
+#if !BUILDFLAG(IS_ANDROID) || BUILDFLAG(ENABLE_BRAVE_REWARDS)
+#include "brave/components/brave_rewards/core/pref_registry.h"
+#endif
 
 #if BUILDFLAG(ENABLE_BRAVE_TALK)
 #include "brave/components/brave_talk/pref_names.h"
@@ -130,7 +156,6 @@
 #endif
 
 #if BUILDFLAG(IS_ANDROID)
-#include "components/feed/core/common/pref_names.h"
 #include "components/feed/core/shared_prefs/pref_names.h"
 #include "components/ntp_tiles/pref_names.h"
 #include "components/translate/core/browser/translate_pref_names.h"
@@ -189,14 +214,8 @@ void OverrideDefaultPrefValues(user_prefs::PrefRegistrySyncable* registry) {
   // Clear default popular sites
   registry->SetDefaultPrefValue(ntp_tiles::prefs::kPopularSitesJsonPref,
                                 base::Value(base::Value::Type::LIST));
-  // Disable NTP suggestions.
-  // On Android we want to have the enable_feed_v2 parameter enabled so the
-  // upstream feed prefs are registered (Brave News uses its own
-  // `brave_news::FetchRssLinks` for RSS discovery), but kEnableSnippets and
-  // kArticlesListVisible must default to false to avoid a failed assertion
-  // in BraveNewTabPage.initializeMainView. So override
-  // feed::prefs::RegisterFeedSharedProfilePrefs for Android only. Related
-  // Chromium commit: d3500b942cde04737bc13021173b6ffa11aaf1b9.
+  // Preserve existing shared enterprise-policy preference defaults.
+  // The Android Discover service and renderer are absent from this build.
   registry->SetDefaultPrefValue(feed::prefs::kEnableSnippets,
                                 base::Value(false));
   registry->SetDefaultPrefValue(feed::prefs::kArticlesListVisible,
@@ -276,10 +295,12 @@ void OverrideDefaultPrefValues(user_prefs::PrefRegistrySyncable* registry) {
   // https://github.com/brave/brave-browser/issues/18017
   registry->SetDefaultPrefValue(prefs::kEnableMediaRouter, base::Value(true));
 
+#if !BUILDFLAG(IS_ANDROID)
   // Disable @aimode search keyword
   // Currently, upstream only defines an int kAIModeAllowed = 0 value and check
   // against it (see components/omnibox/browser/omnibox_prefs.cc).
   registry->SetDefaultPrefValue(omnibox::kAIModeSettings, base::Value(-1));
+#endif  // !BUILDFLAG(IS_ANDROID)
 
   // Disabled due to crash with tab group dragging.
   // TODO(https://github.com/brave/brave-browser/issues/49752): Re-enable.
@@ -343,9 +364,13 @@ void RegisterProfilePrefsForMigration(
 #endif
 
   // Added Feb 2023
+#if !BUILDFLAG(IS_ANDROID)
   registry->RegisterBooleanPref(brave_rewards::prefs::kShowButton, true);
+#endif  // !BUILDFLAG(IS_ANDROID)
 
+#if !BUILDFLAG(IS_ANDROID) || BUILDFLAG(ENABLE_BRAVE_REWARDS)
   brave_rewards::RegisterProfilePrefsForMigration(registry);
+#endif
 
 #if BUILDFLAG(ENABLE_BRAVE_NEWS)
   brave_news::p3a::prefs::RegisterProfileNewsMetricsPrefsForMigration(registry);
@@ -361,8 +386,10 @@ void RegisterProfilePrefsForMigration(
   registry->RegisterIntegerPref(sidebar::kSidePanelWidth, 0);
 #endif
 
+#if !BUILDFLAG(IS_ANDROID) || BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
   // Added 2023-09
   ntp_background_images::RegisterProfilePrefsForMigration(registry);
+#endif
 
   // Added 2023-11
   brave_sync::Prefs::RegisterProfilePrefsForMigration(registry);
@@ -377,7 +404,9 @@ void RegisterProfilePrefsForMigration(
   ai_chat::prefs::RegisterProfilePrefsForMigration(registry);
 #endif
 
+#if !BUILDFLAG(IS_ANDROID)
   brave_shields::RegisterShieldsP3AProfilePrefsForMigration(registry);
+#endif  // !BUILDFLAG(IS_ANDROID)
   brave_shields::AdBlockPrefService::RegisterProfilePrefsForMigration(registry);
 
   // Added 2024-05
@@ -397,7 +426,9 @@ void RegisterProfilePrefsForMigration(
 #endif
 
   // Added 2025-09
+#if !BUILDFLAG(IS_ANDROID)
   SearchEngineTrackerFactory::RegisterProfilePrefsForMigration(registry);
+#endif  // !BUILDFLAG(IS_ANDROID)
 
   // Added 2025-10
   registry->RegisterBooleanPref(kNoScriptControlType, false);
@@ -406,8 +437,10 @@ void RegisterProfilePrefsForMigration(
   registry->RegisterBooleanPref(prefs::kAddOpenSearchEngines, false);
 
   // Added 2026-03
+#if !BUILDFLAG(IS_ANDROID)
   registry->RegisterDictionaryPref(
       serp_metrics::prefs::kDeprecatedSerpMetricsTimePeriodStorage);
+#endif  // !BUILDFLAG(IS_ANDROID)
 
   // Added 2026-03
   registry->RegisterBooleanPref(kNewTabPageHideAllWidgets, false);
@@ -427,8 +460,10 @@ void RegisterProfilePrefs(user_prefs::PrefRegistrySyncable* registry) {
       registry);
 
   brave_perf_predictor::PerfPredictorTabHelper::RegisterProfilePrefs(registry);
+#if !BUILDFLAG(IS_ANDROID)
   brave_perf_predictor::P3ABandwidthSavingsTracker::RegisterProfilePrefs(
       registry);
+#endif  // !BUILDFLAG(IS_ANDROID)
   // autofill
   registry->RegisterBooleanPref(kBraveAutofillPrivateWindows, true);
   // appearance
@@ -443,7 +478,9 @@ void RegisterProfilePrefs(user_prefs::PrefRegistrySyncable* registry) {
 
   brave_sync::Prefs::RegisterProfilePrefs(registry);
 
+#if !BUILDFLAG(IS_ANDROID)
   brave_shields::RegisterShieldsP3AProfilePrefs(registry);
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 #if BUILDFLAG(ENABLE_BRAVE_NEWS)
   brave_news::prefs::RegisterProfilePrefs(registry);
@@ -462,6 +499,13 @@ void RegisterProfilePrefs(user_prefs::PrefRegistrySyncable* registry) {
 #if !BUILDFLAG(USE_GCM_FROM_PLATFORM)
   // PushMessaging
   gcm::RegisterGCMProfilePrefs(registry);
+#elif BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_DESKTOP_ANDROID_EXTENSIONS)
+  // The extension-only native channel requires explicit user or policy opt-in.
+  registry->RegisterBooleanPref(kBraveGCMChannelStatus, false);
+#endif
+#if BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_DESKTOP_ANDROID_EXTENSIONS)
+  registry->RegisterListPref(kBraveExtensionGCMPendingUnregistrations);
+  registry->RegisterListPref(kBraveExtensionGCMRegisteredApplications);
 #endif
 
   registry->RegisterBooleanPref(kShieldsStatsBadgeVisible, true);
@@ -482,8 +526,10 @@ void RegisterProfilePrefs(user_prefs::PrefRegistrySyncable* registry) {
   registry->RegisterBooleanPref(kBraveWaybackMachineAutoCheckEnabled, false);
 #endif
 
+#if !BUILDFLAG(IS_ANDROID)
   brave_adaptive_captcha::BraveAdaptiveCaptchaService::RegisterProfilePrefs(
       registry);
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 #if BUILDFLAG(IS_ANDROID)
   registry->RegisterBooleanPref(kDesktopModeEnabled, false);
@@ -597,8 +643,12 @@ void RegisterProfilePrefs(user_prefs::PrefRegistrySyncable* registry) {
   local_ai::prefs::RegisterProfilePrefs(registry);
 #endif
 
+#if !BUILDFLAG(IS_ANDROID)
   brave_account::prefs::RegisterPrefs(registry);
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
   brave_origin::prefs::RegisterProfilePrefs(registry);
+#endif  // !BUILDFLAG(IS_ANDROID)
 
   brave_search_conversion::RegisterPrefs(registry);
 
@@ -625,9 +675,13 @@ void RegisterProfilePrefs(user_prefs::PrefRegistrySyncable* registry) {
 #if BUILDFLAG(ENABLE_BRAVE_ADS)
   brave_ads::RegisterProfilePrefs(registry);
 #endif
+#if !BUILDFLAG(IS_ANDROID) || BUILDFLAG(ENABLE_BRAVE_REWARDS)
   brave_rewards::RegisterProfilePrefs(registry);
+#endif
 
+#if !BUILDFLAG(IS_ANDROID)
   webcompat_reporter::prefs::RegisterProfilePrefs(registry);
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 #if BUILDFLAG(ENABLE_WEB_DISCOVERY_NATIVE)
   web_discovery::WebDiscoveryService::RegisterProfilePrefs(registry);

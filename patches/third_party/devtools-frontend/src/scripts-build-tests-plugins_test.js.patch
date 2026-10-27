@@ -1,0 +1,87 @@
+diff --git a/scripts/build/tests/plugins_test.js b/scripts/build/tests/plugins_test.js
+index 435287dfefebfca30fe6682204c6973401262ac8..1e7041cefb2d73d87ac3d73f0828dcd734ad381a 100644
+--- a/scripts/build/tests/plugins_test.js
++++ b/scripts/build/tests/plugins_test.js
+@@ -321,3 +321,82 @@
+     }
+   });
+ });
++
++
++describe('esbuild_plugin current Android processed-source ownership', () => {
++  const root = path.resolve(import.meta.dirname, '../../..');
++  const gen = path.join(root, 'out/Default/gen');
++  const relative = 'front_end/core/root/Owned.ts';
++  const rawTs = path.join(root, relative);
++  const rawJs = rawTs.slice(0, -3) + '.js';
++  const generatedTs = path.join(gen, relative);
++  const importer = path.join(root, 'front_end/core/root/root.ts');
++  const generatedImporter = path.join(gen, 'front_end/core/root/root.ts');
++  const outdir = path.dirname(generatedImporter);
++  let existsStub;
++
++  beforeEach(() => {
++    existsStub = sinon.stub(fs, 'existsSync').returns(false);
++  });
++
++  afterEach(() => {
++    existsStub.restore();
++  });
++
++  it('prefers the current declared processed TS over existing ordinary JS and TS', () => {
++    existsStub.withArgs(rawJs).returns(true);
++    existsStub.withArgs(rawTs).returns(true);
++    existsStub.withArgs(generatedTs).returns(true);
++    const plugin = esbuildPlugin(outdir, gen, root, new Set(), false, true, new Set([relative]));
++    assert.deepEqual(plugin({path: './Owned.js', importer}), {path: generatedTs});
++  });
++
++  it('does not resurrect stale generated TS absent from current producer metadata', () => {
++    existsStub.withArgs(rawTs).returns(true);
++    existsStub.withArgs(generatedTs).returns(true);
++    const plugin = esbuildPlugin(outdir, gen, root, new Set(), false, true, new Set());
++    assert.deepEqual(plugin({path: './Owned.js', importer}), {path: rawTs});
++  });
++
++  it('resolves ordinary nonmembers from a generated importer back to current source', () => {
++    existsStub.withArgs(rawTs).returns(true);
++    existsStub.withArgs(generatedTs).returns(true);
++    const plugin = esbuildPlugin(outdir, gen, root, new Set(), false, true, new Set());
++    assert.deepEqual(plugin({path: './Owned.js', importer: generatedImporter}), {path: rawTs});
++  });
++
++  it('keeps a missing declared output as a missing output instead of using raw source', () => {
++    existsStub.withArgs(rawJs).returns(true);
++    existsStub.withArgs(rawTs).returns(true);
++    const plugin = esbuildPlugin(outdir, gen, root, new Set(), false, true, new Set([relative]));
++    assert.deepEqual(plugin({path: './Owned.js', importer}), {path: generatedTs});
++    assert.isFalse(fs.existsSync(generatedTs));
++  });
++
++  it('keeps separate entrypoint imports external even if their sources are processed', () => {
++    const external = new Set(['front_end/core/root/Owned.js']);
++    const plugin = esbuildPlugin(outdir, gen, root, external, false, true, new Set([relative]));
++    assert.deepEqual(plugin({path: './Owned.js', importer}), {path: './Owned.js', external: true});
++  });
++
++  it('leaves the ordinary source preference intact when Android preprocessing is off', () => {
++    existsStub.withArgs(rawTs).returns(true);
++    existsStub.withArgs(generatedTs).returns(true);
++    const plugin = esbuildPlugin(outdir, gen, root, new Set(), false, false, new Set([relative]));
++    assert.deepEqual(plugin({path: './Owned.js', importer}), {path: rawTs});
++  });
++
++  it('keeps the existing generated CSS fallback for nonmembers', () => {
++    const generatedCss = path.join(gen, 'front_end/core/root/ordinary.css.js');
++    existsStub.withArgs(generatedCss).returns(true);
++    const plugin = esbuildPlugin(outdir, gen, root, new Set(), false, true, new Set());
++    assert.deepEqual(plugin({path: './ordinary.css.js', importer}), {path: generatedCss});
++  });
++
++  it('keeps the existing Brave patch sibling fallback for nonmembers', () => {
++    const patchTs = path.join(root, 'brave/chromium_src/front_end/core/root/Owned.ts');
++    existsStub.withArgs(patchTs).returns(true);
++    const plugin = esbuildPlugin(outdir, gen, root, new Set(), false, true, new Set());
++    assert.deepEqual(plugin({path: './Owned.patch.js', importer}), {path: patchTs});
++  });
++});

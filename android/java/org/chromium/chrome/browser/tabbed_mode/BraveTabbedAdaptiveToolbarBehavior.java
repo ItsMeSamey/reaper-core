@@ -9,15 +9,12 @@ import android.app.Activity;
 
 import org.chromium.base.BravePreferenceKeys;
 import org.chromium.base.supplier.MonotonicObservableSupplier;
-import org.chromium.base.supplier.NonNullObservableSupplier;
 import org.chromium.base.supplier.NullableObservableSupplier;
 import org.chromium.build.annotations.NullMarked;
 import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.browser.ActivityTabProvider;
 import org.chromium.chrome.browser.bookmarks.BookmarkModel;
 import org.chromium.chrome.browser.bookmarks.TabBookmarker;
-import org.chromium.chrome.browser.browser_controls.BrowserControlsVisibilityManager;
-import org.chromium.chrome.browser.glic.GlicButtonDelegate;
 import org.chromium.chrome.browser.lifecycle.ActivityLifecycleDispatcher;
 import org.chromium.chrome.browser.preferences.ChromeSharedPreferences;
 import org.chromium.chrome.browser.tab_group_suggestion.toolbar.GroupSuggestionsButtonController;
@@ -26,7 +23,6 @@ import org.chromium.chrome.browser.tabmodel.TabModelSelector;
 import org.chromium.chrome.browser.tabstrip.StripVisibilityState;
 import org.chromium.chrome.browser.toolbar.adaptive.AdaptiveToolbarBehavior;
 import org.chromium.chrome.browser.toolbar.adaptive.AdaptiveToolbarButtonVariant;
-import org.chromium.chrome.browser.ui.browser_window.ChromeAndroidTask;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -43,9 +39,7 @@ public class BraveTabbedAdaptiveToolbarBehavior extends TabbedAdaptiveToolbarBeh
             Set.of(
                     AdaptiveToolbarButtonVariant.BOOKMARKS,
                     AdaptiveToolbarButtonVariant.HISTORY,
-                    AdaptiveToolbarButtonVariant.DOWNLOADS,
-                    AdaptiveToolbarButtonVariant.LEO,
-                    AdaptiveToolbarButtonVariant.WALLET);
+                    AdaptiveToolbarButtonVariant.DOWNLOADS);
 
     private final Activity mActivity;
 
@@ -59,12 +53,7 @@ public class BraveTabbedAdaptiveToolbarBehavior extends TabbedAdaptiveToolbarBeh
             Runnable registerVoiceSearchRunnable,
             Supplier<GroupSuggestionsButtonController> groupSuggestionsButtonController,
             Supplier<@Nullable TabModelSelector> tabModelSelectorSupplier,
-            MonotonicObservableSupplier<@StripVisibilityState Integer> tabStripVisibilitySupplier,
-            GlicButtonDelegate toggleGlicCallback,
-            Supplier<@Nullable ChromeAndroidTask> chromeAndroidTaskSupplier,
-            BrowserControlsVisibilityManager browserControlsVisibilityManager,
-            NonNullObservableSupplier<Boolean> isVerticalTabsActiveSupplier,
-            NonNullObservableSupplier<Boolean> isGlicPinnedSupplier) {
+            MonotonicObservableSupplier<@StripVisibilityState Integer> tabStripVisibilitySupplier) {
         super(
                 activity,
                 activityLifecycleDispatcher,
@@ -75,12 +64,7 @@ public class BraveTabbedAdaptiveToolbarBehavior extends TabbedAdaptiveToolbarBeh
                 registerVoiceSearchRunnable,
                 groupSuggestionsButtonController,
                 tabModelSelectorSupplier,
-                tabStripVisibilitySupplier,
-                toggleGlicCallback,
-                chromeAndroidTaskSupplier,
-                browserControlsVisibilityManager,
-                isVerticalTabsActiveSupplier,
-                isGlicPinnedSupplier);
+                tabStripVisibilitySupplier);
         mActivity = activity;
     }
 

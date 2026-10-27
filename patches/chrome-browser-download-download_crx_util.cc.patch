@@ -1,0 +1,66 @@
+diff --git a/chrome/browser/download/download_crx_util.cc b/chrome/browser/download/download_crx_util.cc
+index 77e32a025e1086f24fa2c7549438ecdb9f7019f5..6f3f98f7a85c7f6358acbcc3fd0459376f1440a0 100644
+--- a/chrome/browser/download/download_crx_util.cc
++++ b/chrome/browser/download/download_crx_util.cc
+@@ -27,6 +27,11 @@
+ #include "extensions/common/extension_urls.h"
+ #include "extensions/common/user_script.h"
+ 
++#if BUILDFLAG(IS_ANDROID)
++#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
++#include "chrome/browser/ui/browser_window/public/browser_window_interface_iterator.h"
++#include "content/public/browser/web_contents.h"
++#endif
+ #if !BUILDFLAG(IS_ANDROID)
+ #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+ #include "chrome/browser/ui/browser_window/public/create_browser_window.h"
+@@ -64,6 +69,41 @@
+   content::WebContents* web_contents =
+       content::DownloadItemUtils::GetWebContents(
+           const_cast<DownloadItem*>(&download_item));
++#if BUILDFLAG(IS_ANDROID)
++  const auto can_use_prompt_host = [profile](content::WebContents* contents) {
++    return contents && !contents->IsBeingDestroyed() &&
++           contents->GetBrowserContext() == profile &&
++           contents->GetTopLevelNativeWindow();
++  };
++  if (!can_use_prompt_host(web_contents)) {
++    web_contents = nullptr;
++    // Keep the existing activation preference, skipping windows without a
++    // live prompt host in this exact profile.
++    ForEachCurrentBrowserWindowInterfaceOrderedByActivation(
++        [&](BrowserWindowInterface* browser) {
++          if (browser->GetProfile() != profile || browser->IsDeleteScheduled()) {
++            return true;
++          }
++          TabListInterface* tab_list = TabListInterface::From(browser);
++          if (!tab_list) {
++            return true;
++          }
++          auto* active_tab = tab_list->GetActiveTab();
++          if (!active_tab) {
++            return true;
++          }
++          content::WebContents* contents = active_tab->GetContents();
++          if (!can_use_prompt_host(contents)) {
++            return true;
++          }
++          web_contents = contents;
++          return false;
++        });
++  }
++  if (!web_contents) {
++    return nullptr;
++  }
++#else
+   if (!web_contents) {
+     BrowserWindowInterface* browser =
+         extensions::browser_window_util::GetLastActiveBrowserWithProfile(
+@@ -83,6 +123,7 @@
+     TabListInterface* tab_list = TabListInterface::From(browser);
+     web_contents = tab_list->GetActiveTab()->GetContents();
+   }
++#endif
+   return std::make_unique<ExtensionInstallPrompt>(
+       web_contents, std::make_unique<extensions::InstallPromptData>(
+                         extensions::InstallPromptData::UNSET_PROMPT_TYPE));

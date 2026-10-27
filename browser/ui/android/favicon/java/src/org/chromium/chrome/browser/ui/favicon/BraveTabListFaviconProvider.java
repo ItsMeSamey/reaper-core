@@ -34,11 +34,11 @@ import java.util.Objects;
 public class BraveTabListFaviconProvider extends TabListFaviconProvider {
     @VisibleForTesting
     static final int BRAVE_NTP_FAVICON_DRAWABLE_ID_OUTLINE =
-            R.drawable.ic_social_brave_outline_favicon_fullheight;
+            R.drawable.ic_reaper_product_outline;
 
     @VisibleForTesting
     static final int BRAVE_NTP_FAVICON_DRAWABLE_ID_FILLED =
-            R.drawable.ic_social_brave_carved_favicon_fullheight;
+            R.drawable.ic_reaper_product_carved;
 
     private final Context mContext;
     private final boolean mIsTabStrip;

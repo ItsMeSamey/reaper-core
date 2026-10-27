@@ -1,0 +1,74 @@
+diff --git a/chrome/browser/android/metrics/uma_session_stats.cc b/chrome/browser/android/metrics/uma_session_stats.cc
+--- a/chrome/browser/android/metrics/uma_session_stats.cc
++++ b/chrome/browser/android/metrics/uma_session_stats.cc
+@@ -79,7 +79,7 @@
+   static void RegisterExternalExperiments(
+       const std::vector<int32_t>& experiment_ids,
+       variations::SyntheticTrialRegistry::OverrideMode override_mode) {
+-    g_browser_process->metrics_service()
++    g_browser_process->GetMetricsServicesManager()
+         ->GetSyntheticTrialRegistry()
+         ->RegisterExternalExperiments(
+             base::PassKey<UmaSessionStatsExternalExperimentRegistrar>(),
+@@ -90,29 +90,12 @@
+ void UmaSessionStats::UmaResumeSession() {
+   DCHECK(g_browser_process);
+   if (++active_session_count_ == 1) {
+-    const bool had_background_session =
+-        session_time_tracker_.BeginForegroundSession();
+-
+-    // Tell the metrics services that the application resumes.
+-    metrics::MetricsService* metrics = g_browser_process->metrics_service();
+-    if (metrics) {
+-      // Forcing a new log allows foreground and background metrics can be
+-      // separated in analysis.
+-      const bool force_new_log = base::FeatureList::IsEnabled(
+-                                     chrome::android::kUmaBackgroundSessions) &&
+-                                 had_background_session;
+-
+-      metrics->OnAppEnterForeground(force_new_log);
+-    }
+-    // Report background session time if it wasn't already reported by
+-    // OnAppEnterForeground() -> ProvideCurrentSessionData().
++    session_time_tracker_.BeginForegroundSession();
++
++    // Retain the local crash-recovery beacon without remote collection.
++    g_browser_process->GetMetricsServicesManager()
++        ->LogHasSessionShutdownCleanly(false);
+     session_time_tracker_.ReportBackgroundSessionTime();
+-
+-    ukm::UkmService* ukm_service =
+-        g_browser_process->GetMetricsServicesManager()->GetUkmService();
+-    if (ukm_service) {
+-      ukm_service->OnAppEnterForeground();
+-    }
+ 
+     AndroidSessionDurationsServiceFactory::OnAppEnterForeground(
+         session_time_tracker_.session_start_time());
+@@ -129,24 +112,11 @@
+         session_time_tracker_.EndForegroundSession();
+ 
+     DCHECK(g_browser_process);
+-    // Tell the metrics services they were cleanly shutdown.
+-    metrics::MetricsService* metrics = g_browser_process->metrics_service();
+-    if (metrics) {
+-      const bool keep_reporting =
+-          base::FeatureList::IsEnabled(chrome::android::kUmaBackgroundSessions);
+-      metrics->OnAppEnterBackground(keep_reporting);
+-    }
+-    ukm::UkmService* ukm_service =
+-        g_browser_process->GetMetricsServicesManager()->GetUkmService();
+-    if (ukm_service) {
+-      ukm_service->OnAppEnterBackground();
+-    }
++    g_browser_process->GetMetricsServicesManager()
++        ->LogHasSessionShutdownCleanly(true);
+ 
+     AndroidSessionDurationsServiceFactory::OnAppEnterBackground(duration);
+ 
+-    // Note: Keep the line below after |metrics->OnAppEnterBackground()|.
+-    // Otherwise, |ProvideCurrentSessionData()| may report a small timeslice of
+-    // background session time toward the previous log.
+     session_time_tracker_.BeginBackgroundSession();
+   }
+ 

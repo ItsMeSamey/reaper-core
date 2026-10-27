@@ -162,6 +162,13 @@ def main():
         '--output-srcjar', required=True, help='Output srcjar file path'
     )
 
+    parser.add_argument(
+        '--exclude-policy',
+        action='append',
+        default=[],
+        help='Policy name to omit from the generated constants (repeatable)',
+    )
+
     args = parser.parse_args()
 
     # Find all YAML policy files
@@ -178,7 +185,7 @@ def main():
     policy_names = []
     for yaml_file in yaml_files:
         policy_name = extract_policy_name_from_filename(yaml_file)
-        if policy_name:
+        if policy_name and policy_name not in args.exclude_policy:
             policy_names.append(policy_name)
 
     # Generate srcjar output

@@ -13,7 +13,6 @@ import android.view.View;
 import android.view.ViewGroup;
 
 import androidx.annotation.VisibleForTesting;
-import androidx.preference.Preference;
 import androidx.preference.PreferenceViewHolder;
 
 import org.chromium.build.annotations.NullMarked;
@@ -96,12 +95,6 @@ public abstract class BraveAutofillOptionsFragmentBase extends ChromeBaseSetting
                     return true;
                 });
         autofillPrivateWindowPreference.setOrder(3);
-
-        Preference autofillAiCategory =
-                findPreference(AutofillOptionsFragment.PREF_AUTOFILL_AI_CATEGORY);
-        if (autofillAiCategory != null) {
-            autofillAiCategory.setOrder(4);
-        }
 
         getPreferenceScreen().addPreference(autofillPrivateWindowPreference);
         notifyPreferencesUpdated();

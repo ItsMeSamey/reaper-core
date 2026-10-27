@@ -1,0 +1,423 @@
+diff --git a/chrome/android/java/src/org/chromium/chrome/browser/media/MediaCapturePickerInvoker.java b/chrome/android/java/src/org/chromium/chrome/browser/media/MediaCapturePickerInvoker.java
+--- a/chrome/android/java/src/org/chromium/chrome/browser/media/MediaCapturePickerInvoker.java
++++ b/chrome/android/java/src/org/chromium/chrome/browser/media/MediaCapturePickerInvoker.java
+@@ -4,134 +4,315 @@
+ 
+ package org.chromium.chrome.browser.media;
+ 
+-import static org.chromium.build.NullUtil.assumeNonNull;
+-
+ import android.app.Activity;
++import android.app.AlertDialog;
+ import android.content.Context;
+ import android.content.Intent;
++import android.media.projection.MediaProjectionConfig;
++import android.media.projection.MediaProjectionManager;
++import android.os.Build;
++import android.view.ViewGroup;
++import android.widget.ArrayAdapter;
++import android.widget.Button;
++import android.widget.CheckBox;
++import android.widget.LinearLayout;
++import android.widget.ListView;
+ 
+ import androidx.activity.result.ActivityResult;
+ import androidx.fragment.app.FragmentActivity;
+ 
++import org.chromium.base.ActivityState;
++import org.chromium.base.ApplicationStatus;
+ import org.chromium.base.ContextUtils;
+ import org.chromium.base.Log;
+-import org.chromium.base.ServiceLoaderUtil;
+ import org.chromium.build.annotations.NullMarked;
+-import org.chromium.chrome.browser.media.MediaCapturePickerHeadlessFragment.CaptureAction;
++import org.chromium.build.annotations.Nullable;
++import org.chromium.chrome.R;
++import org.chromium.chrome.browser.app.tabmodel.AllTabObserver;
+ import org.chromium.chrome.browser.tab.Tab;
+ import org.chromium.content_public.browser.WebContents;
+ import org.chromium.content_public.browser.media.capture.ScreenCapture;
+ 
+-/** Stub for the new media capture picker UI. */
++import java.util.ArrayList;
++import java.util.Comparator;
++
++/** User consent for native tab capture and public Android whole-display capture. */
+ @NullMarked
+ public class MediaCapturePickerInvoker {
+     private static final String TAG = "MediaCapture";
+ 
+-    /**
+-     * Shows the new media capture picker UI.
+-     *
+-     * @param context The {@link Context} to use.
+-     * @param params The parameters for showing the media capture picker.
+-     * @param delegate The delegate to notify of the user's choice.
+-     */
+-    public static void show(
++    /** Returns a dismissal handle that never reports a result after native cancellation. */
++    public static Runnable show(
+             Context context,
+             MediaCapturePickerManager.Params params,
+             MediaCapturePickerManager.Delegate delegate) {
+-        MediaCapturePickerDelegate impl =
+-                ServiceLoaderUtil.maybeCreate(MediaCapturePickerDelegate.class);
+-        if (impl != null) {
+-            Intent intent = impl.createScreenCaptureIntent(context, params, delegate);
+-            if (intent != null) {
+-                Activity activity = ContextUtils.activityFromContext(context);
+-                // We should always get a non-null ChromeActivity which is a FragmentActivity.
+-                // Crash here if this is not true for investigation.
+-                MediaCapturePickerHeadlessFragment fragment =
+-                        MediaCapturePickerHeadlessFragment.getInstance(
+-                                assumeNonNull((FragmentActivity) activity));
+-                Log.d(
+-                        TAG,
+-                        "PickerInvoker: Starting AndroidCapturePrompt for tab/ window/ screen"
+-                                + " sharing");
+-                fragment.startAndroidCapturePrompt(
+-                        (action, result) ->
+-                                onPickAndroidCapturePrompt(
+-                                        context,
+-                                        action,
+-                                        result,
+-                                        params.webContents,
+-                                        delegate,
+-                                        impl),
+-                        intent);
+-                return;
+-            }
+-            Log.e(TAG, "PickerInvoker: Failed to create ScreenCapture Intent, cancel request");
+-            // The delegate will record pre-show failure in createScreenCaptureIntent() before
+-            // returning null.
++        Activity activity = ContextUtils.activityFromContext(context);
++        if (!(activity instanceof FragmentActivity fragmentActivity)
++                || activity.isFinishing()
++                || activity.isDestroyed()
++                || fragmentActivity.getSupportFragmentManager().isStateSaved()) {
+             delegate.onCancel();
+-            return;
+-        }
+-        Log.e(TAG, "PickerInvoker: No PickerDelegate, cancel request");
+-        MediaCapturePickerManager.recordPreShowFailure(
+-                MediaCapturePickerManager.PreShowFailure.PICKER_DELEGATE_NULL_ERROR);
+-        delegate.onCancel();
++            return () -> {};
++        }
++        Picker picker = new Picker(fragmentActivity, params, delegate);
++        try {
++            picker.show();
++        } catch (RuntimeException error) {
++            Log.w(TAG, "Unable to show capture chooser", error);
++            picker.cancel();
++        }
++        return picker::close;
+     }
+ 
+-    private static void onPickAndroidCapturePrompt(
+-            Context context,
+-            @CaptureAction int action,
+-            ActivityResult result,
+-            WebContents webContents,
+-            MediaCapturePickerManager.Delegate delegate,
+-            MediaCapturePickerDelegate impl) {
+-        Log.d(TAG, "PickerInvoker: AndroidCapturePrompt received user action %d", action);
+-        if (action == CaptureAction.CAPTURE_CANCELLED) {
+-            delegate.onCancel();
++    private static final class Picker
++            implements MediaCapturePickerTabObserver.Delegate,
++                    MediaCapturePickerHeadlessFragment.Delegate,
++                    ApplicationStatus.ActivityStateListener {
++        private final FragmentActivity mActivity;
++        private final MediaCapturePickerManager.Params mParams;
++        private final MediaCapturePickerManager.Delegate mDelegate;
++        private final ArrayList<Tab> mTabs = new ArrayList<>();
++        private final ArrayAdapter<String> mAdapter;
++        private final CheckBox mAudio;
++        private final ListView mList;
++        private final MediaCapturePickerTabObserver mTabObserver;
++        private @Nullable AllTabObserver mAllTabs;
++        private @Nullable AlertDialog mDialog;
++        private @Nullable MediaCapturePickerHeadlessFragment mFragment;
++        private @Nullable Tab mSelected;
++        private boolean mFinished;
++        private boolean mAwaitingSystem;
++
++        Picker(
++                FragmentActivity activity,
++                MediaCapturePickerManager.Params params,
++                MediaCapturePickerManager.Delegate delegate) {
++            mActivity = activity;
++            mParams = params;
++            mDelegate = delegate;
++            mAdapter =
++                    new ArrayAdapter<>(activity, android.R.layout.simple_list_item_single_choice);
++            mList = new ListView(activity);
++            mList.setChoiceMode(ListView.CHOICE_MODE_SINGLE);
++            mList.setAdapter(mAdapter);
++            mList.setOnItemClickListener(
++                    (parent, view, position, id) -> {
++                        if (position < 0 || position >= mTabs.size()) return;
++                        mSelected = mTabs.get(position);
++                        updateShareButton();
++                    });
++            mAudio = new CheckBox(activity);
++            mAudio.setText(R.string.desktop_media_picker_also_share_tab_audio);
++            mAudio.setChecked(false);
++            mTabObserver = new MediaCapturePickerTabObserver(this, params, delegate);
++        }
++
++        void show() {
++            boolean tabsAllowed = (mParams.allowedSourceTypes & 1) != 0;
++            boolean screenAllowed =
++                    (mParams.allowedSourceTypes & 2) != 0
++                            && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q;
++            if (!tabsAllowed && !screenAllowed) {
++                cancel();
++                return;
++            }
++            ApplicationStatus.registerStateListenerForActivity(this, mActivity);
++            LinearLayout content = new LinearLayout(mActivity);
++            content.setOrientation(LinearLayout.VERTICAL);
++            int padding = Math.round(16 * mActivity.getResources().getDisplayMetrics().density);
++            content.setPadding(padding, padding, padding, 0);
++            if (tabsAllowed) {
++                content.addView(
++                        mList,
++                        new LinearLayout.LayoutParams(
++                                ViewGroup.LayoutParams.MATCH_PARENT, padding * 14));
++                if (mParams.requestAudio) content.addView(mAudio);
++                mAllTabs = new AllTabObserver(mTabObserver);
++            }
++            if (screenAllowed) {
++                Button screen = new Button(mActivity);
++                screen.setText(R.string.desktop_media_picker_source_type_screen);
++                screen.setOnClickListener(view -> chooseScreen());
++                content.addView(screen);
++            }
++            mDialog =
++                    new AlertDialog.Builder(mActivity)
++                            .setTitle(R.string.desktop_media_picker_title)
++                            .setMessage(
++                                    mActivity.getString(
++                                            R.string.desktop_media_picker_text_delegated,
++                                            mParams.appName,
++                                            mParams.targetName))
++                            .setView(content)
++                            .setPositiveButton(R.string.desktop_media_picker_share, null)
++                            .setNegativeButton(android.R.string.cancel, (dialog, which) -> cancel())
++                            .create();
++            mDialog.setOnDismissListener(
++                    dialog -> {
++                        if (!mFinished && !mAwaitingSystem) cancel();
++                    });
++            mDialog.show();
++            mDialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> chooseTab());
++            updateShareButton();
++        }
++
++        private void updateShareButton() {
++            if (mDialog != null && mDialog.isShowing()) {
++                mDialog.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(mSelected != null);
++            }
++        }
++
++        private void refreshTabs() {
++            if (mFinished) return;
++            mTabs.sort(Comparator.comparingInt(Tab::getId));
++            if (!mTabs.contains(mSelected)) mSelected = null;
++            mAdapter.clear();
++            for (Tab tab : mTabs) {
++                mAdapter.add(tab.getTitle() + "\n" + tab.getUrl().getSpec());
++            }
++            mAdapter.notifyDataSetChanged();
++            mList.clearChoices();
++            if (mSelected != null) mList.setItemChecked(mTabs.indexOf(mSelected), true);
++            updateShareButton();
++        }
++
++        @Override
++        public void onTabAdded(Tab tab) {
++            if (mFinished) return;
++            mTabs.add(tab);
++            refreshTabs();
++        }
++
++        @Override
++        public void onTabRemoved(Tab tab) {
++            mTabs.remove(tab);
++            refreshTabs();
++        }
++
++        @Override
++        public void onTabUpdated(Tab tab) {
++            refreshTabs();
++        }
++
++        private void chooseTab() {
++            if (mFinished || mSelected == null) return;
++            Tab tab = mSelected;
++            WebContents contents = tab.getWebContents();
++            if (tab.isClosing()
++                    || tab.isDestroyed()
++                    || contents == null
++                    || contents.isDestroyed()
++                    || mDelegate.shouldFilterWebContents(contents)) {
++                cancel();
++                return;
++            }
++            boolean audio = mParams.requestAudio && mAudio.isChecked();
++            close();
++            // Native tab capture does not obtain or consume an OS screen projection token.
++            MediaCapturePickerManager.bringTabToFront(mActivity, tab);
++            mDelegate.onPickTab(contents, audio);
++            MediaCapturePickerManager.recordResult(MediaCapturePickerManager.Result.TAB_SELECTED);
++        }
++
++        private void chooseScreen() {
++            if (mFinished || mAwaitingSystem || (mParams.allowedSourceTypes & 2) == 0) return;
++            MediaProjectionManager manager =
++                    (MediaProjectionManager)
++                            mActivity.getSystemService(Context.MEDIA_PROJECTION_SERVICE);
++            if (manager == null) {
++                cancel();
++                return;
++            }
++            try {
++                // Android 14's default picker can return a window OR a display, and public APIs
++                // do not identify which was chosen. Request the entire display explicitly.
++                Intent intent =
++                        Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE
++                                ? manager.createScreenCaptureIntent(
++                                        MediaProjectionConfig.createConfigForDefaultDisplay())
++                                : manager.createScreenCaptureIntent();
++                mFragment = MediaCapturePickerHeadlessFragment.getInstance(mActivity);
++                mAwaitingSystem = true;
++                if (!mFragment.startAndroidCapturePrompt(this, intent)) {
++                    mAwaitingSystem = false;
++                    cancel();
++                    return;
++                }
++                if (mDialog != null) mDialog.dismiss();
++                detachTabs();
++            } catch (RuntimeException error) {
++                Log.w(TAG, "Unable to request screen capture consent", error);
++                mAwaitingSystem = false;
++                cancel();
++            }
++        }
++
++        @Override
++        public void onPicked(int action, ActivityResult result) {
++            mAwaitingSystem = false;
++            if (mFinished) return;
++            if (result.getResultCode() != Activity.RESULT_OK
++                    || result.getData() == null
++                    || mParams.webContents.isDestroyed()
++                    || mActivity.isFinishing()
++                    || mActivity.isDestroyed()) {
++                cancel();
++                return;
++            }
++            int id = mParams.captureId;
++            if (mParams.requestFrame == null
++                    || !ScreenCapture.onPick(
++                            mParams.webContents,
++                            mParams.requestFrame,
++                            mParams.parentWindow,
++                            result,
++                            id,
++                            () -> MediaCaptureNotificationServiceImpl.finishScreenCapture(id))) {
++                cancel();
++                return;
++            }
++            // Foreground mediaProjection service is started only after real OS consent.
++            if (!MediaCaptureNotificationServiceImpl.prepareScreenCapture(mActivity, id)) {
++                ScreenCapture.cancelPick(id);
++                cancel();
++                return;
++            }
++            close();
++            mDelegate.onPickScreen();
++            MediaCapturePickerManager.recordResult(
++                    MediaCapturePickerManager.Result.SCREEN_SELECTED);
++        }
++
++        @Override
++        public void onActivityStateChange(Activity activity, @ActivityState int newState) {
++            if (newState == ActivityState.DESTROYED) cancel();
++        }
++
++        private void detachTabs() {
++            if (mAllTabs != null) {
++                mAllTabs.destroy();
++                mAllTabs = null;
++            }
++            mTabObserver.destroy();
++        }
++
++        private void cancel() {
++            if (mFinished) return;
++            close();
++            mDelegate.onCancel();
+             MediaCapturePickerManager.recordResult(MediaCapturePickerManager.Result.CANCELLED);
+-        } else {
+-            Tab tab = (action == CaptureAction.CAPTURE_WINDOW) ? impl.getPickedTab() : null;
+-            if (tab != null) {
+-                // User selected from app provided contents, i.e. a tab.
+-                Log.d(
+-                        TAG,
+-                        "PickerInvoker: Tab %d with title '%s' was picked",
+-                        tab.getId(),
+-                        tab.getTitle());
+-                tab.loadIfNeeded(/* forceBackingSize= */ true);
+-                WebContents pickedTabwebContents = tab.getWebContents();
+-                assert pickedTabwebContents != null;
+-
+-                // Bring tab and its window to front. This is necessary for tabs belonging to a
+-                // minimized window, or sharing will not be able to start.
+-                // TODO(crbug.com/454192534): reconsider this behavior when the android system bug
+-                // is fixed to keep it consistent with desktop Chrome.
+-                MediaCapturePickerManager.bringTabToFront(context, tab);
+-
+-                impl.startAppContentMediaProjection(webContents, result);
+-
+-                Log.d(TAG, "PickerInvoker: call delegate.onPickTab");
+-                delegate.onPickTab(pickedTabwebContents, impl.shouldShareAudio());
+-                MediaCapturePickerManager.recordResult(
+-                        MediaCapturePickerManager.Result.TAB_SELECTED);
+-            } else {
+-                // User selected a window or screen.
+-                Log.d(TAG, "PickerInvoker: A window or screen was picked");
+-                // Detach any active tab projection session for this WebContents before starting
+-                // the new window/screen MediaProjection, so the old MediaProjection's onStop()
+-                // callback will not treat the replacement as a user-initiated stop.
+-                impl.stopAppContentMediaProjection(webContents);
+-                if (action == CaptureAction.CAPTURE_SCREEN) {
+-                    delegate.onPickScreen();
+-                    MediaCapturePickerManager.recordResult(
+-                            MediaCapturePickerManager.Result.SCREEN_SELECTED);
+-                } else {
+-                    ScreenCapture.onPick(webContents, result);
+-                    delegate.onPickWindow();
+-                    MediaCapturePickerManager.recordResult(
+-                            MediaCapturePickerManager.Result.WINDOW_SELECTED);
+-                }
+-            }
+-        }
+-        impl.onFinish(webContents);
++        }
++
++        void close() {
++            if (mFinished) return;
++            mFinished = true;
++            ApplicationStatus.unregisterActivityStateListener(this);
++            if (mFragment != null) mFragment.cancelPrompt(this);
++            detachTabs();
++            if (mDialog != null) {
++                mDialog.dismiss();
++                mDialog = null;
++            }
++        }
+     }
+ }

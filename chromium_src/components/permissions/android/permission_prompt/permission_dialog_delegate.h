@@ -41,7 +41,7 @@ class PermissionPromptAndroid_ChromiumImpl;
 
 #define CreateDialog                 \
   BravePreCreateDialog(JNIEnv* env); \
-  void CreateDialog
+  virtual void CreateDialog
 
 #include <components/permissions/android/permission_prompt/permission_dialog_delegate.h>  // IWYU pragma: export
 

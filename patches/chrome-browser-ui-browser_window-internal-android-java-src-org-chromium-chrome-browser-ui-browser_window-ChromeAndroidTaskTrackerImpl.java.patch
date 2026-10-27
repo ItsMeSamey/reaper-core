@@ -1,0 +1,288 @@
+diff --git a/chrome/browser/ui/browser_window/internal/android/java/src/org/chromium/chrome/browser/ui/browser_window/ChromeAndroidTaskTrackerImpl.java b/chrome/browser/ui/browser_window/internal/android/java/src/org/chromium/chrome/browser/ui/browser_window/ChromeAndroidTaskTrackerImpl.java
+index dff479bc4583c94d779d366072d55d8bd60c3f36..aa0a7dd196084a353a45c332f432ce71056689e3 100644
+--- a/chrome/browser/ui/browser_window/internal/android/java/src/org/chromium/chrome/browser/ui/browser_window/ChromeAndroidTaskTrackerImpl.java
++++ b/chrome/browser/ui/browser_window/internal/android/java/src/org/chromium/chrome/browser/ui/browser_window/ChromeAndroidTaskTrackerImpl.java
+@@ -30,7 +30,9 @@
+ import org.chromium.ui.display.DisplayAndroid;
+ import org.chromium.ui.display.DisplayUtil;
+ 
++import java.lang.ref.WeakReference;
+ import java.util.ArrayList;
++import java.util.Arrays;
+ import java.util.Collection;
+ import java.util.Comparator;
+ import java.util.List;
+@@ -65,6 +67,10 @@
+      */
+     private final Map<Integer, ChromeAndroidTaskImpl> mPendingTasks = new ArrayMap<>();
+ 
++    // Only real Activities admitted for a still-pending internal request are
++    // tracked. Both success and cancellation remove this request-scoped state.
++    private final Map<Integer, List<WeakReference<Activity>>> mPendingActivities = new ArrayMap<>();
++
+     /** List of observers currently observing this instance. */
+     private final ObserverList<ChromeAndroidTaskTrackerObserver> mObservers = new ObserverList<>();
+ 
+@@ -80,7 +86,7 @@
+     private ChromeAndroidTaskTrackerImpl() {}
+ 
+     @Override
+-    public ChromeAndroidTask obtainTask(
++    public @Nullable ChromeAndroidTask obtainTask(
+             @BrowserWindowType int browserWindowType,
+             ChromeAndroidTask.ActivityScopedObjects activityScopedObjects,
+             @Nullable Integer pendingId) {
+@@ -88,20 +94,49 @@
+         int taskId = getTaskId(activityScopedObjects.mActivityWindowAndroid);
+ 
+         var existingTask = mTasks.get(taskId);
++        if (pendingId != null) {
++            var activity = activityScopedObjects.mActivityWindowAndroid.getActivity().get();
++            var pendingTask = mPendingTasks.get(pendingId);
++            var info = pendingTask == null ? null : pendingTask.getPendingTaskInfo();
++            // A cancelled request must never fall through to an unrelated task
++            // with the same Android task ID or create a replacement window.
++            if (!isPendingTaskAvailable(pendingId) || info == null) {
++                if (activity != null) activity.finish();
++                return null;
++            }
++            assert pendingTask != null;
++            var profile = activityScopedObjects.mTabModelSelector.getCurrentModel().getProfile();
++            if ((existingTask != null
++                            && (existingTask != pendingTask
++                                    || pendingTask.getTopActivityWindowAndroid()
++                                            != activityScopedObjects.mActivityWindowAndroid))
++                    || profile != info.mCreateParams.getProfile()
++                    || browserWindowType != info.mCreateParams.getWindowType()) {
++                pendingTask.destroy();
++                if (activity != null) activity.finish();
++                return null;
++            }
++            // Keep the exact request admitted through model association. Task
++            // completion retires it after removing the launch Intent extra.
++            // Publish ownership before native completion can query the tracker.
++            mTasks.put(taskId, pendingTask);
++            pendingTask.addActivityScopedObjects(activityScopedObjects);
++            if (pendingTask.isDestroyed() || profile.shutdownStarted()) {
++                if (mTasks.get(taskId) == pendingTask) mTasks.remove(taskId);
++                pendingTask.destroy();
++                if (activity != null) activity.finish();
++                return null;
++            }
++            if (existingTask == null) {
++                for (var observer : mObservers) {
++                    observer.onTaskAdded(pendingTask);
++                }
++            }
++            return pendingTask;
++        }
+         if (existingTask != null) {
+             existingTask.addActivityScopedObjects(activityScopedObjects);
+             return existingTask;
+-        }
+-
+-        if (pendingId != null) {
+-            ChromeAndroidTaskImpl pendingTask = mPendingTasks.remove(pendingId);
+-            assert pendingTask != null : "Invalid pendingId provided.";
+-            pendingTask.addActivityScopedObjects(activityScopedObjects);
+-            mTasks.put(taskId, pendingTask);
+-            for (var observer : mObservers) {
+-                observer.onTaskAdded(pendingTask);
+-            }
+-            return pendingTask;
+         }
+ 
+         var newTask = new ChromeAndroidTaskImpl(activityScopedObjects);
+@@ -133,6 +168,15 @@
+             @Nullable JniOnceCallback<Long> callback) {
+         ThreadUtils.assertOnUiThread();
+ 
++        // Java Profile destruction is announced before its native pointer is
++        // cleared. This existing flag also denies same-profile reentrancy from
++        // a cancellation callback during that notification.
++        if (createParams.getProfile().shutdownStarted()) {
++            createParams.destroyWebContents();
++            if (callback != null) callback.onResult(0L);
++            return null;
++        }
++
+         Activity sourceActivity = findSourceActivityForNewWindow();
+         // Only the "NORMAL" browser window requires a source Activity. See
+         // MultiInstanceOrchestrator for the reason.
+@@ -148,14 +192,12 @@
+         var pendingTaskInfo = new PendingTaskInfo(pendingId, createParams, callback);
+         var pendingTask = new ChromeAndroidTaskImpl(pendingTaskInfo);
+         mPendingTasks.put(pendingId, pendingTask);
++        pendingTask.setPendingTaskRemovalCallback(
++                cancelled -> retirePendingTask(pendingId, pendingTask, cancelled));
+ 
+         // Launch the required Activity based on |createParams|.
+         if (!sPausePendingTaskActivityCreationForTesting) {
+             if (!createBrowserWindow(pendingId, createParams, sourceActivity)) {
+-                mPendingTasks.remove(pendingId);
+-                if (callback != null) {
+-                    callback.onResult(0L);
+-                }
+                 pendingTask.destroy();
+                 return null;
+             }
+@@ -163,6 +205,68 @@
+             sPendingTasksAwaitingActivityCreationForTesting.put(pendingId, pendingTaskInfo);
+         }
+         return pendingTask;
++    }
++
++    @Override
++    public boolean isPendingTaskAvailable(int pendingId) {
++        ThreadUtils.assertOnUiThread();
++        var task = mPendingTasks.get(pendingId);
++        var info = task == null ? null : task.getPendingTaskInfo();
++        return info != null && !info.mCreateParams.getProfile().shutdownStarted();
++    }
++
++    @Override
++    public boolean registerPendingTaskActivity(int pendingId, Activity activity) {
++        ThreadUtils.assertOnUiThread();
++        if (!isPendingTaskAvailable(pendingId)) return false;
++        var activities = mPendingActivities.computeIfAbsent(pendingId, unused -> new ArrayList<>());
++        activities.removeIf(
++                ref -> {
++                    var candidate = ref.get();
++                    return candidate == null || candidate.isDestroyed();
++                });
++        for (var ref : activities) {
++            if (ref.get() == activity) return true;
++        }
++        activities.add(new WeakReference<>(activity));
++        return true;
++    }
++
++    @Override
++    public void unregisterPendingTaskActivity(int pendingId, Activity activity) {
++        ThreadUtils.assertOnUiThread();
++        var activities = mPendingActivities.get(pendingId);
++        if (activities == null) return;
++        activities.removeIf(
++                ref -> {
++                    var candidate = ref.get();
++                    return candidate == null || candidate == activity || candidate.isDestroyed();
++                });
++        if (!activities.isEmpty() || activity.isChangingConfigurations()) return;
++        var pendingTask = mPendingTasks.get(pendingId);
++        if (pendingTask != null) pendingTask.destroy();
++    }
++
++    @Override
++    public boolean registerPendingTaskTransferCleanup(int pendingId, Runnable cleanup) {
++        ThreadUtils.assertOnUiThread();
++        if (!isPendingTaskAvailable(pendingId)) return false;
++        var task = mPendingTasks.get(pendingId);
++        assert task != null;
++        task.setTransferredTabCleanup(cleanup);
++        return true;
++    }
++
++    private void retirePendingTask(int pendingId, ChromeAndroidTaskImpl task, boolean cancelled) {
++        if (mPendingTasks.get(pendingId) != task) return;
++        mPendingTasks.remove(pendingId);
++        sPendingTasksAwaitingActivityCreationForTesting.remove(pendingId);
++        var activities = mPendingActivities.remove(pendingId);
++        if (!cancelled || activities == null) return;
++        for (var ref : activities) {
++            var activity = ref.get();
++            if (activity != null && !activity.isDestroyed()) activity.finish();
++        }
+     }
+ 
+     @Override
+@@ -236,16 +340,24 @@
+         return getNativeBrowserWindowPtrs(tasks);
+     }
+ 
+-    /** Activates the second to last activated task, if there are at least two tasks. */
+-    void activatePenultimatelyActivatedTask() {
+-        ThreadUtils.assertOnUiThread();
+-        List<ChromeAndroidTask> tasks = getAllTasks();
+-        tasks.sort(
+-                Comparator.comparingLong(ChromeAndroidTask::getLastActivatedTimeMillis).reversed());
+-
+-        if (tasks.size() >= 2) {
+-            tasks.get(1).activate();
+-        }
++    /** Returns the last activated live task other than the caller, if one is available. */
++    @Nullable ChromeAndroidTask getMostRecentlyActivatedTaskOtherThan(ChromeAndroidTask caller) {
++        ThreadUtils.assertOnUiThread();
++        @Nullable ChromeAndroidTask mostRecentTask = null;
++        for (var task : getAllTasks()) {
++            if (task == caller || task.isDestroyed()) continue;
++            var windowAndroid = task.getTopActivityWindowAndroid();
++            if (windowAndroid == null) continue;
++            var activity = windowAndroid.getActivity().get();
++            if (activity == null || activity.isFinishing() || activity.isDestroyed()) continue;
++
++            if (mostRecentTask == null
++                    || task.getLastActivatedTimeMillis()
++                            > mostRecentTask.getLastActivatedTimeMillis()) {
++                mostRecentTask = task;
++            }
++        }
++        return mostRecentTask;
+     }
+ 
+     /** Count of tasks. */
+@@ -273,10 +385,11 @@
+             task.destroy();
+         }
+         List<ChromeAndroidTask> pendingTasks = new ArrayList<>(mPendingTasks.values());
+-        mPendingTasks.clear();
+         for (var task : pendingTasks) {
+             task.destroy();
+         }
++        mPendingTasks.clear();
++        mPendingActivities.clear();
+     }
+ 
+     boolean hasObserverForTesting(ChromeAndroidTaskTrackerObserver observer) {
+@@ -300,12 +413,36 @@
+     void resumePendingTaskActivityCreationForTesting(int pendingTaskId) {
+         sPausePendingTaskActivityCreationForTesting = false;
+         PendingTaskInfo pendingTaskInfo =
+-                sPendingTasksAwaitingActivityCreationForTesting.get(pendingTaskId);
+-        assert pendingTaskInfo != null
+-                : "Unable to resume Activity creation for pending task with ID: " + pendingTaskId;
+-
+-        createBrowserWindow(
+-                pendingTaskId, pendingTaskInfo.mCreateParams, findSourceActivityForNewWindow());
++                sPendingTasksAwaitingActivityCreationForTesting.remove(pendingTaskId);
++        // Profile destruction may have retired the held request already.
++        if (pendingTaskInfo == null || !isPendingTaskAvailable(pendingTaskId)) return;
++
++        if (!createBrowserWindow(
++                pendingTaskId, pendingTaskInfo.mCreateParams, findSourceActivityForNewWindow())) {
++            var pendingTask = mPendingTasks.get(pendingTaskId);
++            if (pendingTask != null) pendingTask.destroy();
++        }
++    }
++
++    int[] getHeldPendingTaskIdsForTesting() {
++        int[] pendingTaskIds = new int[sPendingTasksAwaitingActivityCreationForTesting.size()];
++        int index = 0;
++        for (int pendingTaskId : sPendingTasksAwaitingActivityCreationForTesting.keySet()) {
++            pendingTaskIds[index++] = pendingTaskId;
++        }
++        Arrays.sort(pendingTaskIds);
++        return pendingTaskIds;
++    }
++
++    void clearActivityCreationPauseForTesting() {
++        ThreadUtils.assertOnUiThread();
++        sPausePendingTaskActivityCreationForTesting = false;
++        var heldIds = new ArrayList<>(sPendingTasksAwaitingActivityCreationForTesting.keySet());
++        sPendingTasksAwaitingActivityCreationForTesting.clear();
++        for (int pendingId : heldIds) {
++            var pendingTask = mPendingTasks.get(pendingId);
++            if (pendingTask != null) pendingTask.destroy();
++        }
+     }
+ 
+     private void removeInternal(int taskId) {

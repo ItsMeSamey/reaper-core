@@ -1,0 +1,258 @@
+diff --git a/chrome/browser/android/tab_android.cc b/chrome/browser/android/tab_android.cc
+index dfb9c0f63fe3d7866cf4eb1a91758bdefa4ef166..812daf5850135b20bba384b3bfd0a8785e6354ab 100644
+--- a/chrome/browser/android/tab_android.cc
++++ b/chrome/browser/android/tab_android.cc
+@@ -4,6 +4,9 @@
+ 
+ #include "chrome/browser/android/tab_android.h"
+ 
++#include "components/tabs/public/split_tab_collection.h"
++#include "components/tabs/public/split_tab_data.h"
++
+ #include <stddef.h>
+ 
+ #include <cstdint>
+@@ -35,8 +38,6 @@
+ #include "chrome/browser/browser_about_handler.h"
+ #include "chrome/browser/browser_process.h"
+ #include "chrome/browser/flags/android/chrome_feature_list.h"
+-#include "chrome/browser/glic/browser_ui/glic_tab_indicator_helper.h"
+-#include "chrome/browser/glic/public/glic_enabling.h"
+ #include "chrome/browser/history/history_service_factory.h"
+ #include "chrome/browser/notifications/notification_permission_context.h"
+ #include "chrome/browser/profiles/profile.h"
+@@ -167,10 +168,16 @@ TabAndroid::TabAndroid(JNIEnv* env,
+     : tab_id_(tab_id),
+       session_window_id_(SessionID::InvalidValue()),
+       profile_(profile->GetWeakPtr()) {
++  // Model insertion may precede WebContents creation for a restored tab.
++  // Reserve the same genuine session identity the first helper will use.
++  SetSessionId(SessionID::NewUnique().id());
+   Java_TabImpl_setNativePtr(env, obj, reinterpret_cast<intptr_t>(this));
+ }
+ 
+ TabAndroid::~TabAndroid() {
++  for (Observer& observer : observers_) {
++    observer.OnTabAndroidDestroyed(this);
++  }
+   CHECK(!parent_collection_)
+       << "TabAndroid destroyed while still in a TabCollection!";
+   JNIEnv* env = AttachCurrentThread();
+@@ -197,6 +204,11 @@ std::unique_ptr<TabAndroid> TabAndroid::CreateForTesting(
+   if (tab->web_contents_) {
+     tabs::TabLookupFromWebContents::CreateForWebContents(
+         tab->web_contents_.get(), tab.get());
++    const SessionID id = sessions::SessionTabHelper::IdForTab(
++        tab->web_contents_.get());
++    if (id.is_valid()) {
++      tab->SetSessionId(id.id());
++    }
+   }
+   return tab;
+ }
+@@ -456,10 +468,6 @@ void TabAndroid::InitWebContents(
+   ShowBadFlagsPrompt(web_contents_.get());
+ 
+   MediaStateObserver::CreateForWebContents(web_contents_.get());
+-  if (glic::GlicEnabling::IsProfileEligible(profile())) {
+-    glic_tab_indicator_helper_ =
+-        std::make_unique<glic::GlicTabIndicatorHelper>(this);
+-  }
+   tab_alert_controller_ = std::make_unique<tabs::TabAlertController>(*this);
+   alert_to_show_subscription_ =
+       tab_alert_controller_->AddAlertToShowChangedCallback(base::BindRepeating(
+@@ -548,17 +556,23 @@ void TabAndroid::UpdateDelegates(
+ }
+ 
+ void TabAndroid::SendDidActivateUpdate(JNIEnv* env) {
+-  // On Android, visibility and activation are currently synonymous.
+-  did_become_visible_callback_list_.Notify(this);
+   did_activate_callback_list_.Notify(this);
+ }
+ 
+ void TabAndroid::SendWillDeactivateUpdate(JNIEnv* env) {
+-  // On Android, visibility and activation are currently synonymous.
+-  will_become_hidden_callback_list_.Notify(this);
+   will_deactivate_callback_list_.Notify(this);
+ }
+ 
++void TabAndroid::SendDidBecomeVisibleUpdate(JNIEnv* env) {
++  // Both panes can be visible while only one is activated. Java dispatches
++  // visibility changes from the actual show/hide transition, not selection.
++  did_become_visible_callback_list_.Notify(this);
++}
++
++void TabAndroid::SendWillBecomeHiddenUpdate(JNIEnv* env) {
++  will_become_hidden_callback_list_.Notify(this);
++}
++
+ void TabAndroid::SendDidInsertUpdate(JNIEnv* env) {
+   did_insert_callback_list_.Notify(this);
+ }
+@@ -585,7 +599,6 @@ void WillRemoveWebContentsFromTab(content::WebContents* contents,
+ }  // namespace
+ 
+ void TabAndroid::ResetTabAlertController() {
+-  glic_tab_indicator_helper_.reset();
+   alert_to_show_subscription_ = {};
+   if (tab_alert_controller_ &&
+       tab_alert_controller_->GetAlertToShow().has_value()) {
+@@ -609,6 +622,9 @@ tabs::TabDestroyStatus TabAndroid::DestroyWebContents() {
+     return DestroyWebContentsSlowShutdown();
+   }
+ 
++  for (Observer& observer : observers_) {
++    observer.OnWillDetachWebContents(this, /*keep_session_id=*/true);
++  }
+   ResetTabAlertController();
+   tab_features_.reset();
+   web_contents_.reset();
+@@ -643,6 +659,9 @@ TabAndroid::ReleaseWebContentsForTesting() {
+ std::unique_ptr<content::WebContents> TabAndroid::ReleaseWebContentsInternal(
+     bool keep_session_id,
+     bool clear_delegate) {
++  for (Observer& observer : observers_) {
++    observer.OnWillDetachWebContents(this, keep_session_id);
++  }
+   WillRemoveWebContentsFromTab(web_contents(), clear_delegate);
+ 
+   ResetTabAlertController();
+@@ -815,6 +834,21 @@ GURL TabAndroid::GetURL() const {
+   return Java_TabImpl_getUrl(env, GetJavaObject(env));
+ }
+ 
++GURL TabAndroid::GetPendingURL() const {
++  JNIEnv* env = AttachCurrentThread();
++  return Java_TabImpl_getPendingUrl(env, GetJavaObject(env));
++}
++
++GURL TabAndroid::GetCommittedURL() const {
++  JNIEnv* env = AttachCurrentThread();
++  return Java_TabImpl_getCommittedUrl(env, GetJavaObject(env));
++}
++
++std::u16string TabAndroid::GetCommittedTitle() const {
++  JNIEnv* env = AttachCurrentThread();
++  return Java_TabImpl_getCommittedTitle(env, GetJavaObject(env));
++}
++
+ base::Time TabAndroid::GetLastActiveTime() const {
+   if (web_contents()) {
+     return web_contents()->GetLastActiveTime();
+@@ -826,6 +860,12 @@ Profile* TabAndroid::GetProfile() const {
+   return profile();
+ }
+ 
++std::string TabAndroid::GetContainerId() const {
++  JNIEnv* env = AttachCurrentThread();
++  auto tab = GetJavaObject(env);
++  return tab ? Java_TabImpl_getContainerId(env, tab) : std::string();
++}
++
+ void TabAndroid::Close() {
+   JNIEnv* env = AttachCurrentThread();
+   Java_TabImpl_closeTabFromNative(env, GetJavaObject(env));
+@@ -954,10 +994,8 @@ bool TabAndroid::IsBlocked() const {
+   return false;
+ }
+ 
+-// Split tabs is currently desktop only.
+ bool TabAndroid::IsSplit() const {
+-  NOTIMPLEMENTED();
+-  return false;
++  return GetSplit().has_value();
+ }
+ 
+ std::optional<tab_groups::TabGroupId> TabAndroid::GetGroup() const {
+@@ -967,9 +1005,13 @@ std::optional<tab_groups::TabGroupId> TabAndroid::GetGroup() const {
+   return tab_groups::TabGroupId::FromOptionalToken(token);
+ }
+ 
+-// Split tabs is currently desktop only.
+ std::optional<split_tabs::SplitTabId> TabAndroid::GetSplit() const {
+-  NOTIMPLEMENTED();
++  for (auto* ancestor = parent_collection_.get(); ancestor;
++       ancestor = ancestor->GetParentCollection()) {
++    if (ancestor->type() == tabs::TabCollection::Type::SPLIT) {
++      return static_cast<tabs::SplitTabCollection*>(ancestor)->GetSplitTabId();
++    }
++  }
+   return std::nullopt;
+ }
+ 
+@@ -1010,11 +1052,13 @@ TabAndroid::TabAndroid(Profile* profile, int tab_id)
+       session_window_id_(SessionID::InvalidValue()),
+       profile_(profile->GetWeakPtr()) {
+   CHECK_IS_TEST();
++  SetSessionId(SessionID::NewUnique().id());
+ }
+ 
+ void TabAndroid::UpdateProperties() {
+   bool pinned = false;
+   std::optional<tab_groups::TabGroupId> tab_group_id;
++  tabs::SplitTabCollection* split_collection = nullptr;
+ 
+   tabs::TabCollection* ancestor = parent_collection_;
+   while (ancestor) {
+@@ -1027,7 +1071,8 @@ void TabAndroid::UpdateProperties() {
+                            ->GetTabGroupId();
+         break;
+       case tabs::TabCollection::Type::SPLIT:
+-        // Intentional fallthrough. Split tabs is currently desktop only.
++        split_collection = static_cast<tabs::SplitTabCollection*>(ancestor);
++        break;
+       case tabs::TabCollection::Type::TABSTRIP:
+       case tabs::TabCollection::Type::UNPINNED:
+         break;
+@@ -1037,6 +1082,20 @@ void TabAndroid::UpdateProperties() {
+ 
+   SetIsPinned(pinned);
+   SetTabGroupId(tab_group_id);
++  JNIEnv* env = AttachCurrentThread();
++  std::optional<base::Token> split_token;
++  int layout = 0;
++  double ratio = 0.5;
++  int position = -1;
++  if (split_collection) {
++    split_token = split_collection->GetSplitTabId().token();
++    const auto* visual = split_collection->data()->visual_data();
++    layout = static_cast<int>(visual->split_layout());
++    ratio = visual->split_ratio();
++    position = static_cast<int>(split_collection->GetIndexOfTab(this).value());
++  }
++  Java_TabImpl_setSplitData(env, GetJavaObject(env), split_token, layout, ratio,
++                            position);
+ }
+ 
+ void TabAndroid::SetIsPinned(bool is_pinned) {
+@@ -1059,6 +1118,30 @@ ScopedJavaLocalRef<jobject> TabAndroid::GetJavaObject(JNIEnv* env) const {
+   return Java_TabImpl_getJavaObject(env, reinterpret_cast<intptr_t>(this));
+ }
+ 
++// static
++std::optional<base::Token> TabAndroid::GetHistoricalSplitTabId(
++    JNIEnv* env, const JavaRef<jobject>& tab) {
++  return Java_TabImpl_getHistoricalSplitTabId(env, tab);
++}
++
++// static
++int TabAndroid::GetHistoricalSplitLayout(
++    JNIEnv* env, const JavaRef<jobject>& tab) {
++  return Java_TabImpl_getHistoricalSplitLayout(env, tab);
++}
++
++// static
++double TabAndroid::GetHistoricalSplitRatio(
++    JNIEnv* env, const JavaRef<jobject>& tab) {
++  return Java_TabImpl_getHistoricalSplitRatio(env, tab);
++}
++
++// static
++int TabAndroid::GetHistoricalSplitPosition(
++    JNIEnv* env, const JavaRef<jobject>& tab) {
++  return Java_TabImpl_getHistoricalSplitPosition(env, tab);
++}
++
+ static TabAndroid* JNI_TabImpl_FromWebContents(
+     content::WebContents* web_contents) {
+   return web_contents ? TabAndroid::FromWebContents(web_contents) : nullptr;

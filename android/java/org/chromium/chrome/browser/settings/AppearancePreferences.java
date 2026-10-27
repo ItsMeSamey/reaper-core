@@ -22,28 +22,19 @@ import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.R;
 import org.chromium.chrome.browser.BraveFeatureUtil;
 import org.chromium.chrome.browser.BraveRelaunchUtils;
-import org.chromium.chrome.browser.BraveRewardsNativeWorker;
-import org.chromium.chrome.browser.BraveRewardsObserver;
-import org.chromium.chrome.browser.BraveRewardsPolicy;
 import org.chromium.chrome.browser.appearance.settings.AppearanceSettingsFragment;
 import org.chromium.chrome.browser.bookmarks.bar.BookmarkBarUtils;
-import org.chromium.chrome.browser.brave_leo.BraveLeoPrefUtils;
 import org.chromium.chrome.browser.flags.ChromeFeatureList;
 import org.chromium.chrome.browser.multiwindow.BraveMultiWindowDialogFragment;
 import org.chromium.chrome.browser.multiwindow.BraveMultiWindowUtils;
 import org.chromium.chrome.browser.multiwindow.MultiInstanceManager.PersistedInstanceType;
 import org.chromium.chrome.browser.multiwindow.MultiWindowUtils;
-import org.chromium.chrome.browser.ntp.NtpUtil;
 import org.chromium.chrome.browser.preferences.ChromeSharedPreferences;
 import org.chromium.chrome.browser.profiles.Profile;
 import org.chromium.chrome.browser.settings.search.ChromeBaseSearchIndexProvider;
 import org.chromium.chrome.browser.tasks.tab_management.BraveTabUiFeatureUtilities;
 import org.chromium.chrome.browser.theme.BraveDynamicColors;
 import org.chromium.chrome.browser.toolbar.ToolbarPositionController;
-import org.chromium.chrome.browser.toolbar.adaptive.AdaptiveToolbarButtonVariant;
-import org.chromium.chrome.browser.toolbar.adaptive.AdaptiveToolbarPrefs;
-import org.chromium.chrome.browser.toolbar.adaptive.BraveAdaptiveToolbarPrefs;
-import org.chromium.chrome.browser.toolbar.adaptive.settings.BraveRadioButtonGroupAdaptiveToolbarPreference;
 import org.chromium.chrome.browser.toolbar.bottom.BottomToolbarConfiguration;
 import org.chromium.chrome.browser.toolbar.settings.AddressBarSettingsFragment;
 import org.chromium.chrome.browser.ui.bottombar.BraveBottomBarUserPrefs;
@@ -57,12 +48,10 @@ import org.chromium.ui.base.DeviceFormFactor;
 import java.util.Map;
 
 public class AppearancePreferences extends AppearanceSettingsFragment
-        implements Preference.OnPreferenceChangeListener, BraveRewardsObserver {
+        implements Preference.OnPreferenceChangeListener {
     /* package */ static final String PREF_NAVIGATION_SECTION = "navigation_section";
     /* package */ static final String PREF_GENERAL_SECTION = "general_section";
-    public static final String PREF_SHOW_BRAVE_REWARDS_ICON = "show_brave_rewards_icon";
     public static final String PREF_ADDRESS_BAR = "address_bar";
-    /* package */ static final String PREF_ADS_SWITCH = "ads_switch";
     /* package */ static final String PREF_BRAVE_NIGHT_MODE_ENABLED =
             "brave_night_mode_enabled_key";
     /* package */ static final String PREF_BRAVE_DISABLE_SHARING_HUB = "brave_disable_sharing_hub";
@@ -71,8 +60,6 @@ public class AppearancePreferences extends AppearanceSettingsFragment
     /* package */ static final String PREF_SHOW_UNDO_WHEN_TABS_CLOSED =
             "show_undo_when_tabs_closed";
     /* package */ static final String PREF_BRAVE_CUSTOMIZE_MENU = "brave_customize_menu";
-
-    private BraveRewardsNativeWorker mBraveRewardsNativeWorker;
 
     @Override
     protected @NonNull PreferenceGroupAdapter onCreateAdapter(
@@ -102,11 +89,6 @@ public class AppearancePreferences extends AppearanceSettingsFragment
         }
         if (isTablet || !isAndroidBottomBarEnabled) {
             removePreferenceIfPresent(BravePreferenceKeys.BRAVE_ENABLE_BOTTOM_BAR);
-        }
-
-        mBraveRewardsNativeWorker = BraveRewardsNativeWorker.getInstance();
-        if (mBraveRewardsNativeWorker == null || !mBraveRewardsNativeWorker.isSupported()) {
-            removePreferenceIfPresent(PREF_SHOW_BRAVE_REWARDS_ICON);
         }
 
         if (!new BraveMultiWindowUtils().shouldShowEnableWindow(getActivity())) {
@@ -158,20 +140,6 @@ public class AppearancePreferences extends AppearanceSettingsFragment
     @Override
     public void onActivityCreated(Bundle savedInstanceState) {
         super.onActivityCreated(savedInstanceState);
-
-        ChromeSwitchPreference showBraveRewardsIconPref =
-                (ChromeSwitchPreference) findPreference(PREF_SHOW_BRAVE_REWARDS_ICON);
-        if (showBraveRewardsIconPref != null) {
-            showBraveRewardsIconPref.setChecked(NtpUtil.shouldShowRewardsIcon());
-            showBraveRewardsIconPref.setOnPreferenceChangeListener(this);
-        }
-
-        ChromeSwitchPreference adsSwitchPref =
-                (ChromeSwitchPreference) findPreference(PREF_ADS_SWITCH);
-        if (adsSwitchPref != null) {
-            adsSwitchPref.setChecked(getPrefAdsInBackgroundEnabled());
-            adsSwitchPref.setOnPreferenceChangeListener(this);
-        }
 
         Preference nightModeEnabled = findPreference(PREF_BRAVE_NIGHT_MODE_ENABLED);
         nightModeEnabled.setOnPreferenceChangeListener(this);
@@ -240,16 +208,7 @@ public class AppearancePreferences extends AppearanceSettingsFragment
 
     @Override
     public void onStart() {
-        if (mBraveRewardsNativeWorker != null) {
-            mBraveRewardsNativeWorker.addObserver(this);
-        }
         super.onStart();
-
-        // Check if Brave Rewards is disabled by policy and hide the icon preference if so
-        checkRewardsPolicyAndUpdatePreference();
-
-        // Check if Leo is disabled by policy for toolbar shortcut settings
-        checkLeoPolicyForToolbarShortcut();
 
         if (ToolbarPositionController.isToolbarPositionCustomizationEnabled(getContext(), false)) {
             updatePreferenceTitle(
@@ -304,14 +263,6 @@ public class AppearancePreferences extends AppearanceSettingsFragment
     }
 
     @Override
-    public void onStop() {
-        if (mBraveRewardsNativeWorker != null) {
-            mBraveRewardsNativeWorker.removeObserver(this);
-        }
-        super.onStop();
-    }
-
-    @Override
     public boolean onPreferenceChange(Preference preference, Object newValue) {
         String key = preference.getKey();
         boolean shouldRelaunch = false;
@@ -328,12 +279,6 @@ public class AppearancePreferences extends AppearanceSettingsFragment
             ChromeSharedPreferences.getInstance()
                     .writeBoolean(BravePreferenceKeys.BRAVE_ENABLE_BOTTOM_BAR, (boolean) newValue);
             shouldRelaunch = true;
-        } else if (PREF_SHOW_BRAVE_REWARDS_ICON.equals(key)) {
-            ChromeSharedPreferences.getInstance()
-                    .writeBoolean(PREF_SHOW_BRAVE_REWARDS_ICON, !(boolean) newValue);
-            shouldRelaunch = true;
-        } else if (PREF_ADS_SWITCH.equals(key)) {
-            setPrefAdsInBackgroundEnabled((boolean) newValue);
         } else if (PREF_BRAVE_NIGHT_MODE_ENABLED.equals(key)) {
             BraveFeatureUtil.enableFeature(
                     BraveFeatureList.ENABLE_FORCE_DARK, (boolean) newValue, true);
@@ -385,16 +330,6 @@ public class AppearancePreferences extends AppearanceSettingsFragment
         }
 
         return true;
-    }
-
-    /** Returns the user preference for whether the brave ads in background is enabled. */
-    public static boolean getPrefAdsInBackgroundEnabled() {
-        return ChromeSharedPreferences.getInstance().readBoolean(PREF_ADS_SWITCH, false);
-    }
-
-    /** Sets the user preference for whether the brave ads in background is enabled. */
-    public void setPrefAdsInBackgroundEnabled(boolean enabled) {
-        ChromeSharedPreferences.getInstance().writeBoolean(PREF_ADS_SWITCH, enabled);
     }
 
     private static boolean isSharingHubEnabled() {
@@ -450,8 +385,6 @@ public class AppearancePreferences extends AppearanceSettingsFragment
         setPreferenceOrder(PREF_GENERAL_SECTION, 8);
         setPreferenceOrder(PREF_BRAVE_NIGHT_MODE_ENABLED, 9);
         setPreferenceOrder(PREF_BRAVE_DISABLE_SHARING_HUB, 10);
-        setPreferenceOrder(PREF_SHOW_BRAVE_REWARDS_ICON, 11);
-        setPreferenceOrder(PREF_ADS_SWITCH, 12);
         setPreferenceOrder(AppearanceSettingsFragment.PREF_BOOKMARK_BAR, 13);
         setPreferenceOrder(PREF_BRAVE_ENABLE_TAB_GROUPS, 14);
         setPreferenceOrder(PREF_SHOW_UNDO_WHEN_TABS_CLOSED, 15);
@@ -461,41 +394,6 @@ public class AppearancePreferences extends AppearanceSettingsFragment
         Preference preference = findPreference(key);
         if (preference != null) {
             preference.setOrder(order);
-        }
-    }
-
-    /**
-     * Checks if Brave Rewards is disabled by policy and removes related preferences if so. This
-     * ensures that when Brave Rewards is disabled, users cannot toggle rewards-related settings in
-     * the appearance settings.
-     */
-    private void checkRewardsPolicyAndUpdatePreference() {
-        if (BraveRewardsPolicy.isDisabledByPolicy(getProfile())) {
-            // Policy disables Brave Rewards - remove rewards-related preferences
-            removePreferenceIfPresent(PREF_SHOW_BRAVE_REWARDS_ICON);
-            removePreferenceIfPresent(PREF_ADS_SWITCH);
-        }
-    }
-
-    /**
-     * Checks if Leo AI is disabled by policy and updates the static flag in
-     * BraveRadioButtonGroupAdaptiveToolbarPreference. This is checked before the user can navigate
-     * to toolbar shortcut settings, so the flag will be set when the preference screen opens.
-     */
-    private void checkLeoPolicyForToolbarShortcut() {
-        boolean isDisabled = BraveLeoPrefUtils.isLeoDisabledByPolicy(getProfile());
-        BraveRadioButtonGroupAdaptiveToolbarPreference.setLeoDisabledByPolicy(isDisabled);
-        // If Leo was selected and is now disabled, reset to default
-        if (isDisabled
-                && BraveAdaptiveToolbarPrefs.getCustomizationSetting()
-                        == AdaptiveToolbarButtonVariant.LEO) {
-            @AdaptiveToolbarButtonVariant
-            int defaultVariant =
-                    DeviceFormFactor.isNonMultiDisplayContextOnTablet(
-                                    ContextUtils.getApplicationContext())
-                            ? AdaptiveToolbarButtonVariant.SHARE
-                            : AdaptiveToolbarButtonVariant.NEW_TAB;
-            AdaptiveToolbarPrefs.saveToolbarButtonManualOverride(defaultVariant);
         }
     }
 
@@ -536,11 +434,6 @@ public class AppearancePreferences extends AppearanceSettingsFragment
                     if (!BookmarkBarUtils.isDeviceBookmarkBarCompatible(context)) {
                         indexData.removeEntryForKey(
                                 frag, AppearanceSettingsFragment.PREF_BOOKMARK_BAR);
-                    }
-
-                    if (BraveRewardsPolicy.isDisabledByPolicy(profile)) {
-                        indexData.removeEntryForKey(frag, PREF_SHOW_BRAVE_REWARDS_ICON);
-                        indexData.removeEntryForKey(frag, PREF_ADS_SWITCH);
                     }
 
                     if (!shouldShowSharingHubPreference()) {

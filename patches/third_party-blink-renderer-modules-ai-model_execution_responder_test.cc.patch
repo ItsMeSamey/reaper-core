@@ -1,0 +1,114 @@
+diff --git a/third_party/blink/renderer/modules/ai/model_execution_responder_test.cc b/third_party/blink/renderer/modules/ai/model_execution_responder_test.cc
+index 96288f6e6..915f86602 100644
+--- a/third_party/blink/renderer/modules/ai/model_execution_responder_test.cc
++++ b/third_party/blink/renderer/modules/ai/model_execution_responder_test.cc
+@@ -25,6 +25,7 @@
+ #include "third_party/blink/renderer/core/fetch/readable_stream_bytes_consumer.h"
+ #include "third_party/blink/renderer/modules/ai/ai_metrics.h"
+ #include "third_party/blink/renderer/modules/ai/ai_utils.h"
++#include "third_party/blink/renderer/platform/bindings/buildflags.h"
+ #include "third_party/blink/renderer/platform/bindings/v8_binding.h"
+ #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+ #include "third_party/blink/renderer/platform/testing/task_environment.h"
+@@ -628,4 +629,101 @@ TEST(CreateModelExecutionResponder, TokenMetrics) {
+       static_cast<int>(kResponseTokens), 1);
+ }
+ 
++#if !BUILDFLAG(ENABLE_WEB_AI_MODEL_APIS)
++TEST(CreateModelExecutionResponder, AndroidToolCallsRejectWithoutExecuting) {
++  test::TaskEnvironment task_environment;
++  V8TestingScope scope;
++  ScriptState* script_state = scope.GetScriptState();
++  auto* resolver =
++      MakeGarbageCollected<ScriptPromiseResolver<IDLString>>(script_state);
++  auto promise = resolver->Promise();
++  int complete_calls = 0;
++  int tool_calls = 0;
++  auto pending_remote = CreateModelExecutionResponder(
++      script_state, nullptr,
++      blink::scheduler::GetSequencedTaskRunnerForTesting(),
++      AIMetrics::AISessionType::kTranslator,
++      base::BindOnce(
++          [](int* calls, ScriptPromiseResolver<IDLString>* resolver,
++             const String& response,
++             mojom::blink::ModelExecutionContextInfoPtr info) {
++            ++*calls;
++            ResolvePromiseOnCompletion(resolver, response, std::move(info));
++          },
++          base::Unretained(&complete_calls), WrapPersistent(resolver)),
++      base::BindRepeating(
++          [](int* calls, Vector<mojom::blink::ToolCallPtr> tools) { ++*calls; },
++          base::Unretained(&tool_calls)),
++      base::DoNothing(),
++      base::BindOnce(&RejectPromiseOnError<IDLString>,
++                     WrapPersistent(resolver)),
++      base::BindOnce(&RejectPromiseOnAbort<IDLString>, WrapPersistent(resolver),
++                     nullptr, WrapPersistent(script_state)));
++  mojo::Remote<mojom::blink::ModelStreamingResponder> responder(
++      std::move(pending_remote));
++  base::RunLoop disconnected;
++  responder.set_disconnect_handler(disconnected.QuitClosure());
++  Vector<mojom::blink::ToolCallPtr> tools;
++  auto tool = mojom::blink::ToolCall::New();
++  tool->call_id = "unsupported-call";
++  tool->name = "unsupported-tool";
++  tools.push_back(std::move(tool));
++  responder->OnToolCalls(std::move(tools));
++  responder->OnCompletion(mojom::blink::ModelExecutionContextInfo::New(1, 1));
++  ScriptPromiseTester tester(script_state, promise);
++  tester.WaitUntilSettled();
++  EXPECT_TRUE(tester.IsRejected());
++  auto* exception = V8DOMException::ToWrappable(script_state->GetIsolate(),
++                                                tester.Value().V8Value());
++  ASSERT_TRUE(exception);
++  EXPECT_EQ(exception->name(),
++            DOMException(DOMExceptionCode::kUnknownError).name());
++  EXPECT_EQ(tool_calls, 0);
++  EXPECT_EQ(complete_calls, 0);
++  disconnected.Run();
++}
++
++TEST(CreateModelExecutionStreamingResponder,
++     AndroidToolCallsErrorAndDisconnect) {
++  test::TaskEnvironment task_environment;
++  V8TestingScope scope;
++  ScriptState* script_state = scope.GetScriptState();
++  int complete_calls = 0;
++  auto [stream, pending_remote] = CreateModelExecutionStreamingResponder(
++      script_state, nullptr,
++      blink::scheduler::GetSequencedTaskRunnerForTesting(),
++      AIMetrics::AISessionType::kTranslator,
++      base::BindOnce(
++          [](int* calls, mojom::blink::ModelExecutionContextInfoPtr info) {
++            ++*calls;
++          },
++          base::Unretained(&complete_calls)),
++      base::DoNothing());
++  mojo::Remote<mojom::blink::ModelStreamingResponder> responder(
++      std::move(pending_remote));
++  base::RunLoop disconnected;
++  responder.set_disconnect_handler(disconnected.QuitClosure());
++  Vector<mojom::blink::ToolCallPtr> tools;
++  auto tool = mojom::blink::ToolCall::New();
++  tool->call_id = "unsupported-call";
++  tool->name = "unsupported-tool";
++  tools.push_back(std::move(tool));
++  responder->OnToolCalls(std::move(tools));
++  responder->OnCompletion(mojom::blink::ModelExecutionContextInfo::New(1, 1));
++  auto* reader =
++      stream->GetDefaultReaderForTesting(script_state, ASSERT_NO_EXCEPTION);
++  auto read_promise = reader->read(script_state, ASSERT_NO_EXCEPTION);
++  ScriptPromiseTester tester(script_state, read_promise);
++  tester.WaitUntilSettled();
++  EXPECT_TRUE(tester.IsRejected());
++  auto* exception = V8DOMException::ToWrappable(script_state->GetIsolate(),
++                                                tester.Value().V8Value());
++  ASSERT_TRUE(exception);
++  EXPECT_EQ(exception->name(),
++            DOMException(DOMExceptionCode::kUnknownError).name());
++  EXPECT_EQ(complete_calls, 0);
++  disconnected.Run();
++}
++#endif  // !BUILDFLAG(ENABLE_WEB_AI_MODEL_APIS)
++
+ }  // namespace blink

@@ -1,0 +1,622 @@
+diff --git a/chrome/android/java/src/org/chromium/chrome/browser/tabmodel/TabPersistentStoreImpl.java b/chrome/android/java/src/org/chromium/chrome/browser/tabmodel/TabPersistentStoreImpl.java
+index 05fa7e212448f0a5e69c0bb5334bbe6c87e3ae2a..2f63c80b7ab69ee7c2e705ee1e5398dd85305a02 100644
+--- a/chrome/android/java/src/org/chromium/chrome/browser/tabmodel/TabPersistentStoreImpl.java
++++ b/chrome/android/java/src/org/chromium/chrome/browser/tabmodel/TabPersistentStoreImpl.java
+@@ -21,6 +21,7 @@
+ import org.chromium.base.ObserverList;
+ import org.chromium.base.StreamUtil;
+ import org.chromium.base.ThreadUtils;
++import org.chromium.base.Token;
+ import org.chromium.base.TraceEvent;
+ import org.chromium.base.TriState;
+ import org.chromium.base.metrics.RecordHistogram;
+@@ -34,13 +35,15 @@
+ import org.chromium.build.annotations.Initializer;
+ import org.chromium.build.annotations.NullMarked;
+ import org.chromium.build.annotations.Nullable;
+-import org.chromium.chrome.browser.actor.BackgroundTabRestorationHelper;
+ import org.chromium.chrome.browser.app.tabmodel.AsyncTabParamsManagerSingleton;
+ import org.chromium.chrome.browser.crash.ChromePureJavaExceptionReporter;
+ import org.chromium.chrome.browser.crypto.CipherFactory;
+ import org.chromium.chrome.browser.flags.ChromeFeatureList;
+ import org.chromium.chrome.browser.preferences.ChromePreferenceKeys;
+ import org.chromium.chrome.browser.preferences.ChromeSharedPreferences;
++import org.chromium.chrome.browser.containers.ContainersBridge;
++import org.chromium.chrome.browser.containers.ContainersPersistentTabReferences;
++import org.chromium.chrome.browser.profiles.Profile;
+ import org.chromium.chrome.browser.tab.Tab;
+ import org.chromium.chrome.browser.tab.TabCreationState;
+ import org.chromium.chrome.browser.tab.TabId;
+@@ -77,7 +80,6 @@
+ import java.lang.annotation.RetentionPolicy;
+ import java.util.ArrayDeque;
+ import java.util.ArrayList;
+-import java.util.Collections;
+ import java.util.Deque;
+ import java.util.HashMap;
+ import java.util.HashSet;
+@@ -160,6 +162,8 @@
+         public final String url;
+         public final @TriState int isIncognito;
+         public final boolean fromMerge;
++        // Null only for pre-container metadata, whose per-tab state is authoritative.
++        public final @Nullable String containerId;
+ 
+         public TabRestoreDetails(
+                 int id,
+@@ -167,11 +171,18 @@
+                 @TriState int isIncognito,
+                 String url,
+                 boolean fromMerge) {
++            this(id, originalIndex, isIncognito, url, fromMerge, null);
++        }
++
++        public TabRestoreDetails(
++                int id, int originalIndex, @TriState int isIncognito,
++                String url, boolean fromMerge, @Nullable String containerId) {
+             this.id = id;
+             this.originalIndex = originalIndex;
+             this.url = url;
+             this.isIncognito = isIncognito;
+             this.fromMerge = fromMerge;
++            this.containerId = containerId;
+         }
+     }
+ 
+@@ -205,13 +216,14 @@
+     private @Nullable MigrateTabTask mMigrateTabTask;
+     private @Nullable SaveListTask mSaveListTask;
+     private boolean mDestroyed;
++
++    // Keep original saved values until both members exist; native attachment may clear the mirror.
++    private final Map<Tab, Tab.SplitData> mPendingSplitRestores = new HashMap<>();
+     private boolean mCancelNormalTabLoads;
+     private boolean mCancelIncognitoTabLoads;
+     // Keys are the original tab indexes, values are the tab ids.
+     private @Nullable SparseIntArray mNormalTabsRestored;
+     private @Nullable SparseIntArray mIncognitoTabsRestored;
+-    private Set<@TabId Integer> mBackgroundTabIds = Collections.emptySet();
+-    private Set<@TabId Integer> mRemainingBackgroundTabIds = Collections.emptySet();
+     private @Nullable AsyncTask<@Nullable DataInputStream> mPrefetchTabListTask;
+     private @Nullable TabModelSelectorMetadata mLastSavedMetadata;
+     // Tracks whether this TabPersistentStore's tabs are being loaded.
+@@ -409,6 +421,7 @@
+ 
+     @Override
+     public void saveState() {
++        Profile containerWriteProfile = beginContainerPersistenceWrite();
+         // Temporarily allowing disk access. TODO: Fix. See http://b/5518024
+         StrictMode.ThreadPolicy oldPolicy = StrictMode.allowThreadDiskWrites();
+         try {
+@@ -466,7 +479,7 @@
+                     if (attributes != null) {
+                         attributes.clearTabStateDirtiness();
+                     }
+-                    TabState state = TabStateExtractor.from(tab);
++                    TabState state = extractTabState(tab);
+                     if (state != null) {
+                         TabStateFileManager.saveState(
+                                 getStateDirectory(), state, id, incognito, mCipherFactory);
+@@ -481,6 +494,7 @@
+             mTabsToSave.clear();
+         } finally {
+             StrictMode.setThreadPolicy(oldPolicy);
++            endContainerPersistenceWrite(containerWriteProfile);
+         }
+     }
+ 
+@@ -497,7 +511,7 @@
+             boolean incognito = tab.isIncognito();
+             if (TabStateFileManager.isMigrated(getStateDirectory(), id, incognito)) {
+                 try {
+-                    TabState state = TabStateExtractor.from(tab);
++                    TabState state = extractTabState(tab);
+                     if (state != null) {
+                         TabStateFileManager.migrateTabState(
+                                 getStateDirectory(), state, id, incognito, mCipherFactory);
+@@ -536,12 +550,6 @@
+ 
+         initializeRestoreVars(ignoreIncognitoFiles, ignoreRegularFiles);
+ 
+-        mBackgroundTabIds =
+-                BackgroundTabRestorationHelper.fetchBackgroundTabIds(
+-                        mOrchestratorType, mTabModelSelector, ignoreRegularFiles, mIsAuthoritative);
+-        mRemainingBackgroundTabIds =
+-                BackgroundTabRestorationHelper.claimRemainingBackgroundTabIds(
+-                        mOrchestratorType, mTabModelSelector, ignoreRegularFiles, mIsAuthoritative);
+ 
+         try {
+             mTabRestoreStartTime = SystemClock.elapsedRealtime();
+@@ -645,21 +653,6 @@
+         if (mDestroyed) return;
+         if (mSeenTabUrlMap == null && !mTabsToRestore.isEmpty()) {
+             mSeenTabUrlMap = new HashMap<>();
+-        }
+-        if (mBackgroundTabIds.isEmpty()) {
+-            mBackgroundTabIds =
+-                    BackgroundTabRestorationHelper.fetchBackgroundTabIds(
+-                            mOrchestratorType,
+-                            mTabModelSelector,
+-                            mCancelNormalTabLoads,
+-                            mIsAuthoritative);
+-            assert mRemainingBackgroundTabIds.isEmpty();
+-            mRemainingBackgroundTabIds =
+-                    BackgroundTabRestorationHelper.claimRemainingBackgroundTabIds(
+-                            mOrchestratorType,
+-                            mTabModelSelector,
+-                            mCancelNormalTabLoads,
+-                            mIsAuthoritative);
+         }
+         if (setActiveTab) {
+             // Restore and select the active tab, which is first in the restore list.
+@@ -780,6 +773,20 @@
+         }
+         // This may not create a frozen tab for reparenting cases which is misleading.
+         Tab tab = tabCreator.createFrozenTab(tabState, tabToRestore.id, restoredIndex);
++        if (tab != null
++                && Tab.SplitData.isValid(
++                        tabState.splitTabId,
++                        tabState.splitLayout,
++                        tabState.splitRatio,
++                        tabState.splitPosition)) {
++            mPendingSplitRestores.put(
++                    tab,
++                    new Tab.SplitData(
++                            assumeNonNull(tabState.splitTabId),
++                            tabState.splitLayout,
++                            tabState.splitRatio,
++                            tabState.splitPosition));
++        }
+         if (tab != null && tabState.shouldMigrate) {
+             mTabsToMigrate.add(tab);
+         }
+@@ -811,6 +818,14 @@
+             TabRestoreDetails tabToRestore, @Nullable TabState tabState, boolean setAsActive) {
+         // If we don't have enough information about the Tab, bail out.
+         boolean isIncognito = isIncognitoTabBeingRestored(tabToRestore, tabState);
++        if (tabToRestore.containerId != null
++                && tabState != null
++                && !tabToRestore.containerId.equals(tabState.containerId)) {
++            Log.w(TAG, "Conflicting persisted storage identity; refusing URL fallback");
++            return;
++        }
++        if (tabToRestore.containerId != null
++                && !ContainersBridge.isContainerIdWellFormed(tabToRestore.containerId)) return;
+ 
+         if (tabState == null) {
+             if (tabToRestore.isIncognito == TriState.NOT_SET) {
+@@ -879,14 +894,7 @@
+ 
+         boolean isFromReparenting = isTabReparenting(tabToRestore.id, isIncognito);
+         @Nullable Tab tab = null;
+-        if (maybeRestoreBackgroundTab(
+-                tabToRestore, restoredIndex, tabState, isIncognito, setAsActive)) {
+-            // Handled as a background tab.
+-            if (setAsActive || (tabToRestore.fromMerge && restoredIndex == 0)) {
+-                TabModelUtils.setIndex(model, TabModelUtils.getTabIndexById(model, tabId));
+-            }
+-            return;
+-        } else if (isFromReparenting) {
++        if (isFromReparenting) {
+             // The tabState should be ignored in this case, but it may still be null; as a
+             // precaution, fall back to the TabState from the AsyncTabParams or a new instance if
+             // that still failed.
+@@ -924,12 +932,23 @@
+                     recordingTabCreator.recordFallbackTab(tabToRestore.id, tabToRestore.url);
+                 }
+             }
+-            tab =
+-                    tabCreator.createNewTab(
+-                            new LoadUrlParams(tabToRestore.url),
+-                            TabLaunchType.FROM_RESTORE,
+-                            /* parent= */ null,
+-                            restoredIndex);
++            if (tabToRestore.containerId != null && !tabToRestore.containerId.isEmpty()) {
++                if (!ContainersBridge.restoreContainerIdentity(
++                        assumeNonNull(model.getProfile()), tabToRestore.containerId)) return;
++                tab =
++                        tabCreator.createNewTabInContainer(
++                                new LoadUrlParams(tabToRestore.url),
++                                TabLaunchType.FROM_RESTORE,
++                                tabToRestore.containerId,
++                                restoredIndex);
++            } else {
++                tab =
++                        tabCreator.createNewTab(
++                                new LoadUrlParams(tabToRestore.url),
++                                TabLaunchType.FROM_RESTORE,
++                                /* parent= */ null,
++                                restoredIndex);
++            }
+             recordRestorationResult(tab, TabRestoreMethod.CREATE_NEW_TAB);
+ 
+             // restoredIndex might not be the one used in createNewTab so update accordingly.
+@@ -1093,38 +1112,6 @@
+         return null;
+     }
+ 
+-    private boolean maybeRestoreBackgroundTab(
+-            TabRestoreDetails tabToRestore,
+-            int restoredIndex,
+-            @Nullable TabState tabState,
+-            boolean isIncognito,
+-            boolean setAsActive) {
+-        if (!BackgroundTabRestorationHelper.shouldIntercept(
+-                        mOrchestratorType, isIncognito, mIsAuthoritative)
+-                || !mBackgroundTabIds.contains(tabToRestore.id)) {
+-            return false;
+-        }
+-
+-        Tab tab =
+-                BackgroundTabRestorationHelper.maybeRestoreBackgroundTab(
+-                        mOrchestratorType,
+-                        mTabModelSelector,
+-                        tabToRestore.id,
+-                        restoredIndex,
+-                        tabState,
+-                        mIsAuthoritative);
+-        if (tab == null) return false;
+-
+-        if (setAsActive) {
+-            notifyActiveTabLoaded(isIncognito);
+-        }
+-        mSeenTabIds.add(tabToRestore.id);
+-        if (tab.getId() != tabToRestore.id) {
+-            mSeenTabIds.add(tab.getId());
+-        }
+-        return true;
+-    }
+-
+     private void notifyActiveTabLoaded(boolean isIncognito) {
+         for (TabPersistentStoreObserver observer : mObservers) {
+             observer.onActiveTabLoaded(isIncognito);
+@@ -1135,8 +1122,7 @@
+     @Override
+     public void destroy() {
+         mDestroyed = true;
+-        mBackgroundTabIds = Collections.emptySet();
+-        mRemainingBackgroundTabIds = Collections.emptySet();
++        mPendingSplitRestores.clear();
+         if (mTabModelObserver != null) {
+             mTabModelSelector.getModel(false).removeObserver(mTabModelObserver);
+             mTabModelSelector.getModel(true).removeObserver(mTabModelObserver);
+@@ -1197,12 +1183,20 @@
+      */
+     private OnTabStateReadCallback createOnTabStateReadCallback(
+             final boolean isIncognitoSelected, final boolean fromMerge) {
+-        return (int index,
+-                int id,
+-                String url,
+-                @TriState int isIncognito,
+-                boolean isStandardActiveIndex,
+-                boolean isIncognitoActiveIndex) -> {
++        return new OnTabStateReadCallback() {
++            @Override
++            public void onDetailsRead(
++                    int index, int id, String url, @TriState int isIncognito,
++                    boolean isStandardActiveIndex, boolean isIncognitoActiveIndex) {
++                onDetailsReadWithContainer(index, id, url, isIncognito,
++                        isStandardActiveIndex, isIncognitoActiveIndex, null);
++            }
++
++            @Override
++            public void onDetailsReadWithContainer(
++                    int index, int id, String url, @TriState int isIncognito,
++                    boolean isStandardActiveIndex, boolean isIncognitoActiveIndex,
++                    @Nullable String containerId) {
+             if (shouldCancelTabLoad(isIncognito)) {
+                 return;
+             }
+@@ -1223,7 +1217,7 @@
+             // the current tab from the standard model.
+             // This logic only works because we store the incognito indices first.
+             TabRestoreDetails details =
+-                    new TabRestoreDetails(id, index, isIncognito, url, fromMerge);
++                    new TabRestoreDetails(id, index, isIncognito, url, fromMerge, containerId);
+ 
+             if (!fromMerge
+                     && ((isIncognitoActiveIndex && isIncognitoSelected)
+@@ -1243,6 +1237,7 @@
+                         isIncognitoActiveIndex,
+                         isIncognito,
+                         fromMerge);
++            }
+             }
+         };
+     }
+@@ -1408,7 +1403,38 @@
+         }
+     }
+ 
+-    private class SaveTabTask extends AsyncTask<Void> {
++    private @Nullable Profile beginContainerPersistenceWrite() {
++        Profile profile = mTabModelSelector.getModel(false).getProfile();
++        if (profile == null || !profile.isNativeInitialized() || profile.shutdownStarted()) return null;
++        ContainersPersistentTabReferences.beginPersistenceWrite(profile);
++        return profile;
++    }
++
++    private static void endContainerPersistenceWrite(@Nullable Profile profile) {
++        if (profile != null) ContainersPersistentTabReferences.endPersistenceWrite(profile);
++    }
++
++    public abstract class ContainerPersistenceTask extends AsyncTask<Void> {
++        private @Nullable Profile mContainerWriteProfile;
++
++        @Override
++        protected void onPreExecute() {
++            mContainerWriteProfile = beginContainerPersistenceWrite();
++        }
++
++        final void finishContainerPersistenceWrite() {
++            Profile profile = mContainerWriteProfile;
++            mContainerWriteProfile = null;
++            endContainerPersistenceWrite(profile);
++        }
++
++        @Override
++        protected void onCancelled() {
++            finishContainerPersistenceWrite();
++        }
++    }
++
++    private class SaveTabTask extends ContainerPersistenceTask {
+         final Tab mTab;
+         final int mId;
+         final boolean mEncrypted;
+@@ -1425,12 +1451,13 @@
+         @Override
+         protected void onPreExecute() {
+             if (mDestroyed || mTab.isDestroyed() || isCancelled()) return;
++            super.onPreExecute();
+             TabStateAttributes attributes =
+                     TabStateAttributesRegistry.getAttributesFor(mTab, TabPersistentStoreImpl.class);
+             if (attributes != null) {
+                 attributes.clearTabStateDirtiness();
+             }
+-            mState = TabStateExtractor.from(mTab);
++            mState = extractTabState(mTab);
+         }
+ 
+         @Override
+@@ -1441,15 +1468,19 @@
+ 
+         @Override
+         protected void onPostExecute(Void v) {
+-            if (mDestroyed || isCancelled()) return;
+-            mSaveTabTask = null;
+-            saveNextTab();
++            try {
++                if (mDestroyed || isCancelled()) return;
++                mSaveTabTask = null;
++                saveNextTab();
++                    } finally {
++                finishContainerPersistenceWrite();
++            }
+         }
+     }
+ 
+     /** Migrate Tab to new FlatBuffer format. */
+     @VisibleForTesting
+-    public class MigrateTabTask extends AsyncTask<Void> {
++    public class MigrateTabTask extends ContainerPersistenceTask {
+         final Tab mTab;
+         final int mId;
+         final boolean mEncrypted;
+@@ -1468,8 +1499,9 @@
+         @Override
+         protected void onPreExecute() {
+             if (mDestroyed || mTab.isDestroyed() || isCancelled()) return;
++            super.onPreExecute();
+             try {
+-                mState = TabStateExtractor.from(mTab);
++                mState = extractTabState(mTab);
+             } catch (Exception e) {
+                 Log.d(TAG_MIGRATION, "Error MigrateTabTask#onPreExecute", e);
+                 throw e;
+@@ -1495,18 +1527,23 @@
+ 
+         @Override
+         protected void onPostExecute(Void v) {
+-            if (mDestroyed || isCancelled()) return;
+-            mMigrateTabTask = null;
+-            migrateNextTabIfApplicable(mNumMigration + 1);
+-        }
+-    }
+-
+-    private class SaveListTask extends AsyncTask<Void> {
++            try {
++                if (mDestroyed || isCancelled()) return;
++                mMigrateTabTask = null;
++                migrateNextTabIfApplicable(mNumMigration + 1);
++                    } finally {
++                finishContainerPersistenceWrite();
++            }
++        }
++    }
++
++    private class SaveListTask extends ContainerPersistenceTask {
+         @Nullable TabModelSelectorMetadata mMetadata;
+ 
+         @Override
+         protected void onPreExecute() {
+             if (mDestroyed || isCancelled()) return;
++            super.onPreExecute();
+             try {
+                 mMetadata = extractTabMetadata();
+             } catch (IOException e) {
+@@ -1525,17 +1562,21 @@
+ 
+         @Override
+         protected void onPostExecute(Void v) {
+-            if (mDestroyed || isCancelled()) {
+-                mMetadata = null;
+-                return;
+-            }
+-
+-            if (mSaveListTask == this) {
+-                mSaveListTask = null;
+-                for (TabPersistentStoreObserver observer : mObservers) {
+-                    observer.onMetadataSavedAsynchronously();
++            try {
++                if (mDestroyed || isCancelled()) {
++                    mMetadata = null;
++                    return;
+                 }
+-                mMetadata = null;
++
++                if (mSaveListTask == this) {
++                    mSaveListTask = null;
++                    for (TabPersistentStoreObserver observer : mObservers) {
++                        observer.onMetadataSavedAsynchronously();
++                    }
++                    mMetadata = null;
++                }
++                    } finally {
++                finishContainerPersistenceWrite();
+             }
+         }
+     }
+@@ -1592,12 +1633,89 @@
+         TabStateFileManager.deleteTabState(getStateDirectory(), id, encrypted);
+     }
+ 
++    /** Preserve saved pairs while their second member is still being loaded. */
++    private @Nullable TabState extractTabState(Tab tab) {
++        TabState state = TabStateExtractor.from(tab);
++        Tab.SplitData pending = mPendingSplitRestores.get(tab);
++        if (state != null && pending != null) {
++            state.splitTabId = pending.getToken();
++            state.splitLayout = pending.getLayout();
++            state.splitRatio = pending.getRatio();
++            state.splitPosition = pending.getPosition();
++        }
++        return state;
++    }
++
++    /** Rebuild real native collections only when both saved members have arrived. */
++    @VisibleForTesting
++    void restorePendingSplits() {
++        ThreadUtils.assertOnUiThread();
++        Map<Tab, Tab.SplitData> saved = new HashMap<>(mPendingSplitRestores);
++        mPendingSplitRestores.clear();
++        for (boolean incognito : new boolean[] {false, true}) {
++            if (mDestroyed) return;
++            TabModel model = mTabModelSelector.getModel(incognito);
++            Map<Token, List<Tab>> pairs = new HashMap<>();
++            for (Entry<Tab, Tab.SplitData> entry : saved.entrySet()) {
++                Tab tab = entry.getKey();
++                if (tab.isDestroyed()
++                        || tab.isIncognito() != incognito
++                        || model.getTabById(tab.getId()) != tab) continue;
++                pairs.computeIfAbsent(entry.getValue().getToken(), ignored -> new ArrayList<>())
++                        .add(tab);
++            }
++            for (List<Tab> members : pairs.values()) {
++                if (mDestroyed) return;
++                members.removeIf(tab -> tab.isDestroyed() || model.getTabById(tab.getId()) != tab);
++                boolean restored = false;
++                if (members.size() == 2) {
++                    Tab first = members.get(0);
++                    Tab second = members.get(1);
++                    Tab.SplitData a = assumeNonNull(saved.get(first));
++                    Tab.SplitData b = assumeNonNull(saved.get(second));
++                    if (a.getPosition() != b.getPosition()
++                            && a.getLayout() == b.getLayout()
++                            && Double.compare(a.getRatio(), b.getRatio()) == 0) {
++                        restored =
++                                model.restoreSplit(
++                                        new SplitInfo(
++                                                a.getToken(),
++                                                a.getPosition() == 0
++                                                        ? first.getId()
++                                                        : second.getId(),
++                                                a.getPosition() == 0
++                                                        ? second.getId()
++                                                        : first.getId(),
++                                                a.getLayout(),
++                                                a.getRatio()));
++                    }
++                }
++                if (mDestroyed) return;
++                if (!restored) {
++                    for (Tab member : members) {
++                        // A user or synchronous observer may already have made a different real
++                        // pair.
++                        if (!member.isDestroyed()
++                                && model.getTabById(member.getId()) == member
++                                && model.getSplitInfoForTab(member.getId()) == null) {
++                            member.setSplitData(null, 0, 0.5, -1);
++                        }
++                    }
++                }
++            }
++        }
++    }
++
+     private void onStateLoaded() {
+-        for (TabPersistentStoreObserver observer : mObservers) {
+-            // mergeState() starts an AsyncTask to call this and this calls
+-            // onTabStateInitialized which should be called from the UI thread.
+-            PostTask.runOrPostTask(TaskTraits.UI_DEFAULT, observer::onStateLoaded);
+-        }
++        // Merging can finish off-thread; rebuild pairs and signal completion in one UI task.
++        PostTask.runOrPostTask(
++                TaskTraits.UI_DEFAULT,
++                () -> {
++                    if (mDestroyed) return;
++                    restorePendingSplits();
++                    if (mDestroyed) return;
++                    for (TabPersistentStoreObserver observer : mObservers) observer.onStateLoaded();
++                });
+     }
+ 
+     private void loadNextTabs() {
+@@ -1606,7 +1724,6 @@
+         if (mTabBatchLoader != null) return;
+ 
+         if (mTabsToRestore.isEmpty()) {
+-            restoreRemainingBackgroundTabs();
+             mNormalTabsRestored = null;
+             mIncognitoTabsRestored = null;
+             mLoadInProgress = false;
+@@ -1652,19 +1769,6 @@
+             mTabBatchLoader = new TabBatchLoader(details);
+             mTabBatchLoader.load();
+         }
+-    }
+-
+-    private void restoreRemainingBackgroundTabs() {
+-        List<Tab> remainingTabs =
+-                BackgroundTabRestorationHelper.restoreRemainingBackgroundTabs(
+-                        mOrchestratorType,
+-                        mTabModelSelector,
+-                        mRemainingBackgroundTabIds,
+-                        mIsAuthoritative);
+-        for (Tab tab : remainingTabs) {
+-            mSeenTabIds.add(tab.getId());
+-        }
+-        mRemainingBackgroundTabIds = Collections.emptySet();
+     }
+ 
+     private void recordDuplicateTabIdMetrics() {
+@@ -2067,9 +2171,11 @@
+                 if (details.isIncognito != TriState.FALSE) {
+                     incognitoInfo.ids.add(details.id);
+                     incognitoInfo.urls.add(details.url);
++                    incognitoInfo.containerIds.add(details.containerId);
+                 } else {
+                     normalInfo.ids.add(details.id);
+                     normalInfo.urls.add(details.url);
++                    normalInfo.containerIds.add(details.containerId);
+                 }
+             }
+         }
+@@ -2132,6 +2238,7 @@
+             }
+             modelInfo.ids.add(tab.getId());
+             modelInfo.urls.add(tab.getUrl().getSpec());
++            modelInfo.containerIds.add(tab.getContainerId());
+         }
+         return modelInfo;
+     }

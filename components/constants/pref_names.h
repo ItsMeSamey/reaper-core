@@ -93,6 +93,10 @@ inline constexpr char kBraveSearchVisitCount[] =
     "brave.brave_search_visit_count";
 
 inline constexpr char kBraveGCMChannelStatus[] = "brave.gcm.channel_status";
+inline constexpr char kBraveExtensionGCMPendingUnregistrations[] =
+    "brave.extensions.gcm.pending_unregistrations";
+inline constexpr char kBraveExtensionGCMRegisteredApplications[] =
+    "brave.extensions.gcm.registered_applications";
 inline constexpr char kImportDialogExtensions[] = "import_dialog_extensions";
 inline constexpr char kImportDialogPayments[] = "import_dialog_payments";
 inline constexpr char kMRUCyclingEnabled[] = "brave.mru_cycling_enabled";

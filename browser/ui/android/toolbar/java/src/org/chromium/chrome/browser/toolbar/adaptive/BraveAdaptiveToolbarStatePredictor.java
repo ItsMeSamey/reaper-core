@@ -7,10 +7,8 @@ package org.chromium.chrome.browser.toolbar.adaptive;
 
 import android.content.Context;
 
-import org.chromium.base.BraveFeatureList;
 import org.chromium.build.annotations.NullMarked;
 import org.chromium.build.annotations.Nullable;
-import org.chromium.chrome.browser.flags.ChromeFeatureList;
 import org.chromium.chrome.browser.profiles.Profile;
 import org.chromium.ui.permissions.AndroidPermissionDelegate;
 
@@ -40,14 +38,18 @@ public class BraveAdaptiveToolbarStatePredictor
     public static boolean isValidSegment(@AdaptiveToolbarButtonVariant int variant) {
         // Check Brave-specific variants first
         switch (variant) {
+            // Persisted upgrades and delayed segmentation results can still contain these IDs.
+            // Reject them before Chromium's validator, which asserts on unknown Brave variants.
+            case AdaptiveToolbarButtonVariant.PLAYLIST:
+            case AdaptiveToolbarButtonVariant.LEO:
+            case AdaptiveToolbarButtonVariant.WALLET:
+            case AdaptiveToolbarButtonVariant.NEWS:
+            case AdaptiveToolbarButtonVariant.GLIC:
+                return false;
                 // Add more Brave-specific variants here as needed
             case AdaptiveToolbarButtonVariant.BOOKMARKS:
             case AdaptiveToolbarButtonVariant.HISTORY:
             case AdaptiveToolbarButtonVariant.DOWNLOADS:
-                return true;
-            case AdaptiveToolbarButtonVariant.LEO:
-                return ChromeFeatureList.isEnabled(BraveFeatureList.AI_CHAT);
-            case AdaptiveToolbarButtonVariant.WALLET:
                 return true;
         }
 

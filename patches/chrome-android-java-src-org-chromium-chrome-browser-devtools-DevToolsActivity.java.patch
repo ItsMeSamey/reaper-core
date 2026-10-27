@@ -1,0 +1,161 @@
+diff --git a/chrome/android/java/src/org/chromium/chrome/browser/devtools/DevToolsActivity.java b/chrome/android/java/src/org/chromium/chrome/browser/devtools/DevToolsActivity.java
+--- a/chrome/android/java/src/org/chromium/chrome/browser/devtools/DevToolsActivity.java
++++ b/chrome/android/java/src/org/chromium/chrome/browser/devtools/DevToolsActivity.java
+@@ -14,12 +14,19 @@
+ import org.jni_zero.CalledByNative;
+ 
+ import org.chromium.base.ContextUtils;
++import org.chromium.base.IntentUtils;
++import org.chromium.base.library_loader.LibraryLoader;
++import org.chromium.base.supplier.OneshotSupplier;
++import org.chromium.base.supplier.OneshotSupplierImpl;
+ import org.chromium.build.annotations.NullMarked;
+ import org.chromium.build.annotations.Nullable;
+ import org.chromium.chrome.browser.app.metrics.LaunchCauseMetrics;
+ import org.chromium.chrome.browser.browserservices.intents.BrowserServicesIntentDataProvider;
+ import org.chromium.chrome.browser.customtabs.BaseCustomTabActivity;
++import org.chromium.chrome.browser.flags.CustomTabProfileType;
++import org.chromium.chrome.browser.lifecycle.DestroyObserver;
+ import org.chromium.chrome.browser.profiles.Profile;
++import org.chromium.chrome.browser.profiles.ProfileProvider;
+ import org.chromium.chrome.browser.tab.Tab;
+ import org.chromium.chrome.browser.tabmodel.TabClosureParams;
+ import org.chromium.chrome.browser.tabmodel.TabModel;
+@@ -31,6 +38,52 @@
+ public class DevToolsActivity extends BaseCustomTabActivity {
+     private static final String WEB_CONTENTS_KEY =
+             "org.chromium.chrome.browser.devtools.DevTools.WebContents";
++
++    private @Nullable WebContents mFrontendContents;
++    private @Nullable Profile mFrontendProfile;
++
++    @Override
++    protected boolean isStartedUpCorrectly(Intent intent) {
++        // A native-owned frontend can only survive within this browser process.
++        // Do not recreate an incognito profile for an obsolete activity intent.
++        if (!super.isStartedUpCorrectly(intent) || !LibraryLoader.getInstance().isInitialized()) {
++            return false;
++        }
++        intent.setExtrasClassLoader(WebContents.class.getClassLoader());
++        WebContents contents = IntentUtils.safeGetParcelableExtra(intent, WEB_CONTENTS_KEY);
++        if (contents == null || contents.isDestroyed()) return false;
++        Profile profile = Profile.fromWebContents(contents);
++        if (profile == null || profile.shutdownStarted()) return false;
++        mFrontendContents = contents;
++        mFrontendProfile = profile;
++        return true;
++    }
++
++    @Override
++    protected OneshotSupplier<ProfileProvider> createProfileProvider() {
++        Profile frontendProfile = assumeNonNull(mFrontendProfile);
++        getLifecycleDispatcher().register((DestroyObserver) this::releaseUnattachedFrontend);
++        OneshotSupplierImpl<ProfileProvider> supplier = new OneshotSupplierImpl<>();
++        supplier.set(
++                new ProfileProvider() {
++                    @Override
++                    public Profile getOriginalProfile() {
++                        return frontendProfile.getOriginalProfile();
++                    }
++
++                    @Override
++                    public @Nullable Profile getOffTheRecordProfile(boolean createIfNeeded) {
++                        // The frontend already owns the exact primary or DevTools OTR profile.
++                        // Creating a CCT-specific profile would change extension isolation.
++                        if (!frontendProfile.isOffTheRecord()) {
++                            assert !createIfNeeded;
++                            return null;
++                        }
++                        return frontendProfile.shutdownStarted() ? null : frontendProfile;
++                    }
++                });
++        return supplier;
++    }
+ 
+     @CalledByNative
+     /** Launches the DevTools activity for the given DevTools frontend. */
+@@ -50,7 +103,15 @@
+     @Override
+     protected @Nullable BrowserServicesIntentDataProvider buildIntentDataProvider(
+             Intent intent, @CustomTabsIntent.ColorScheme int colorScheme) {
+-        return new DevToolsIntentDataProvider(intent);
++        Profile profile = mFrontendProfile;
++        if (profile == null || profile.shutdownStarted()) return null;
++        int profileType =
++                !profile.isOffTheRecord()
++                        ? CustomTabProfileType.REGULAR
++                        : (profile.isIncognitoBranded()
++                                ? CustomTabProfileType.INCOGNITO
++                                : CustomTabProfileType.EPHEMERAL);
++        return new DevToolsIntentDataProvider(intent, profileType);
+     }
+ 
+     @Override
+@@ -67,23 +128,52 @@
+     public void finishNativeInitialization() {
+         super.finishNativeInitialization();
+ 
+-        TabModel tabModel = getTabModelSelector().getModel(false);
+-        Tab existingTab = assumeNonNull(tabModel.getCurrentTabSupplier().get());
+-
+-        // Attach the given DevTools frontend web contents to the browser window.
+-        Intent intent = getIntent();
+-        intent.setExtrasClassLoader(WebContents.class.getClassLoader());
+-        WebContents webContents = intent.getParcelableExtra(WEB_CONTENTS_KEY);
++        WebContents contents = mFrontendContents;
++        Profile profile = mFrontendProfile;
+         ChromeAndroidTask task = getChromeAndroidTaskSupplier().get();
+-        Profile profile = tabModel.getProfile();
+-        // NOTE: If this condition is not met, this activity brifly shows up, but quickly disappears
+-        // because there is no tab in the tab model after the closerTabs() call below.
+-        if (webContents != null && task != null && profile != null) {
+-            DevToolsWindowAndroid.attachToBrowser(
+-                    webContents, task.getOrCreateNativeBrowserWindowPtr(profile));
++        if (contents == null
++                || contents.isDestroyed()
++                || profile == null
++                || profile.shutdownStarted()
++                || task == null) {
++            closeUnattachedFrontend();
++            return;
+         }
+ 
+-        // Remove the existing blank page tab.
+-        tabModel.getTabRemover().closeTabs(TabClosureParams.closeTab(existingTab).build(), false);
++        TabModel tabModel = getTabModelSelector().getModel(profile.isOffTheRecord());
++        if (tabModel.getProfile() != profile) {
++            closeUnattachedFrontend();
++            return;
++        }
++        Tab placeholder = tabModel.getCurrentTabSupplier().get();
++        getTabModelSelector().selectModel(profile.isOffTheRecord());
++        if (contents.isDestroyed() || profile.shutdownStarted()) {
++            closeUnattachedFrontend();
++            return;
++        }
++        if (!DevToolsWindowAndroid.attachToBrowser(
++                contents, task.getOrCreateNativeBrowserWindowPtr(profile))) {
++            closeUnattachedFrontend();
++            return;
++        }
++        mFrontendContents = null; // The selected tab model now owns it.
++        if (placeholder != null && !placeholder.isDestroyed()) {
++            tabModel.getTabRemover()
++                    .closeTabs(
++                            TabClosureParams.closeTab(placeholder).allowUndo(false).build(), false);
++        }
++    }
++
++    private void closeUnattachedFrontend() {
++        releaseUnattachedFrontend();
++        finish();
++    }
++
++    private void releaseUnattachedFrontend() {
++        WebContents contents = mFrontendContents;
++        mFrontendContents = null;
++        if (contents != null && !contents.isDestroyed()) {
++            DevToolsWindowAndroid.closeDevTools(contents);
++        }
+     }
+ }

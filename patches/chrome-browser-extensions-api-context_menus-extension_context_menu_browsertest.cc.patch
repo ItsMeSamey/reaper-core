@@ -1,0 +1,330 @@
+diff --git a/chrome/browser/extensions/api/context_menus/extension_context_menu_browsertest.cc b/chrome/browser/extensions/api/context_menus/extension_context_menu_browsertest.cc
+--- a/chrome/browser/extensions/api/context_menus/extension_context_menu_browsertest.cc
++++ b/chrome/browser/extensions/api/context_menus/extension_context_menu_browsertest.cc
+@@ -7,9 +7,11 @@
+ #include <memory>
+ #include <optional>
+ #include <set>
++#include <string>
+ #include <string_view>
+ #include <tuple>
+ #include <utility>
++#include <vector>
+ 
+ #include "base/functional/bind.h"
+ #include "base/memory/raw_ptr.h"
+@@ -59,7 +61,19 @@
+ #endif
+ 
+ #if BUILDFLAG(IS_ANDROID)
++#include "base/android/jni_android.h"
++#include "base/android/jni_string.h"
++#include "base/android/scoped_java_ref.h"
++#include "base/check.h"
++#include "base/test/run_until.h"
++#include "base/values.h"
++#include "brave/browser/extensions/reaper_selection_menu_android.h"
++#include "chrome/browser/android/tab_android.h"
+ #include "chrome/browser/extensions/test_extension_menu_model_android.h"
++#include "extensions/browser/background_script_executor.h"
++#include "extensions/browser/event_router.h"
++#include "extensions/browser/test_event_router_observer.h"
++#include "extensions/test/test_extension_dir.h"
+ #else
+ #include "chrome/browser/renderer_context_menu/render_view_context_menu_test_util.h"
+ #endif
+@@ -996,5 +1010,294 @@
+                              /*IsLockedForOnTask=*/::testing::Bool()));
+ #endif
+ 
++#if BUILDFLAG(IS_ANDROID)
++// Runs the real Java/native Reaper owner on a real web Tab. Selection text is
++// supplied by the fixture; this does not synthesize a device selection gesture.
++class ReaperSelectionMenuGenerationBrowserTest : public ExtensionBrowserTest {
++ public:
++  void SetUpOnMainThread() override {
++    ExtensionBrowserTest::SetUpOnMainThread();
++    ASSERT_TRUE(embedded_test_server()->Start());
++    ASSERT_TRUE(
++        content::NavigateToURL(GetActiveWebContents(),
++                               embedded_test_server()->GetURL("/title1.html")));
++    ASSERT_TRUE(content::ExecJs(GetActiveWebContents(),
++                                "window.focus(); document.body.tabIndex = 0; "
++                                "document.body.focus();"));
++    ASSERT_TRUE(base::test::RunUntil([&] {
++      return GetActiveWebContents()->GetFocusedFrame() ==
++             GetActiveWebContents()->GetPrimaryMainFrame();
++    }));
++  }
++
++  void TearDownOnMainThread() override {
++    // Includes owners left live by an earlier ASSERT. Native-initiated closure
++    // has already cleared the Java handle, so this is idempotent.
++    JNIEnv* env = base::android::AttachCurrentThread();
++    for (const auto& owner : owners_) {
++      ReaperSelectionMenu::DestroyForTesting(env, owner);
++    }
++    owners_.clear();
++    ExtensionBrowserTest::TearDownOnMainThread();
++  }
++
++ protected:
++  const Extension* LoadMenuExtension() {
++    auto dir = std::make_unique<TestExtensionDir>();
++    dir->WriteManifest(R"({
++      "manifest_version": 3,
++      "name": "Reaper selection generation fixture",
++      "version": "1",
++      "permissions": ["contextMenus"],
++      "background": {"service_worker": "worker.js"}
++    })");
++    dir->WriteFile(FILE_PATH_LITERAL("worker.js"), R"(
++      chrome.contextMenus.onClicked.addListener(info => {
++        chrome.test.sendMessage('clicked:' + info.menuItemId + ':' + info.selectionText);
++      });
++      globalThis.replaceItems = async properties => {
++        await new Promise((resolve, reject) => chrome.contextMenus.removeAll(() => {
++          const error = chrome.runtime.lastError;
++          error ? reject(error.message) : resolve();
++        }));
++        for (const property of properties) {
++          await new Promise((resolve, reject) => chrome.contextMenus.create(property, () => {
++            const error = chrome.runtime.lastError;
++            error ? reject(error.message) : resolve();
++          }));
++        }
++      };
++    )");
++    MenuManagerTestObserver observer(MenuManager::Get(profile()));
++    const Extension* extension = LoadExtension(
++        dir->UnpackedPath(), {.wait_for_registration_stored = true});
++    dirs_.push_back(std::move(dir));
++    if (!extension) {
++      return nullptr;
++    }
++    // Wait for the real read callback, not merely the presence of any item.
++    // Worker code intentionally creates no items before this barrier.
++    bool restored = base::test::RunUntil(
++        [&] { return observer.did_read_for_extension(extension->id()); });
++    EXPECT_TRUE(restored);
++    return restored ? extension : nullptr;
++  }
++
++  bool ReplaceItems(const ExtensionId& extension_id, std::string_view json) {
++    return BackgroundScriptExecutor::ExecuteScript(
++               profile(), extension_id,
++               content::JsReplace(
++                   "replaceItems(JSON.parse($1)).then("
++                   "() => chrome.test.sendScriptResult(true),"
++                   "error => chrome.test.sendScriptResult(String(error)));",
++                   std::string(json)),
++               BackgroundScriptExecutor::ResultCapture::kSendScriptResult) ==
++           base::Value(true);
++  }
++
++  bool ReloadAndWaitForMenus(const ExtensionId& id) {
++    MenuManagerTestObserver observer(MenuManager::Get(profile()));
++    ReloadExtension(id);
++    return base::test::RunUntil(
++        [&] { return observer.did_read_for_extension(id); });
++  }
++
++  bool EnableAndWaitForMenus(const ExtensionId& id) {
++    MenuManagerTestObserver observer(MenuManager::Get(profile()));
++    EnableExtension(id);
++    return base::test::RunUntil([&] {
++      return extension_registry()->enabled_extensions().GetByID(id) &&
++             observer.did_read_for_extension(id);
++    });
++  }
++
++  base::android::ScopedJavaLocalRef<jobject> CreateOwner() {
++    TabAndroid* tab = TabAndroid::FromWebContents(GetActiveWebContents());
++    CHECK(tab);
++    auto owner = ReaperSelectionMenu::CreateForTesting(
++        base::android::AttachCurrentThread(), tab->GetJavaObject(),
++        u"selection snapshot");
++    if (owner) {
++      owners_.emplace_back(owner);
++    }
++    return owner;
++  }
++
++  base::android::ScopedJavaLocalRef<jobject> GetRow(
++      const base::android::JavaRef<jobject>& owner,
++      const std::u16string& title) {
++    return ReaperSelectionMenu::GetItemForTesting(
++        base::android::AttachCurrentThread(), owner, title);
++  }
++
++  bool IsClosed(const base::android::JavaRef<jobject>& owner) {
++    return ReaperSelectionMenu::IsClosedForTesting(
++        base::android::AttachCurrentThread(), owner);
++  }
++
++  bool InvokeRow(const base::android::JavaRef<jobject>& row) {
++    return ReaperSelectionMenu::ClickItemForTesting(
++        base::android::AttachCurrentThread(), row);
++  }
++
++  bool ClickAndWait(const base::android::JavaRef<jobject>& row,
++                    const std::string& menu_id) {
++    ExtensionTestMessageListener listener("clicked:" + menu_id +
++                                          ":selection snapshot");
++    TestEventRouterObserver observer(EventRouter::Get(profile()));
++    return InvokeRow(row) &&
++           observer.events().contains("contextMenus.onClicked") &&
++           listener.WaitUntilSatisfied();
++  }
++
++  ExtensionIdSet FreshVisibleIds() {
++    auto* frame = GetActiveWebContents()->GetPrimaryMainFrame();
++    content::ContextMenuParams params;
++    params.page_url = frame->GetLastCommittedURL();
++    params.frame_url = params.page_url;
++    params.selection_text = u"selection snapshot";
++    return CreateContextMenu(frame, params)->GetVisibleExtensionIds();
++  }
++
++ private:
++  std::vector<std::unique_ptr<TestExtensionDir>> dirs_;
++  std::vector<base::android::ScopedJavaGlobalRef<jobject>> owners_;
++};
++
++IN_PROC_BROWSER_TEST_F(ReaperSelectionMenuGenerationBrowserTest,
++                       ReloadRetiresActualOwnerAndRetainedRow) {
++  scoped_refptr<const Extension> original = LoadMenuExtension();
++  ASSERT_TRUE(original);
++  ASSERT_TRUE(ReplaceItems(original->id(), R"([
++    {"id":"action", "title":"Old selection action", "contexts":["selection"]}
++  ])"));
++  auto owner = CreateOwner();
++  ASSERT_TRUE(owner);
++  auto retained_row = GetRow(owner, u"Old selection action");
++  ASSERT_TRUE(retained_row);
++  ASSERT_FALSE(IsClosed(owner));
++
++  ASSERT_TRUE(ReloadAndWaitForMenus(original->id()));
++  const Extension* replacement =
++      extension_registry()->enabled_extensions().GetByID(original->id());
++  ASSERT_TRUE(replacement);
++  ASSERT_NE(original.get(), replacement);
++  ASSERT_TRUE(ReplaceItems(original->id(), R"([
++    {"id":"action", "title":"Replacement page action", "contexts":["page"]}
++  ])"));
++  ASSERT_TRUE(IsClosed(owner));
++  // Invoke the actual copied leaf callback, not an owner helper that merely
++  // short-circuits on mClosed. Its native bridge handle has been retired.
++  {
++    // The real router records this synchronously, before worker delivery. A
++    // retired callback must not even attempt dispatch to the replacement.
++    TestEventRouterObserver observer(EventRouter::Get(profile()));
++    EXPECT_TRUE(InvokeRow(retained_row));
++    ASSERT_FALSE(observer.events().contains(MenuManager::kOnContextMenus));
++    ASSERT_FALSE(observer.events().contains("contextMenus.onClicked"));
++  }
++  EXPECT_FALSE(FreshVisibleIds().contains(original->id()));
++
++  ASSERT_TRUE(ReplaceItems(original->id(), R"([
++    {"id":"action", "title":"Fresh selection action", "contexts":["selection"]}
++  ])"));
++  auto fresh_owner = CreateOwner();
++  ASSERT_TRUE(fresh_owner);
++  auto fresh_row = GetRow(fresh_owner, u"Fresh selection action");
++  ASSERT_TRUE(fresh_row);
++  EXPECT_TRUE(ClickAndWait(fresh_row, "action"));
++  EXPECT_TRUE(IsClosed(owner));
++}
++
++IN_PROC_BROWSER_TEST_F(ReaperSelectionMenuGenerationBrowserTest,
++                       DisableAndEnableCannotReviveRetainedRow) {
++  scoped_refptr<const Extension> extension = LoadMenuExtension();
++  ASSERT_TRUE(extension);
++  ASSERT_TRUE(ReplaceItems(extension->id(), R"([
++    {"id":"action", "title":"Before disable", "contexts":["selection"]}
++  ])"));
++  auto owner = CreateOwner();
++  ASSERT_TRUE(owner);
++  auto retained_row = GetRow(owner, u"Before disable");
++  ASSERT_TRUE(retained_row);
++  DisableExtension(extension->id());
++  ASSERT_TRUE(IsClosed(owner));
++  ASSERT_TRUE(EnableAndWaitForMenus(extension->id()));
++  ASSERT_TRUE(ReplaceItems(extension->id(), R"([
++    {"id":"action", "title":"After enable", "contexts":["selection"]}
++  ])"));
++  {
++    // The real router records this synchronously, before worker delivery. A
++    // retired callback must not even attempt dispatch to the replacement.
++    TestEventRouterObserver observer(EventRouter::Get(profile()));
++    EXPECT_TRUE(InvokeRow(retained_row));
++    ASSERT_FALSE(observer.events().contains(MenuManager::kOnContextMenus));
++    ASSERT_FALSE(observer.events().contains("contextMenus.onClicked"));
++  }
++  auto fresh_owner = CreateOwner();
++  ASSERT_TRUE(fresh_owner);
++  auto fresh_row = GetRow(fresh_owner, u"After enable");
++  ASSERT_TRUE(fresh_row);
++  EXPECT_TRUE(ClickAndWait(fresh_row, "action"));
++  EXPECT_TRUE(IsClosed(owner));
++}
++
++IN_PROC_BROWSER_TEST_F(ReaperSelectionMenuGenerationBrowserTest,
++                       UnrepresentedReloadPreservesNestedVisibleOwner) {
++  scoped_refptr<const Extension> visible = LoadMenuExtension();
++  scoped_refptr<const Extension> excluded = LoadMenuExtension();
++  ASSERT_TRUE(visible);
++  ASSERT_TRUE(excluded);
++  ASSERT_NE(visible->id(), excluded->id());
++  ASSERT_TRUE(ReplaceItems(visible->id(), R"([
++    {"id":"first", "title":"Grouped first", "contexts":["selection"]},
++    {"id":"second", "title":"Grouped second", "contexts":["selection"]}
++  ])"));
++  ASSERT_TRUE(ReplaceItems(excluded->id(), R"([
++    {"id":"hidden", "title":"Hidden selection", "contexts":["selection"], "visible":false},
++    {"id":"filtered", "title":"Page only", "contexts":["page"]}
++  ])"));
++  EXPECT_TRUE(FreshVisibleIds().contains(visible->id()));
++  EXPECT_FALSE(FreshVisibleIds().contains(excluded->id()));
++  auto owner = CreateOwner();
++  ASSERT_TRUE(owner);
++  // Two ordinary top-level items are under a synthetic grouping row with no
++  // direct matcher ID. This lookup retains the real child bridge callback.
++  auto nested_row = GetRow(owner, u"Grouped first");
++  ASSERT_TRUE(nested_row);
++  ASSERT_TRUE(ReloadAndWaitForMenus(excluded->id()));
++  EXPECT_FALSE(IsClosed(owner));
++  DisableExtension(excluded->id());
++  EXPECT_FALSE(IsClosed(owner));
++  EXPECT_TRUE(ClickAndWait(nested_row, "first"));
++}
++
++IN_PROC_BROWSER_TEST_F(ReaperSelectionMenuGenerationBrowserTest,
++                       SameInstanceUpdateKeepsExistingDispatchSemantics) {
++  scoped_refptr<const Extension> extension = LoadMenuExtension();
++  ASSERT_TRUE(extension);
++  ASSERT_TRUE(ReplaceItems(extension->id(), R"([
++    {"id":"action", "title":"Original selection", "contexts":["selection"]}
++  ])"));
++  auto owner = CreateOwner();
++  ASSERT_TRUE(owner);
++  auto retained_row = GetRow(owner, u"Original selection");
++  ASSERT_TRUE(retained_row);
++  EXPECT_EQ(base::Value(true),
++            BackgroundScriptExecutor::ExecuteScript(
++                profile(), extension->id(), R"(
++        chrome.contextMenus.update('action', {
++          title: 'Updated page action', contexts: ['page']
++        }, () => chrome.test.sendScriptResult(
++          chrome.runtime.lastError ? chrome.runtime.lastError.message : true));
++      )",
++                BackgroundScriptExecutor::ResultCapture::kSendScriptResult));
++  EXPECT_EQ(extension.get(), extension_registry()->enabled_extensions().GetByID(
++                                 extension->id()));
++  EXPECT_FALSE(IsClosed(owner));
++  EXPECT_FALSE(FreshVisibleIds().contains(extension->id()));
++  EXPECT_TRUE(ClickAndWait(retained_row, "action"));
++}
++#endif  // BUILDFLAG(IS_ANDROID)
+ 
+ }  // namespace extensions

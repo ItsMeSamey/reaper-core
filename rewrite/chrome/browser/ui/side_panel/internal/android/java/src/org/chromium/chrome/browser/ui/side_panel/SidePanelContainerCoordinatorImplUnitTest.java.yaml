@@ -1,0 +1,107 @@
+# Android side-panel teardown lifecycle regressions.
+substitutions:
+  - description: "Use ordinary assertions and interface JNI test doubles."
+    regex:
+      pattern: "import static org.junit.Assert.assertEquals;"
+      replace: "import static org.junit.Assert.assertEquals;\nimport static org.junit.Assert.assertNotNull;\nimport static org.junit.Assert.assertNull;\nimport static org.mockito.ArgumentMatchers.any;\nimport static org.mockito.ArgumentMatchers.anyLong;\nimport static org.mockito.Mockito.doAnswer;\nimport static org.mockito.Mockito.mock;\nimport static org.mockito.Mockito.times;\nimport static org.mockito.Mockito.verify;\nimport static org.mockito.Mockito.when;"
+  - description: "Create real Android view and activity owners."
+    regex:
+      pattern: "import android.content.res.Resources;"
+      replace: "import android.app.Activity;\nimport android.content.res.Resources;\nimport android.view.View;\nimport android.widget.FrameLayout;"
+  - description: "Run the fixed-code fixtures on the actual supported SDK variants."
+    regex:
+      pattern: "import org.junit.runner.RunWith;"
+      replace: "import org.junit.runner.RunWith;\nimport org.robolectric.Robolectric;\nimport org.robolectric.annotation.Config;\nimport org.robolectric.android.controller.ActivityController;"
+  - description: "Reuse the genuine task tracker fixture and successful-frame interface."
+    regex:
+      pattern: "import org.chromium.chrome.browser.ui.side_ui.SideUiCoordinator.HeightType;"
+      replace: "import org.chromium.chrome.browser.browser_controls.TopControlsStacker;\nimport org.chromium.chrome.browser.ui.browser_window.ChromeAndroidTask;\nimport org.chromium.chrome.browser.ui.browser_window.ChromeAndroidTaskFeatureKey;\nimport org.chromium.chrome.browser.ui.browser_window.ChromeAndroidTaskTrackerFactory;\nimport org.chromium.chrome.browser.ui.browser_window.ChromeAndroidTaskUnitTestSupport;\nimport org.chromium.chrome.browser.ui.extensions.side_panel.ExtensionSidePanelManagerBridge;\nimport org.chromium.chrome.browser.ui.side_ui.SideUiCoordinator;\nimport org.chromium.chrome.browser.ui.side_ui.SideUiCoordinator.HeightType;\nimport org.chromium.components.thinwebview.ThinWebView;\nimport org.chromium.components.thinwebview.ThinWebViewAttachParams;\nimport org.chromium.content_public.browser.WebContents;\n\nimport java.lang.ref.WeakReference;"
+  - description: "Exercise real fixed coordinator teardown and reentrant replacement ownership."
+    regex:
+      pattern: "\n}\n"
+      replace: "\n\n    private static final int TASK_ID = 204067;\n    private static final long NATIVE_COORDINATOR = 204;\n\n    public static class TestActivity extends Activity {\n        @Override\n        public int getTaskId() {\n            return TASK_ID;\n        }\n    }\n\n    /** A real View which queues only the native successful-presentation boundary. */\n    private static class DeferredFrameView extends FrameLayout implements ThinWebView {\n        private Runnable mNextFrame;\n\n        DeferredFrameView(Activity activity) {\n            super(activity);\n        }\n\n        @Override\n        public View getView() {\n            return this;\n        }\n\n        @Override\n        public void attachWebContents(\n                WebContents webContents, View contentView, ThinWebViewAttachParams attachParams) {}\n\n        @Override\n        public void runOnNextFrame(Runnable runnable) {\n            mNextFrame = runnable;\n        }\n\n        Runnable nextFrame() {\n            assertNotNull(mNextFrame);\n            return mNextFrame;\n        }\n\n        @Override\n        public void resizeWebContents(int width, int height) {}\n\n        @Override\n        public void destroy() {}\n    }\n\n    private static class ReplacementFixture implements AutoCloseable {\n        final ActivityController<TestActivity> activityController;\n        final ChromeAndroidTaskUnitTestSupport.ChromeAndroidTaskWithMockDeps task;\n        final ChromeAndroidTask chromeTask;\n        final WeakReference<Activity> originalActivity;\n        final SideUiCoordinator sideUi = mock(SideUiCoordinator.class);\n        final SidePanelCoordinatorAndroidBridge.Natives nativeCoordinator =\n                mock(SidePanelCoordinatorAndroidBridge.Natives.class);\n        final SidePanelContainerCoordinatorImpl coordinator;\n\n        ReplacementFixture() {\n            activityController = Robolectric.buildActivity(TestActivity.class).setup();\n            task = ChromeAndroidTaskUnitTestSupport.createChromeAndroidTaskWithMockDeps(\n                    TASK_ID, /* isPendingTask= */ false, /* isDesktopMode= */ false);\n            chromeTask = ChromeAndroidTaskTrackerFactory.getInstance().get(TASK_ID);\n            assertNotNull(chromeTask);\n            var window = task.mActivityWindowAndroidMocks.mMockActivityWindowAndroid;\n            originalActivity = window.getActivity();\n            when(window.getActivity()).thenReturn(new WeakReference<>(activityController.get()));\n\n            var registryNative = mock(WindowScopedSidePanelRegistryBridge.Natives.class);\n            when(registryNative.create(any(), anyLong())).thenReturn(1L);\n            WindowScopedSidePanelRegistryBridgeJni.setInstanceForTesting(registryNative);\n            when(nativeCoordinator.create(any(), anyLong())).thenReturn(NATIVE_COORDINATOR);\n            SidePanelCoordinatorAndroidBridgeJni.setInstanceForTesting(nativeCoordinator);\n\n            var tabModelSelector = task.mActivityScopedObjects.mTabModelSelector;\n            chromeTask.addFeature(\n                    new ChromeAndroidTaskFeatureKey(\n                            ExtensionSidePanelManagerBridge.class,\n                            task.mMockProfile,\n                            window,\n                            tabModelSelector.getModel(false)),\n                    () -> mock(ExtensionSidePanelManagerBridge.class));\n            coordinator = new SidePanelContainerCoordinatorImpl(\n                    window, sideUi, tabModelSelector, mock(TopControlsStacker.class));\n            coordinator.init();\n            coordinator.configDeferredViewReplacementForTesting(true);\n        }\n\n        DeferredFrameView replace(View oldView) {\n            coordinator.startOpeningPanel(new SidePanelContent(oldView), true);\n            var next = new DeferredFrameView(activityController.get());\n            coordinator.startReplacingPanelContent(new SidePanelContent(next));\n            assertNotNull(next.nextFrame());\n            return next;\n        }\n\n        @Override\n        public void close() {\n            when(task.mActivityScopedObjects.mTabModelSelector.getCurrentModel().getProfile())\n                    .thenReturn(task.mMockProfile);\n            coordinator.destroy();\n            when(task.mActivityWindowAndroidMocks.mMockActivityWindowAndroid.getActivity())\n                    .thenReturn(originalActivity);\n            ChromeAndroidTaskTrackerFactory.getInstance().remove(TASK_ID);\n            activityController.pause().stop().destroy();\n        }\n    }\n\n    @Test\n    @Config(sdk = {33, 34})\n    public void testDestroyCompletesDeferredReplacementOnceBeforeBridgeRemoval() {\n        try (var fixture = new ReplacementFixture()) {\n            var oldView = new View(fixture.activityController.get());\n            var nextView = fixture.replace(oldView);\n            Runnable lateFrame = nextView.nextFrame();\n            when(fixture.task.mActivityScopedObjects.mTabModelSelector\n                            .getCurrentModel().getProfile())\n                    .thenReturn(null);\n            doAnswer(invocation -> {\n                fixture.coordinator.startOpeningPanel(new SidePanelContent(new View(\n                        fixture.activityController.get())), true);\n                fixture.coordinator.startReplacingPanelContent(new SidePanelContent(\n                        new DeferredFrameView(fixture.activityController.get())));\n                return null;\n            }).when(fixture.nativeCoordinator).onPanelContentReplaced(NATIVE_COORDINATOR);\n\n            fixture.coordinator.destroy();\n            fixture.coordinator.destroy();\n            assertNull(fixture.coordinator.getContentView());\n            assertNull(oldView.getParent());\n            assertNull(nextView.getParent());\n            lateFrame.run();\n            lateFrame.run();\n            verify(fixture.nativeCoordinator, times(1))\n                    .onPanelContentReplaced(NATIVE_COORDINATOR);\n            verify(fixture.sideUi, times(1)).unregisterSideUiContainer(fixture.coordinator);\n        }\n    }\n\n    @Test\n    @Config(sdk = {33, 34})\n    public void testCompletionPreservesReentrantDeferredReplacement() {\n        try (var fixture = new ReplacementFixture()) {\n            var oldView = new View(fixture.activityController.get());\n            var firstView = fixture.replace(oldView);\n            var secondView = new DeferredFrameView(fixture.activityController.get());\n            int[] completions = {0};\n            doAnswer(invocation -> {\n                if (++completions[0] == 1) {\n                    fixture.coordinator.startReplacingPanelContent(\n                            new SidePanelContent(secondView));\n                }\n                return null;\n            }).when(fixture.nativeCoordinator).onPanelContentReplaced(NATIVE_COORDINATOR);\n\n            fixture.coordinator.completePendingContentReplacement();\n            assertNull(oldView.getParent());\n            assertNotNull(firstView.getParent());\n            assertNotNull(secondView.nextFrame());\n            assertEquals(secondView, fixture.coordinator.getContentView());\n            fixture.coordinator.completePendingContentReplacement();\n            assertNull(firstView.getParent());\n            assertNotNull(secondView.getParent());\n            firstView.nextFrame().run();\n            secondView.nextFrame().run();\n            verify(fixture.nativeCoordinator, times(2))\n                    .onPanelContentReplaced(NATIVE_COORDINATOR);\n        }\n    }\n\n}\n"
+  - description: "Android Java validation integration (SidePanelContainerCoordinatorImplUnitTest.java, 1)."
+    regex:
+      pattern: "import org.chromium.base.test.BaseRobolectricTestRunner;\n"
+      replace: "import org.chromium.base.supplier.ObservableSuppliers;\nimport org.chromium.base.supplier.SettableMonotonicObservableSupplier;\nimport org.chromium.base.test.BaseRobolectricTestRunner;\n"
+    count: 1
+  - description: "Android Java validation integration (SidePanelContainerCoordinatorImplUnitTest.java, 2)."
+    regex:
+      pattern: "import org.chromium.chrome.browser.browser_controls.TopControlsStacker;\n"
+      replace: "import org.chromium.chrome.browser.browser_controls.TopControlsStacker;\nimport org.chromium.chrome.browser.tabmodel.IncognitoTabModel;\nimport org.chromium.chrome.browser.tabmodel.SupportedProfileType;\nimport org.chromium.chrome.browser.tabmodel.TabModel;\nimport org.chromium.chrome.browser.tabmodel.TabModelSelector;\nimport org.chromium.chrome.browser.ui.browser_window.BrowserWindowType;\n"
+    count: 1
+  - description: "Android Java validation integration (SidePanelContainerCoordinatorImplUnitTest.java, 3)."
+    regex:
+      pattern: "import org.chromium.components.thinwebview.ThinWebView;\n"
+      replace: "import org.chromium.components.browser_ui.desktop_windowing.DesktopWindowStateManager;\nimport org.chromium.components.thinwebview.ThinWebView;\n"
+    count: 1
+  - description: "Android Java validation integration (SidePanelContainerCoordinatorImplUnitTest.java, 4)."
+    regex:
+      pattern: "import java.lang.ref.WeakReference;\n"
+      replace: "import java.lang.ref.WeakReference;\nimport java.util.List;\n"
+    count: 1
+  - description: "Android Java validation integration (SidePanelContainerCoordinatorImplUnitTest.java, 5)."
+    regex:
+      pattern: "        final ChromeAndroidTask chromeTask;\n"
+      replace: "        final ChromeAndroidTask chromeTask;\n        final TabModelSelector tabModelSelector = mock(TabModelSelector.class);\n"
+    count: 1
+  - description: "Android Java validation integration (SidePanelContainerCoordinatorImplUnitTest.java, 6)."
+    regex:
+      pattern: "            chromeTask = ChromeAndroidTaskTrackerFactory.getInstance().get(TASK_ID);\n            assertNotNull(chromeTask);\n            var window = task.mActivityWindowAndroidMocks.mMockActivityWindowAndroid;\n"
+      replace: "            var window = task.mActivityWindowAndroidMocks.mMockActivityWindowAndroid;\n            var tracker = ChromeAndroidTaskTrackerFactory.getInstance();\n            tracker.remove(TASK_ID);\n            var tabModel = mock(TabModel.class);\n            when(tabModel.getProfile()).thenReturn(task.mMockProfile);\n            SettableMonotonicObservableSupplier<TabModel> tabModelSupplier =\n                    ObservableSuppliers.createMonotonic();\n            tabModelSupplier.set(tabModel);\n            when(tabModelSelector.getModel(false)).thenReturn(tabModel);\n            when(tabModelSelector.getCurrentTabModelSupplier()).thenReturn(tabModelSupplier);\n            when(tabModelSelector.getCurrentModel()).thenReturn(tabModel);\n            var incognitoTabModel = mock(IncognitoTabModel.class);\n            when(tabModelSelector.getModel(true)).thenReturn(incognitoTabModel);\n            when(tabModelSelector.getModels()).thenReturn(List.of(tabModel, incognitoTabModel));\n            when(incognitoTabModel.getProfile()).thenReturn(null);\n            chromeTask = tracker.obtainTask(\n                    BrowserWindowType.NORMAL,\n                    new ChromeAndroidTask.ActivityScopedObjects(\n                            window, tabModelSelector, BrowserWindowType.NORMAL,\n                            SupportedProfileType.REGULAR, mock(DesktopWindowStateManager.class)),\n                    /* pendingId= */ null);\n            assertNotNull(chromeTask);\n"
+    count: 1
+  - description: "Android Java validation integration (SidePanelContainerCoordinatorImplUnitTest.java, 7)."
+    regex:
+      pattern: "            var tabModelSelector = task.mActivityScopedObjects.mTabModelSelector;\n"
+      replace: ""
+    count: 1
+  - description: "Android Java validation integration (SidePanelContainerCoordinatorImplUnitTest.java, 8)."
+    regex:
+      pattern: "            when(task.mActivityScopedObjects.mTabModelSelector.getCurrentModel().getProfile())\n"
+      replace: "            when(tabModelSelector.getCurrentModel().getProfile())\n"
+    count: 1
+  - description: "Android Java validation integration (SidePanelContainerCoordinatorImplUnitTest.java, 9)."
+    regex:
+      pattern: "            when(fixture.task.mActivityScopedObjects.mTabModelSelector\n"
+      replace: "            when(fixture.tabModelSelector\n"
+    count: 1
+  - description: "Use explicit regular TabModel fixture identity for Mockito validation (1)."
+    regex:
+      pattern: "        final TabModelSelector tabModelSelector = mock(TabModelSelector.class);\n"
+      replace: "        final TabModelSelector tabModelSelector = mock(TabModelSelector.class);\n        final TabModel tabModel = mock(TabModel.class);\n"
+    count: 1
+  - description: "Use explicit regular TabModel fixture identity for Mockito validation (2)."
+    regex:
+      pattern: "            var tabModel = mock(TabModel.class);\n"
+      replace: ""
+    count: 1
+  - description: "Use explicit regular TabModel fixture identity for Mockito validation (3)."
+    regex:
+      pattern: "                            tabModelSelector.getModel(false)),\n"
+      replace: "                            tabModel),\n"
+    count: 1
+  - description: "Use explicit regular TabModel fixture identity for Mockito validation (4)."
+    regex:
+      pattern: "            when(tabModelSelector.getCurrentModel().getProfile())\n"
+      replace: "            when(tabModel.getProfile())\n"
+    count: 1
+  - description: "Use explicit regular TabModel fixture identity for Mockito validation (5)."
+    regex:
+      pattern: "            when(fixture.tabModelSelector\n                            .getCurrentModel().getProfile())\n"
+      replace: "            when(fixture.tabModel.getProfile())\n"
+    count: 1
+  - description: "Use themed real side-panel fixture and exception-safe original Activity restoration (1)."
+    regex:
+      pattern: "            activityController = Robolectric.buildActivity(TestActivity.class).setup();\n"
+      replace: "            activityController = Robolectric.buildActivity(TestActivity.class);\n            activityController.get().setTheme(R.style.Theme_BrowserUI_DayNight);\n            activityController.setup();\n"
+    count: 1
+  - description: "Use themed real side-panel fixture and exception-safe original Activity restoration (2)."
+    regex:
+      pattern: "            var registryNative = mock(WindowScopedSidePanelRegistryBridge.Natives.class);\n            when(registryNative.create(any(), anyLong())).thenReturn(1L);\n            WindowScopedSidePanelRegistryBridgeJni.setInstanceForTesting(registryNative);\n            when(nativeCoordinator.create(any(), anyLong())).thenReturn(NATIVE_COORDINATOR);\n            SidePanelCoordinatorAndroidBridgeJni.setInstanceForTesting(nativeCoordinator);\n\n            chromeTask.addFeature(\n                    new ChromeAndroidTaskFeatureKey(\n                            ExtensionSidePanelManagerBridge.class,\n                            task.mMockProfile,\n                            window,\n                            tabModel),\n                    () -> mock(ExtensionSidePanelManagerBridge.class));\n            coordinator = new SidePanelContainerCoordinatorImpl(\n                    window, sideUi, tabModelSelector, mock(TopControlsStacker.class));\n            coordinator.init();\n            coordinator.configDeferredViewReplacementForTesting(true);"
+      replace: "            SidePanelContainerCoordinatorImpl createdCoordinator = null;\n            try {\n                var registryNative = mock(WindowScopedSidePanelRegistryBridge.Natives.class);\n                when(registryNative.create(any(), anyLong())).thenReturn(1L);\n                WindowScopedSidePanelRegistryBridgeJni.setInstanceForTesting(registryNative);\n                when(nativeCoordinator.create(any(), anyLong())).thenReturn(NATIVE_COORDINATOR);\n                SidePanelCoordinatorAndroidBridgeJni.setInstanceForTesting(nativeCoordinator);\n\n                chromeTask.addFeature(\n                        new ChromeAndroidTaskFeatureKey(\n                                ExtensionSidePanelManagerBridge.class,\n                                task.mMockProfile,\n                                window,\n                                tabModel),\n                        () -> mock(ExtensionSidePanelManagerBridge.class));\n                createdCoordinator = new SidePanelContainerCoordinatorImpl(\n                        window, sideUi, tabModelSelector, mock(TopControlsStacker.class));\n                createdCoordinator.init();\n                createdCoordinator.configDeferredViewReplacementForTesting(true);\n                coordinator = createdCoordinator;\n            } catch (RuntimeException | Error failure) {\n                try {\n                    closeFixture(createdCoordinator);\n                } catch (RuntimeException | Error cleanupFailure) {\n                    failure.addSuppressed(cleanupFailure);\n                }\n                throw failure;\n            }"
+    count: 1
+  - description: "Use themed real side-panel fixture and exception-safe original Activity restoration (3)."
+    regex:
+      pattern: "        @Override\n        public void close() {\n            when(tabModel.getProfile())\n                    .thenReturn(task.mMockProfile);\n            coordinator.destroy();\n            when(task.mActivityWindowAndroidMocks.mMockActivityWindowAndroid.getActivity())\n                    .thenReturn(originalActivity);\n            ChromeAndroidTaskTrackerFactory.getInstance().remove(TASK_ID);\n            activityController.pause().stop().destroy();\n        }\n"
+      replace: "        private void closeFixture(SidePanelContainerCoordinatorImpl createdCoordinator) {\n            try {\n                when(tabModel.getProfile()).thenReturn(task.mMockProfile);\n                if (createdCoordinator != null) createdCoordinator.destroy();\n            } finally {\n                // The task registered with this original Activity's lifecycle dispatcher.\n                when(task.mActivityWindowAndroidMocks.mMockActivityWindowAndroid.getActivity())\n                        .thenReturn(originalActivity);\n                try {\n                    ChromeAndroidTaskTrackerFactory.getInstance().remove(TASK_ID);\n                } finally {\n                    activityController.pause().stop().destroy();\n                }\n            }\n        }\n\n        @Override\n        public void close() {\n            closeFixture(coordinator);\n        }\n"
+    count: 1

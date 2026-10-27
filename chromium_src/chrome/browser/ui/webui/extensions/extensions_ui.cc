@@ -4,8 +4,10 @@
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "brave/grit/brave_generated_resources.h"
+#include "build/build_config.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/common/buildflags.h"
+#include "chrome/grit/branded_strings.h"
 #include "chrome/grit/generated_resources.h"
 #include "content/public/browser/web_ui_data_source.h"
 #include "extensions/browser/extension_util.h"
@@ -18,12 +20,20 @@ namespace {
 // a plaster.
 void BraveAddExtensionsResources(content::WebUIDataSource* source,
                                  Profile* profile) {
+#if BUILDFLAG(IS_ANDROID)
+  // Android has no Tor mode. Reuse the complete localized private-mode warning.
+  source->AddLocalizedString("privateInfoWarning",
+                             IDS_EXTENSIONS_INCOGNITO_WARNING);
+  source->AddString("spanningInfoWarning", "");
+  source->AddString("privateAndTorInfoWarning", "");
+#else
   source->AddLocalizedString("privateInfoWarning",
                              IDS_EXTENSIONS_BRAVE_PRIVATE_WARNING);
   source->AddLocalizedString("spanningInfoWarning",
                              IDS_EXTENSIONS_BRAVE_SPANNING_WARNING);
   source->AddLocalizedString("privateAndTorInfoWarning",
                              IDS_EXTENSIONS_BRAVE_PRIVATE_AND_TOR_WARNING);
+#endif
   source->AddLocalizedString("braveHosted", IDS_EXTENSIONS_BRAVE_HOSTED);
 
   const std::string mv2_extensions =

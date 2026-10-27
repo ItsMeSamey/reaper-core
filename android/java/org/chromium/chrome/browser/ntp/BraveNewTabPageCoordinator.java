@@ -13,7 +13,6 @@ import org.chromium.build.annotations.NullMarked;
 import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.browser.app.BraveActivity;
 import org.chromium.chrome.browser.back_press.BackPressManager;
-import org.chromium.chrome.browser.feed.FeedSurfaceScrollDelegate;
 import org.chromium.chrome.browser.lifecycle.ActivityLifecycleDispatcher;
 import org.chromium.chrome.browser.magic_stack.ModuleRegistry;
 import org.chromium.chrome.browser.preloading.AndroidPrerenderManager;
@@ -31,7 +30,6 @@ import org.chromium.chrome.browser.ui.native_page.TouchEnabledDelegate;
 import org.chromium.chrome.browser.ui.side_ui.SideUiStateProvider;
 import org.chromium.components.browser_ui.bottomsheet.BottomSheetController;
 import org.chromium.components.browser_ui.widget.displaystyle.UiConfig;
-import org.chromium.misc_metrics.mojom.MiscAndroidMetrics;
 import org.chromium.ui.base.ActivityResultTracker;
 import org.chromium.ui.base.WindowAndroid;
 import org.chromium.ui.modaldialog.ModalDialogManager;
@@ -107,13 +105,13 @@ public class BraveNewTabPageCoordinator extends NewTabPageCoordinator {
             TileGroup.Delegate tileGroupDelegate,
             boolean searchProviderHasLogo,
             boolean searchProviderIsGoogle,
-            FeedSurfaceScrollDelegate scrollDelegate,
+            NtpScrollDelegate scrollDelegate,
             TouchEnabledDelegate touchEnabledDelegate,
             UiConfig uiConfig,
             ActivityLifecycleDispatcher lifecycleDispatcher,
-            Supplier<GURL> composeplateUrlSupplier) {
+            Supplier<? extends @Nullable GURL> composeplateUrlSupplier) {
         super.initialize(
-                new BraveTileGroupDelegate(tileGroupDelegate, mActivity),
+                tileGroupDelegate,
                 searchProviderHasLogo,
                 searchProviderIsGoogle,
                 scrollDelegate,
@@ -125,96 +123,4 @@ public class BraveNewTabPageCoordinator extends NewTabPageCoordinator {
         mBraveNewTabPageLayout.initialize(mNewTabPageManager, mActivity, mProfile, mWindowAndroid);
     }
 
-    private static class BraveTileGroupDelegate implements TileGroup.Delegate {
-        private final TileGroup.Delegate mDelegate;
-        private final Activity mActivity;
-
-        BraveTileGroupDelegate(TileGroup.Delegate delegate, Activity activity) {
-            mDelegate = delegate;
-            mActivity = activity;
-        }
-
-        @Override
-        public void openMostVisitedItem(int windowDisposition, Tile tile) {
-            if (mActivity instanceof BraveActivity braveActivity) {
-                MiscAndroidMetrics metrics = braveActivity.getMiscAndroidMetrics();
-                if (metrics != null) {
-                    metrics.recordTopSiteNavigation(tile.getSource() == TileSource.CUSTOM_LINKS);
-                }
-            }
-            mDelegate.openMostVisitedItem(windowDisposition, tile);
-        }
-
-        @Override
-        public void openMostVisitedItemInGroup(int windowDisposition, Tile tile) {
-            mDelegate.openMostVisitedItemInGroup(windowDisposition, tile);
-        }
-
-        @Override
-        public void removeMostVisitedItem(Tile tile) {
-            mDelegate.removeMostVisitedItem(tile);
-        }
-
-        @Override
-        public void setMostVisitedSitesObserver(
-                MostVisitedSites.Observer observer, int maxResults) {
-            mDelegate.setMostVisitedSitesObserver(observer, maxResults);
-        }
-
-        @Override
-        public void onLoadingComplete(List<Tile> tiles) {
-            mDelegate.onLoadingComplete(tiles);
-        }
-
-        @Override
-        public void initAndroidPrerenderManager(AndroidPrerenderManager androidPrerenderManager) {
-            mDelegate.initAndroidPrerenderManager(androidPrerenderManager);
-        }
-
-        @Override
-        public CustomTileEditCoordinator createCustomTileEditCoordinator(
-                @Nullable Tile originalTile) {
-            return mDelegate.createCustomTileEditCoordinator(originalTile);
-        }
-
-        @Override
-        public void showTileUnpinSnackbar(Runnable undoHandler) {
-            mDelegate.showTileUnpinSnackbar(undoHandler);
-        }
-
-        @Override
-        public double getSuggestionScore(GURL url) {
-            return mDelegate.getSuggestionScore(url);
-        }
-
-        @Override
-        public void destroy() {
-            mDelegate.destroy();
-        }
-
-        @Override
-        public boolean addCustomLink(String name, @Nullable GURL url, @Nullable Integer pos) {
-            return mDelegate.addCustomLink(name, url, pos);
-        }
-
-        @Override
-        public boolean assignCustomLink(GURL keyUrl, String name, @Nullable GURL url) {
-            return mDelegate.assignCustomLink(keyUrl, name, url);
-        }
-
-        @Override
-        public boolean deleteCustomLink(GURL keyUrl) {
-            return mDelegate.deleteCustomLink(keyUrl);
-        }
-
-        @Override
-        public boolean hasCustomLink(GURL keyUrl) {
-            return mDelegate.hasCustomLink(keyUrl);
-        }
-
-        @Override
-        public boolean reorderCustomLink(GURL keyUrl, int newPos) {
-            return mDelegate.reorderCustomLink(keyUrl, newPos);
-        }
-    }
 }

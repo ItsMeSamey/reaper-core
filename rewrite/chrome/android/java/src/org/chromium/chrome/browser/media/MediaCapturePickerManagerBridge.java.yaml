@@ -1,0 +1,53 @@
+substitutions:
+- description: Close and guard the Java chooser when its native request goes away.
+  regex:
+    pattern: import org.chromium.build.annotations.NullMarked;
+    replace: 'import org.chromium.build.annotations.NullMarked;
+
+      import org.chromium.build.annotations.Nullable;
+
+      import org.chromium.content_public.browser.media.capture.ScreenCapture;
+
+      import org.chromium.content_public.browser.RenderFrameHost;
+
+      import org.chromium.ui.base.WindowAndroid;'
+- description: Own the dismissal handle and consent ID for one native request.
+  regex:
+    pattern: '    private long mNativeMediaCapturePickerManagerBridge;'
+    replace: "    private long mNativeMediaCapturePickerManagerBridge;\n    private @Nullable Runnable mDismissPicker;\n    private int mCaptureId;"
+- description: Receive the parent window chosen in the authorized native profile context.
+  regex:
+    pattern: "            @JniType(\"content::WebContents*\") WebContents webContents,\n            @JniType(\"std::u16string\") String appName,"
+    replace: "            @JniType(\"content::WebContents*\") WebContents webContents,\n            @Nullable WindowAndroid parentWindow,\n            @JniType(\"content::RenderFrameHost*\") RenderFrameHost requestFrame,\n            @JniType(\"std::u16string\") String appName,"
+- description: Receive the immutable native request type mask and unique consent ID.
+  regex:
+    pattern: '            @AllowedScreenCaptureLevel int allowedCaptureLevel) {'
+    replace: "            @AllowedScreenCaptureLevel int allowedCaptureLevel,\n            int allowedSourceTypes,\n            int captureId) {"
+- description: Tie chooser dismissal to the native bridge, including synchronous rejection.
+  regex:
+    pattern: '        MediaCapturePickerManager.showDialog(params, /* delegate= */ this);'
+    replace: "        params.allowedSourceTypes = allowedSourceTypes;\n        params.captureId = captureId;\n        params.parentWindow = parentWindow;\n        params.requestFrame = requestFrame;\n        mCaptureId = captureId;\n        Runnable dismiss = MediaCapturePickerManager.showDialog(params, /* delegate= */ this);\n        if (mNativeMediaCapturePickerManagerBridge == 0) dismiss.run();\n        else mDismissPicker = dismiss;"
+- description: Dismiss pending UI, revoke rejected consent and make late callbacks harmless.
+  regex:
+    pattern: "    private void destroy() {\n        mNativeMediaCapturePickerManagerBridge = 0;\n    }"
+    replace: "    private void destroy(boolean keepCapture) {\n        if (mNativeMediaCapturePickerManagerBridge == 0) return;\n        mNativeMediaCapturePickerManagerBridge = 0;\n        if (mDismissPicker != null) {\n            mDismissPicker.run();\n            mDismissPicker = null;\n        }\n        if (!keepCapture) ScreenCapture.cancelPick(mCaptureId);\n    }"
+- description: Guard late onPickTab callbacks after native destruction.
+  regex:
+    pattern: "        // We know `mNativeMediaCapturePickerManagerBridge` is non-zero because\n        // `destroy` will only be called after the dialog is dismissed.\n        assert mNativeMediaCapturePickerManagerBridge != 0;\n        MediaCapturePickerManagerBridgeJni.get()\n                .onPickTab"
+    replace: "        if (mNativeMediaCapturePickerManagerBridge == 0) return;\n        MediaCapturePickerManagerBridgeJni.get()\n                .onPickTab"
+- description: Guard late onPickWindow callbacks after native destruction.
+  regex:
+    pattern: "        // We know `mNativeMediaCapturePickerManagerBridge` is non-zero because\n        // `destroy` will only be called after the dialog is dismissed.\n        assert mNativeMediaCapturePickerManagerBridge != 0;\n        MediaCapturePickerManagerBridgeJni.get()\n                .onPickWindow"
+    replace: "        if (mNativeMediaCapturePickerManagerBridge == 0) return;\n        MediaCapturePickerManagerBridgeJni.get()\n                .onPickWindow"
+- description: Guard late onPickScreen callbacks after native destruction.
+  regex:
+    pattern: "        // We know `mNativeMediaCapturePickerManagerBridge` is non-zero because\n        // `destroy` will only be called after the dialog is dismissed.\n        assert mNativeMediaCapturePickerManagerBridge != 0;\n        MediaCapturePickerManagerBridgeJni.get()\n                .onPickScreen"
+    replace: "        if (mNativeMediaCapturePickerManagerBridge == 0) return;\n        MediaCapturePickerManagerBridgeJni.get()\n                .onPickScreen"
+- description: Guard late cancellation callbacks.
+  regex:
+    pattern: "        // We know `mNativeMediaCapturePickerManagerBridge` is non-zero because\n        // `destroy` will only be called after the dialog is dismissed.\n        assert mNativeMediaCapturePickerManagerBridge != 0;\n        MediaCapturePickerManagerBridgeJni.get().onCancel"
+    replace: "        if (mNativeMediaCapturePickerManagerBridge == 0) return;\n        MediaCapturePickerManagerBridgeJni.get().onCancel"
+- description: Filter all tabs after the native request has gone away.
+  regex:
+    pattern: "        // We know `mNativeMediaCapturePickerManagerBridge` is non-zero because\n        // `destroy` will only be called after the dialog is dismissed.\n        assert mNativeMediaCapturePickerManagerBridge != 0;\n        return MediaCapturePickerManagerBridgeJni.get()"
+    replace: "        if (mNativeMediaCapturePickerManagerBridge == 0) return true;\n        return MediaCapturePickerManagerBridgeJni.get()"

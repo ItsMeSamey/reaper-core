@@ -1,0 +1,148 @@
+diff --git a/chrome/browser/download/internal/android/java/src/org/chromium/chrome/browser/download/DownloadMessageUiControllerTest.java b/chrome/browser/download/internal/android/java/src/org/chromium/chrome/browser/download/DownloadMessageUiControllerTest.java
+--- a/chrome/browser/download/internal/android/java/src/org/chromium/chrome/browser/download/DownloadMessageUiControllerTest.java
++++ b/chrome/browser/download/internal/android/java/src/org/chromium/chrome/browser/download/DownloadMessageUiControllerTest.java
+@@ -36,6 +36,8 @@
+ import org.chromium.url.GURL;
+ import org.chromium.url.JUnitTestGURLs;
+ 
++import java.util.HashSet;
++import java.util.Set;
+ import java.util.UUID;
+ 
+ /**
+@@ -101,6 +103,12 @@
+ 
+     static class TestDelegate implements DownloadMessageUiController.Delegate {
+         public boolean mMaybeSwitchToFocusedActivityCalled;
++        public final Set<String> mSuppressedProfiles = new HashSet<>();
++
++        @Override
++        public boolean shouldSuppressDownloadUi(@Nullable String serializedOtrProfileId) {
++            return mSuppressedProfiles.contains(serializedOtrProfileId);
++        }
+ 
+         @Override
+         public @Nullable Context getContext() {
+@@ -192,6 +200,15 @@
+         return item;
+     }
+ 
++    private static OfflineItem createPolicyDownload(int state, @Nullable String otrProfileId) {
++        OfflineItem item = createOfflineItem(state);
++        item.id = LegacyHelpers.buildLegacyContentId(false, UUID.randomUUID().toString());
++        item.filePath = "/data/local/tmp/download-policy-test.txt";
++        item.otrProfileId = otrProfileId;
++        item.isOffTheRecord = otrProfileId != null;
++        return item;
++    }
++
+     private static void markItemComplete(OfflineItem item) {
+         item.state = OfflineItemState.COMPLETE;
+         item.title = TEST_FILE_NAME;
+@@ -218,6 +235,106 @@
+                     Criteria.checkThat(mTestController.mInfo, Matchers.notNullValue());
+                     Criteria.checkThat(mTestController.mInfo.message, Matchers.is(message));
+                 });
++    }
++
++    @Test
++    @SmallTest
++    @Feature({"Download"})
++    public void testPolicyDisableDuringProgressCompleteDoesNotResurrect() {
++        OfflineItem item = createPolicyDownload(OfflineItemState.IN_PROGRESS, null);
++        mTestController.onItemUpdated(item);
++        mTestController.verify(MESSAGE_DOWNLOADING_FILE, DESCRIPTION_DOWNLOADING);
++        mTestController.mDelegate.mSuppressedProfiles.add(null);
++        mTestController.onDownloadUiPolicyChanged();
++        mTestController.verifyMessageGone();
++        markItemComplete(item);
++        mTestController.onItemUpdated(item);
++        mTestController.mDelegate.mSuppressedProfiles.clear();
++        mTestController.onDownloadUiPolicyChanged();
++        mTestController.verifyMessageGone();
++    }
++
++    @Test
++    @SmallTest
++    @Feature({"Download"})
++    public void testPolicyDisableDuringProgressCancelDoesNotResurrect() {
++        OfflineItem item = createPolicyDownload(OfflineItemState.IN_PROGRESS, null);
++        mTestController.onItemUpdated(item);
++        mTestController.mDelegate.mSuppressedProfiles.add(null);
++        mTestController.onDownloadUiPolicyChanged();
++        item.state = OfflineItemState.CANCELLED;
++        mTestController.onItemUpdated(item);
++        mTestController.mDelegate.mSuppressedProfiles.clear();
++        mTestController.onDownloadUiPolicyChanged();
++        mTestController.verifyMessageGone();
++    }
++
++    @Test
++    @SmallTest
++    @Feature({"Download"})
++    public void testPolicyReenableRestoresOnlyStillActiveDownload() {
++        OfflineItem item = createPolicyDownload(OfflineItemState.IN_PROGRESS, null);
++        mTestController.mDelegate.mSuppressedProfiles.add(null);
++        mTestController.onItemUpdated(item);
++        mTestController.verifyMessageGone();
++        mTestController.mDelegate.mSuppressedProfiles.clear();
++        mTestController.onDownloadUiPolicyChanged();
++        mTestController.verify(MESSAGE_DOWNLOADING_FILE, DESCRIPTION_DOWNLOADING);
++        markItemComplete(item);
++        mTestController.onItemUpdated(item);
++        mTestController.verify(MESSAGE_SINGLE_DOWNLOAD_COMPLETE, DESCRIPTION_DOWNLOAD_COMPLETE);
++    }
++
++    @Test
++    @SmallTest
++    @Feature({"Download"})
++    public void testPolicyRegularAndOtrRemainIndependent() {
++        OfflineItem regular = createPolicyDownload(OfflineItemState.IN_PROGRESS, null);
++        OfflineItem otr = createPolicyDownload(OfflineItemState.IN_PROGRESS, "otr-test");
++        mTestController.onItemUpdated(regular);
++        mTestController.onItemUpdated(otr);
++        mTestController.verify(MESSAGE_DOWNLOADING_TWO_FILES, DESCRIPTION_DOWNLOADING);
++        mTestController.mDelegate.mSuppressedProfiles.add(null);
++        mTestController.onDownloadUiPolicyChanged();
++        mTestController.verify(MESSAGE_DOWNLOADING_FILE, DESCRIPTION_DOWNLOADING);
++        mTestController.mDelegate.mSuppressedProfiles.add("otr-test");
++        mTestController.onDownloadUiPolicyChanged();
++        mTestController.verifyMessageGone();
++        mTestController.mDelegate.mSuppressedProfiles.remove(null);
++        mTestController.onDownloadUiPolicyChanged();
++        mTestController.verify(MESSAGE_DOWNLOADING_FILE, DESCRIPTION_DOWNLOADING);
++    }
++
++    @Test
++    @SmallTest
++    @Feature({"Download"})
++    public void testPolicyNeverSuppressesBlockedSecurityFeedback() {
++        OfflineItem ordinary = createPolicyDownload(OfflineItemState.IN_PROGRESS, null);
++        mTestController.onItemUpdated(ordinary);
++        OfflineItem item = createPolicyDownload(OfflineItemState.FAILED, null);
++        item.failState = FailState.FILE_BLOCKED;
++        mTestController.mDelegate.mSuppressedProfiles.add(null);
++        mTestController.onItemUpdated(item);
++        Assert.assertNotNull(mTestController.mInfo);
++        mTestController.onDownloadUiPolicyChanged();
++        Assert.assertNotNull(mTestController.mInfo);
++        Assert.assertEquals(0, mTestController.mInfo.downloadCount.inProgress);
++        Assert.assertEquals(1, mTestController.mInfo.downloadCount.blocked);
++    }
++
++    @Test
++    @SmallTest
++    @Feature({"Download"})
++    public void testPolicySuppressesEarlyProfileSpecificFeedback() {
++        OtrProfileId otr = OtrProfileId.getPrimaryOtrProfileId();
++        mTestController.mDelegate.mSuppressedProfiles.add(OtrProfileId.serialize(otr));
++        mTestController.onDownloadStarted(otr);
++        mTestController.verifyMessageGone();
++        mTestController.onDownloadStarted(null);
++        mTestController.verify(MESSAGE_DOWNLOADING_FILE, DESCRIPTION_DOWNLOADING);
++        mTestController.mDelegate.mSuppressedProfiles.add(null);
++        mTestController.onDownloadUiPolicyChanged();
++        mTestController.verifyMessageGone();
+     }
+ 
+     @Test

@@ -1,0 +1,92 @@
+# Copyright (c) 2026 The Reaper Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+substitutions:
+- description: Integrate reviewed Android extension UI, MV3 lifecycle, authenticated native messaging and artifact-parser source with retained desktop behavior
+  regex:
+    re_pattern: '//\ found\ in\ the\ LICENSE\ file\.\
+
+      \
+
+      \#include\ "base/test/metrics/histogram_tester\.h"\
+
+      \#include\ "chrome/browser/extensions/extension_apitest\.h"\
+
+      \#include\ "chrome/browser/profiles/profile\.h"\
+
+      \#include\ "chrome/common/chrome_switches\.h"\
+
+      '
+    replace: '// found in the LICENSE file.
+
+
+      #include "base/test/metrics/histogram_tester.h"
+
+      #include "build/build_config.h"
+
+      #include "chrome/browser/extensions/extension_apitest.h"
+
+      #include "chrome/browser/profiles/profile.h"
+
+      #include "chrome/common/chrome_switches.h"
+
+      '
+- description: Integrate reviewed Android extension UI, MV3 lifecycle, authenticated native messaging and artifact-parser source with retained desktop behavior
+  regex:
+    re_pattern: '\
+
+      \#if\ BUILDFLAG\(ENABLE_EXTENSIONS\)\
+
+      \#include\ "chrome/browser/extensions/api/messaging/native_messaging_test_util\.h"\
+
+      \#endif\
+
+      \
+
+      static_assert\(BUILDFLAG\(ENABLE_EXTENSIONS_CORE\)\);\
+
+      '
+    replace: '
+
+      #if BUILDFLAG(ENABLE_EXTENSIONS)
+
+      #include "chrome/browser/extensions/api/messaging/native_messaging_test_util.h"
+
+      #endif
+
+
+      #if BUILDFLAG(IS_ANDROID)
+
+      #include "base/run_loop.h"
+
+      #include "content/public/test/browser_test_utils.h"
+
+      #include "extensions/browser/background_script_executor.h"
+
+      #include "extensions/browser/process_manager.h"
+
+      #include "extensions/browser/service_worker/service_worker_keepalive.h"
+
+      #endif
+
+
+      static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
+
+      '
+- description: Integrate reviewed Android extension UI, MV3 lifecycle, authenticated native messaging and artifact-parser source with retained desktop behavior
+  regex:
+    re_pattern: '\ \ \ \ ServiceWorkerMessagingTest::SetUpCommandLine\(command_line\);\
+
+      \ \ \}\
+
+      \};\
+
+      \
+
+      //\ Tests\ one\-way\ message\ from\ content\ script\ to\ SW\ extension\ using\
+
+      //\ chrome\.runtime\.sendMessage\.\
+
+      '
+    replace: "    ServiceWorkerMessagingTest::SetUpCommandLine(command_line);\n  }\n};\n\n#if BUILDFLAG(IS_ANDROID)\nIN_PROC_BROWSER_TEST_F(ServiceWorkerMessagingTest,\n                       PortAccountingDropsStoppedWorkerBeforeLateClose) {\n  TestExtensionDir test_dir;\n  test_dir.WriteManifest(R\"({\n    \"name\": \"Port incarnation accounting\",\n    \"manifest_version\": 3,\n    \"version\": \"1.0\",\n    \"background\": {\"service_worker\": \"background.js\"}\n  })\");\n  test_dir.WriteFile(FILE_PATH_LITERAL(\"background.js\"), R\"(\n    self.ports = [];\n    chrome.runtime.onConnect.addListener(port => {\n      self.ports.push(port);\n      port.postMessage('worker connected');\n    });\n    chrome.test.sendMessage('port worker ready');\n  )\");\n  test_dir.WriteFile(FILE_PATH_LITERAL(\"receiver.html\"),\n                    \"<script src='receiver.js'></script>\");\n  test_dir.WriteFile(FILE_PATH_LITERAL(\"receiver.js\"), R\"(\n    window.ports = [];\n    chrome.runtime.onConnect.addListener(port => {\n      window.ports.push(port);\n      port.postMessage('frame connected');\n    });\n    window.ready = true;\n  )\");\n  test_dir.WriteFile(FILE_PATH_LITERAL(\"sender.html\"), \"<p>Sender</p>\");\n  ExtensionTestMessageListener ready(\"port worker ready\");\n  const Extension* extension = LoadExtension(\n      test_dir.UnpackedPath(), {.wait_for_registration_stored = true});\n  ASSERT_TRUE(extension);\n  ASSERT_TRUE(ready.WaitUntilSatisfied());\n  ASSERT_TRUE(\n      NavigateToURLInNewTab(extension->GetResourceURL(\"receiver.html\")));\n  content::WebContents* receiver = GetActiveWebContents();\n  EXPECT_EQ(true, content::EvalJs(receiver, \"window.ready\"));\n  ASSERT_TRUE(NavigateToURLInNewTab(extension->GetResourceURL(\"sender.html\")));\n  content::WebContents* sender = GetActiveWebContents();\n  EXPECT_EQ(true, content::EvalJs(sender, R\"(\n    (async () => {\n      window.disconnected = false;\n      return await new Promise(resolve => {\n        const connected = new Set();\n        window.port = chrome.runtime.connect({name: 'accounting'});\n        window.port.onDisconnect.addListener(() => {\n          window.disconnected = true;\n        });\n        window.port.onMessage.addListener(value => {\n          connected.add(value);\n          if (connected.has('worker connected') &&\n              connected.has('frame connected')) {\n            resolve(true);\n          }\n        });\n      });\n    })();\n  )\"));\n  base::RunLoop().RunUntilIdle();\n  ProcessManager* pm = ProcessManager::Get(profile());\n  const auto old_workers = pm->GetServiceWorkersForExtension(extension->id());\n  ASSERT_EQ(1u, old_workers.size());\n  const auto initial_records =\n      pm->GetServiceWorkerKeepaliveDataForRecords(extension->id());\n  ASSERT_FALSE(initial_records.empty());\n  for (const auto& record : initial_records) {\n    EXPECT_EQ(Activity::MESSAGE_PORT, record.activity_type);\n    EXPECT_TRUE(record.worker_id.start_token == old_workers[0].start_token);\n  }\n\n  StopServiceWorker(*extension);\n  base::RunLoop().RunUntilIdle();\n  EXPECT_TRUE(\n      pm->GetServiceWorkerKeepaliveDataForRecords(extension->id()).empty());\n  // The genuine receiver frame keeps this channel alive after the worker stops.\n  EXPECT_EQ(false, content::EvalJs(sender, \"window.disconnected\"));\n  EXPECT_EQ(\"restarted\", BackgroundScriptExecutor::ExecuteScript(\n                             profile(), extension->id(),\n                             \"chrome.test.sendScriptResult('restarted');\",\n                             BackgroundScriptExecutor::ResultCapture::\n                                 kSendScriptResult));\n  base::RunLoop().RunUntilIdle();\n  const auto new_workers = pm->GetServiceWorkersForExtension(extension->id());\n  ASSERT_EQ(1u, new_workers.size());\n  EXPECT_TRUE(new_workers[0].start_token != old_workers[0].start_token);\n  ServiceWorkerKeepalive new_owner(\n      profile(), new_workers[0],\n      content::ServiceWorkerExternalRequestTimeoutType::kDefault,\n      Activity::EVENT, \"new port incarnation\");\n  ASSERT_TRUE(content::ExecJs(sender, \"window.port.disconnect();\"));\n  base::RunLoop().RunUntilIdle();\n  const auto remaining =\n      pm->GetServiceWorkerKeepaliveDataForRecords(extension->id());\n  ASSERT_EQ(1u, remaining.size());\n  EXPECT_EQ(\"new port incarnation\", remaining[0].extra_data);\n  EXPECT_TRUE(remaining[0].worker_id.start_token == new_workers[0].start_token);\n}\nIN_PROC_BROWSER_TEST_F(ServiceWorkerMessagingTest,\n                       LivePortDisconnectBalancesCurrentWorkerRecords) {\n  TestExtensionDir test_dir;\n  test_dir.WriteManifest(R\"({\n    \"name\": \"Live port accounting\",\n    \"manifest_version\": 3,\n    \"version\": \"1.0\",\n    \"background\": {\"service_worker\": \"background.js\"}\n  })\");\n  test_dir.WriteFile(FILE_PATH_LITERAL(\"background.js\"), R\"(\n    chrome.runtime.onConnect.addListener(port => {\n      self.port = port;\n      port.onMessage.addListener(message => {\n        if (message === 'disconnect') {\n          port.disconnect();\n        }\n      });\n      port.postMessage('connected');\n    });\n    chrome.test.sendMessage('live port worker ready');\n  )\");\n  test_dir.WriteFile(FILE_PATH_LITERAL(\"sender.html\"), \"<p>Sender</p>\");\n  ExtensionTestMessageListener ready(\"live port worker ready\");\n  const Extension* extension = LoadExtension(\n      test_dir.UnpackedPath(), {.wait_for_registration_stored = true});\n  ASSERT_TRUE(extension);\n  ASSERT_TRUE(ready.WaitUntilSatisfied());\n  base::RunLoop().RunUntilIdle();\n  ProcessManager* pm = ProcessManager::Get(profile());\n  EXPECT_TRUE(\n      pm->GetServiceWorkerKeepaliveDataForRecords(extension->id()).empty());\n\n  ASSERT_TRUE(NavigateToURLInNewTab(extension->GetResourceURL(\"sender.html\")));\n  content::WebContents* sender = GetActiveWebContents();\n  EXPECT_EQ(true, content::EvalJs(sender, R\"(\n    (async () => {\n      return await new Promise(resolve => {\n        window.port = chrome.runtime.connect({name: 'live accounting'});\n        window.disconnected = new Promise(disconnected => {\n          window.port.onDisconnect.addListener(() => disconnected(true));\n        });\n        window.port.onMessage.addListener(message => {\n          if (message === 'connected') {\n            resolve(true);\n          }\n        });\n      });\n    })();\n  )\"));\n  base::RunLoop().RunUntilIdle();\n  const auto workers = pm->GetServiceWorkersForExtension(extension->id());\n  ASSERT_EQ(1u, workers.size());\n  const auto connected_records =\n      pm->GetServiceWorkerKeepaliveDataForRecords(extension->id());\n  ASSERT_FALSE(connected_records.empty());\n  for (const auto& record : connected_records) {\n    EXPECT_EQ(Activity::MESSAGE_PORT, record.activity_type);\n    EXPECT_TRUE(record.worker_id.start_token == workers[0].start_token);\n  }\n  {\n    ServiceWorkerKeepalive unrelated_owner(\n        profile(), workers[0],\n        content::ServiceWorkerExternalRequestTimeoutType::kDefault,\n        Activity::EVENT, \"unrelated live port owner\");\n    EXPECT_EQ(true, content::EvalJs(sender, R\"(\n      window.port.postMessage('disconnect');\n      window.disconnected;\n    )\"));\n    base::RunLoop().RunUntilIdle();\n    const auto remaining =\n        pm->GetServiceWorkerKeepaliveDataForRecords(extension->id());\n    ASSERT_EQ(1u, remaining.size());\n    EXPECT_EQ(Activity::EVENT, remaining[0].activity_type);\n    EXPECT_EQ(\"unrelated live port owner\", remaining[0].extra_data);\n    EXPECT_TRUE(remaining[0].worker_id.start_token == workers[0].start_token);\n    const auto current_workers =\n        pm->GetServiceWorkersForExtension(extension->id());\n    ASSERT_EQ(1u, current_workers.size());\n    EXPECT_TRUE(current_workers[0].start_token == workers[0].start_token);\n  }\n  EXPECT_TRUE(\n      pm->GetServiceWorkerKeepaliveDataForRecords(extension->id()).empty());\n}\n\n#endif\n\n// Tests one-way message from content script to SW extension using\n// chrome.runtime.sendMessage.\n"

@@ -6,6 +6,7 @@
 #ifndef BRAVE_BROWSER_BRAVE_BROWSER_PROCESS_IMPL_H_
 #define BRAVE_BROWSER_BRAVE_BROWSER_PROCESS_IMPL_H_
 
+#include "brave/components/ntp_background_images/buildflags/buildflags.h"
 #include <memory>
 
 #include "base/memory/scoped_refptr.h"
@@ -49,9 +50,11 @@ namespace debounce {
 class DebounceComponentInstaller;
 }  // namespace debounce
 
+#if !BUILDFLAG(IS_ANDROID)
 namespace misc_metrics {
 class ProcessMiscMetrics;
 }  // namespace misc_metrics
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 namespace request_otr {
 #if BUILDFLAG(ENABLE_REQUEST_OTR)
@@ -63,10 +66,12 @@ namespace ntp_background_images {
 class NTPBackgroundImagesService;
 }  // namespace ntp_background_images
 
+#if !BUILDFLAG(IS_ANDROID)
 namespace p3a {
 class HistogramsBraveizer;
 class P3AService;
 }  // namespace p3a
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 namespace tor {
 class BraveTorClientUpdater;
@@ -90,7 +95,7 @@ class AIChatAgentProfileManager;
 #endif
 }  // namespace ai_chat
 
-#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_ANDROID)
+#if BUILDFLAG(IS_WIN)
 class DayZeroBrowserUIExptManager;
 #endif
 
@@ -127,8 +132,12 @@ class BraveBrowserProcessImpl : public BraveBrowserProcess,
   tor::BraveTorPluggableTransportUpdater* tor_pluggable_transport_updater()
       override;
 #endif
+#if !BUILDFLAG(IS_ANDROID)
   p3a::P3AService* p3a_service() override;
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
   brave::BraveReferralsService* brave_referrals_service() override;
+#endif  // !BUILDFLAG(IS_ANDROID)
 #if BUILDFLAG(ENABLE_BRAVE_STATS_UPDATER)
   brave_stats::BraveStatsUpdater* brave_stats_updater() override;
 #endif
@@ -136,8 +145,10 @@ class BraveBrowserProcessImpl : public BraveBrowserProcess,
   brave_ads::BraveStatsHelper* ads_brave_stats_helper() override;
   brave_ads::ResourceComponent* resource_component() override;
 #endif  // BUILDFLAG(ENABLE_BRAVE_ADS)
+#if BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
   ntp_background_images::NTPBackgroundImagesService*
   ntp_background_images_service() override;
+#endif  // BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
 #if BUILDFLAG(ENABLE_SPEEDREADER)
   speedreader::SpeedreaderRewriterService* speedreader_rewriter_service()
       override;
@@ -145,7 +156,9 @@ class BraveBrowserProcessImpl : public BraveBrowserProcess,
 #if BUILDFLAG(ENABLE_BRAVE_VPN_V1)
   brave_vpn::BraveVPNConnectionManager* brave_vpn_connection_manager() override;
 #endif
+#if !BUILDFLAG(IS_ANDROID)
   misc_metrics::ProcessMiscMetrics* process_misc_metrics() override;
+#endif  // !BUILDFLAG(IS_ANDROID)
 
  private:
   // BrowserProcessImpl overrides:
@@ -195,16 +208,22 @@ class BraveBrowserProcessImpl : public BraveBrowserProcess,
 #if BUILDFLAG(ENABLE_BRAVE_STATS_UPDATER)
   std::unique_ptr<brave_stats::BraveStatsUpdater> brave_stats_updater_;
 #endif
+#if !BUILDFLAG(IS_ANDROID)
   std::unique_ptr<brave::BraveReferralsService> brave_referrals_service_;
+#endif  // !BUILDFLAG(IS_ANDROID)
 #if BUILDFLAG(ENABLE_TOR)
   std::unique_ptr<tor::BraveTorClientUpdater> tor_client_updater_;
   std::unique_ptr<tor::BraveTorPluggableTransportUpdater>
       tor_pluggable_transport_updater_;
 #endif
+#if !BUILDFLAG(IS_ANDROID)
   scoped_refptr<p3a::P3AService> p3a_service_;
   scoped_refptr<p3a::HistogramsBraveizer> histogram_braveizer_;
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
   std::unique_ptr<ntp_background_images::NTPBackgroundImagesService>
       ntp_background_images_service_;
+#endif  // BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
 
 #if BUILDFLAG(ENABLE_BRAVE_ADS)
   std::unique_ptr<brave_ads::ResourceComponent> resource_component_;
@@ -221,9 +240,11 @@ class BraveBrowserProcessImpl : public BraveBrowserProcess,
       brave_vpn_connection_manager_;
 #endif
 
+#if !BUILDFLAG(IS_ANDROID)
   std::unique_ptr<misc_metrics::ProcessMiscMetrics> process_misc_metrics_;
+#endif  // !BUILDFLAG(IS_ANDROID)
 
-#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_ANDROID)
+#if BUILDFLAG(IS_WIN)
   std::unique_ptr<DayZeroBrowserUIExptManager>
       day_zero_browser_ui_expt_manager_;
 #endif

@@ -23,8 +23,6 @@ import org.chromium.chrome.browser.toolbar.adaptive.AdaptiveToolbarButtonVariant
 import org.chromium.chrome.browser.toolbar.adaptive.BraveBookmarksButtonController;
 import org.chromium.chrome.browser.toolbar.adaptive.BraveDownloadsButtonController;
 import org.chromium.chrome.browser.toolbar.adaptive.BraveHistoryButtonController;
-import org.chromium.chrome.browser.toolbar.adaptive.BraveLeoButtonController;
-import org.chromium.chrome.browser.toolbar.adaptive.BraveWalletButtonController;
 import org.chromium.ui.modaldialog.ModalDialogManager;
 
 /**
@@ -38,7 +36,6 @@ public class BraveAdaptiveToolbarUiCoordinator extends AdaptiveToolbarUiCoordina
     @Nullable private Context mContext;
     @Nullable private ActivityTabProvider mActivityTabProvider;
     @Nullable private NonNullObservableSupplier<ModalDialogManager> mModalDialogManagerSupplier;
-    @Nullable private MonotonicObservableSupplier<Profile> mProfileSupplier;
     @Nullable private AdaptiveToolbarButtonController mAdaptiveToolbarButtonController;
 
     public BraveAdaptiveToolbarUiCoordinator(
@@ -52,17 +49,18 @@ public class BraveAdaptiveToolbarUiCoordinator extends AdaptiveToolbarUiCoordina
      * Initialize Brave-specific adaptive toolbar components.
      *
      * @param bookmarkManagerOpener The bookmark manager opener for the `Bookmarks` button.
+     * @param profileSupplier The profile supplier owned by the root UI coordinator.
      */
-    public void initializeBrave(BookmarkManagerOpener bookmarkManagerOpener) {
+    public void initializeBrave(
+            BookmarkManagerOpener bookmarkManagerOpener,
+            MonotonicObservableSupplier<Profile> profileSupplier) {
         assert mContext != null
                         && mActivityTabProvider != null
                         && mModalDialogManagerSupplier != null
-                        && mProfileSupplier != null
                 : "Bytecode changes were not applied!";
         if (mContext == null
                 || mActivityTabProvider == null
-                || mModalDialogManagerSupplier == null
-                || mProfileSupplier == null) {
+                || mModalDialogManagerSupplier == null) {
             return;
         }
         assert mAdaptiveToolbarButtonController != null
@@ -75,7 +73,7 @@ public class BraveAdaptiveToolbarUiCoordinator extends AdaptiveToolbarUiCoordina
                         mContext,
                         AppCompatResources.getDrawable(mContext, R.drawable.ic_product_bookmarks),
                         mActivityTabProvider,
-                        mProfileSupplier,
+                        profileSupplier,
                         mModalDialogManagerSupplier.get(),
                         bookmarkManagerOpener);
         mAdaptiveToolbarButtonController.addButtonVariant(
@@ -86,7 +84,7 @@ public class BraveAdaptiveToolbarUiCoordinator extends AdaptiveToolbarUiCoordina
                         mContext,
                         AppCompatResources.getDrawable(mContext, R.drawable.ic_history),
                         mActivityTabProvider,
-                        mProfileSupplier,
+                        profileSupplier,
                         mModalDialogManagerSupplier.get());
         mAdaptiveToolbarButtonController.addButtonVariant(
                 AdaptiveToolbarButtonVariant.HISTORY, historyButtonController);
@@ -96,30 +94,10 @@ public class BraveAdaptiveToolbarUiCoordinator extends AdaptiveToolbarUiCoordina
                         mContext,
                         AppCompatResources.getDrawable(mContext, R.drawable.ic_download),
                         mActivityTabProvider,
-                        mProfileSupplier,
+                        profileSupplier,
                         mModalDialogManagerSupplier.get());
         mAdaptiveToolbarButtonController.addButtonVariant(
                 AdaptiveToolbarButtonVariant.DOWNLOADS, downloadsButtonController);
 
-        var leoButtonController =
-                new BraveLeoButtonController(
-                        mContext,
-                        AppCompatResources.getDrawable(mContext, R.drawable.ic_product_brave_leo),
-                        mActivityTabProvider,
-                        mProfileSupplier,
-                        mModalDialogManagerSupplier.get());
-        mAdaptiveToolbarButtonController.addButtonVariant(
-                AdaptiveToolbarButtonVariant.LEO, leoButtonController);
-
-        var walletButtonController =
-                new BraveWalletButtonController(
-                        mContext,
-                        AppCompatResources.getDrawable(
-                                mContext, R.drawable.ic_product_brave_wallet),
-                        mActivityTabProvider,
-                        mProfileSupplier,
-                        mModalDialogManagerSupplier.get());
-        mAdaptiveToolbarButtonController.addButtonVariant(
-                AdaptiveToolbarButtonVariant.WALLET, walletButtonController);
     }
 }

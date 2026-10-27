@@ -1,0 +1,1126 @@
+diff --git a/chrome/browser/extensions/api/sessions/sessions_apitest.cc b/chrome/browser/extensions/api/sessions/sessions_apitest.cc
+--- a/chrome/browser/extensions/api/sessions/sessions_apitest.cc
++++ b/chrome/browser/extensions/api/sessions/sessions_apitest.cc
+@@ -6,6 +6,7 @@
+ 
+ #include <array>
+ #include <memory>
++#include <set>
+ #include <utility>
+ 
+ #include "base/command_line.h"
+@@ -75,11 +76,23 @@
+ #if BUILDFLAG(IS_ANDROID)
+ #include "base/android/callback_android.h"
+ #include "base/android/jni_android.h"
++#include "base/test/run_until.h"
+ #include "base/test/scoped_feature_list.h"
++#include "chrome/browser/extensions/window_controller.h"
+ #include "chrome/browser/flags/android/chrome_feature_list.h"
++#include "chrome/browser/sessions/session_restore.h"
+ #include "chrome/browser/ui/android/tab_model/tab_model.h"
++#include "chrome/browser/ui/browser_window/public/browser_window_interface_iterator.h"
++#include "components/sessions/core/serialized_navigation_entry.h"
++#include "components/sessions/core/session_types.h"
++#include "components/sync_sessions/open_tabs_ui_delegate.h"
++#include "components/tab_groups/tab_group_visual_data.h"
++#include "content/public/browser/navigation_controller.h"
++#include "content/public/browser/navigation_entry.h"
++#include "content/public/test/test_navigation_observer.h"
+ 
+ // Must come after all headers that specialize FromJniType() / ToJniType().
++#include "chrome/test/test_support_jni_headers/PopupCreatorImpl_jni.h"
+ #include "chrome/test/test_support_jni_headers/TabWindowManagerNativeTestSupport_jni.h"
+ #endif  // BUILDFLAG(IS_ANDROID)
+ 
+@@ -533,6 +546,602 @@
+             tab_list3->GetTab(0)->GetContents()->GetVisibleURL());
+ }
+ 
++#if BUILDFLAG(IS_ANDROID)
++// Exercise the real native tab history together with the real Java
++// closed-window manager. Only native entry timestamps/IDs are adjusted to make
++// ordering and numeric namespace collisions deterministic, without sleeps or a
++// fake backend.
++class ExtensionSessionsMixedHistoryTest : public ExtensionSessionsTest {
++ protected:
++  void CreateMixedHistory(bool grouped_split = false, bool extra_tab = false) {
++    auto* service = TabRestoreServiceFactory::GetForProfile(GetProfile());
++    ASSERT_TRUE(service);
++    ASSERT_TRUE(service->entries().empty());
++    NavigateToURLInNewTab(GURL("chrome://version/"));
++    CloseTabForWebContents(GetWebContentsAt(1));
++    ASSERT_EQ(1u, service->entries().size());
++    ASSERT_EQ(sessions::tab_restore::Type::TAB,
++              service->entries().front()->type);
++
++    BrowserWindowInterface* second =
++        CreateBrowserWindowWithType(BrowserWindowInterface::TYPE_NORMAL);
++    ASSERT_TRUE(second);
++    auto* tabs = TabListInterface::From(second);
++    ASSERT_TRUE(tabs);
++    ASSERT_EQ(1, tabs->GetTabCount());
++    auto* contents = tabs->GetTab(0)->GetContents();
++    ASSERT_TRUE(NavigateToURL(contents, GURL("chrome://version/")));
++    ASSERT_TRUE(NavigateToURL(contents, GURL("chrome://credits/")));
++    window_navigation_count_ = contents->GetController().GetEntryCount();
++    ASSERT_GE(window_navigation_count_, 2);
++    if (grouped_split || extra_tab) {
++      tabs->OpenTab(GURL("chrome://version/"), -1);
++      ASSERT_EQ(2, tabs->GetTabCount());
++      ASSERT_TRUE(content::WaitForLoadStop(tabs->GetTab(1)->GetContents()));
++    }
++    if (grouped_split) {
++      std::vector<tabs::TabHandle> members = {tabs->GetTab(0)->GetHandle(),
++                                              tabs->GetTab(1)->GetHandle()};
++      group_id_ = tabs->CreateTabGroup(members);
++      ASSERT_TRUE(group_id_);
++      tabs->SetTabGroupVisualData(
++          *group_id_,
++          tab_groups::TabGroupVisualData(u"Restored group",
++                                         tab_groups::TabGroupColorId::kBlue));
++      tabs->ActivateTab(members[0]);
++      split_id_ = tabs->CreateSplit(members);
++      ASSERT_TRUE(split_id_);
++    }
++    CloseWindowAndWait(second);
++
++    auto result = utils::RunFunctionAndReturnSingleResult(
++        CreateFunction<SessionsGetRecentlyClosedFunction>(true).get(), "[]",
++        GetProfile());
++    ASSERT_TRUE(result);
++    ASSERT_TRUE(result->is_list());
++    ASSERT_EQ(2u, result->GetList().size());
++    for (const auto& entry : result->GetList()) {
++      if (const auto* window = entry.GetDict().FindDict("window")) {
++        window_session_id_ = utils::GetString(*window, "sessionId");
++        const auto* closed_tabs = window->FindList("tabs");
++        ASSERT_TRUE(closed_tabs);
++        for (const auto& closed_tab : *closed_tabs) {
++          child_session_ids_.push_back(
++              utils::GetString(closed_tab.GetDict(), "sessionId"));
++        }
++      }
++    }
++    constexpr char prefix[] = "android-window:";
++    ASSERT_TRUE(window_session_id_.starts_with(prefix));
++    const auto separator = window_session_id_.find(':', sizeof(prefix) - 1);
++    ASSERT_NE(std::string::npos, separator);
++    ASSERT_TRUE(base::StringToInt(
++        window_session_id_.substr(sizeof(prefix) - 1,
++                                  separator - (sizeof(prefix) - 1)),
++        &window_instance_id_));
++    ASSERT_TRUE(base::StringToInt64(window_session_id_.substr(separator + 1),
++                                    &window_closure_time_));
++    ASSERT_EQ(1u, service->entries().size());
++  }
++
++  std::optional<base::Value> Restore(const std::string& arguments) {
++    return utils::RunFunctionAndReturnSingleResult(
++        CreateFunction<SessionsRestoreFunction>(true).get(), arguments,
++        GetProfile());
++  }
++
++  std::string window_session_id_;
++  int window_instance_id_ = -1;
++  int window_navigation_count_ = 0;
++  int64_t window_closure_time_ = 0;
++  std::vector<std::string> child_session_ids_;
++  std::optional<tab_groups::TabGroupId> group_id_;
++  std::optional<split_tabs::SplitTabId> split_id_;
++};
++
++IN_PROC_BROWSER_TEST_F(ExtensionSessionsMixedHistoryTest,
++                       WindowIdDoesNotRestoreCollidingNativeTab) {
++  ASSERT_NO_FATAL_FAILURE(CreateMixedHistory());
++  auto* service = TabRestoreServiceFactory::GetForProfile(GetProfile());
++  ASSERT_GT(window_instance_id_, 0);
++  service->entries().front()->id =
++      SessionID::FromSerializedValue(window_instance_id_);
++  BrowserCreatedWaiter waiter;
++  auto result = Restore("[\"" + window_session_id_ + "\"]");
++  ASSERT_TRUE(result);
++  ASSERT_TRUE(result->GetDict().FindDict("window"));
++  BrowserWindowInterface* restored = waiter.Wait();
++  ASSERT_TRUE(restored);
++  auto* contents = TabListInterface::From(restored)->GetTab(0)->GetContents();
++  ASSERT_TRUE(content::WaitForLoadStop(contents));
++  EXPECT_EQ(GURL("chrome://credits/"), contents->GetURL());
++  EXPECT_EQ(window_navigation_count_,
++            contents->GetController().GetEntryCount());
++  ASSERT_EQ(1u, service->entries().size());
++  EXPECT_EQ(window_instance_id_, service->entries().front()->id.id());
++}
++
++IN_PROC_BROWSER_TEST_F(ExtensionSessionsMixedHistoryTest,
++                       LegacyWindowIdFallsBackAfterNativeMiss) {
++  ASSERT_NO_FATAL_FAILURE(CreateMixedHistory());
++  auto* service = TabRestoreServiceFactory::GetForProfile(GetProfile());
++  service->entries().front()->id =
++      SessionID::FromSerializedValue(window_instance_id_ + 1000);
++  service->entries().front()->original_id = service->entries().front()->id;
++  BrowserCreatedWaiter waiter;
++  auto result =
++      Restore("[\"" + base::NumberToString(window_instance_id_) + "\"]");
++  ASSERT_TRUE(result);
++  ASSERT_TRUE(result->GetDict().FindDict("window"));
++  ASSERT_TRUE(waiter.Wait());
++  ASSERT_EQ(1u, service->entries().size());
++  EXPECT_EQ(window_instance_id_ + 1000, service->entries().front()->id.id());
++}
++
++IN_PROC_BROWSER_TEST_F(ExtensionSessionsMixedHistoryTest,
++                       MostRecentWindowWinsOverOlderNativeTab) {
++  ASSERT_NO_FATAL_FAILURE(CreateMixedHistory());
++  auto* service = TabRestoreServiceFactory::GetForProfile(GetProfile());
++  service->entries().front()->timestamp = base::Time::UnixEpoch();
++  const SessionID native_id = service->entries().front()->id;
++  BrowserCreatedWaiter waiter;
++  auto result = Restore("[]");
++  ASSERT_TRUE(result);
++  ASSERT_TRUE(result->GetDict().FindDict("window"));
++  ASSERT_TRUE(waiter.Wait());
++  ASSERT_EQ(1u, service->entries().size());
++  EXPECT_EQ(native_id, service->entries().front()->id);
++}
++
++IN_PROC_BROWSER_TEST_F(ExtensionSessionsMixedHistoryTest,
++                       MostRecentNativeTabWinsOverOlderWindow) {
++  ASSERT_NO_FATAL_FAILURE(CreateMixedHistory());
++  auto* service = TabRestoreServiceFactory::GetForProfile(GetProfile());
++  service->entries().front()->timestamp = base::Time::Now() + base::Days(1);
++  auto result = Restore("[]");
++  ASSERT_TRUE(result);
++  const auto* tab = result->GetDict().FindDict("tab");
++  ASSERT_TRUE(tab);
++  EXPECT_EQ("chrome://version/", utils::GetString(*tab, "url"));
++  EXPECT_TRUE(service->entries().empty());
++  auto remaining = utils::RunFunctionAndReturnSingleResult(
++      CreateFunction<SessionsGetRecentlyClosedFunction>(true).get(), "[]",
++      GetProfile());
++  ASSERT_TRUE(remaining);
++  ASSERT_EQ(1u, remaining->GetList().size());
++  const auto* window = remaining->GetList()[0].GetDict().FindDict("window");
++  ASSERT_TRUE(window);
++  EXPECT_EQ(window_session_id_, utils::GetString(*window, "sessionId"));
++}
++
++IN_PROC_BROWSER_TEST_F(ExtensionSessionsMixedHistoryTest,
++                       RestoredWindowRetainsGroupSplitAndConsumesHistory) {
++  ASSERT_NO_FATAL_FAILURE(CreateMixedHistory(/*grouped_split=*/true));
++  BrowserCreatedWaiter waiter;
++  auto result = Restore("[\"" + window_session_id_ + "\"]");
++  ASSERT_TRUE(result);
++  ASSERT_TRUE(result->GetDict().FindDict("window"));
++  auto* restored = waiter.Wait();
++  ASSERT_TRUE(restored);
++  auto* tabs = TabListInterface::From(restored);
++  ASSERT_TRUE(tabs);
++  ASSERT_EQ(2, tabs->GetTabCount());
++  EXPECT_EQ(group_id_, tabs->GetTab(0)->GetGroup());
++  EXPECT_EQ(group_id_, tabs->GetTab(1)->GetGroup());
++  EXPECT_EQ(split_id_, tabs->GetTab(0)->GetSplit());
++  EXPECT_EQ(split_id_, tabs->GetTab(1)->GetSplit());
++  auto visual_data = tabs->GetTabGroupVisualData(*group_id_);
++  ASSERT_TRUE(visual_data);
++  EXPECT_EQ(u"Restored group", visual_data->title());
++  EXPECT_EQ(tab_groups::TabGroupColorId::kBlue, visual_data->color());
++  auto* contents = tabs->GetTab(0)->GetContents();
++  ASSERT_TRUE(content::WaitForLoadStop(contents));
++  EXPECT_EQ(window_navigation_count_,
++            contents->GetController().GetEntryCount());
++  auto remaining = utils::RunFunctionAndReturnSingleResult(
++      CreateFunction<SessionsGetRecentlyClosedFunction>(true).get(), "[]",
++      GetProfile());
++  ASSERT_TRUE(remaining);
++  ASSERT_EQ(1u, remaining->GetList().size());
++  EXPECT_TRUE(remaining->GetList()[0].GetDict().FindDict("tab"));
++}
++
++IN_PROC_BROWSER_TEST_F(ExtensionSessionsMixedHistoryTest,
++                       SavedChildTabRetainsHistoryAndLeavesItsPeerClosed) {
++  ASSERT_NO_FATAL_FAILURE(CreateMixedHistory(false, /*extra_tab=*/true));
++  ASSERT_EQ(2u, child_session_ids_.size());
++  EXPECT_NE(child_session_ids_[0], child_session_ids_[1]);
++  auto result = Restore("[\"" + child_session_ids_[0] + "\"]");
++  ASSERT_TRUE(result);
++  const auto* tab = result->GetDict().FindDict("tab");
++  ASSERT_TRUE(tab);
++  EXPECT_EQ("chrome://credits/", utils::GetString(*tab, "url"));
++  ASSERT_EQ(2, GetTabCount());
++  auto* contents = GetActiveWebContents();
++  ASSERT_TRUE(contents);
++  ASSERT_TRUE(content::WaitForLoadStop(contents));
++  EXPECT_EQ(window_navigation_count_,
++            contents->GetController().GetEntryCount());
++  auto remaining = utils::RunFunctionAndReturnSingleResult(
++      CreateFunction<SessionsGetRecentlyClosedFunction>(true).get(), "[]",
++      GetProfile());
++  ASSERT_TRUE(remaining);
++  ASSERT_EQ(2u, remaining->GetList().size());
++  const base::DictValue* closed_window = nullptr;
++  for (const auto& entry : remaining->GetList()) {
++    if (const auto* window = entry.GetDict().FindDict("window"))
++      closed_window = window;
++  }
++  ASSERT_TRUE(closed_window);
++  const auto* children = closed_window->FindList("tabs");
++  ASSERT_TRUE(children);
++  ASSERT_EQ(1u, children->size());
++  EXPECT_EQ(child_session_ids_[1],
++            utils::GetString((*children)[0].GetDict(), "sessionId"));
++}
++
++IN_PROC_BROWSER_TEST_F(ExtensionSessionsMixedHistoryTest,
++                       StaleClosureIdentityDoesNotConsumeCurrentHistory) {
++  ASSERT_NO_FATAL_FAILURE(CreateMixedHistory());
++  const std::string stale_id =
++      "android-window:" + base::NumberToString(window_instance_id_) + ":" +
++      base::NumberToString(window_closure_time_ + 1);
++  std::string error = utils::RunFunctionAndReturnError(
++      CreateFunction<SessionsRestoreFunction>(true).get(),
++      "[\"" + stale_id + "\"]", GetProfile());
++  EXPECT_FALSE(error.empty());
++  auto remaining = utils::RunFunctionAndReturnSingleResult(
++      CreateFunction<SessionsGetRecentlyClosedFunction>(true).get(), "[]",
++      GetProfile());
++  ASSERT_TRUE(remaining);
++  ASSERT_EQ(2u, remaining->GetList().size());
++}
++
++class ExtensionSessionsLazyHistoryTest
++    : public ExtensionSessionsMixedHistoryTest {
++ public:
++  ExtensionSessionsLazyHistoryTest() {
++    feature_list_.Reset();
++    feature_list_.InitWithFeatures({},
++                                   {chrome::android::kLoadAllTabsAtStartup});
++  }
++};
++
++IN_PROC_BROWSER_TEST_F(ExtensionSessionsLazyHistoryTest,
++                       RestoredWindowResultIncludesLazyTabs) {
++  ASSERT_NO_FATAL_FAILURE(CreateMixedHistory(false, /*extra_tab=*/true));
++  BrowserCreatedWaiter waiter;
++  auto result = Restore("[\"" + window_session_id_ + "\"]");
++  ASSERT_TRUE(result);
++  const auto* window = result->GetDict().FindDict("window");
++  ASSERT_TRUE(window);
++  const auto* tabs = window->FindList("tabs");
++  ASSERT_TRUE(tabs);
++  EXPECT_EQ(2u, tabs->size());
++  auto* restored = waiter.Wait();
++  ASSERT_TRUE(restored);
++  EXPECT_EQ(2, TabListInterface::From(restored)->GetTabCount());
++}
++
++IN_PROC_BROWSER_TEST_F(ExtensionSessionsLazyHistoryTest,
++                       SessionsOnlyPermissionDoesNotExposeLazyTabMetadata) {
++  ASSERT_NO_FATAL_FAILURE(CreateMixedHistory(false, /*extra_tab=*/true));
++  extension_ = ExtensionBuilder("Sessions only")
++                   .AddAPIPermissions({"sessions"})
++                   .SetLocation(mojom::ManifestLocation::kInternal)
++                   .Build();
++  BrowserCreatedWaiter waiter;
++  auto result = Restore("[\"" + window_session_id_ + "\"]");
++  ASSERT_TRUE(result);
++  const auto* window = result->GetDict().FindDict("window");
++  ASSERT_TRUE(window);
++  const auto* tabs = window->FindList("tabs");
++  ASSERT_TRUE(tabs);
++  ASSERT_EQ(2u, tabs->size());
++  for (const auto& entry : *tabs) {
++    const auto& tab = entry.GetDict();
++    EXPECT_FALSE(tab.contains("url"));
++    EXPECT_FALSE(tab.contains("title"));
++    EXPECT_FALSE(tab.contains("favIconUrl"));
++    EXPECT_FALSE(tab.contains("pendingUrl"));
++    EXPECT_FALSE(tab.contains("sessionId"));
++  }
++  ASSERT_TRUE(waiter.Wait());
++}
++
++IN_PROC_BROWSER_TEST_F(ExtensionSessionsMixedHistoryTest,
++                       MalformedWindowIdsDoNotConsumeHistory) {
++  ASSERT_NO_FATAL_FAILURE(CreateMixedHistory());
++  auto* service = TabRestoreServiceFactory::GetForProfile(GetProfile());
++  const SessionID native_id = service->entries().front()->id;
++  for (const char* id :
++       {"android-window:", "android-window:-1", "android-window:2147483648:1",
++        "android-window:nope:1", "android-window:1:-1", "android-window:1:0",
++        "android-tab:1:0:2", "android-window:1:9223372036854775808",
++        "android-tab:1:1:-1", "android-tab:1:1:2:3"}) {
++    std::string error = utils::RunFunctionAndReturnError(
++        CreateFunction<SessionsRestoreFunction>(true).get(),
++        "[\"" + std::string(id) + "\"]", GetProfile());
++    EXPECT_FALSE(error.empty());
++    ASSERT_EQ(1u, service->entries().size());
++    EXPECT_EQ(native_id, service->entries().front()->id);
++  }
++}
++// Keep both closed instances distinct: create both live windows before closing
++// either, so allocation cannot reuse a formerly closed instance slot.
++class ExtensionSessionsMultipleWindowsTest : public ExtensionSessionsTest {
++ protected:
++  void CreateHistories() {
++    NavigateToURLInNewTab(GURL("chrome://version/"));
++    CloseTabForWebContents(GetWebContentsAt(1));
++    auto* first =
++        CreateBrowserWindowWithType(BrowserWindowInterface::TYPE_NORMAL);
++    auto* second =
++        CreateBrowserWindowWithType(BrowserWindowInterface::TYPE_NORMAL);
++    ASSERT_TRUE(first);
++    ASSERT_TRUE(second);
++    ASSERT_NE(first, second);
++    ASSERT_TRUE(
++        NavigateToURL(TabListInterface::From(first)->GetTab(0)->GetContents(),
++                      GURL("chrome://version/")));
++    ASSERT_TRUE(
++        NavigateToURL(TabListInterface::From(second)->GetTab(0)->GetContents(),
++                      GURL("chrome://credits/")));
++    CloseWindowAndWait(first);
++    CloseWindowAndWait(second);
++  }
++
++  std::optional<base::Value> List(const std::string& arguments = "[]") {
++    return utils::RunFunctionAndReturnSingleResult(
++        CreateFunction<SessionsGetRecentlyClosedFunction>(true).get(),
++        arguments, GetProfile());
++  }
++};
++
++IN_PROC_BROWSER_TEST_F(ExtensionSessionsMultipleWindowsTest,
++                       ListsBothWindowsAndNativeTabWithDistinctChildren) {
++  ASSERT_NO_FATAL_FAILURE(CreateHistories());
++  auto result = List();
++  ASSERT_TRUE(result);
++  ASSERT_EQ(3u, result->GetList().size());
++  std::vector<std::string> window_ids;
++  std::vector<std::string> child_ids;
++  size_t native_count = 0;
++  for (const auto& session : result->GetList()) {
++    const auto* window = session.GetDict().FindDict("window");
++    if (!window) {
++      ASSERT_TRUE(session.GetDict().FindDict("tab"));
++      ++native_count;
++      continue;
++    }
++    window_ids.push_back(utils::GetString(*window, "sessionId"));
++    const auto* tabs = window->FindList("tabs");
++    ASSERT_TRUE(tabs);
++    ASSERT_EQ(1u, tabs->size());
++    child_ids.push_back(utils::GetString((*tabs)[0].GetDict(), "sessionId"));
++  }
++  EXPECT_EQ(1u, native_count);
++  ASSERT_EQ(2u, window_ids.size());
++  EXPECT_NE(window_ids[0], window_ids[1]);
++  EXPECT_NE(child_ids[0], child_ids[1]);
++}
++
++IN_PROC_BROWSER_TEST_F(ExtensionSessionsMultipleWindowsTest,
++                       MaxResultsBoundsTheMergedHistoryAndAllowsZero) {
++  ASSERT_NO_FATAL_FAILURE(CreateHistories());
++  auto* service = TabRestoreServiceFactory::GetForProfile(GetProfile());
++  ASSERT_EQ(1u, service->entries().size());
++  service->entries().front()->timestamp = base::Time::Now() + base::Days(1);
++  auto empty = List("[{\"maxResults\":0}]");
++  ASSERT_TRUE(empty);
++  EXPECT_TRUE(empty->GetList().empty());
++  auto one = List("[{\"maxResults\":1}]");
++  ASSERT_TRUE(one);
++  ASSERT_EQ(1u, one->GetList().size());
++  EXPECT_TRUE(one->GetList()[0].GetDict().FindDict("tab"));
++  auto two = List("[{\"maxResults\":2}]");
++  ASSERT_TRUE(two);
++  ASSERT_EQ(2u, two->GetList().size());
++  EXPECT_TRUE(two->GetList()[0].GetDict().FindDict("tab"));
++  EXPECT_TRUE(two->GetList()[1].GetDict().FindDict("window"));
++  auto all = List();
++  ASSERT_TRUE(all);
++  EXPECT_EQ(3u, all->GetList().size());
++}
++
++IN_PROC_BROWSER_TEST_F(ExtensionSessionsMultipleWindowsTest,
++                       NativeWindowMergeUsesMillisecondsWithinTheSameSecond) {
++  ASSERT_NO_FATAL_FAILURE(CreateHistories());
++  auto all = List();
++  ASSERT_TRUE(all);
++  int64_t latest_window = 0;
++  std::string latest_id;
++  for (const auto& session : all->GetList()) {
++    if (const auto* window = session.GetDict().FindDict("window")) {
++      const auto id = utils::GetString(*window, "sessionId");
++      int64_t timestamp;
++      ASSERT_TRUE(
++          base::StringToInt64(id.substr(id.rfind(':') + 1), &timestamp));
++      if (timestamp > latest_window) {
++        latest_window = timestamp;
++        latest_id = id;
++      }
++    }
++  }
++  ASSERT_GT(latest_window, 0);
++  auto* service = TabRestoreServiceFactory::GetForProfile(GetProfile());
++  ASSERT_EQ(1u, service->entries().size());
++  // When the real close happened exactly on a whole second, use the next
++  // millisecond and require native first; otherwise require window first.
++  const bool native_newer = latest_window % 1000 == 0;
++  service->entries().front()->timestamp =
++      base::Time::FromMillisecondsSinceUnixEpoch(latest_window +
++                                                 (native_newer ? 1 : -1));
++  auto result = List("[{\"maxResults\":1}]");
++  ASSERT_TRUE(result);
++  ASSERT_EQ(1u, result->GetList().size());
++  if (native_newer) {
++    EXPECT_TRUE(result->GetList()[0].GetDict().FindDict("tab"));
++  } else {
++    const auto* window = result->GetList()[0].GetDict().FindDict("window");
++    ASSERT_TRUE(window);
++    EXPECT_EQ(latest_id, utils::GetString(*window, "sessionId"));
++  }
++}
++
++#endif  // BUILDFLAG(IS_ANDROID)
++
++#if BUILDFLAG(IS_ANDROID)
++class ExtensionSessionsNativeCollectionsTest : public ExtensionSessionsTest {
++ protected:
++  TabModel* model() {
++    return static_cast<TabModel*>(
++        TabListInterface::From(browser_window_interface()));
++  }
++
++  void CloseGroupedTab() {
++    NavigateToURLInNewTab(GURL("chrome://version/"));
++    auto* contents = GetWebContentsAt(1);
++    ASSERT_TRUE(NavigateToURL(contents, GURL("chrome://credits/")));
++    navigation_count_ = contents->GetController().GetEntryCount();
++    NavigateToURLInNewTab(GURL("chrome://version/"));
++    auto group = model()->CreateTabGroup(
++        {model()->GetTab(1)->GetHandle(), model()->GetTab(2)->GetHandle()});
++    ASSERT_TRUE(group);
++    model()->SetTabGroupVisualData(
++        *group, tab_groups::TabGroupVisualData(
++                    u"Native saved group", tab_groups::TabGroupColorId::kBlue));
++    CloseTabForWebContents(contents);
++    auto* service = TabRestoreServiceFactory::GetForProfile(GetProfile());
++    ASSERT_EQ(1u, service->entries().size());
++    ASSERT_EQ(sessions::tab_restore::Type::TAB,
++              service->entries().front()->type);
++    const auto& saved = static_cast<const sessions::tab_restore::Tab&>(
++        *service->entries().front());
++    ASSERT_TRUE(saved.group);
++    closed_id_ = saved.id;
++  }
++
++  void CloseSplit() {
++    NavigateToURLInNewTab(GURL("chrome://version/"));
++    NavigateToURLInNewTab(GURL("chrome://credits/"));
++    auto* first = model()->GetTab(1)->GetContents();
++    auto* second = model()->GetTab(2)->GetContents();
++    model()->ActivateTab(model()->GetTab(1)->GetHandle());
++    auto split = model()->CreateSplit(
++        {model()->GetTab(1)->GetHandle(), model()->GetTab(2)->GetHandle()});
++    ASSERT_TRUE(split);
++    auto* service = TabRestoreServiceFactory::GetForProfile(GetProfile());
++    // Use the real service's closing-split transaction. The subsequent real tab
++    // closes are suppressed by its cached session IDs, exactly as bulk closure.
++    service->CreateHistoricalSplit(model()->GetLiveTabContext(), *split);
++    ASSERT_EQ(1u, service->entries().size());
++    ASSERT_EQ(sessions::tab_restore::Type::SPLIT,
++              service->entries().front()->type);
++    const auto& saved = static_cast<const sessions::tab_restore::Split&>(
++        *service->entries().front());
++    ASSERT_EQ(2u, saved.tabs.size());
++    closed_id_ = saved.id;
++    first_child_id_ = saved.tabs[0]->id;
++    second_child_id_ = saved.tabs[1]->id;
++    CloseTabForWebContents(first);
++    CloseTabForWebContents(second);
++    service->SplitClosed(*split);
++    ASSERT_EQ(1, model()->GetTabCount());
++    ASSERT_EQ(1u, service->entries().size());
++  }
++
++  std::optional<base::Value> Restore(const std::string& arguments) {
++    return utils::RunFunctionAndReturnSingleResult(
++        CreateFunction<SessionsRestoreFunction>(true).get(), arguments,
++        GetProfile());
++  }
++
++  void ExpectRestoredGroup(const base::Value& result) {
++    ASSERT_TRUE(result.GetDict().FindDict("tab"));
++    auto* active = model()->GetActiveTab();
++    ASSERT_TRUE(active);
++    ASSERT_TRUE(active->GetGroup());
++    auto visual = model()->GetTabGroupVisualData(*active->GetGroup());
++    ASSERT_TRUE(visual);
++    EXPECT_EQ(u"Native saved group", visual->title());
++    EXPECT_EQ(tab_groups::TabGroupColorId::kBlue, visual->color());
++    auto* contents = active->GetContents();
++    ASSERT_TRUE(contents);
++    ASSERT_TRUE(content::WaitForLoadStop(contents));
++    EXPECT_EQ(GURL("chrome://credits/"), contents->GetURL());
++    EXPECT_EQ(navigation_count_, contents->GetController().GetEntryCount());
++  }
++
++  SessionID closed_id_ = SessionID::InvalidValue();
++  SessionID first_child_id_ = SessionID::InvalidValue();
++  SessionID second_child_id_ = SessionID::InvalidValue();
++  int navigation_count_ = 0;
++};
++
++IN_PROC_BROWSER_TEST_F(ExtensionSessionsNativeCollectionsTest,
++                       ExplicitGroupedTabRetainsVisualsAndForegroundHistory) {
++  ASSERT_NO_FATAL_FAILURE(CloseGroupedTab());
++  auto result = Restore("[\"" + base::NumberToString(closed_id_.id()) + "\"]");
++  ASSERT_TRUE(result);
++  ExpectRestoredGroup(*result);
++}
++
++IN_PROC_BROWSER_TEST_F(ExtensionSessionsNativeCollectionsTest,
++                       MostRecentGroupedTabRetainsVisualsAndForegroundHistory) {
++  ASSERT_NO_FATAL_FAILURE(CloseGroupedTab());
++  auto result = Restore("[]");
++  ASSERT_TRUE(result);
++  ExpectRestoredGroup(*result);
++}
++
++IN_PROC_BROWSER_TEST_F(ExtensionSessionsNativeCollectionsTest,
++                       MostRecentNativeSplitReconstructsBothRealTabs) {
++  ASSERT_NO_FATAL_FAILURE(CloseSplit());
++  auto result = Restore("[]");
++  ASSERT_TRUE(result);
++  ASSERT_TRUE(result->GetDict().FindDict("tab"));
++  ASSERT_EQ(3, model()->GetTabCount());
++  ASSERT_EQ(1u, model()->ListSplits().size());
++  auto* active = model()->GetActiveTab();
++  ASSERT_TRUE(active);
++  ASSERT_TRUE(active->GetSplit());
++  EXPECT_EQ(model()->GetTab(1)->GetSplit(), model()->GetTab(2)->GetSplit());
++  EXPECT_EQ(GURL("chrome://version/"), active->GetContents()->GetVisibleURL());
++  EXPECT_TRUE(
++      TabRestoreServiceFactory::GetForProfile(GetProfile())->entries().empty());
++}
++
++IN_PROC_BROWSER_TEST_F(ExtensionSessionsNativeCollectionsTest,
++                       ListedSplitChildRestoresOnlyRequestedTab) {
++  ASSERT_NO_FATAL_FAILURE(CloseSplit());
++  auto listed = utils::RunFunctionAndReturnSingleResult(
++      CreateFunction<SessionsGetRecentlyClosedFunction>(true).get(), "[]",
++      GetProfile());
++  ASSERT_TRUE(listed);
++  ASSERT_EQ(2u, listed->GetList().size());
++  std::set<std::string> ids;
++  for (const auto& item : listed->GetList()) {
++    const auto* tab = item.GetDict().FindDict("tab");
++    ASSERT_TRUE(tab);
++    ids.insert(utils::GetString(*tab, "sessionId"));
++  }
++  EXPECT_TRUE(ids.contains(base::NumberToString(first_child_id_.id())));
++  EXPECT_TRUE(ids.contains(base::NumberToString(second_child_id_.id())));
++  auto result =
++      Restore("[\"" + base::NumberToString(first_child_id_.id()) + "\"]");
++  ASSERT_TRUE(result);
++  ASSERT_EQ(2, model()->GetTabCount());
++  EXPECT_TRUE(model()->ListSplits().empty());
++  EXPECT_FALSE(model()->GetActiveTab()->GetSplit());
++  EXPECT_EQ(GURL("chrome://version/"),
++            model()->GetActiveTab()->GetContents()->GetVisibleURL());
++  auto* service = TabRestoreServiceFactory::GetForProfile(GetProfile());
++  ASSERT_EQ(1u, service->entries().size());
++  EXPECT_EQ(second_child_id_, service->entries().front()->id);
++}
++#endif  // BUILDFLAG(IS_ANDROID)
++
+ IN_PROC_BROWSER_TEST_F(ExtensionSessionsTest, RestoreForeignSessionWindow) {
+   CreateSessionModels();
+ 
+@@ -557,6 +1166,487 @@
+   }
+   EXPECT_EQ(restored_id, api_test_utils::GetInteger(window, "id"));
+ }
++
++#if BUILDFLAG(IS_ANDROID)
++class ExtensionSessionsAndroidForeignWindowTest : public ExtensionSessionsTest {
++ public:
++  void SetUpCommandLine(base::CommandLine* command_line) override {
++    ExtensionSessionsTest::SetUpCommandLine(command_line);
++    // The restored window launches a normal ChromeTabbedActivity.
++    command_line->AppendSwitch("disable-fre");
++  }
++
++  void SetUpOnMainThread() override {
++    ExtensionSessionsTest::SetUpOnMainThread();
++    ForEachCurrentBrowserWindowInterfaceOrderedByActivation(
++        [&](BrowserWindowInterface* browser) {
++          initial_window_ids_.insert(ExtensionTabUtil::GetWindowId(browser));
++          return true;
++        });
++    base::FilePath test_data;
++    ASSERT_TRUE(base::PathService::Get(chrome::DIR_TEST_DATA, &test_data));
++    embedded_test_server()->ServeFilesFromDirectory(test_data);
++    ASSERT_TRUE(embedded_test_server()->Start());
++  }
++
++  void TearDownOnMainThread() override {
++    // Close only windows created by this fixture, including a window left by a
++    // failing assertion. Closing tabs alone does not explicitly finish each
++    // additional ChromeTabbedActivity.
++    std::vector<base::WeakPtr<BrowserWindowInterface>> restored_windows;
++    ForEachCurrentBrowserWindowInterfaceOrderedByActivation(
++        [&](BrowserWindowInterface* browser) {
++          if (!initial_window_ids_.contains(
++                  ExtensionTabUtil::GetWindowId(browser))) {
++            restored_windows.push_back(browser->GetWeakPtr());
++          }
++          return true;
++        });
++    for (const auto& browser : restored_windows) {
++      if (browser) {
++        browser->GetWindow()->Close();
++      }
++    }
++    EXPECT_TRUE(base::test::RunUntil([&] {
++      for (const auto& browser : restored_windows) {
++        if (browser) {
++          return false;
++        }
++      }
++      return true;
++    }));
++    ExtensionSessionsTest::TearDownOnMainThread();
++  }
++
++ protected:
++  GURL SavedUrl(int tab, int navigation) {
++    return embedded_test_server()->GetURL(base::StringPrintf(
++        "/title1.html?tab=%d&navigation=%d", tab, navigation));
++  }
++
++  void CreateForeignWindowModel(
++      bool popup = false,
++      std::unique_ptr<syncer::MockDataTypeWorker>* retained_worker = nullptr) {
++    syncer::DataTypeActivationRequest request;
++    request.error_handler = base::DoNothing();
++    request.cache_guid = kTestCacheGuid;
++    request.authenticated_gaia_id = GaiaId("SomeGaiaId");
++    auto* service = SessionSyncServiceFactory::GetForProfile(GetProfile());
++    base::test::TestFuture<std::unique_ptr<syncer::DataTypeActivationResponse>>
++        sync_start;
++    service->GetControllerDelegate()->OnSyncStarting(request,
++                                                     sync_start.GetCallback());
++    auto worker = syncer::MockDataTypeWorker::CreateWorkerAndConnectSync(
++        sync_start.Take());
++
++    sync_pb::EntitySpecifics header;
++    BuildSessionSpecifics("foreign-window", header.mutable_session());
++    BuildWindowSpecifics(20, {100, 101, 102}, header.mutable_session());
++    auto* window =
++        header.mutable_session()->mutable_header()->mutable_window(0);
++    window->set_selected_tab_index(2);
++    window->set_browser_type(popup
++                                 ? sync_pb::SyncEnums_BrowserType_TYPE_POPUP
++                                 : sync_pb::SyncEnums_BrowserType_TYPE_TABBED);
++    syncer::EntityData data;
++    data.client_tag_hash = TagHashFromSpecifics(header.session());
++    data.id = "FakeId:" + data.client_tag_hash.value();
++    data.specifics = header;
++    data.creation_time = base::Time::Now();
++    data.modification_time = data.creation_time;
++    syncer::UpdateResponseData update;
++    update.entity = std::move(data);
++    update.response_version = 1;
++    syncer::UpdateResponseDataList updates;
++    updates.push_back(std::move(update));
++    worker->UpdateFromServer(std::move(updates));
++    for (int tab_index = 0; tab_index < 3; ++tab_index) {
++      sync_pb::EntitySpecifics entity;
++      BuildTabSpecifics("foreign-window", 100 + tab_index, tab_index,
++                        entity.mutable_session());
++      auto* tab = entity.mutable_session()->mutable_tab();
++      tab->set_window_id(20);
++      tab->set_tab_visual_index(tab_index);
++      tab->set_current_navigation_index(1);
++      tab->set_pinned(tab_index == 0);
++      tab->clear_navigation();
++      for (int i = 0; i < 3; ++i) {
++        auto* navigation = tab->add_navigation();
++        navigation->set_virtual_url(SavedUrl(tab_index, i).spec());
++        navigation->set_title("Saved page");
++        navigation->set_page_transition(
++            sync_pb::SyncEnums_PageTransition_TYPED);
++      }
++      worker->UpdateFromServer(TagHashFromSpecifics(entity.session()), entity);
++    }
++    // Exercise the real SessionSyncService model, not a restore delegate fake.
++    base::RunLoop().RunUntilIdle();
++    if (retained_worker) {
++      *retained_worker = std::move(worker);
++    } else {
++      worker.reset();
++    }
++    base::RunLoop().RunUntilIdle();
++    auto* delegate = service->GetOpenTabsUIDelegate();
++    ASSERT_TRUE(delegate);
++    auto windows = delegate->GetForeignSession("foreign-window");
++    ASSERT_EQ(1u, windows.size());
++    ASSERT_EQ(3u, windows[0]->tabs.size());
++  }
++
++  std::unique_ptr<sessions::SessionWindow> MakeWindow(int selected_index,
++                                                      int last_index = 3) {
++    auto window = std::make_unique<sessions::SessionWindow>();
++    window->window_id = SessionID::NewUnique();
++    window->type = sessions::SessionWindow::TYPE_NORMAL;
++    window->selected_tab_index = selected_index;
++    for (int tab_index = 0; tab_index <= last_index; ++tab_index) {
++      auto tab = std::make_unique<sessions::SessionTab>();
++      tab->window_id = window->window_id;
++      tab->tab_id = SessionID::NewUnique();
++      tab->tab_visual_index = tab_index;
++      tab->current_navigation_index = 1;
++      tab->pinned = tab_index == 0;
++      if (tab_index != 1) {
++        for (int i = 0; i < 3; ++i) {
++          sessions::SerializedNavigationEntry navigation;
++          navigation.set_index(i);
++          navigation.set_virtual_url(SavedUrl(tab_index, i));
++          navigation.set_title(u"Saved page");
++          navigation.set_transition_type(ui::PAGE_TRANSITION_TYPED);
++          tab->navigations.push_back(std::move(navigation));
++        }
++      }
++      window->tabs.push_back(std::move(tab));
++    }
++    return window;
++  }
++
++  BrowserWindowInterface* FindRestoredWindow(const base::Value& result) {
++    const auto* window = result.GetDict().FindDict("window");
++    if (!window) {
++      ADD_FAILURE() << "sessions.restore did not return a window";
++      return nullptr;
++    }
++    const int id = utils::GetInteger(*window, "id");
++    BrowserWindowInterface* match = nullptr;
++    ForEachCurrentBrowserWindowInterfaceOrderedByActivation(
++        [&](BrowserWindowInterface* browser) {
++          if (ExtensionTabUtil::GetWindowId(browser) == id) {
++            match = browser;
++            return false;
++          }
++          return true;
++        });
++    return match;
++  }
++
++  void ExpectWindow(BrowserWindowInterface* browser,
++                    const std::vector<int>& original_indices,
++                    int active_index,
++                    const std::set<int>& pinned_indices = {0}) {
++    ASSERT_TRUE(browser);
++    EXPECT_EQ(GetProfile(), browser->GetProfile());
++    auto* tabs = TabListInterface::From(browser);
++    ASSERT_TRUE(tabs);
++    ASSERT_EQ(static_cast<int>(original_indices.size()), tabs->GetTabCount());
++    EXPECT_EQ(active_index, tabs->GetActiveIndex());
++    ASSERT_TRUE(tabs->GetActiveTab());
++    ASSERT_TRUE(content::WaitForLoadStop(tabs->GetActiveTab()->GetContents()));
++    for (int i = 0; i < tabs->GetTabCount(); ++i) {
++      SCOPED_TRACE(i);
++      auto* tab = tabs->GetTab(i);
++      EXPECT_EQ(pinned_indices.contains(original_indices[i]), tab->IsPinned());
++      auto* contents = tab->GetContents();
++      ASSERT_TRUE(contents);
++      EXPECT_EQ(GetProfile(), contents->GetBrowserContext());
++      auto& controller = contents->GetController();
++      ASSERT_EQ(3, controller.GetEntryCount());
++      EXPECT_EQ(1, controller.GetCurrentEntryIndex());
++      EXPECT_TRUE(controller.CanGoBack());
++      EXPECT_TRUE(controller.CanGoForward());
++      for (int j = 0; j < 3; ++j) {
++        EXPECT_EQ(SavedUrl(original_indices[i], j),
++                  controller.GetEntryAtIndex(j)->GetVirtualURL());
++      }
++    }
++  }
++
++  size_t WindowCount() {
++    size_t count = 0;
++    ForEachCurrentBrowserWindowInterfaceOrderedByActivation(
++        [&](BrowserWindowInterface* browser) {
++          if (browser->GetProfile() == GetProfile()) {
++            ++count;
++          }
++          return true;
++        });
++    return count;
++  }
++
++ private:
++  std::set<int> initial_window_ids_;
++};
++
++IN_PROC_BROWSER_TEST_F(ExtensionSessionsAndroidForeignWindowTest,
++                       ApiRestoresOrderedTabsHistoryPinsAndSelection) {
++  ASSERT_NO_FATAL_FAILURE(CreateForeignWindowModel());
++  auto result = utils::RunFunctionAndReturnSingleResult(
++      CreateFunction<SessionsRestoreFunction>(true), R"(["foreign-window.20"])",
++      GetProfile());
++  ASSERT_TRUE(result);
++  BrowserWindowInterface* browser = FindRestoredWindow(*result);
++  ASSERT_NO_FATAL_FAILURE(ExpectWindow(browser, {0, 1, 2}, 2));
++  auto* contents =
++      TabListInterface::From(browser)->GetActiveTab()->GetContents();
++  auto& controller = contents->GetController();
++  content::TestNavigationObserver back(contents);
++  controller.GoBack();
++  back.Wait();
++  EXPECT_EQ(SavedUrl(2, 0), contents->GetLastCommittedURL());
++  EXPECT_EQ(0, controller.GetCurrentEntryIndex());
++  content::TestNavigationObserver forward(contents);
++  controller.GoForward();
++  forward.Wait();
++  EXPECT_EQ(SavedUrl(2, 1), contents->GetLastCommittedURL());
++  EXPECT_EQ(1, controller.GetCurrentEntryIndex());
++}
++
++IN_PROC_BROWSER_TEST_F(ExtensionSessionsAndroidForeignWindowTest,
++                       ApiPreservesForeignTabPinStateAndHistory) {
++  ASSERT_NO_FATAL_FAILURE(CreateForeignWindowModel());
++  auto devices = utils::RunFunctionAndReturnSingleResult(
++      CreateFunction<SessionsGetDevicesFunction>(true), "[]", GetProfile());
++  ASSERT_TRUE(devices);
++  ASSERT_TRUE(devices->is_list());
++  ASSERT_EQ(1u, devices->GetList().size());
++  const auto* session_list =
++      devices->GetList()[0].GetDict().FindList("sessions");
++  ASSERT_TRUE(session_list);
++  ASSERT_EQ(1u, session_list->size());
++  const auto* window = (*session_list)[0].GetDict().FindDict("window");
++  ASSERT_TRUE(window);
++  const auto* advertised_tabs = window->FindList("tabs");
++  ASSERT_TRUE(advertised_tabs);
++  const size_t windows_before = WindowCount();
++
++  // The normal Sync/API route admits both saved pin states. Find by the actual
++  // advertised ID, rather than assuming an ordering for equally recent tabs.
++  for (int original_index : {0, 1}) {
++    SCOPED_TRACE(original_index);
++    const bool pinned = original_index == 0;
++    const std::string session_id =
++        base::StringPrintf("foreign-window.%d", 100 + original_index);
++    const base::DictValue* advertised = nullptr;
++    for (const auto& value : *advertised_tabs) {
++      const auto* id = value.GetDict().FindString("sessionId");
++      if (id && *id == session_id) {
++        advertised = &value.GetDict();
++        break;
++      }
++    }
++    ASSERT_TRUE(advertised);
++    EXPECT_EQ(pinned, utils::GetBoolean(*advertised, "pinned"));
++    auto result = utils::RunFunctionAndReturnSingleResult(
++        CreateFunction<SessionsRestoreFunction>(true),
++        base::StringPrintf("[\"%s\"]", session_id.c_str()), GetProfile());
++    ASSERT_TRUE(result);
++    const auto* restored = result->GetDict().FindDict("tab");
++    ASSERT_TRUE(restored);
++    EXPECT_EQ(pinned, utils::GetBoolean(*restored, "pinned"));
++    EXPECT_TRUE(utils::GetBoolean(*restored, "active"));
++    WindowController* controller = nullptr;
++    content::WebContents* contents = nullptr;
++    int tab_index = -1;
++    ASSERT_TRUE(ExtensionTabUtil::GetTabById(
++        utils::GetInteger(*restored, "id"), GetProfile(),
++        /*include_incognito=*/false, &controller, &contents, &tab_index));
++    ASSERT_TRUE(controller);
++    ASSERT_TRUE(contents);
++    EXPECT_EQ(GetProfile(), contents->GetBrowserContext());
++    auto* browser = controller->GetBrowserWindowInterface();
++    ASSERT_TRUE(browser);
++    EXPECT_EQ(GetProfile(), browser->GetProfile());
++    auto* tabs = TabListInterface::From(browser);
++    ASSERT_TRUE(tabs);
++    ASSERT_GE(tab_index, 0);
++    ASSERT_LT(tab_index, tabs->GetTabCount());
++    EXPECT_EQ(pinned, tabs->GetTab(tab_index)->IsPinned());
++    EXPECT_EQ(tab_index, tabs->GetActiveIndex());
++    ASSERT_TRUE(tabs->GetActiveTab());
++    EXPECT_EQ(contents, tabs->GetActiveTab()->GetContents());
++    ASSERT_TRUE(content::WaitForLoadStop(contents));
++    auto& navigation = contents->GetController();
++    ASSERT_EQ(3, navigation.GetEntryCount());
++    EXPECT_EQ(1, navigation.GetCurrentEntryIndex());
++    EXPECT_TRUE(navigation.CanGoBack());
++    EXPECT_TRUE(navigation.CanGoForward());
++    for (int i = 0; i < 3; ++i) {
++      EXPECT_EQ(SavedUrl(original_index, i),
++                navigation.GetEntryAtIndex(i)->GetVirtualURL());
++    }
++    EXPECT_EQ(windows_before, WindowCount());
++  }
++}
++
++IN_PROC_BROWSER_TEST_F(ExtensionSessionsAndroidForeignWindowTest,
++                       RetainedForeignTabIdRejectsEmptyHistoryUpdate) {
++  std::unique_ptr<syncer::MockDataTypeWorker> worker;
++  ASSERT_NO_FATAL_FAILURE(CreateForeignWindowModel(/*popup=*/false, &worker));
++  ASSERT_TRUE(worker);
++  auto devices = utils::RunFunctionAndReturnSingleResult(
++      CreateFunction<SessionsGetDevicesFunction>(true), "[]", GetProfile());
++  ASSERT_TRUE(devices);
++  ASSERT_TRUE(devices->is_list());
++  ASSERT_EQ(1u, devices->GetList().size());
++  const auto* session_list =
++      devices->GetList()[0].GetDict().FindList("sessions");
++  ASSERT_TRUE(session_list);
++  ASSERT_EQ(1u, session_list->size());
++  const auto* window = (*session_list)[0].GetDict().FindDict("window");
++  ASSERT_TRUE(window);
++  const auto* tabs = window->FindList("tabs");
++  ASSERT_TRUE(tabs);
++  ASSERT_EQ(3u, tabs->size());
++  const auto* advertised_id = (*tabs)[0].GetDict().FindString("sessionId");
++  ASSERT_TRUE(advertised_id);
++  const std::string retained_id = *advertised_id;
++  ASSERT_EQ("foreign-window.100", retained_id);
++
++  // A newer valid Sync record can retain the tab ID but contain no history.
++  // The extension may still hold the previously advertised ID.
++  sync_pb::EntitySpecifics entity;
++  BuildTabSpecifics("foreign-window", 100, 0, entity.mutable_session());
++  auto* tab = entity.mutable_session()->mutable_tab();
++  tab->set_window_id(20);
++  tab->set_tab_visual_index(0);
++  tab->clear_navigation();
++  tab->set_current_navigation_index(-1);
++  auto update = worker->GenerateUpdateData(
++      TagHashFromSpecifics(entity.session()), entity);
++  update.entity.modification_time = base::Time::Now();
++  syncer::UpdateResponseDataList updates;
++  updates.push_back(std::move(update));
++  worker->UpdateFromServer(std::move(updates));
++  auto* delegate = SessionSyncServiceFactory::GetForProfile(GetProfile())
++                       ->GetOpenTabsUIDelegate();
++  ASSERT_TRUE(delegate);
++  const sessions::SessionTab* updated_tab = nullptr;
++  ASSERT_TRUE(delegate->GetForeignTab(
++      "foreign-window", SessionID::FromSerializedValue(100), &updated_tab));
++  ASSERT_TRUE(updated_tab);
++  ASSERT_TRUE(updated_tab->navigations.empty());
++
++  const size_t windows_before = WindowCount();
++  const auto count_tabs = [&] {
++    int count = 0;
++    ForEachCurrentBrowserWindowInterfaceOrderedByActivation(
++        [&](BrowserWindowInterface* browser) {
++          if (browser->GetProfile() == GetProfile()) {
++            auto* tab_list = TabListInterface::From(browser);
++            if (tab_list) {
++              count += tab_list->GetTabCount();
++            }
++          }
++          return true;
++        });
++    return count;
++  };
++  const int tabs_before = count_tabs();
++  EXPECT_EQ(
++      "Invalid session id: \"foreign-window.100\".",
++      utils::RunFunctionAndReturnError(
++          CreateFunction<SessionsRestoreFunction>(true),
++          base::StringPrintf("[\"%s\"]", retained_id.c_str()), GetProfile()));
++  base::RunLoop().RunUntilIdle();
++  EXPECT_EQ(windows_before, WindowCount());
++  EXPECT_EQ(tabs_before, count_tabs());
++}
++
++IN_PROC_BROWSER_TEST_F(ExtensionSessionsAndroidForeignWindowTest,
++                       ApiPopupLaunchFailureReturnsError) {
++  ASSERT_NO_FATAL_FAILURE(CreateForeignWindowModel(/*popup=*/true));
++  const size_t before = WindowCount();
++  // Reset the nullable override, not to true (which would fake a launch).
++  // The native browser-test runner does not use JUnit per-method resetters.
++  base::ScopedClosureRunner clear_launch_override(base::BindOnce([] {
++    Java_PopupCreatorImpl_clearTryStartActivityResultForTesting(
++        base::android::AttachCurrentThread());
++  }));
++  Java_PopupCreatorImpl_setTryStartActivityResultForTesting(
++      base::android::AttachCurrentThread(), false);
++  auto function = CreateFunction<SessionsRestoreFunction>(true);
++  EXPECT_EQ("There are no browser windows to restore the session.",
++            utils::RunFunctionAndReturnError(
++                function, R"(["foreign-window.20"])", GetProfile()));
++  EXPECT_TRUE(function->did_respond());
++  EXPECT_EQ(before, WindowCount());
++}
++
++IN_PROC_BROWSER_TEST_F(ExtensionSessionsAndroidForeignWindowTest,
++                       OwnsPendingSnapshotAndMapsSelectionPastEmptyHistory) {
++  auto source = MakeWindow(/*selected_index=*/3);
++  std::vector<const sessions::SessionWindow*> input = {source.get()};
++  base::test::TestFuture<std::vector<BrowserWindowInterface*>> restored;
++  SessionRestore::RestoreForeignSessionWindows(
++      GetProfile(), input.begin(), input.end(), restored.GetCallback());
++  // The real creator is still pending. No fake creator or callback is injected;
++  // discard the original data before Android completes window creation.
++  ASSERT_FALSE(restored.IsReady());
++  source.reset();
++  input.clear();
++  auto browsers = restored.Take();
++  ASSERT_EQ(1u, browsers.size());
++  ExpectWindow(browsers[0], {0, 2, 3}, 2);
++}
++
++IN_PROC_BROWSER_TEST_F(ExtensionSessionsAndroidForeignWindowTest,
++                       SelectedEmptyHistoryFallsBackToFirstSurvivingTab) {
++  auto source = MakeWindow(/*selected_index=*/1);
++  std::vector<const sessions::SessionWindow*> input = {source.get()};
++  base::test::TestFuture<std::vector<BrowserWindowInterface*>> restored;
++  SessionRestore::RestoreForeignSessionWindows(
++      GetProfile(), input.begin(), input.end(), restored.GetCallback());
++  auto browsers = restored.Take();
++  ASSERT_EQ(1u, browsers.size());
++  ExpectWindow(browsers[0], {0, 2, 3}, 0);
++}
++
++IN_PROC_BROWSER_TEST_F(ExtensionSessionsAndroidForeignWindowTest,
++                       MixedPinsPreserveStableGroupsAndSelectedOriginalTab) {
++  auto source = MakeWindow(/*selected_index=*/2, /*last_index=*/5);
++  source->tabs[0]->pinned = false;
++  source->tabs[3]->pinned = true;
++  source->tabs[5]->pinned = true;
++  std::vector<const sessions::SessionWindow*> input = {source.get()};
++  base::test::TestFuture<std::vector<BrowserWindowInterface*>> restored;
++  SessionRestore::RestoreForeignSessionWindows(
++      GetProfile(), input.begin(), input.end(), restored.GetCallback());
++  auto browsers = restored.Take();
++  ASSERT_EQ(1u, browsers.size());
++  // Pinned tabs precede unpinned tabs on both Android and desktop. Selection
++  // follows the originally selected U2 through filtering and both groups.
++  ExpectWindow(browsers[0], {3, 5, 0, 2, 4}, 3, {3, 5});
++}
++
++IN_PROC_BROWSER_TEST_F(ExtensionSessionsAndroidForeignWindowTest,
++                       AllEmptyHistoriesFailWithoutCreatingWindow) {
++  const size_t before = WindowCount();
++  auto source = MakeWindow(/*selected_index=*/0);
++  for (auto& tab : source->tabs) {
++    tab->navigations.clear();
++  }
++  std::vector<const sessions::SessionWindow*> input = {source.get()};
++  base::test::TestFuture<std::vector<BrowserWindowInterface*>> restored;
++  SessionRestore::RestoreForeignSessionWindows(
++      GetProfile(), input.begin(), input.end(), restored.GetCallback());
++  auto browsers = restored.Take();
++  ASSERT_EQ(1u, browsers.size());
++  EXPECT_EQ(nullptr, browsers[0]);
++  base::RunLoop().RunUntilIdle();
++  EXPECT_EQ(before, WindowCount());
++}
++#endif  // BUILDFLAG(IS_ANDROID)
+ 
+ IN_PROC_BROWSER_TEST_F(ExtensionSessionsTest, RestoreForeignSessionInvalidId) {
+   CreateSessionModels();

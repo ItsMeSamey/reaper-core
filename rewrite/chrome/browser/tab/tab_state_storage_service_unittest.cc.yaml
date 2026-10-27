@@ -1,0 +1,132 @@
+# Reaper Android containers lifecycle; complete raw-pin ancestry.
+substitutions:
+- description: 'Reaper Android containers: immutable tab identity, trusted CCT admission, persistent partition/SQL/reference lifecycle.'
+  regex:
+    re_pattern: '\
+
+      \#include\ "chrome/browser/tab/tab_state_storage_service\.h"\
+
+      \
+
+      \#include\ <memory>\
+
+      \#include\ <string>\
+
+      \#include\ <vector>\
+
+      \
+
+      \#include\ "base/files/scoped_temp_dir\.h"\
+
+      '
+    replace: '
+
+      #include "chrome/browser/tab/tab_state_storage_service.h"
+
+
+      #include <algorithm>
+
+      #include <memory>
+
+      #include <optional>
+
+      #include <string>
+
+      #include <string_view>
+
+      #include <utility>
+
+      #include <vector>
+
+
+      #include "base/files/scoped_temp_dir.h"
+
+      '
+- description: 'Reaper Android containers: immutable tab identity, trusted CCT admission, persistent partition/SQL/reference lifecycle.'
+  regex:
+    re_pattern: '\#include\ "base/run_loop\.h"\
+
+      \#include\ "base/test/task_environment\.h"\
+
+      \#include\ "chrome/browser/tab/restore_entity_tracker\.h"\
+
+      \#include\ "chrome/browser/tab/storage_id\.h"\
+
+      \#include\ "chrome/browser/tab/tab_storage_packager\.h"\
+
+      \#include\ "components/tabs/public/tab_collection\.h"\
+
+      '
+    replace: '#include "base/run_loop.h"
+
+      #include "base/test/task_environment.h"
+
+      #include "chrome/browser/tab/restore_entity_tracker.h"
+
+      #if BUILDFLAG(IS_ANDROID)
+
+      #include "chrome/browser/tab/payload_util.h"
+
+      #include "chrome/browser/tab/protocol/tab_state.pb.h"
+
+      #include "chrome/browser/tab/storage_update_unit.h"
+
+      #include "chrome/browser/tab/tab_state_storage_backend.h"
+
+      #include "chrome/browser/tab/tab_state_storage_updater.h"
+
+      #include "chrome/browser/tab/tab_storage_type.h"
+
+      #endif
+
+      #include "chrome/browser/tab/storage_id.h"
+
+      #include "chrome/browser/tab/tab_storage_packager.h"
+
+      #include "components/tabs/public/tab_collection.h"
+
+      '
+- description: 'Reaper Android containers: immutable tab identity, trusted CCT admission, persistent partition/SQL/reference lifecycle.'
+  regex:
+    re_pattern: '\}\
+
+      \
+
+      \}\ \ //\ namespace\
+
+      \}\ \ //\ namespace\ tabs\
+
+      '
+    replace: "}\n\n}  // namespace\n#if BUILDFLAG(IS_ANDROID)\nTEST_F(TabStateStorageServiceTest, ContainerInventoryEmptyIsCompleteAfterDbInitialization) {\n  FlushOperations();\n  base::RunLoop loop;\n  service()->GetPersistedContainerIds(base::BindOnce(\n      [](base::OnceClosure done, std::optional<std::vector<std::string>> ids) {\n        EXPECT_TRUE(ids);\n        if (ids) EXPECT_TRUE(ids->empty());\n        std::move(done).Run();\n      }, loop.QuitClosure()));\n  loop.Run();\n}\n\nTEST_F(TabStateStorageServiceTest, ContainerInventoryWaitsWithoutDestroyingActiveScopedBatch) {\n  FlushOperations();\n  bool queried = false;\n  bool batch_callback = false;\n  TabStripCollection collection;\n  auto batch = service()->CreateScopedBatch();\n  service()->GetPersistedContainerIds(base::BindOnce(\n      [](bool* queried, std::optional<std::vector<std::string>> ids) {\n        EXPECT_TRUE(ids);\n        if (ids) EXPECT_TRUE(ids->empty());\n        *queried = true;\n      }, &queried));\n  EXPECT_FALSE(queried);\n  service()->Save(&collection); // Builder remains alive and usable after query.\n  batch.AddCallback(base::BindOnce([](bool* called) { *called = true; }, &batch_callback));\n  batch = TabStateStorageService::ScopedBatch();\n  FlushOperations();\n  task_environment_.RunUntilIdle();\n  EXPECT_TRUE(batch_callback);\n  EXPECT_TRUE(queried);\n}\n\nnamespace {\n\nconstexpr char kInventoryNamedId[] = \"4a4d13b6-c971-4c61-ae11-e7a864f58165\";\nconstexpr char kInventoryTemporaryId[] =\n    \"t-22a6d27a-e4ef-46ec-8f8f-11a93d558b33\";\nconstexpr char kInventoryOtrId[] = \"cc963f17-77df-4ce7-9750-a9b217a37820\";\n\n// Seed through the real updater/transaction/backend path. This is deliberately\n// not a fake database or a mock inventory provider.\nclass InventorySaveNodeUnit : public StorageUpdateUnit {\n public:\n  InventorySaveNodeUnit(std::string window_tag,\n                        bool is_off_the_record,\n                        TabStorageType type,\n                        std::vector<uint8_t> payload)\n      : window_tag_(std::move(window_tag)),\n        is_off_the_record_(is_off_the_record),\n        type_(type),\n        payload_(std::move(payload)) {}\n\n  bool Execute(TabStateStorageDatabase* db,\n               TabStateStorageDatabase::OpenTransaction* transaction) override {\n    return db->SaveNode(transaction, StorageId::Create(), window_tag_,\n                        is_off_the_record_, type_, std::move(payload_), {});\n  }\n\n private:\n  const std::string window_tag_;\n  const bool is_off_the_record_;\n  const TabStorageType type_;\n  std::vector<uint8_t> payload_;\n};\n\nclass ContainerInventoryBackendTest : public ::testing::Test {\n protected:\n  void SetUp() override {\n    ASSERT_TRUE(temp_dir_.CreateUniqueTempDir());\n    backend_ = std::make_unique<TabStateStorageBackend>(\n        temp_dir_.GetPath(), /*support_off_the_record_data=*/true);\n    backend_->Initialize();\n    base::RunLoop loop;\n    backend_->WaitForAllPendingOperations(loop.QuitClosure());\n    loop.Run();\n  }\n\n  void TearDown() override {\n    backend_.reset();\n    task_environment_.RunUntilIdle();\n  }\n\n  std::vector<uint8_t> TabPayload(std::string_view id) {\n    tabs_pb::TabState state;\n    state.set_tab_id(42);\n    state.set_url(\"https://example.test/persisted\");\n    state.set_container_id(std::string(id));\n    std::string bytes = state.SerializeAsString();\n    return {bytes.begin(), bytes.end()};\n  }\n\n  void Save(std::string window_tag,\n            bool is_off_the_record,\n            std::vector<uint8_t> payload,\n            TabStorageType type = TabStorageType::kTab) {\n    std::vector<std::unique_ptr<StorageUpdateUnit>> updates;\n    updates.push_back(std::make_unique<InventorySaveNodeUnit>(\n        std::move(window_tag), is_off_the_record, type, std::move(payload)));\n    base::RunLoop loop;\n    bool committed = false;\n    std::vector<base::OnceClosure> callbacks;\n    callbacks.push_back(base::BindOnce(\n        [](bool* committed, base::OnceClosure done) {\n          *committed = true;\n          std::move(done).Run();\n        },\n        &committed, loop.QuitClosure()));\n    backend_->Update(std::make_unique<TabStateStorageUpdater>(\n        std::move(updates), std::move(callbacks)));\n    loop.Run();\n    ASSERT_TRUE(committed);\n  }\n\n  std::optional<std::vector<std::string>> Inventory() {\n    base::RunLoop loop;\n    std::optional<std::vector<std::string>> result;\n    backend_->GetPersistedContainerIds(base::BindOnce(\n        [](std::optional<std::vector<std::string>>* result,\n           base::OnceClosure done,\n           std::optional<std::vector<std::string>> ids) {\n          *result = std::move(ids);\n          std::move(done).Run();\n        },\n        &result, loop.QuitClosure()));\n    loop.Run();\n    return result;\n  }\n\n  base::test::TaskEnvironment task_environment_{\n      base::test::TaskEnvironment::MainThreadType::UI};\n  base::ScopedTempDir temp_dir_;\n  std::unique_ptr<TabStateStorageBackend> backend_;\n};\n\nTEST_F(ContainerInventoryBackendTest,\n       IncludesPopulatedNamedAndTemporaryRowsAcrossWindowsAndArchive) {\n  Save(\"window-a\", false, TabPayload(kInventoryNamedId));\n  Save(\"archived-window-b\", false, TabPayload(kInventoryTemporaryId));\n  Save(\"window-c\", false,\n       TabPayload(\"\"));  // Default is a valid legacy identity.\n  Save(\"collection-window\", false, {0xff}, TabStorageType::kTabStrip);\n  auto ids = Inventory();\n  ASSERT_TRUE(ids);\n  std::sort(ids->begin(), ids->end());\n  EXPECT_EQ(*ids, (std::vector<std::string>{kInventoryNamedId,\n                                            kInventoryTemporaryId}));\n}\n\nTEST_F(ContainerInventoryBackendTest,\n       ExcludesRealSealedOtrRecordsIncludingCorruptOtrPayloads) {\n  Save(\"regular\", false, TabPayload(kInventoryNamedId));\n  backend_->SetKey(\"otr\", GenerateKeyForOtrPayloads());\n  Save(\"otr\", true, TabPayload(kInventoryOtrId));\n  Save(\"otr\", true, {0xff});\n  base::RunLoop loop;\n  backend_->CountTabsForWindow(\n      \"otr\", true,\n      base::BindOnce(\n          [](base::OnceClosure done, int count) {\n            EXPECT_EQ(count, 2);  // Prove both encrypted records really exist.\n            std::move(done).Run();\n          },\n          loop.QuitClosure()));\n  loop.Run();\n  auto ids = Inventory();\n  ASSERT_TRUE(ids);\n  EXPECT_EQ(*ids, (std::vector<std::string>{kInventoryNamedId}));\n}\n\nTEST_F(ContainerInventoryBackendTest,\n       CorruptRegularPayloadBlocksCompleteInventory) {\n  Save(\"regular\", false, TabPayload(kInventoryNamedId));\n  Save(\"archived-corrupt\", false, {0xff});\n  EXPECT_FALSE(Inventory());  // Never publish a partial list containing only\n                              // the first jar.\n}\n\nTEST_F(ContainerInventoryBackendTest,\n       MalformedRegularIdentityBlocksCompleteInventory) {\n  Save(\"regular\", false, TabPayload(kInventoryNamedId));\n  Save(\"archived-malformed\", false,\n       TabPayload(\"t-22A6D27A-E4EF-46EC-8F8F-11A93D558B33\"));\n  EXPECT_FALSE(Inventory());\n}\n\nTEST_F(ContainerInventoryBackendTest,\n       PopulatedInventorySurvivesRestartAndScopedBatch) {\n  Save(\"archived-window-a\", false, TabPayload(kInventoryNamedId));\n  Save(\"window-b\", false, TabPayload(kInventoryTemporaryId));\n  backend_.reset();\n  task_environment_.RunUntilIdle();\n  RestoreEntityTrackerFactory tracker_factory = base::BindRepeating(\n      [](OnTabAssociation,\n         OnCollectionAssociation) -> std::unique_ptr<RestoreEntityTracker> {\n        return nullptr;\n      });\n  TabStateStorageService service(\n      temp_dir_.GetPath(), /*support_off_the_record_data=*/true,\n      std::make_unique<TestTabStoragePackager>(), tracker_factory);\n  base::RunLoop initialized;\n  service.WaitForAllPendingOperations(initialized.QuitClosure());\n  initialized.Run();\n  bool queried = false;\n  bool committed = false;\n  auto batch = service.CreateScopedBatch();\n  service.GetPersistedContainerIds(base::BindOnce(\n      [](bool* queried, std::optional<std::vector<std::string>> ids) {\n        ASSERT_TRUE(ids);\n        std::sort(ids->begin(), ids->end());\n        EXPECT_EQ(*ids, (std::vector<std::string>{kInventoryNamedId,\n                                                  kInventoryTemporaryId}));\n        *queried = true;\n      },\n      &queried));\n  task_environment_.RunUntilIdle();\n  EXPECT_FALSE(queried);\n  batch.AddCallback(\n      base::BindOnce([](bool* committed) { *committed = true; }, &committed));\n  batch = TabStateStorageService::ScopedBatch();\n  base::RunLoop flushed;\n  service.WaitForAllPendingOperations(flushed.QuitClosure());\n  flushed.Run();\n  task_environment_.RunUntilIdle();\n  EXPECT_TRUE(committed);\n  EXPECT_TRUE(queried);\n}\n\n}  // namespace\n\n#endif\n\n}  // namespace tabs\n"
+- description: 'Reaper Android container inventory: settle an abandoned deferred reply on its originating sequence.'
+  regex:
+    re_pattern: '\#if\ BUILDFLAG\(IS_ANDROID\)\
+
+      \#include\ "chrome/browser/tab/payload_util\.h"'
+    replace: '#if BUILDFLAG(IS_ANDROID)
+
+      #include "base/task/sequenced_task_runner.h"
+
+      #include "chrome/browser/tab/payload_util.h"'
+- description: 'Reaper Android container inventory: settle an abandoned deferred reply on its originating sequence.'
+  regex:
+    re_pattern: 'namespace\ \{\
+
+      \
+
+      constexpr\ char\ kInventoryNamedId\[\]'
+    replace: "TEST_F(TabStateStorageServiceTest,\n       ContainerInventoryDeferredReplyCompletesOnceOnOriginSequence) {\n\
+      \  FlushOperations();\n  int replies = 0;\n  auto origin = base::SequencedTaskRunner::GetCurrentDefault();\n  {\n  \
+      \  auto batch = service()->CreateScopedBatch();\n    service()->GetPersistedContainerIds(base::BindOnce(\n        [](scoped_refptr<base::SequencedTaskRunner>\
+      \ origin, int* replies,\n           std::optional<std::vector<std::string>> ids) {\n          EXPECT_TRUE(origin->RunsTasksInCurrentSequence());\n\
+      \          ASSERT_TRUE(ids);\n          EXPECT_TRUE(ids->empty());\n          ++*replies;\n        },\n        origin,\
+      \ &replies));\n    EXPECT_EQ(replies, 0);\n  }\n  FlushOperations();\n  task_environment_.RunUntilIdle();\n  EXPECT_EQ(replies,\
+      \ 1);\n}\n\nTEST_F(TabStateStorageServiceTest,\n       ContainerInventoryCancelledDeferredReplyIsUnavailableOnOriginSequence)\
+      \ {\n  FlushOperations();\n  int replies = 0;\n  auto origin = base::SequencedTaskRunner::GetCurrentDefault();\n  {\n\
+      \    auto batch = service()->CreateScopedBatch();\n    service()->GetPersistedContainerIds(base::BindOnce(\n       \
+      \ [](scoped_refptr<base::SequencedTaskRunner> origin, int* replies,\n           std::optional<std::vector<std::string>>\
+      \ ids) {\n          EXPECT_TRUE(origin->RunsTasksInCurrentSequence());\n          EXPECT_FALSE(ids);\n          ++*replies;\n\
+      \        },\n        origin, &replies));\n    EXPECT_EQ(replies, 0);\n  }\n  // Retire the service before the deferred\
+      \ reply can run on this sequence.\n  // The batch has already closed, so no ScopedBatch holds a retired builder.\n \
+      \ service_.reset();\n  task_environment_.RunUntilIdle();\n  EXPECT_EQ(replies, 1);\n}\n\nnamespace {\n\nconstexpr char\
+      \ kInventoryNamedId[]"

@@ -1,0 +1,164 @@
+diff --git a/chrome/browser/extensions/open_tab_helper.cc b/chrome/browser/extensions/open_tab_helper.cc
+--- a/chrome/browser/extensions/open_tab_helper.cc
++++ b/chrome/browser/extensions/open_tab_helper.cc
+@@ -32,6 +32,10 @@
+ #include "ui/base/window_open_disposition.h"
+ #include "url/gurl.h"
+
++#if BUILDFLAG(IS_ANDROID)
++#include "extensions/common/error_utils.h"
++#endif
++
+ #if !BUILDFLAG(IS_ANDROID)
+ #include "chrome/browser/ui/tabs/split_tab_metrics.h"
+ #include "chrome/browser/ui/unload_controller.h"
+@@ -160,14 +164,6 @@
+     const Params& params) {
+   auto* const extension = function.extension();
+
+-#if BUILDFLAG(IS_ANDROID)
+-  // TODO(https://crbug.com/480192698): Remove this restriction once split tabs
+-  // are supported on Desktop Android.
+-  if (params.split_with_tab_id.has_value()) {
+-    return base::unexpected(tabs_constants::kSplitViewCreationFailedError);
+-  }
+-#endif
+-
+   // DCHECK because the input should already have been validated, and this is
+   // a somewhat costly function.
+   DCHECK(ExtensionTabUtil::PrepareURLForNavigation(
+@@ -200,6 +196,11 @@
+   // If splitWithTabId is specified, determine the relative positioning of the
+   // new tab. Defaults to the right of the target tab if index is not specified.
+   tabs::TabInterface* split_tab = nullptr;
++#if BUILDFLAG(IS_ANDROID)
++  std::optional<tabs::TabHandle> split_handle;
++  auto browser_weak = browser.GetWeakPtr();
++  bool insert_before_split = false;
++#endif
+   if (params.split_with_tab_id.has_value() &&
+       base::FeatureList::IsEnabled(extensions_features::kApiTabsSplitView)) {
+     content::WebContents* split_contents = nullptr;
+@@ -216,6 +217,10 @@
+       if (split_contents) {
+         split_tab = tabs::TabInterface::GetFromContents(split_contents);
+         CHECK(split_tab);
++#if BUILDFLAG(IS_ANDROID)
++        split_handle = split_tab->GetHandle();
++        insert_before_split = index == split_index;
++#endif
+       }
+     }
+   }
+@@ -245,6 +250,28 @@
+
+   MaybeSetPdfNavigateParams(function, navigate_params);
+
++#if BUILDFLAG(IS_ANDROID)
++  if (params.opener_tab_id) {
++    tabs::TabInterface* opener = nullptr;
++    if (!ExtensionTabUtil::GetTabById(
++            *params.opener_tab_id, function.browser_context(),
++            function.include_incognito_information(), nullptr, nullptr, nullptr,
++            &opener) ||
++        !opener || !opener->GetContents()) {
++      return base::unexpected(ErrorUtils::FormatErrorMessage(
++          ExtensionTabUtil::kTabNotFoundError,
++          base::NumberToString(*params.opener_tab_id)));
++    }
++    if (opener->GetBrowserWindowInterface() != &browser ||
++        opener->GetContents()->GetBrowserContext() != browser.GetProfile()) {
++      return base::unexpected(
++          "Tab opener must be in the same window as the updated tab.");
++    }
++    navigate_params.source_contents = opener->GetContents();
++    navigate_params.tabstrip_add_types |= AddTabTypes::ADD_INHERIT_OPENER;
++  }
++#endif
++
+   base::WeakPtr<content::NavigationHandle> handle = Navigate(&navigate_params);
+   if (handle && params.bookmark_id) {
+     ChromeNavigationUIData* ui_data =
+@@ -260,6 +287,74 @@
+     return base::unexpected(ExtensionTabUtil::kLockedFullscreenModeNewTabError);
+   }
+
++#if BUILDFLAG(IS_ANDROID)
++  // Android inserts an ordinary tab first. Group and move through the existing
++  // model before splitting. Each operation notifies synchronous Java observers,
++  // so revalidate weak handles after every operation (including split
++  // creation).
++  if (split_handle) {
++    if (!browser_weak) {
++      return base::unexpected(tabs_constants::kSplitViewCreationFailedError);
++    }
++    auto* created_tab = tabs::TabInterface::GetFromContents(new_contents);
++    if (!created_tab) {
++      return base::unexpected(tabs_constants::kSplitViewCreationFailedError);
++    }
++    const tabs::TabHandle created_handle = created_tab->GetHandle();
++    auto contents_weak = new_contents->GetWeakPtr();
++    auto current_list = [&]() -> TabListInterface* {
++      return browser_weak ? TabListInterface::From(browser_weak.get())
++                          : nullptr;
++    };
++    auto valid_pair = [&]() {
++      auto* list = current_list();
++      auto* target = split_handle->Get();
++      auto* created = created_handle.Get();
++      return list && target && created && contents_weak &&
++             created->GetContents() == contents_weak.get() &&
++             list->GetIndexOfTab(*split_handle) >= 0 &&
++             list->GetIndexOfTab(created_handle) >= 0 && !target->IsSplit() &&
++             !created->IsSplit();
++    };
++    auto fail_split =
++        [&]() -> base::expected<content::WebContents*, std::string> {
++      auto* list = current_list();
++      if (list && created_handle.Get() &&
++          list->GetIndexOfTab(created_handle) >= 0) {
++        list->CloseTab(created_handle);
++      }
++      return base::unexpected(tabs_constants::kSplitViewCreationFailedError);
++    };
++    if (!valid_pair())
++      return fail_split();
++    const auto target_group = split_handle->Get()->GetGroup();
++    if (target_group && created_handle.Get()->GetGroup() != target_group) {
++      if (!current_list()->AddTabsToGroup(target_group, {created_handle}) ||
++          !valid_pair()) {
++        return fail_split();
++      }
++    }
++    int target_index = current_list()->GetIndexOfTab(*split_handle);
++    int new_index = current_list()->GetIndexOfTab(created_handle);
++    if (new_index < target_index)
++      --target_index;
++    current_list()->MoveTab(created_handle,
++                            target_index + (insert_before_split ? 0 : 1));
++    if (!valid_pair() ||
++        !current_list()->CreateSplit({*split_handle, created_handle})) {
++      return fail_split();
++    }
++    if (!contents_weak || !current_list() || !created_handle.Get() ||
++        !split_handle->Get() ||
++        current_list()->GetIndexOfTab(*split_handle) < 0 ||
++        current_list()->GetIndexOfTab(created_handle) < 0 ||
++        !created_handle.Get()->GetSplit() ||
++        created_handle.Get()->GetSplit() != split_handle->Get()->GetSplit()) {
++      return fail_split();
++    }
++    new_contents = contents_weak.get();
++  }
++#else
+   // Split the tab if the splitWithTabId is specified and the tab is valid.
+   // Returns an error and cleans up the newly created tab if the split view
+   // cannot be created.
+@@ -273,6 +368,7 @@
+       return base::unexpected(tabs_constants::kSplitViewCreationFailedError);
+     }
+   }
++#endif
+
+   if (active) {
+     new_contents->SetInitialFocus();

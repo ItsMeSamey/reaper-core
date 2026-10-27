@@ -6,6 +6,8 @@
 #ifndef BRAVE_COMPONENTS_REQUEST_OTR_BROWSER_REQUEST_OTR_STORAGE_TAB_HELPER_H_
 #define BRAVE_COMPONENTS_REQUEST_OTR_BROWSER_REQUEST_OTR_STORAGE_TAB_HELPER_H_
 
+#include "build/build_config.h"
+
 #include "brave/components/brave_shields/content/browser/blocked_domain_1pes_lifetime.h"
 #include "content/public/browser/web_contents_user_data.h"
 
@@ -56,7 +58,9 @@ class RequestOTRStorageTabHelper
   friend class content::WebContentsUserData<RequestOTRStorageTabHelper>;
   WEB_CONTENTS_USER_DATA_KEY_DECL();
 
+#if !BUILDFLAG(IS_ANDROID)
   void RecordSessionStats();
+#endif  // !BUILDFLAG(IS_ANDROID)
 
   // Flag stores whether we are in the middle of a proceed action.
   bool is_proceeding_ = false;

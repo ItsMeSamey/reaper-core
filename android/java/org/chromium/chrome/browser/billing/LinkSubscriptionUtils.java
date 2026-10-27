@@ -19,14 +19,9 @@ public class LinkSubscriptionUtils {
     public static String getBraveAccountLinkUrl(SubscriptionProduct subscriptionProduct) {
         String braveAccountUrl =
                 isLinkSubscriptionOnStaging() ? BRAVE_ACCOUNT_URL_STAGING : BRAVE_ACCOUNT_URL;
-        String linkType =
-                (SubscriptionProduct.VPN == subscriptionProduct) ? "connect-receipt" : "link-order";
-        String baseUrl = "https://%s?intent=%s&product=%s&mtm_campaign=linking-android";
+        String baseUrl = "https://%s?intent=link-order&product=%s&mtm_campaign=linking-android";
         return String.format(
-                baseUrl,
-                braveAccountUrl,
-                linkType,
-                subscriptionProduct.name().toLowerCase(Locale.ROOT));
+                baseUrl, braveAccountUrl, subscriptionProduct.name().toLowerCase(Locale.ROOT));
     }
 
     public static String getBraveAccountRecoverUrl(SubscriptionProduct subscriptionProduct) {

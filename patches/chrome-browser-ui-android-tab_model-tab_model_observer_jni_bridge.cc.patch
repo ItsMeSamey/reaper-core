@@ -1,0 +1,601 @@
+diff --git a/chrome/browser/ui/android/tab_model/tab_model_observer_jni_bridge.cc b/chrome/browser/ui/android/tab_model/tab_model_observer_jni_bridge.cc
+--- a/chrome/browser/ui/android/tab_model/tab_model_observer_jni_bridge.cc
++++ b/chrome/browser/ui/android/tab_model/tab_model_observer_jni_bridge.cc
+@@ -4,10 +4,12 @@
+ 
+ #include "chrome/browser/ui/android/tab_model/tab_model_observer_jni_bridge.h"
+ 
++#include <utility>
+ #include <vector>
+ 
+ #include "base/android/jni_android.h"
+ #include "base/android/token_android.h"
++#include "base/check_op.h"
+ #include "base/memory/raw_ptr.h"
+ #include "chrome/browser/android/tab_android.h"
+ #include "chrome/browser/tab_list/tab_removed_reason.h"
+@@ -25,29 +27,105 @@
+ TabModelObserverJniBridge::TabModelObserverJniBridge(
+     JNIEnv* env,
+     const JavaRef<jobject>& java_tab_model,
+-    TabModel& tab_model)
+-    : tab_model_(tab_model) {
++    TabModel& tab_model,
++    base::RepeatingClosure on_empty)
++    : TabModelObserverJniBridge(tab_model, std::move(on_empty)) {
+   // Create the Java object. This immediately adds it as an observer on the
+   // corresponding TabModel.
+   java_object_.Reset(Java_TabModelObserverJniBridge_create(
+       env, reinterpret_cast<uintptr_t>(this), java_tab_model));
+ }
+ 
++TabModelObserverJniBridge::TabModelObserverJniBridge(
++    TabModel& tab_model,
++    base::RepeatingClosure on_empty)
++    : on_empty_(std::move(on_empty)), tab_model_(&tab_model) {}
++
+ TabModelObserverJniBridge::~TabModelObserverJniBridge() {
+-  JNIEnv* env = AttachCurrentThread();
+-  Java_TabModelObserverJniBridge_detachFromTabModel(env, java_object_);
++  CHECK_EQ(dispatch_depth_, 0u);
++  DetachFromJava();
++}
++
++TabModelObserverJniBridge::ScopedDispatch::ScopedDispatch(
++    TabModelObserverJniBridge* bridge)
++    : bridge_(bridge) {
++  ++bridge_->dispatch_depth_;
++}
++
++TabModelObserverJniBridge::ScopedDispatch::~ScopedDispatch() {
++  CHECK_GT(bridge_->dispatch_depth_, 0u);
++  --bridge_->dispatch_depth_;
++  bridge_->ReleaseOwnerIfEmpty();
++}
++
++void TabModelObserverJniBridge::ReleaseOwnerIfEmpty() {
++  if (dispatch_depth_ || has_observers() || !on_empty_) {
++    return;
++  }
++  // The callback may release the last owner reference and delete this bridge.
++  // Keep its callable alive independently and do not access members afterward.
++  auto on_empty = on_empty_;
++  on_empty.Run();
++}
++
++void TabModelObserverJniBridge::DetachFromJava() {
++  if (java_object_.is_null()) {
++    return;
++  }
++  auto java_object = std::move(java_object_);
++  Java_TabModelObserverJniBridge_detachFromTabModel(AttachCurrentThread(),
++                                                    java_object);
++}
++
++void TabModelObserverJniBridge::DidChangeSplit(
++    JNIEnv* env,
++    const std::vector<int>& affected_tab_ids) {
++  ScopedDispatch dispatch(this);
++  if (shutting_down_) {
++    return;
++  }
++  std::vector<tabs::TabHandle> affected;
++  for (int id : affected_tab_ids) {
++    for (tabs::TabInterface* tab : tab_model_->GetAllTabs()) {
++      if (static_cast<TabAndroid*>(tab)->GetAndroidId() == id) {
++        affected.push_back(tab->GetHandle());
++        break;
++      }
++    }
++  }
++  for (tabs::TabHandle handle : affected) {
++    for (auto& observer : interface_observers_) {
++      auto* tab = handle.Get();
++      if (!tab || tab_model_->GetIndexOfTab(handle) < 0)
++        break;
++      observer.OnSplitChanged(*tab_model_, tab);
++      if (shutting_down_) {
++        return;
++      }
++    }
++  }
+ }
+ 
+ void TabModelObserverJniBridge::DidSelectTab(JNIEnv* env,
+                                              TabAndroid* tab,
+                                              int type,
+                                              int last_id) {
++  ScopedDispatch dispatch(this);
++  if (shutting_down_) {
++    return;
++  }
+   CHECK(tab);
+   for (auto& observer : model_observers_) {
+     observer.DidSelectTab(tab, static_cast<TabModel::TabSelectionType>(type));
++    if (shutting_down_) {
++      return;
++    }
+   }
+   for (auto& observer : interface_observers_) {
+     observer.OnActiveTabChanged(*tab_model_, tab);
++    if (shutting_down_) {
++      return;
++    }
+   }
+ }
+ 
+@@ -56,41 +134,75 @@
+     const std::vector<TabAndroid*>& tabs,
+     bool is_all_tabs,
+     bool allow_undo) {
++  ScopedDispatch dispatch(this);
++  if (shutting_down_) {
++    return;
++  }
+   for (auto& observer : model_observers_) {
+     observer.WillCloseTabs(tabs, is_all_tabs, allow_undo);
++    if (shutting_down_) {
++      return;
++    }
+   }
+   if (is_all_tabs) {
+     for (auto& observer : interface_observers_) {
+       observer.OnAllTabsAreClosing(*tab_model_);
++      if (shutting_down_) {
++        return;
++      }
+     }
+   }
+ }
+ 
+ void TabModelObserverJniBridge::WillCloseTab(JNIEnv* env, TabAndroid* tab) {
++  ScopedDispatch dispatch(this);
++  if (shutting_down_) {
++    return;
++  }
+   CHECK(tab);
+   for (auto& observer : model_observers_) {
+     observer.WillCloseTab(tab);
++    if (shutting_down_) {
++      return;
++    }
+   }
+ }
+ 
+ void TabModelObserverJniBridge::DidRemoveTabForClosure(JNIEnv* env,
+                                                        TabAndroid* tab) {
++  ScopedDispatch dispatch(this);
++  if (shutting_down_) {
++    return;
++  }
+   CHECK(tab);
+   for (auto& observer : model_observers_) {
+     observer.DidRemoveTabForClosure(tab);
++    if (shutting_down_) {
++      return;
++    }
+   }
+   for (auto& observer : interface_observers_) {
+     observer.OnTabRemoved(*tab_model_, tab, TabRemovedReason::kDeleted);
++    if (shutting_down_) {
++      return;
++    }
+   }
+ }
+ 
+ void TabModelObserverJniBridge::OnFinishingTabClosure(JNIEnv* env,
+                                                       TabAndroid* tab,
+                                                       int source) {
++  ScopedDispatch dispatch(this);
++  if (shutting_down_) {
++    return;
++  }
+   CHECK(tab);
+   for (auto& observer : model_observers_) {
+     observer.OnFinishingTabClosure(
+         tab, static_cast<TabModel::TabClosingSource>(source));
++    if (shutting_down_) {
++      return;
++    }
+   }
+ }
+ 
+@@ -98,8 +210,15 @@
+     JNIEnv* env,
+     const std::vector<TabAndroid*>& tabs,
+     bool can_restore) {
++  ScopedDispatch dispatch(this);
++  if (shutting_down_) {
++    return;
++  }
+   for (auto& observer : model_observers_) {
+     observer.OnFinishingMultipleTabClosure(tabs, can_restore);
++    if (shutting_down_) {
++      return;
++    }
+   }
+ }
+ 
+@@ -109,19 +228,33 @@
+     bool is_all_tabs,
+     bool can_restore,
+     int source) {
++  ScopedDispatch dispatch(this);
++  if (shutting_down_) {
++    return;
++  }
+   for (auto& observer : model_observers_) {
+     observer.OnTabCloseCommitted(
+         tabs, is_all_tabs, can_restore,
+         static_cast<TabModel::TabClosingSource>(source));
++    if (shutting_down_) {
++      return;
++    }
+   }
+ }
+ 
+ void TabModelObserverJniBridge::WillAddTab(JNIEnv* env,
+                                            TabAndroid* tab,
+                                            int type) {
++  ScopedDispatch dispatch(this);
++  if (shutting_down_) {
++    return;
++  }
+   CHECK(tab);
+   for (auto& observer : model_observers_) {
+     observer.WillAddTab(tab, static_cast<TabModel::TabLaunchType>(type));
++    if (shutting_down_) {
++      return;
++    }
+   }
+ }
+ 
+@@ -129,13 +262,23 @@
+                                           TabAndroid* tab,
+                                           int type,
+                                           int index) {
++  ScopedDispatch dispatch(this);
++  if (shutting_down_) {
++    return;
++  }
+   CHECK(tab);
+   for (auto& observer : model_observers_) {
+     observer.DidAddTab(tab, static_cast<TabModel::TabLaunchType>(type));
++    if (shutting_down_) {
++      return;
++    }
+   }
+ 
+   for (auto& observer : interface_observers_) {
+     observer.OnTabAdded(*tab_model_, tab, index);
++    if (shutting_down_) {
++      return;
++    }
+   }
+ }
+ 
+@@ -143,12 +286,22 @@
+                                            TabAndroid* tab,
+                                            int new_index,
+                                            int cur_index) {
++  ScopedDispatch dispatch(this);
++  if (shutting_down_) {
++    return;
++  }
+   CHECK(tab);
+   for (auto& observer : model_observers_) {
+     observer.DidMoveTab(tab, new_index, cur_index);
++    if (shutting_down_) {
++      return;
++    }
+   }
+   for (auto& observer : interface_observers_) {
+     observer.OnTabMoved(*tab_model_, tab, cur_index, new_index);
++    if (shutting_down_) {
++      return;
++    }
+   }
+ }
+ 
+@@ -156,21 +309,38 @@
+     JNIEnv* env,
+     const std::vector<TabAndroid*>& tabs,
+     int source) {
++  ScopedDispatch dispatch(this);
++  if (shutting_down_) {
++    return;
++  }
+   for (auto& observer : model_observers_) {
+     observer.OnTabClosePending(tabs,
+                                static_cast<TabModel::TabClosingSource>(source));
++    if (shutting_down_) {
++      return;
++    }
+   }
+ }
+ 
+ void TabModelObserverJniBridge::TabClosureUndone(JNIEnv* env,
+                                                  TabAndroid* tab,
+                                                  int index) {
++  ScopedDispatch dispatch(this);
++  if (shutting_down_) {
++    return;
++  }
+   CHECK(tab);
+   for (auto& observer : model_observers_) {
+     observer.TabClosureUndone(tab);
++    if (shutting_down_) {
++      return;
++    }
+   }
+   for (auto& observer : interface_observers_) {
+     observer.OnTabAdded(*tab_model_, tab, index);
++    if (shutting_down_) {
++      return;
++    }
+   }
+ }
+ 
+@@ -178,18 +348,32 @@
+     JNIEnv* env,
+     const std::vector<TabAndroid*>& tabs,
+     const std::vector<int>& indices) {
++  ScopedDispatch dispatch(this);
++  if (shutting_down_) {
++    return;
++  }
+   CHECK_EQ(tabs.size(), indices.size());
+   for (auto& observer : model_observers_) {
+     observer.OnTabCloseUndone(tabs);
++    if (shutting_down_) {
++      return;
++    }
+   }
+   for (auto& observer : interface_observers_) {
+     for (size_t i = 0; i < tabs.size(); ++i) {
+       observer.OnTabAdded(*tab_model_, tabs[i], indices[i]);
++      if (shutting_down_) {
++        return;
++      }
+     }
+   }
+ }
+ 
+ void TabModelObserverJniBridge::OnTabsSelectionChanged(JNIEnv* env) {
++  ScopedDispatch dispatch(this);
++  if (shutting_down_) {
++    return;
++  }
+   std::set<tabs::TabInterface*> highlighted_tabs;
+   const int count = tab_model_->GetTabCount();
+ 
+@@ -202,127 +386,229 @@
+ 
+   for (auto& observer : interface_observers_) {
+     observer.OnHighlightedTabsChanged(*tab_model_, highlighted_tabs);
++    if (shutting_down_) {
++      return;
++    }
+   }
+   for (auto& observer : model_observers_) {
+     observer.OnTabsSelectionsChanged();
++    if (shutting_down_) {
++      return;
++    }
+   }
+ }
+ 
+ void TabModelObserverJniBridge::TabClosureCommitted(JNIEnv* env,
+                                                     TabAndroid* tab) {
++  ScopedDispatch dispatch(this);
++  if (shutting_down_) {
++    return;
++  }
+   CHECK(tab);
+   for (auto& observer : model_observers_) {
+     observer.TabClosureCommitted(tab);
++    if (shutting_down_) {
++      return;
++    }
+   }
+ }
+ 
+ void TabModelObserverJniBridge::AllTabsClosureCommitted(JNIEnv* env) {
++  ScopedDispatch dispatch(this);
++  if (shutting_down_) {
++    return;
++  }
+   for (auto& observer : model_observers_) {
+     observer.AllTabsClosureCommitted();
++    if (shutting_down_) {
++      return;
++    }
+   }
+ }
+ 
+ void TabModelObserverJniBridge::AllTabsAreClosing(JNIEnv* env) {
++  ScopedDispatch dispatch(this);
++  if (shutting_down_) {
++    return;
++  }
+   for (auto& observer : model_observers_) {
+     observer.AllTabsAreClosing();
++    if (shutting_down_) {
++      return;
++    }
+   }
+   for (auto& observer : interface_observers_) {
+     observer.OnAllTabsAreClosing(*tab_model_);
++    if (shutting_down_) {
++      return;
++    }
+   }
+ }
+ 
+ void TabModelObserverJniBridge::TabRemoved(JNIEnv* env, TabAndroid* tab) {
++  ScopedDispatch dispatch(this);
++  if (shutting_down_) {
++    return;
++  }
+   CHECK(tab);
+   for (auto& observer : model_observers_) {
+     observer.TabRemoved(tab);
++    if (shutting_down_) {
++      return;
++    }
+   }
+   for (auto& observer : interface_observers_) {
+     observer.OnTabRemoved(*tab_model_, tab,
+                           TabRemovedReason::kInsertedIntoOtherTabStrip);
++    if (shutting_down_) {
++      return;
++    }
+   }
+ }
+ 
+ void TabModelObserverJniBridge::OnTabGroupCreated(JNIEnv* env,
+                                                   base::Token group_id) {
++  ScopedDispatch dispatch(this);
++  if (shutting_down_) {
++    return;
++  }
+   auto tab_group_id = tab_groups::TabGroupId::FromRawToken(group_id);
+   CHECK(!tab_group_id.is_empty());
+   for (auto& observer : model_observers_) {
+     observer.OnTabGroupCreated(tab_group_id);
++    if (shutting_down_) {
++      return;
++    }
+   }
+ }
+ 
+ void TabModelObserverJniBridge::OnTabGroupRemoving(JNIEnv* env,
+                                                    base::Token group_id) {
++  ScopedDispatch dispatch(this);
++  if (shutting_down_) {
++    return;
++  }
+   auto tab_group_id = tab_groups::TabGroupId::FromRawToken(group_id);
+   CHECK(!tab_group_id.is_empty());
+   for (auto& observer : model_observers_) {
+     observer.OnTabGroupRemoving(tab_group_id);
++    if (shutting_down_) {
++      return;
++    }
+   }
+ }
+ 
+ void TabModelObserverJniBridge::OnTabGroupMoved(JNIEnv* env,
+                                                 base::Token group_id,
+                                                 int old_index) {
++  ScopedDispatch dispatch(this);
++  if (shutting_down_) {
++    return;
++  }
+   auto tab_group_id = tab_groups::TabGroupId::FromRawToken(group_id);
+   CHECK(!tab_group_id.is_empty());
+   for (auto& observer : model_observers_) {
+     observer.OnTabGroupMoved(tab_group_id, old_index);
++    if (shutting_down_) {
++      return;
++    }
+   }
+ }
+ 
+ void TabModelObserverJniBridge::OnTabGroupVisualsChanged(JNIEnv* env,
+                                                          base::Token group_id) {
++  ScopedDispatch dispatch(this);
++  if (shutting_down_) {
++    return;
++  }
+   auto tab_group_id = tab_groups::TabGroupId::FromRawToken(group_id);
+   CHECK(!tab_group_id.is_empty());
+   for (auto& observer : model_observers_) {
+     observer.OnTabGroupVisualsChanged(tab_group_id);
++    if (shutting_down_) {
++      return;
++    }
+   }
+ }
+ 
+ void TabModelObserverJniBridge::OnWillActiveStateChange(JNIEnv* env,
+                                                         TabModel* tab_model,
+                                                         bool active) {
++  ScopedDispatch dispatch(this);
++  if (shutting_down_) {
++    return;
++  }
+   for (auto& observer : model_observers_) {
+     observer.OnWillActiveStateChange(*tab_model, active);
++    if (shutting_down_) {
++      return;
++    }
+   }
+ }
+ 
+ void TabModelObserverJniBridge::OnDidActiveStateChange(JNIEnv* env,
+                                                        TabModel* tab_model,
+                                                        bool active) {
++  ScopedDispatch dispatch(this);
++  if (shutting_down_) {
++    return;
++  }
+   for (auto& observer : model_observers_) {
+     observer.OnDidActiveStateChange(*tab_model, active);
++    if (shutting_down_) {
++      return;
++    }
+   }
+   for (auto& observer : interface_observers_) {
+     observer.OnTabListActiveChanged(*tab_model, active);
++    if (shutting_down_) {
++      return;
++    }
+   }
+ }
+ 
+ void TabModelObserverJniBridge::AddObserver(TabModelObserver* observer) {
++  CHECK(!shutting_down_);
+   model_observers_.AddObserver(observer);
+ }
+ 
+ void TabModelObserverJniBridge::AddTabListInterfaceObserver(
+     TabListInterfaceObserver* observer) {
++  CHECK(!shutting_down_);
+   interface_observers_.AddObserver(observer);
+ }
+ 
+ void TabModelObserverJniBridge::RemoveObserver(TabModelObserver* observer) {
+   model_observers_.RemoveObserver(observer);
++  ReleaseOwnerIfEmpty();
+ }
+ 
+ void TabModelObserverJniBridge::RemoveTabListInterfaceObserver(
+     TabListInterfaceObserver* observer) {
+   interface_observers_.RemoveObserver(observer);
++  ReleaseOwnerIfEmpty();
+ }
+ 
+ void TabModelObserverJniBridge::NotifyShutdown() {
++  ScopedDispatch dispatch(this);
++  if (shutting_down_) {
++    return;
++  }
++  shutting_down_ = true;
++  // The owner is being destroyed: no deferred callback may refer to it. Stop
++  // Java delivery now, while retaining this dispatcher through native
++  // callbacks.
++  on_empty_.Reset();
++  DetachFromJava();
+   for (auto& observer : model_observers_) {
+     observer.OnTabModelDestroyed(*tab_model_);
+   }
+   for (auto& observer : interface_observers_) {
+     observer.OnTabListDestroyed(*tab_model_);
+   }
++  model_observers_.Clear();
++  interface_observers_.Clear();
++  tab_model_ = nullptr;
+ }
+ 
+ DEFINE_JNI(TabModelObserverJniBridge)

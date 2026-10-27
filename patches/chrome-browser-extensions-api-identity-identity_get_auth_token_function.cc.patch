@@ -1,8 +1,30 @@
 diff --git a/chrome/browser/extensions/api/identity/identity_get_auth_token_function.cc b/chrome/browser/extensions/api/identity/identity_get_auth_token_function.cc
-index c4af70fe195ee349c192c79fa8985ab29b9c5f94..eae4864ea01fcb7e5e4f7405ad9d6f1618144f5f 100644
+index c4af70fe195ee349c192c79fa8985ab29b9c5f94..3a7a6fea40d5daf026d98e28fb4e464a5fe4a1cd 100644
 --- a/chrome/browser/extensions/api/identity/identity_get_auth_token_function.cc
 +++ b/chrome/browser/extensions/api/identity/identity_get_auth_token_function.cc
-@@ -124,7 +124,7 @@ CoreAccountInfo GetSigninPrimaryAccount(Profile* profile) {
+@@ -63,6 +63,21 @@
+ #include "third_party/perfetto/include/perfetto/tracing/track.h"
+ #include "ui/base/idle/idle.h"
+ 
++#if BUILDFLAG(IS_ANDROID)
++#include "base/android/jni_android.h"
++#include "base/android/jni_string.h"
++#include "chrome/browser/tab_list/tab_list_interface.h"
++#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
++#include "chrome/browser/ui/browser_window/public/profile_browser_collection.h"
++#include "components/tabs/public/tab_interface.h"
++#include "content/public/browser/web_contents.h"
++#include "ui/android/window_android.h"
++#include "ui/base/base_window.h"
++
++// After native account/window JNI conversions and the function declaration.
++#include "chrome/android/chrome_jni_headers/ReaperGoogleAccountConsentBridge_jni.h"
++#endif
++
+ #if BUILDFLAG(IS_CHROMEOS)
+ #include "chrome/browser/browser_process.h"
+ #include "chrome/browser/device_identity/device_oauth2_token_service.h"
+@@ -124,7 +139,7 @@
        signin::ConsentLevel::kSignin);
  }
  
@@ -11,7 +33,7 @@ index c4af70fe195ee349c192c79fa8985ab29b9c5f94..eae4864ea01fcb7e5e4f7405ad9d6f16
  bool IsAccountInCookieJar(const signin::AccountsInCookieJarInfo& cookie_info,
                            const CoreAccountInfo& account_info) {
    if (!cookie_info.AreAccountsFresh()) {
-@@ -156,7 +156,7 @@ class IdentityGetAuthTokenFunction::RefreshTokensLoadedWaiter
+@@ -156,7 +171,7 @@
        identity_manager_observation_{this};
  };
  
@@ -20,7 +42,50 @@ index c4af70fe195ee349c192c79fa8985ab29b9c5f94..eae4864ea01fcb7e5e4f7405ad9d6f16
  class IdentityGetAuthTokenFunction::AccountsInCookieUpdatedWaiter
      : public signin::IdentityManager::Observer {
   public:
-@@ -328,6 +328,10 @@ ExtensionFunction::ResponseAction IdentityGetAuthTokenFunction::Run() {
+@@ -252,8 +267,21 @@
+ IdentityGetAuthTokenFunction::IdentityGetAuthTokenFunction() = default;
+ 
+ IdentityGetAuthTokenFunction::~IdentityGetAuthTokenFunction() {
++#if BUILDFLAG(IS_ANDROID)
++  CancelAndroidAccountConsentRecovery();
++#endif
+   TRACE_EVENT_END("identity", IdentityMintRequestQueue::GetRequestTrack(this));
+ }
++
++#if BUILDFLAG(IS_ANDROID)
++bool IdentityGetAuthTokenFunction::ShouldKeepWorkerAliveIndefinitely() {
++  // Interactive consent can legitimately outlast the worker request timeout.
++  // Leave silent/default and malformed requests subject to the normal limit.
++  const auto params = api::identity::GetAuthToken::Params::Create(args());
++  return params && params->details &&
++         params->details->interactive.value_or(false);
++}
++#endif
+ 
+ ExtensionFunction::ResponseAction IdentityGetAuthTokenFunction::Run() {
+   TRACE_EVENT_BEGIN("identity", "IdentityGetAuthTokenFunction",
+@@ -309,6 +337,20 @@
+     RecordFunctionResult(error, remote_consent_approved_);
+     return RespondNow(Error(error.ToString()));
+   }
++
++#if BUILDFLAG(IS_ANDROID)
++  android_explicit_requested_gaia_id_ = gaia_id;
++
++  // The fallback accepts an explicit account only when existing scopes can
++  // expose its trusted subject. Default/native account behavior is unchanged.
++  if (!google_apis::IsGoogleChromeAPIKeyUsed() && !gaia_id.empty() &&
++      !ConfigureAndroidRequestedAccount(gaia_id.ToString(), scopes)) {
++    auto error = IdentityGetAuthTokenError::FromMintTokenAuthError(
++        "Account selection is not supported by Android browser-based OAuth.");
++    RecordFunctionResult(error, remote_consent_approved_);
++    return RespondNow(Error(error.ToString()));
++  }
++#endif
+ 
+   token_key_.scopes = scopes;
+   token_key_.extension_id = extension()->id();
+@@ -328,6 +370,10 @@
    // From here on out, results must be returned asynchronously.
    StartAsyncRun();
  
@@ -31,7 +96,7 @@ index c4af70fe195ee349c192c79fa8985ab29b9c5f94..eae4864ea01fcb7e5e4f7405ad9d6f16
    base::OnceCallback next_step =
        base::BindOnce(&IdentityGetAuthTokenFunction::GetAuthTokenForAccount,
                       weak_ptr_factory_.GetWeakPtr(), gaia_id);
-@@ -410,7 +414,7 @@ void IdentityGetAuthTokenFunction::GetAuthTokenForAccount(
+@@ -410,7 +456,7 @@
    }
  }
  
@@ -40,7 +105,34 @@ index c4af70fe195ee349c192c79fa8985ab29b9c5f94..eae4864ea01fcb7e5e4f7405ad9d6f16
  bool IdentityGetAuthTokenFunction::ShouldDelayRemoteConsent() {
    signin::IdentityManager* identity_manager =
        IdentityManagerFactory::GetForProfile(GetProfile());
-@@ -549,12 +553,16 @@ void IdentityGetAuthTokenFunction::StartSigninFlow() {
+@@ -455,6 +501,10 @@
+ void IdentityGetAuthTokenFunction::StartAsyncRun() {
+   // Balanced in CompleteAsyncRun
+   AddRef();
++#if BUILDFLAG(IS_ANDROID)
++  async_run_active_ = true;
++  registry_observation_.Observe(ExtensionRegistry::Get(browser_context()));
++#endif
+ 
+   identity_api_shutdown_subscription_ =
+       extensions::IdentityAPI::GetFactoryInstance()
+@@ -464,6 +514,15 @@
+ }
+ 
+ void IdentityGetAuthTokenFunction::CompleteAsyncRun(ResponseValue response) {
++#if BUILDFLAG(IS_ANDROID)
++  if (!async_run_active_) {
++    return;
++  }
++  CancelAndroidAccountConsentRecovery();
++  async_run_active_ = false;
++  registry_observation_.Reset();
++  weak_ptr_factory_.InvalidateWeakPtrs();
++#endif
+   identity_api_shutdown_subscription_ = {};
+ 
+   Respond(std::move(response));
+@@ -549,12 +608,16 @@
  void IdentityGetAuthTokenFunction::StartMintTokenFlow(
      IdentityMintRequestQueue::MintType type) {
  #if !BUILDFLAG(IS_CHROMEOS)
@@ -57,16 +149,249 @@ index c4af70fe195ee349c192c79fa8985ab29b9c5f94..eae4864ea01fcb7e5e4f7405ad9d6f16
  #endif
    TRACE_EVENT_BEGIN("identity", "MintTokenFlow",
                      IdentityMintRequestQueue::GetRequestTrack(this), "type",
-@@ -959,7 +967,7 @@ void IdentityGetAuthTokenFunction::OnIdentityAPIShutdown() {
+@@ -609,6 +672,9 @@
+   const auto& oauth2_info = OAuth2ManifestHandler::GetOAuth2Info(*extension());
+   IdentityAPI* id_api = IdentityAPI::GetFactoryInstance()->Get(GetProfile());
+   IdentityTokenCacheValue cache_entry =
++#if BUILDFLAG(IS_ANDROID)
++      HasAndroidRequestedAccount() ? IdentityTokenCacheValue() :
++#endif
+       id_api->token_cache()->GetToken(token_key_);
+   IdentityTokenCacheValue::CacheValueStatus cache_status = cache_entry.status();
+ 
+@@ -869,6 +935,18 @@
+   TRACE_EVENT_INSTANT("identity", "OnGaiaRemoteConsentFlowApproved",
+                       IdentityMintRequestQueue::GetRequestTrack(this));
+   DCHECK(!consent_result.empty());
++
++#if BUILDFLAG(IS_ANDROID)
++  if (!android_explicit_requested_gaia_id_.empty() &&
++      android_explicit_requested_gaia_id_ != gaia_id) {
++    CompleteMintTokenFlow();
++    CompleteFunctionWithError(
++        IdentityGetAuthTokenError::FromMintTokenAuthError(
++            "The consent account does not match the requested account."));
++    return;
++  }
++#endif
++
+   remote_consent_approved_ = true;
+ 
+   AccountInfo account = IdentityManagerFactory::GetForProfile(GetProfile())
+@@ -947,19 +1025,199 @@
+                              access_token_info.expiration_time,
+                              GoogleServiceAuthError::AuthErrorNone());
+   } else {
++#if BUILDFLAG(IS_ANDROID)
++    if (StartAndroidAccountConsentRecovery(error)) {
++      return;
++    }
++#endif
+     OnGetAccessTokenComplete(std::nullopt, base::Time(), error);
+   }
+ }
+ 
+-void IdentityGetAuthTokenFunction::OnIdentityAPIShutdown() {
+-#if BUILDFLAG(IS_CHROMEOS)
+-  device_oauth2_token_fetcher_.reset();
+-#endif
++#if BUILDFLAG(IS_ANDROID)
++bool IdentityGetAuthTokenFunction::StartAndroidAccountConsentRecovery(
++    const GoogleServiceAuthError& error) {
++  if (!async_run_active_ || android_account_consent_attempted_ ||
++      error.state() != GoogleServiceAuthError::INVALID_GAIA_CREDENTIALS ||
++      !IsInteractionAllowed(interactivity_status_for_signin_) ||
++      GetProfile()->IsOffTheRecord() || token_key_.account_info.IsEmpty() ||
++      token_key_.account_info.gaia.empty() ||
++      token_key_.account_info.email.empty() ||
++      (!android_explicit_requested_gaia_id_.empty() &&
++       android_explicit_requested_gaia_id_ != token_key_.account_info.gaia)) {
++    return false;
++  }
++
++  Profile* profile = GetProfile();
++  auto* collection = ProfileBrowserCollection::GetForProfile(profile);
++  content::WebContents* contents = GetSenderWebContents();
++  if (contents && contents->GetBrowserContext() != profile) {
++    return false;
++  }
++  if (!contents) {
++    // A worker request may use only an active tab of this exact profile.
++    auto* browser = collection->FindTabbedBrowser(/*match_original_profiles=*/false);
++    if (!browser || browser->GetProfile() != profile ||
++        browser->IsDeleteScheduled()) {
++      return false;
++    }
++    auto* tabs = TabListInterface::From(browser);
++    auto* tab = tabs ? tabs->GetActiveTab() : nullptr;
++    contents = tab ? tab->GetContents() : nullptr;
++  }
++  if (!contents || contents->GetBrowserContext() != profile) {
++    return false;
++  }
++  ui::WindowAndroid* window = contents->GetTopLevelNativeWindow();
++  auto* browser = window ? collection->FindBrowserWithWindow(window) : nullptr;
++  if (!browser || browser->GetProfile() != profile ||
++      browser->IsDeleteScheduled() || !browser->GetWindow() ||
++      browser->GetWindow()->GetNativeWindow() != window) {
++    return false;
++  }
++
++  JNIEnv* env = base::android::AttachCurrentThread();
++  auto bridge = Java_ReaperGoogleAccountConsentBridge_create(
++      env, reinterpret_cast<int64_t>(this), token_key_.account_info,
++      base::StrCat({"oauth2:", GaiaConstants::kAnyApiOAuth2Scope}), window);
++  if (bridge.is_null()) {
++    return false;
++  }
++  android_account_consent_attempted_ = true;
++  android_account_consent_account_ = token_key_.account_info;
++  android_account_consent_error_ = error;
++  android_account_consent_bridge_.Reset(bridge);
++  android_account_consent_window_subscription_ = browser->RegisterBrowserDidClose(
++      base::BindRepeating(
++          [](base::WeakPtr<IdentityGetAuthTokenFunction> request,
++             BrowserWindowInterface*) {
++            if (request) {
++              request->CancelAndroidAsyncRun(
++                  IdentityGetAuthTokenError(
++                      IdentityGetAuthTokenError::State::kRemoteConsentFlowRejected),
++                  /*defer_response=*/false);
++            }
++          },
++          weak_ptr_factory_.GetWeakPtr()));
++  Java_ReaperGoogleAccountConsentBridge_start(
++      env, android_account_consent_bridge_);
++  return true;
++}
++
++void IdentityGetAuthTokenFunction::CancelAndroidAccountConsentRecovery() {
++  android_account_consent_window_subscription_ = {};
++  if (!android_account_consent_bridge_.is_null()) {
++    Java_ReaperGoogleAccountConsentBridge_cancel(
++        base::android::AttachCurrentThread(), android_account_consent_bridge_);
++    android_account_consent_bridge_.Reset();
++  }
++}
++
++void IdentityGetAuthTokenFunction::OnAndroidAccountConsentResult(
++    JNIEnv* env,
++    const std::string& browser_login_token) {
++  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
++  const bool same_account =
++      token_key_.account_info == android_account_consent_account_ &&
++      (android_explicit_requested_gaia_id_.empty() ||
++       android_explicit_requested_gaia_id_ == token_key_.account_info.gaia);
++  const GoogleServiceAuthError original_error = android_account_consent_error_;
++  CancelAndroidAccountConsentRecovery();
++  if (!async_run_active_) {
++    return;
++  }
++  if (!same_account || browser_login_token.empty()) {
++    TRACE_EVENT_END("identity", IdentityMintRequestQueue::GetRequestTrack(this),
++                    "error", original_error.ToString());
++    CompleteMintTokenFlow();
++    CompleteFunctionWithError(
++        IdentityGetAuthTokenError::FromGetAccessTokenAuthError(
++            original_error.ToString()));
++    return;
++  }
++  // The SDK token is a browser login credential, not an extension scope grant.
++  // Existing mint and remote-consent processing (including the account guard)
++  // still decide the extension result.
++  OnGetAccessTokenComplete(browser_login_token, base::Time(),
++                           GoogleServiceAuthError::AuthErrorNone());
++}
++
++void IdentityGetAuthTokenFunction::CancelAndroidAsyncRun(
++    const IdentityGetAuthTokenError& error,
++    bool defer_response) {
++  if (!async_run_active_) {
++    return;
++  }
++  // Retire the original flow before canceling its queue entry or replying.
++  // Deferred WebAuthFlow deletion and late callbacks cannot publish a token.
++  CancelAndroidWebAuthFlow();
++  CancelAndroidAccountConsentRecovery();
++  weak_ptr_factory_.InvalidateWeakPtrs();
++  registry_observation_.Reset();
++  mint_token_flow_.reset();
+   gaia_remote_consent_flow_.reset();
    token_key_account_access_token_fetcher_.reset();
    refresh_tokens_loaded_waiter_.reset();
    scoped_identity_manager_observation_.Reset();
 -#if BUILDFLAG(ENABLE_DESKTOP_ANDROID_EXTENSIONS)
++#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
++  accounts_in_cookie_updated_waiter_.reset();
++#endif
++  IdentityAPI::GetFactoryInstance()
++      ->Get(GetProfile())
++      ->mint_queue()
++      ->RequestCancel(token_key_, this);
++
++  if (defer_response) {
++    // All requests for this unloaded Extension must leave the queue before a
++    // response can synchronously start a replacement request with the same ID.
++    content::GetUIThreadTaskRunner({})->PostTask(
++        FROM_HERE,
++        base::BindOnce(&IdentityGetAuthTokenFunction::CompleteFunctionWithError,
++                       weak_ptr_factory_.GetWeakPtr(), error));
++    return;
++  }
++  CompleteFunctionWithError(error);
++}
++
++void IdentityGetAuthTokenFunction::OnExtensionUnloaded(
++    content::BrowserContext* browser_context,
++    const Extension* extension,
++    UnloadedExtensionReason reason) {
++  if (browser_context != this->browser_context() ||
++      extension != this->extension()) {
++    return;
++  }
++  CancelAndroidAsyncRun(
++      IdentityGetAuthTokenError(
++          IdentityGetAuthTokenError::State::kRemoteConsentFlowRejected),
++      /*defer_response=*/true);
++}
++
++void IdentityGetAuthTokenFunction::OnShutdown(ExtensionRegistry* registry) {
++  registry_observation_.Reset();
++  OnIdentityAPIShutdown();
++}
++
++void IdentityGetAuthTokenFunction::OnBrowserContextShutdown() {
++  OnIdentityAPIShutdown();
++}
++#endif
++
++void IdentityGetAuthTokenFunction::OnIdentityAPIShutdown() {
++#if BUILDFLAG(IS_ANDROID)
++  CancelAndroidAsyncRun(
++      IdentityGetAuthTokenError(
++          IdentityGetAuthTokenError::State::kBrowserContextShutDown),
++      /*defer_response=*/false);
++#else
++#if BUILDFLAG(IS_CHROMEOS)
++  device_oauth2_token_fetcher_.reset();
++#endif
++  gaia_remote_consent_flow_.reset();
++  token_key_account_access_token_fetcher_.reset();
++  refresh_tokens_loaded_waiter_.reset();
++  scoped_identity_manager_observation_.Reset();
 +#if BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_EXTENSIONS_CORE)
    accounts_in_cookie_updated_waiter_.reset();
  #endif
    extensions::IdentityAPI::GetFactoryInstance()
-@@ -1034,7 +1042,7 @@ void IdentityGetAuthTokenFunction::ShowExtensionLoginPrompt() {
+@@ -969,6 +1227,7 @@
+ 
+   CompleteFunctionWithError(IdentityGetAuthTokenError(
+       IdentityGetAuthTokenError::State::kBrowserContextShutDown));
++#endif
+ }
+ 
+ void IdentityGetAuthTokenFunction::StartTokenKeyAccountAccessTokenRequest() {
+@@ -1034,7 +1293,7 @@
  #endif
  
  void IdentityGetAuthTokenFunction::ShowRemoteConsentDialog() {
@@ -75,7 +400,7 @@ index c4af70fe195ee349c192c79fa8985ab29b9c5f94..eae4864ea01fcb7e5e4f7405ad9d6f16
    // On Android, Gaia session cookies are reconciled asynchronously after
    // sign-in. Defer showing the remote consent dialog until cookies are
    // ready in the cookie jar to prevent loading a blank consent page.
-@@ -1191,7 +1199,7 @@ void IdentityGetAuthTokenFunction::RefreshTokensLoadedWaiter::
+@@ -1191,7 +1450,7 @@
    std::move(callback_).Run();
  }
  
@@ -84,3 +409,11 @@ index c4af70fe195ee349c192c79fa8985ab29b9c5f94..eae4864ea01fcb7e5e4f7405ad9d6f16
  IdentityGetAuthTokenFunction::AccountsInCookieUpdatedWaiter::
      AccountsInCookieUpdatedWaiter(signin::IdentityManager& identity_manager,
                                    const CoreAccountInfo& account_info,
+@@ -1228,3 +1487,7 @@
+ #endif
+ 
+ }  // namespace extensions
++
++#if BUILDFLAG(IS_ANDROID)
++DEFINE_JNI(ReaperGoogleAccountConsentBridge)
++#endif

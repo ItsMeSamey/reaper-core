@@ -1,0 +1,518 @@
+diff --git a/chrome/browser/extensions/webstore_installer_unittest.cc b/chrome/browser/extensions/webstore_installer_unittest.cc
+--- a/chrome/browser/extensions/webstore_installer_unittest.cc
++++ b/chrome/browser/extensions/webstore_installer_unittest.cc
+@@ -14,6 +14,32 @@
+ #include "components/update_client/update_query_params.h"
+ #include "extensions/buildflags/buildflags.h"
+ #include "testing/gtest/include/gtest/gtest.h"
++
++#if BUILDFLAG(IS_ANDROID)
++#include <memory>
++
++#include "base/files/file_enumerator.h"
++#include "base/files/file_util.h"
++#include "base/test/bind.h"
++#include "base/threading/thread_restrictions.h"
++#include "base/values.h"
++#include "chrome/browser/extensions/extension_service_test_base.h"
++#include "chrome/browser/profiles/profile.h"
++#include "components/download/public/common/download_url_parameters.h"
++#include "components/download/public/common/mock_download_item.h"
++#include "content/public/test/mock_download_manager.h"
++#include "content/public/test/web_contents_tester.h"
++#include "extensions/browser/crx_installer.h"
++#include "extensions/browser/extension_registry.h"
++#include "extensions/browser/extensions_browser_client.h"
++#include "extensions/browser/install_approval.h"
++#include "extensions/browser/install_tracker.h"
++#include "extensions/browser/install_verifier.h"
++#include "extensions/common/extension_builder.h"
++#include "extensions/strings/grit/extensions_strings.h"
++#include "testing/gmock/include/gmock/gmock.h"
++#include "ui/base/l10n/l10n_util.h"
++#endif
+ 
+ static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
+ 
+@@ -79,4 +105,481 @@
+   }
+ }
+ 
++#if BUILDFLAG(IS_ANDROID)
++class DestructionObservedWebstoreInstaller : public WebstoreInstaller {
++ public:
++  using WebstoreInstaller::WebstoreInstaller;
++
++  void ObserveDestruction(base::OnceClosure callback) {
++    on_destroyed_ = std::move(callback);
++  }
++
++ protected:
++  ~DestructionObservedWebstoreInstaller() override {
++    if (on_destroyed_) {
++      std::move(on_destroyed_).Run();
++    }
++  }
++
++ private:
++  base::OnceClosure on_destroyed_;
++};
++
++class RegistryShutdownOnRemoval : public download::DownloadItem::Observer {
++ public:
++  explicit RegistryShutdownOnRemoval(base::OnceClosure callback)
++      : on_removed_(std::move(callback)) {}
++
++  void OnDownloadRemoved(download::DownloadItem*) override {
++    std::move(on_removed_).Run();
++  }
++
++ private:
++  base::OnceClosure on_removed_;
++};
++
++class WebstoreInstallerAndroidLifecycleTest : public ExtensionServiceTestBase {
++ protected:
++  void SetUp() override {
++    ExtensionServiceTestBase::SetUp();
++    CreateProfileAndContents();
++    download_directory_ = temp_dir().GetPath().AppendASCII("pending_store");
++    WebstoreInstaller::SetDownloadDirectoryForTests(&download_directory_);
++  }
++
++  void TearDown() override {
++    on_failure_.Reset();
++    web_contents_.reset();
++    ExtensionServiceTestBase::TearDown();
++    task_environment()->RunUntilIdle();
++    WebstoreInstaller::SetDownloadDirectoryForTests(nullptr);
++  }
++
++  void CreateProfileAndContents() {
++    InitializeEmptyExtensionService();
++    web_contents_ = content::WebContentsTester::CreateTestWebContents(
++        profile(), nullptr);
++  }
++
++  scoped_refptr<WebstoreInstaller> CreateInstaller(
++      const std::string& id, base::OnceClosure on_destroyed = base::OnceClosure()) {
++    std::unique_ptr<InstallApproval> approval;
++    if (crx_file::id_util::IdIsValid(id)) {
++      base::DictValue manifest;
++      manifest.Set("name", "Lifecycle extension");
++      manifest.Set("manifest_version", 3);
++      manifest.Set("version", "1");
++      approval = InstallApproval::CreateWithNoInstallPrompt(
++          profile(), id, std::move(manifest), /*strict_manifest_check=*/true);
++    }
++    auto installer = base::MakeRefCounted<DestructionObservedWebstoreInstaller>(
++        profile(),
++        base::BindLambdaForTesting([this](const std::string&) {
++          ++success_count_;
++        }),
++        base::BindLambdaForTesting(
++            [this](const std::string&, const std::string& error,
++                   WebstoreInstaller::FailureReason reason) {
++              ++failure_count_;
++              last_error_ = error;
++              last_reason_ = reason;
++              if (on_failure_) {
++                on_failure_.Run();
++              }
++            }),
++        web_contents_.get(), id, std::move(approval),
++        WebstoreInstaller::INSTALL_SOURCE_OTHER);
++    installer->ObserveDestruction(std::move(on_destroyed));
++    return installer;
++  }
++
++  bool IsRetired(const WebstoreInstaller& installer) {
++    return installer.completed_ && !installer.browser_context_ &&
++           !installer.extension_registry_observation_.IsObserving() &&
++           !installer.download_item_ && !installer.start_ref_held_ &&
++           !installer.download_progress_timer_.IsRunning();
++  }
++
++  scoped_refptr<WebstoreInstaller> StartDownloadItem(
++      download::MockDownloadItem* item,
++      base::OnceClosure on_destroyed = base::OnceClosure()) {
++    auto manager =
++        std::make_unique<testing::NiceMock<content::MockDownloadManager>>();
++    EXPECT_CALL(*manager, DownloadUrlMock(testing::_))
++        .WillOnce([item](download::DownloadUrlParameters* params) {
++          ASSERT_TRUE(params->callback());
++          std::move(params->callback())
++              .Run(item, download::DOWNLOAD_INTERRUPT_REASON_NONE);
++        });
++    profile()->SetDownloadManagerForTesting(std::move(manager));
++    auto installer = CreateInstaller("abcdefghijklmnopabcdefghijklmnop",
++                                     std::move(on_destroyed));
++    installer->Start();
++    return installer;
++  }
++
++  void SetCrxHandoffForTesting(WebstoreInstaller* installer) {
++    installer->crx_installer_ = CrxInstaller::CreateSilent(profile());
++  }
++
++  InstallTracker* tracker() {
++    return ExtensionsBrowserClient::Get()->GetInstallTracker(profile());
++  }
++
++  void ExpectAlreadyInterruptedDownloadRetires(
++      download::DownloadInterruptReason reason) {
++    testing::StrictMock<download::MockDownloadItem> item;
++    EXPECT_CALL(item, GetState())
++        .WillRepeatedly(testing::Return(download::DownloadItem::INTERRUPTED));
++    EXPECT_CALL(item, GetLastReason()).WillRepeatedly(testing::Return(reason));
++    EXPECT_CALL(item, Cancel(testing::_)).Times(0);
++    auto installer = StartDownloadItem(&item);
++    ASSERT_TRUE(tracker()->GetActiveInstall("abcdefghijklmnopabcdefghijklmnop"));
++    // The failure predates observer attachment. No later item notification is
++    // sent until after the completion and ownership assertions.
++    task_environment()->RunUntilIdle();
++    EXPECT_EQ(1, failure_count_);
++    EXPECT_EQ(0, success_count_);
++    EXPECT_EQ(WebstoreInstaller::FAILURE_REASON_OTHER, last_reason_);
++    EXPECT_EQ(l10n_util::GetStringUTF8(IDS_WEBSTORE_DOWNLOAD_ACCESS_DENIED),
++              last_error_);
++    EXPECT_TRUE(IsRetired(*installer));
++    EXPECT_TRUE(installer->HasOneRef());
++    EXPECT_FALSE(tracker()->GetActiveInstall("abcdefghijklmnopabcdefghijklmnop"));
++    item.NotifyObserversDownloadUpdated();
++    installer->Start();
++    task_environment()->RunUntilIdle();
++    EXPECT_EQ(1, failure_count_);
++  }
++
++  ScopedInstallVerifierBypassForTest verifier_bypass_;
++  std::unique_ptr<content::WebContents> web_contents_;
++  base::FilePath download_directory_;
++  base::RepeatingClosure on_failure_;
++  int success_count_ = 0;
++  int failure_count_ = 0;
++  std::string last_error_;
++  WebstoreInstaller::FailureReason last_reason_ =
++      WebstoreInstaller::FAILURE_REASON_OTHER;
++};
++
++TEST_F(WebstoreInstallerAndroidLifecycleTest,
++       ProfileShutdownRetiresPendingDownload) {
++  auto installer = CreateInstaller("abcdefghijklmnopabcdefghijklmnop");
++  on_failure_ = base::BindLambdaForTesting([&] { installer->Start(); });
++  installer->Start();
++  EXPECT_EQ(0, failure_count_);
++  EXPECT_FALSE(installer->HasOneRef());
++
++  // The real file task is pending; retire the repaired operation via genuine
++  // profile/registry shutdown before allowing its UI reply to complete.
++  web_contents_.reset();
++  DeleteProfile();
++  EXPECT_EQ(1, failure_count_);
++  EXPECT_EQ(WebstoreInstaller::FAILURE_REASON_CANCELLED, last_reason_);
++  EXPECT_TRUE(IsRetired(*installer));
++  task_environment()->RunUntilIdle();
++  EXPECT_TRUE(installer->HasOneRef());
++  EXPECT_EQ(1, failure_count_);
++  EXPECT_EQ(0, success_count_);
++  base::ScopedAllowBlockingForTesting allow_blocking;
++  EXPECT_TRUE(base::FileEnumerator(download_directory_, false,
++                                   base::FileEnumerator::FILES)
++                  .Next()
++                  .empty());
++}
++
++TEST_F(WebstoreInstallerAndroidLifecycleTest,
++       ShutdownBeforeStartDoesNotReleaseUnownedReference) {
++  auto installer = CreateInstaller("abcdefghijklmnopabcdefghijklmnop");
++  EXPECT_TRUE(installer->HasOneRef());
++  web_contents_.reset();
++  DeleteProfile();
++  EXPECT_EQ(1, failure_count_);
++  EXPECT_TRUE(IsRetired(*installer));
++  EXPECT_TRUE(installer->HasOneRef());
++  installer->Start();
++  task_environment()->RunUntilIdle();
++  EXPECT_EQ(1, failure_count_);
++  EXPECT_EQ(0, success_count_);
++  EXPECT_TRUE(installer->HasOneRef());
++}
++
++TEST_F(WebstoreInstallerAndroidLifecycleTest,
++       FailureCallbackCanShutdownProfileAndFreshOperationCanRetry) {
++  auto installer = CreateInstaller("invalid");
++  on_failure_ = base::BindLambdaForTesting([this] {
++    web_contents_.reset();
++    DeleteProfile();
++  });
++  installer->Start();
++  EXPECT_EQ(1, failure_count_);
++  EXPECT_EQ("Invalid id", last_error_);
++  EXPECT_TRUE(IsRetired(*installer));
++  EXPECT_TRUE(installer->HasOneRef());
++  installer->Start();
++  EXPECT_EQ(1, failure_count_);
++
++  on_failure_.Reset();
++  CreateProfileAndContents();
++  auto retry = CreateInstaller("invalid");
++  retry->Start();
++  EXPECT_EQ(2, failure_count_);
++  EXPECT_EQ(0, success_count_);
++  EXPECT_TRUE(IsRetired(*retry));
++  EXPECT_TRUE(retry->HasOneRef());
++}
++
++TEST_F(WebstoreInstallerAndroidLifecycleTest,
++       AlreadyForbiddenDownloadRetiresWithoutAnotherUpdate) {
++  ExpectAlreadyInterruptedDownloadRetires(
++      download::DOWNLOAD_INTERRUPT_REASON_SERVER_FORBIDDEN);
++}
++
++TEST_F(WebstoreInstallerAndroidLifecycleTest,
++       AlreadyUnauthorizedDownloadRetiresWithoutAnotherUpdate) {
++  ExpectAlreadyInterruptedDownloadRetires(
++      download::DOWNLOAD_INTERRUPT_REASON_SERVER_UNAUTHORIZED);
++}
++
++TEST_F(WebstoreInstallerAndroidLifecycleTest,
++       AlreadyCancelledDownloadCompletesOnce) {
++  testing::StrictMock<download::MockDownloadItem> item;
++  EXPECT_CALL(item, GetState())
++      .WillRepeatedly(testing::Return(download::DownloadItem::CANCELLED));
++  EXPECT_CALL(item, Cancel(testing::_)).Times(0);
++  auto installer = StartDownloadItem(&item);
++  task_environment()->RunUntilIdle();
++  EXPECT_EQ(1, failure_count_);
++  EXPECT_EQ(WebstoreInstaller::FAILURE_REASON_CANCELLED, last_reason_);
++  EXPECT_EQ("Download canceled", last_error_);
++  EXPECT_TRUE(IsRetired(*installer));
++  EXPECT_TRUE(installer->HasOneRef());
++  EXPECT_FALSE(tracker()->GetActiveInstall("abcdefghijklmnopabcdefghijklmnop"));
++  item.NotifyObserversDownloadUpdated();
++  EXPECT_EQ(1, failure_count_);
++  EXPECT_EQ(0, success_count_);
++}
++
++TEST_F(WebstoreInstallerAndroidLifecycleTest,
++       InProgressDownloadStillWaitsForAnUpdate) {
++  testing::StrictMock<download::MockDownloadItem> item;
++  auto state = download::DownloadItem::IN_PROGRESS;
++  EXPECT_CALL(item, GetState()).WillRepeatedly([&] { return state; });
++  EXPECT_CALL(item, GetLastReason())
++      .WillRepeatedly(testing::Return(
++          download::DOWNLOAD_INTERRUPT_REASON_SERVER_FORBIDDEN));
++  EXPECT_CALL(item, Cancel(testing::_)).Times(0);
++  auto installer = StartDownloadItem(&item);
++  task_environment()->RunUntilIdle();
++  EXPECT_EQ(0, failure_count_);
++  EXPECT_EQ(0, success_count_);
++  EXPECT_FALSE(IsRetired(*installer));
++  EXPECT_TRUE(tracker()->GetActiveInstall("abcdefghijklmnopabcdefghijklmnop"));
++  state = download::DownloadItem::INTERRUPTED;
++  item.NotifyObserversDownloadUpdated();
++  EXPECT_EQ(1, failure_count_);
++  EXPECT_TRUE(IsRetired(*installer));
++  EXPECT_TRUE(installer->HasOneRef());
++  EXPECT_FALSE(tracker()->GetActiveInstall("abcdefghijklmnopabcdefghijklmnop"));
++}
++
++TEST_F(WebstoreInstallerAndroidLifecycleTest,
++       CompletedDownloadStillWaitsForExtensionInstallation) {
++  testing::StrictMock<download::MockDownloadItem> item;
++  EXPECT_CALL(item, GetState())
++      .WillRepeatedly(testing::Return(download::DownloadItem::COMPLETE));
++  EXPECT_CALL(item, Cancel(testing::_)).Times(0);
++  auto installer = StartDownloadItem(&item);
++  task_environment()->RunUntilIdle();
++  EXPECT_EQ(0, failure_count_);
++  EXPECT_EQ(0, success_count_);
++  EXPECT_FALSE(IsRetired(*installer));
++  EXPECT_CALL(item, Remove()).Times(1);
++  auto extension = ExtensionBuilder("Lifecycle extension")
++                       .SetManifestVersion(3)
++                       .SetID("abcdefghijklmnopabcdefghijklmnop")
++                       .Build();
++  ASSERT_TRUE(extension);
++  registry()->AddEnabled(extension);
++  registry()->TriggerOnInstalled(extension.get(), /*is_update=*/false);
++  EXPECT_EQ(0, failure_count_);
++  EXPECT_EQ(1, success_count_);
++  EXPECT_TRUE(IsRetired(*installer));
++  EXPECT_TRUE(installer->HasOneRef());
++  EXPECT_FALSE(tracker()->GetActiveInstall("abcdefghijklmnopabcdefghijklmnop"));
++  item.NotifyObserversDownloadUpdated();
++  EXPECT_EQ(1, success_count_);
++}
++
++TEST_F(WebstoreInstallerAndroidLifecycleTest,
++       InitialFailureCanReleaseTheLastCallerReference) {
++  testing::StrictMock<download::MockDownloadItem> item;
++  EXPECT_CALL(item, GetState())
++      .WillRepeatedly(testing::Return(download::DownloadItem::INTERRUPTED));
++  EXPECT_CALL(item, GetLastReason())
++      .WillRepeatedly(testing::Return(
++          download::DOWNLOAD_INTERRUPT_REASON_SERVER_FORBIDDEN));
++  EXPECT_CALL(item, Cancel(testing::_)).Times(0);
++  auto destroyed = std::make_shared<bool>(false);
++  auto installer = StartDownloadItem(
++      &item, base::BindLambdaForTesting([destroyed] { *destroyed = true; }));
++  on_failure_ = base::BindLambdaForTesting([&] {
++    EXPECT_TRUE(IsRetired(*installer));
++    installer.reset();
++    EXPECT_FALSE(*destroyed);
++  });
++  task_environment()->RunUntilIdle();
++  EXPECT_FALSE(installer);
++  EXPECT_TRUE(*destroyed);
++  EXPECT_EQ(1, failure_count_);
++  EXPECT_EQ(0, success_count_);
++  EXPECT_FALSE(tracker()->GetActiveInstall("abcdefghijklmnopabcdefghijklmnop"));
++  item.NotifyObserversDownloadUpdated();
++  EXPECT_EQ(1, failure_count_);
++}
++
++TEST_F(WebstoreInstallerAndroidLifecycleTest,
++       DownloadDestroyedBeforeCrxHandoffRetiresAndAllowsFreshRetry) {
++  const std::string id = "abcdefghijklmnopabcdefghijklmnop";
++  auto item =
++      std::make_unique<testing::StrictMock<download::MockDownloadItem>>();
++  EXPECT_CALL(*item, GetState())
++      .WillRepeatedly(testing::Return(download::DownloadItem::IN_PROGRESS));
++  EXPECT_CALL(*item, Cancel(testing::_)).Times(0);
++  auto installer = StartDownloadItem(item.get());
++  task_environment()->RunUntilIdle();
++  ASSERT_TRUE(tracker()->GetActiveInstall(id));
++  ASSERT_FALSE(IsRetired(*installer));
++
++  // MockDownloadItem's real destructor notifies the installed observer. No
++  // synthetic terminal update or registry shutdown completes this operation.
++  item.reset();
++  EXPECT_EQ(1, failure_count_);
++  EXPECT_EQ(0, success_count_);
++  EXPECT_EQ(WebstoreInstaller::FAILURE_REASON_CANCELLED, last_reason_);
++  EXPECT_TRUE(IsRetired(*installer));
++  EXPECT_TRUE(installer->HasOneRef());
++  EXPECT_FALSE(tracker()->GetActiveInstall(id));
++  installer->Start();
++  task_environment()->RunUntilIdle();
++  EXPECT_EQ(1, failure_count_);
++
++  auto retry_item =
++      std::make_unique<testing::StrictMock<download::MockDownloadItem>>();
++  EXPECT_CALL(*retry_item, GetState())
++      .WillRepeatedly(testing::Return(download::DownloadItem::IN_PROGRESS));
++  EXPECT_CALL(*retry_item, Cancel(testing::_)).Times(0);
++  auto retry = StartDownloadItem(retry_item.get());
++  task_environment()->RunUntilIdle();
++  EXPECT_TRUE(tracker()->GetActiveInstall(id));
++  EXPECT_FALSE(IsRetired(*retry));
++  retry_item.reset();
++  EXPECT_EQ(2, failure_count_);
++  EXPECT_TRUE(IsRetired(*retry));
++  EXPECT_FALSE(tracker()->GetActiveInstall(id));
++}
++
++TEST_F(WebstoreInstallerAndroidLifecycleTest,
++       DownloadDestroyedFailureCanReleaseLastCallerReference) {
++  auto item =
++      std::make_unique<testing::StrictMock<download::MockDownloadItem>>();
++  EXPECT_CALL(*item, GetState())
++      .WillRepeatedly(testing::Return(download::DownloadItem::IN_PROGRESS));
++  EXPECT_CALL(*item, Cancel(testing::_)).Times(0);
++  auto destroyed = std::make_shared<bool>(false);
++  auto installer = StartDownloadItem(
++      item.get(), base::BindLambdaForTesting([destroyed] { *destroyed = true; }));
++  task_environment()->RunUntilIdle();
++  on_failure_ = base::BindLambdaForTesting([&] {
++    EXPECT_FALSE(*destroyed);
++    EXPECT_TRUE(IsRetired(*installer));
++    installer.reset();
++    EXPECT_FALSE(*destroyed);
++  });
++  item.reset();
++  EXPECT_EQ(1, failure_count_);
++  EXPECT_EQ(0, success_count_);
++  EXPECT_TRUE(*destroyed);
++}
++
++TEST_F(WebstoreInstallerAndroidLifecycleTest,
++       DownloadDestroyedAfterCrxHandoffKeepsInstallationPending) {
++  const std::string id = "abcdefghijklmnopabcdefghijklmnop";
++  auto item =
++      std::make_unique<testing::StrictMock<download::MockDownloadItem>>();
++  EXPECT_CALL(*item, GetState())
++      .WillRepeatedly(testing::Return(download::DownloadItem::IN_PROGRESS));
++  EXPECT_CALL(*item, Cancel(testing::_)).Times(0);
++  auto installer = StartDownloadItem(item.get());
++  task_environment()->RunUntilIdle();
++  // Model the distinct CRX-owned stage without downloading or installing a CRX.
++  // Its eventual result must remain responsible for completion.
++  SetCrxHandoffForTesting(installer.get());
++  item.reset();
++  EXPECT_EQ(0, failure_count_);
++  EXPECT_EQ(0, success_count_);
++  EXPECT_FALSE(IsRetired(*installer));
++  EXPECT_TRUE(tracker()->GetActiveInstall(id));
++  registry()->Shutdown();
++  EXPECT_EQ(1, failure_count_);
++  EXPECT_TRUE(IsRetired(*installer));
++  EXPECT_TRUE(installer->HasOneRef());
++}
++
++TEST_F(WebstoreInstallerAndroidLifecycleTest,
++       DownloadRemovalRetiresOperationWithoutLosingCallbackOwner) {
++  const std::string id = "abcdefghijklmnopabcdefghijklmnop";
++  testing::StrictMock<download::MockDownloadItem> item;
++  EXPECT_CALL(item, GetState())
++      .WillRepeatedly(testing::Return(download::DownloadItem::IN_PROGRESS));
++  auto manager =
++      std::make_unique<testing::NiceMock<content::MockDownloadManager>>();
++  EXPECT_CALL(*manager, DownloadUrlMock(testing::_))
++      .WillOnce([&](download::DownloadUrlParameters* params) {
++        ASSERT_TRUE(params->callback());
++        std::move(params->callback())
++            .Run(&item, download::DOWNLOAD_INTERRUPT_REASON_NONE);
++      });
++  profile()->SetDownloadManagerForTesting(std::move(manager));
++
++  auto destroyed = std::make_shared<bool>(false);
++  auto installer = CreateInstaller(
++      id, base::BindLambdaForTesting([destroyed] { *destroyed = true; }));
++  WebstoreInstaller* raw_installer = installer.get();
++  on_failure_ = base::BindLambdaForTesting(
++      [&] { EXPECT_TRUE(IsRetired(*raw_installer)); });
++  installer->Start();
++  // Consume genuine path preparation and the ordinary DownloadUrl started
++  // callback. No file reply or caller reference remains during removal.
++  task_environment()->RunUntilIdle();
++  ASSERT_EQ(0, failure_count_);
++  ASSERT_FALSE(IsRetired(*installer));
++  installer.reset();
++  ASSERT_FALSE(*destroyed);
++
++  RegistryShutdownOnRemoval removal_observer(
++      base::BindLambdaForTesting([this] { registry()->Shutdown(); }));
++  item.AddObserver(&removal_observer);
++  EXPECT_CALL(item, Remove()).WillOnce([&] {
++    item.NotifyObserversDownloadRemoved();
++    // The repaired callback owns itself until Remove() has returned.
++    EXPECT_FALSE(*destroyed);
++  });
++  EXPECT_CALL(item, Cancel(testing::_)).Times(0);
++  auto extension = ExtensionBuilder("Lifecycle extension")
++                       .SetManifestVersion(3)
++                       .SetID(id)
++                       .Build();
++  ASSERT_TRUE(extension);
++  registry()->AddEnabled(extension);
++  registry()->TriggerOnInstalled(extension.get(), /*is_update=*/false);
++  EXPECT_TRUE(*destroyed);
++  EXPECT_EQ(1, failure_count_);
++  EXPECT_EQ(WebstoreInstaller::FAILURE_REASON_CANCELLED, last_reason_);
++  EXPECT_EQ(0, success_count_);
++  item.RemoveObserver(&removal_observer);
++}
++#endif
++
+ }  // namespace extensions

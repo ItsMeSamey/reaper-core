@@ -1,0 +1,339 @@
+diff --git a/chrome/test/data/webui/extensions/load_error_test.ts b/chrome/test/data/webui/extensions/load_error_test.ts
+--- a/chrome/test/data/webui/extensions/load_error_test.ts
++++ b/chrome/test/data/webui/extensions/load_error_test.ts
+@@ -7,6 +7,10 @@
+ import 'chrome://extensions/extensions.js';
+ 
+ import type {LoadErrorElement} from 'chrome://extensions/extensions.js';
++// <if expr="is_android">
++import {PromiseResolver} from 'chrome://resources/js/promise_resolver.js';
++import {getDeepActiveElement} from 'chrome://resources/js/util.js';
++// </if>
+ import {assertEquals, assertFalse, assertTrue} from 'chrome://webui-test/chai_assert.js';
+ import {microtasksFinished} from 'chrome://webui-test/test_util.js';
+ 
+@@ -42,6 +46,37 @@
+     loadError.show();
+     assertTrue(isElementVisible(dialogElement));
+ 
++    // <if expr="is_android">
++    const pendingRetry = new PromiseResolver<boolean>();
++    const originalRetry = mockDelegate.retryLoadUnpacked.bind(mockDelegate);
++    mockDelegate.retryLoadUnpacked = (guid: string) => {
++      mockDelegate.methodCalled('retryLoadUnpacked', guid);
++      return pendingRetry.promise;
++    };
++    const retryButton =
++        loadError.shadowRoot.querySelector<HTMLElement>('.action-button')!;
++    const spinner = loadError.shadowRoot.querySelector<HTMLElement>('.spinner')!;
++    retryButton.focus();
++    assertEquals(retryButton, loadError.shadowRoot.activeElement);
++    // Both clicks happen before Lit has rendered the disabled state.
++    retryButton.click();
++    retryButton.click();
++    assertEquals(1, mockDelegate.getCallCount('retryLoadUnpacked'));
++    assertEquals(fakeGuid, mockDelegate.getArgs('retryLoadUnpacked')[0]);
++    await microtasksFinished();
++    assertTrue(retryButton.hasAttribute('disabled'));
++    assertFalse(spinner.hidden);
++    pendingRetry.reject(stubLoadError);
++    await microtasksFinished();
++    assertTrue(isElementVisible(dialogElement));
++    assertFalse(retryButton.hasAttribute('disabled'));
++    assertTrue(spinner.hidden);
++    assertEquals(1, mockDelegate.getCallCount('retryLoadUnpacked'));
++    assertEquals(retryButton, loadError.shadowRoot.activeElement);
++    mockDelegate.retryLoadUnpacked = originalRetry;
++    mockDelegate.resetResolver('retryLoadUnpacked');
++    // </if>
++
+     mockDelegate.setRetryLoadUnpackedError(stubLoadError);
+     loadError.shadowRoot.querySelector<HTMLElement>('.action-button')!.click();
+     const arg = await mockDelegate.whenCalled('retryLoadUnpacked');
+@@ -49,7 +84,171 @@
+     assertTrue(isElementVisible(dialogElement));
+     loadError.shadowRoot.querySelector<HTMLElement>('.cancel-button')!.click();
+     assertFalse(isElementVisible(dialogElement));
+-  });
++    // <if expr="is_android">
++    await checkAndroidRetryErrorPreservesNewerFocusAndClosedDialog();
++    await checkAndroidSupersededRetryPreservesNewError();
++    await checkAndroidSupersededRetryDuringFocusRender();
++    // </if>
++  });
++
++  // <if expr="is_android">
++  async function checkAndroidRetryErrorPreservesNewerFocusAndClosedDialog() {
++    for (const scenario of ['cancel-focus', 'closed', 'detached']) {
++      document.body.appendChild(loadError);
++      await microtasksFinished();
++      loadError.show();
++      const pending = new PromiseResolver<boolean>();
++      mockDelegate.retryLoadUnpacked = () => pending.promise;
++      const retry = loadError.shadowRoot.querySelector<HTMLElement>('.action-button')!;
++      const cancel = loadError.shadowRoot.querySelector<HTMLElement>('.cancel-button')!;
++      retry.focus();
++      assertTrue(retry.matches(':focus-within'));
++      retry.click();
++      await microtasksFinished();
++      assertTrue(retry.hasAttribute('disabled'));
++      if (scenario === 'cancel-focus') {
++        cancel.focus();
++      } else {
++        loadError.close();
++        if (scenario === 'detached') {
++          loadError.remove();
++        }
++      }
++      const chosenFocus = getDeepActiveElement();
++      pending.reject({...stubLoadError, error: 'Retry still failed'});
++      await microtasksFinished();
++      assertEquals(chosenFocus, getDeepActiveElement());
++      assertFalse(retry.hasAttribute('disabled'));
++      assertEquals(scenario === 'cancel-focus', loadError.$.dialog.getNative().open);
++      loadError.close();
++    }
++  }
++  // </if>
++
++  // <if expr="is_android">
++  async function checkAndroidSupersededRetryPreservesNewError() {
++    for (const outcome of ['success', 'failure']) {
++      for (const sameError of [false, true]) {
++        loadError.remove();
++        loadError = document.createElement('extensions-load-error');
++        loadError.delegate = mockDelegate;
++        loadError.loadError = stubLoadError;
++        document.body.appendChild(loadError);
++        await microtasksFinished();
++        loadError.show();
++        const oldRetry = new PromiseResolver<boolean>();
++        mockDelegate.retryLoadUnpacked = () => oldRetry.promise;
++        const retry = loadError.shadowRoot.querySelector<HTMLElement>('.action-button')!;
++        const cancel = loadError.shadowRoot.querySelector<HTMLElement>('.cancel-button')!;
++        retry.focus();
++        retry.click();
++        await microtasksFinished();
++        assertTrue(retry.hasAttribute('disabled'));
++
++        // manager.onLoadError_ reuses the open dialog and calls show() for
++        // each new event, including a repeated presentation of the same Error.
++        const newerError = sameError ? stubLoadError :
++            {...stubLoadError, error: 'Newer failure', retryGuid: 'newer-guid'};
++        loadError.loadError = newerError;
++        loadError.show();
++        await microtasksFinished();
++        assertTrue(retry.hasAttribute('disabled'));
++        cancel.focus();
++        const chosenFocus = getDeepActiveElement();
++        if (outcome === 'success') {
++          oldRetry.resolve(true);
++        } else {
++          oldRetry.reject({...stubLoadError, error: 'Old retry failed'});
++        }
++        await microtasksFinished();
++        assertTrue(loadError.$.dialog.getNative().open);
++        assertEquals(newerError, loadError.loadError);
++        assertEquals(chosenFocus, getDeepActiveElement());
++        assertFalse(retry.hasAttribute('disabled'));
++
++        // A subsequent explicit Retry still delivers the current result.
++        const currentRetry = new PromiseResolver<boolean>();
++        mockDelegate.retryLoadUnpacked = () => currentRetry.promise;
++        retry.click();
++        await microtasksFinished();
++        assertTrue(retry.hasAttribute('disabled'));
++        currentRetry.resolve(true);
++        await microtasksFinished();
++        assertFalse(loadError.$.dialog.getNative().open);
++      }
++    }
++  }
++
++  async function checkAndroidSupersededRetryDuringFocusRender() {
++    for (const startNewRetry of [false, true]) {
++      loadError.remove();
++      loadError = document.createElement('extensions-load-error');
++      loadError.delegate = mockDelegate;
++      loadError.loadError = stubLoadError;
++      document.body.appendChild(loadError);
++      await microtasksFinished();
++      loadError.show();
++      const oldRetry = new PromiseResolver<boolean>();
++      mockDelegate.retryLoadUnpacked = () => oldRetry.promise;
++      const retry = loadError.shadowRoot.querySelector<HTMLElement>('.action-button')!;
++      const cancel = loadError.shadowRoot.querySelector<HTMLElement>('.cancel-button')!;
++      retry.focus();
++      retry.click();
++      await microtasksFinished();
++
++      // Hold only the callback's render await; Lit still performs real updates.
++      const renderGate = new PromiseResolver<boolean>();
++      let awaitedRender = false;
++      Object.defineProperty(loadError, 'updateComplete', {
++        configurable: true,
++        get: () => {
++          awaitedRender = true;
++          return renderGate.promise;
++        },
++      });
++      try {
++        oldRetry.reject({...stubLoadError, error: 'Old retry failed'});
++        await microtasksFinished();
++        assertTrue(awaitedRender);
++        assertFalse(retry.hasAttribute('disabled'));
++        const newerError = {...stubLoadError, error: 'Newer failure'};
++        loadError.loadError = newerError;
++        loadError.show();
++        await microtasksFinished();
++        const currentRetry = new PromiseResolver<boolean>();
++        mockDelegate.retryLoadUnpacked = () => currentRetry.promise;
++        if (startNewRetry) {
++          retry.click();
++          await microtasksFinished();
++          assertTrue(retry.hasAttribute('disabled'));
++          cancel.focus();
++        } else {
++          cancel.focus();
++          cancel.blur();
++          // The old focus condition accepts body; only request ownership may
++          // stop its late continuation from focusing the newer presentation.
++          assertEquals(document.body, getDeepActiveElement());
++        }
++        const chosenFocus = getDeepActiveElement();
++        renderGate.resolve(true);
++        await microtasksFinished();
++        assertTrue(loadError.$.dialog.getNative().open);
++        assertEquals(newerError, loadError.loadError);
++        assertEquals(startNewRetry, retry.hasAttribute('disabled'));
++        assertEquals(chosenFocus, getDeepActiveElement());
++        if (startNewRetry) {
++          currentRetry.resolve(true);
++          await microtasksFinished();
++          assertFalse(loadError.$.dialog.getNative().open);
++        }
++      } finally {
++        Reflect.deleteProperty(loadError, 'updateComplete');
++        renderGate.resolve(true);
++        loadError.close();
++      }
++    }
++  }
++  // </if>
+ 
+   test('RetrySuccess', async function() {
+     const dialogElement =
+@@ -94,6 +293,113 @@
+         'some/path/');
+   });
+ 
++  // <if expr="is_android">
++  test('AndroidLongPathAndErrorWrapAtPhoneWidths', async () => {
++    const path =
++        'content://com.android.externalstorage.documents/document/' +
++        'primary%3ADownload%2F' + 'UnbrokenExtensionDirectory'.repeat(12);
++    const message = 'MANIFEST_ERROR_' + 'UnbrokenErrorDetail'.repeat(16);
++    for (const hasFile of [true, false]) {
++      loadError.loadError = hasFile ?
++          {...stubLoadError, path, error: message} : new Error(message);
++      await microtasksFinished();
++      loadError.show();
++      const dialog = loadError.$.dialog;
++      const nativeDialog = dialog.getNative();
++      const body = dialog.shadowRoot.querySelector<HTMLElement>('#container')!;
++      assertTrue(nativeDialog.open);
++      assertEquals(
++          !hasFile,
++          loadError.shadowRoot.querySelector<HTMLElement>('#file')!.hidden);
++      for (const width of [280, 360]) {
++        // Keep the width case within the actual viewport's normal phone margin.
++        const dialogWidth =
++            Math.min(width, document.documentElement.clientWidth - 32);
++        dialog.style.setProperty('--cr-dialog-width', `${dialogWidth}px`);
++        for (const fontSize of [13, 26]) {
++          loadError.style.fontSize = `${fontSize}px`;
++          for (const direction of ['ltr', 'rtl']) {
++            loadError.dir = direction;
++            await new Promise<void>(resolve => {
++              requestAnimationFrame(() => resolve());
++            });
++            assertTrue(
++                Math.abs(nativeDialog.getBoundingClientRect().width - dialogWidth) <
++                1);
++            assertTrue(body.scrollWidth <= body.clientWidth + 1);
++            const dialogBounds = nativeDialog.getBoundingClientRect();
++            const footer = loadError.shadowRoot.querySelector<HTMLElement>(
++                '[slot=button-container]')!;
++            assertTrue(footer.scrollWidth <= footer.clientWidth + 1);
++            for (const selector of ['.cancel-button', '.action-button']) {
++              const button =
++                  loadError.shadowRoot.querySelector<HTMLElement>(selector)!;
++              // A fixed smaller font must not conceal a large-text overflow.
++              assertEquals(fontSize, parseFloat(getComputedStyle(button).fontSize));
++              assertFalse(button.hasAttribute('disabled'));
++              // Brave delegates host focus to the native Leo control.
++              const nativeButton = button.shadowRoot
++                  ?.querySelector('leo-button')?.shadowRoot
++                  ?.querySelector('button');
++              assertTrue(nativeButton instanceof HTMLButtonElement);
++              assertFalse(nativeButton.disabled);
++              assertTrue(nativeButton.tabIndex >= 0);
++              button.focus();
++              assertEquals(button, loadError.shadowRoot.activeElement);
++              assertEquals(
++                  nativeButton,
++                  (nativeButton.getRootNode() as ShadowRoot).activeElement);
++              const bounds = button.getBoundingClientRect();
++              assertTrue(bounds.width > 0 && bounds.height > 0);
++              assertTrue(bounds.left >= dialogBounds.left - 1);
++              assertTrue(bounds.right <= dialogBounds.right + 1);
++              assertTrue(bounds.top >= dialogBounds.top - 1);
++              assertTrue(bounds.bottom <= dialogBounds.bottom + 1);
++              assertTrue(bounds.left >= -1 && bounds.top >= -1);
++              assertTrue(
++                  bounds.right <= document.documentElement.clientWidth + 1);
++              assertTrue(
++                  bounds.bottom <= document.documentElement.clientHeight + 1);
++              const textRange = document.createRange();
++              textRange.selectNodeContents(button);
++              const textRects = Array.from(textRange.getClientRects())
++                                    .filter(rect => rect.width && rect.height);
++              assertTrue(textRects.length > 0);
++              for (const rect of textRects) {
++                assertTrue(rect.left >= bounds.left - 1);
++                assertTrue(rect.right <= bounds.right + 1);
++                assertTrue(rect.top >= bounds.top - 1);
++                assertTrue(rect.bottom <= bounds.bottom + 1);
++              }
++            }
++            for (const id of hasFile ? ['file', 'error'] : ['error']) {
++              const row =
++                  loadError.shadowRoot.querySelector<HTMLElement>(`#${id}`)!;
++              const value = row.querySelector<HTMLElement>('.row-value')!;
++              assertEquals(id === 'file' ? path : message, value.textContent);
++              const rowBounds = row.getBoundingClientRect();
++              const valueBounds = value.getBoundingClientRect();
++              assertTrue(valueBounds.width > 0);
++              assertTrue(valueBounds.left >= rowBounds.left - 1);
++              assertTrue(valueBounds.right <= rowBounds.right + 1);
++              assertTrue(value.scrollWidth <= value.clientWidth + 1);
++              const range = document.createRange();
++              range.selectNodeContents(value);
++              const lines = Array.from(range.getClientRects());
++              assertTrue(lines.length > 1);
++              assertTrue(
++                  range.getBoundingClientRect().height >
++                  Math.max(...lines.map(line => line.height)) + 1);
++            }
++          }
++        }
++      }
++      loadError.shadowRoot.querySelector<HTMLElement>('.cancel-button')!.click();
++      assertFalse(nativeDialog.open);
++    }
++  });
++  // </if>
++
+   test('GenericError', async () => {
+     assertTrue(loadError.$.code.$.scrollContainer.hidden);
+ 

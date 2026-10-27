@@ -1,0 +1,116 @@
+diff --git a/chrome/browser/extensions/menu_manager.h b/chrome/browser/extensions/menu_manager.h
+--- a/chrome/browser/extensions/menu_manager.h
++++ b/chrome/browser/extensions/menu_manager.h
+@@ -8,14 +8,17 @@
+ #include <stddef.h>
+ #include <stdint.h>
+ 
++#include <deque>
+ #include <map>
+ #include <memory>
+ #include <set>
+ #include <string>
+ #include <vector>
+ 
++#include "base/functional/callback_helpers.h"
+ #include "base/gtest_prod_util.h"
+ #include "base/memory/raw_ptr.h"
++#include "base/memory/scoped_refptr.h"
+ #include "base/memory/weak_ptr.h"
+ #include "base/observer_list.h"
+ #include "base/observer_list_types.h"
+@@ -23,6 +26,7 @@
+ #include "base/scoped_observation.h"
+ #include "base/timer/timer.h"
+ #include "base/values.h"
++#include "build/build_config.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/profiles/profile_observer.h"
+ #include "components/keyed_service/core/keyed_service.h"
+@@ -309,6 +313,16 @@
+ 
+   ~MenuManager() override;
+ 
++#if BUILDFLAG(IS_ANDROID)
++  void Shutdown() override;
++
++  // Runs inline if the initial read is complete; otherwise queues in API
++  // arrival order. Destroying the returned handle cancels only this request.
++  base::ScopedClosureRunner RunAfterInitialRestore(
++      const Extension& extension,
++      base::OnceCallback<void(bool)> callback);
++#endif
++
+   // Convenience function to get the MenuManager for a browser context.
+   static MenuManager* Get(content::BrowserContext* context);
+ 
+@@ -390,6 +404,16 @@
+                            const Extension* extension,
+                            UnloadedExtensionReason reason) override;
+ 
++#if BUILDFLAG(IS_ANDROID)
++  void OnExtensionWillBeInstalled(content::BrowserContext* browser_context,
++                                  const Extension* extension,
++                                  bool is_update,
++                                  const std::string& old_name) override;
++  void OnExtensionUninstalled(content::BrowserContext* browser_context,
++                              const Extension* extension,
++                              UninstallReason reason) override;
++#endif
++
+   // Stores the menu items for the extension in the state storage. The write
+   // will happen asynchronously after some delay.
+   void WriteToStorage(const Extension* extension,
+@@ -430,7 +454,52 @@
+   // Returns true if item is a descendant of an item with id `ancestor_id`.
+   bool DescendantOf(MenuItem* item, const MenuItem::Id& ancestor_id);
+ 
++#if BUILDFLAG(IS_ANDROID)
++  void WriteToStorageInternal(const MenuItem::ExtensionKey& extension_key,
++                              uint64_t write_id);
++  base::Value SerializeMenuItems(
++      const MenuItem::ExtensionKey& extension_key) const;
++  bool IsCurrentPendingWrite(const MenuItem::ExtensionKey& extension_key,
++                             uint64_t write_id) const;
++  void SubmitPendingWrite(const MenuItem::ExtensionKey& extension_key,
++                          uint64_t write_id,
++                          base::Value value);
++#else
+   void WriteToStorageInternal(const MenuItem::ExtensionKey& extension_key);
++#endif
++
++#if BUILDFLAG(IS_ANDROID)
++  struct PendingRestoreRequest {
++    uint64_t id;
++    base::OnceCallback<void(bool)> callback;
++  };
++  struct InitialRestore {
++    uint64_t generation;
++    scoped_refptr<const Extension> extension;
++    std::deque<PendingRestoreRequest> requests;
++  };
++
++  void OnInitialRestoreRead(const std::string& extension_id,
++                            uint64_t generation,
++                            std::optional<base::Value> value);
++  void CancelRestoreRequest(const std::string& extension_id,
++                            uint64_t generation,
++                            uint64_t request_id);
++  static void FailRestoreRequests(std::deque<PendingRestoreRequest> requests);
++
++  // The record remains present while draining, so reentrant calls join the
++  // tail. Generations distinguish even same-object disable/re-enable cycles.
++  std::map<std::string, InitialRestore> initial_restores_;
++  uint64_t next_restore_generation_ = 0;
++  uint64_t next_restore_request_id_ = 0;
++
++  // Keep the ID until submission, including while WillWrite observers run
++  // after the timer has been removed. A reload or another write retires it.
++  std::map<MenuItem::ExtensionKey, uint64_t> pending_write_ids_;
++  uint64_t next_pending_write_id_ = 0;
++  bool notifying_write_observers_ = false;
++  bool shutting_down_ = false;
++#endif
+ 
+   // We keep items organized by mapping ExtensionKey to a list of items.
+   std::map<MenuItem::ExtensionKey, MenuItem::OwnedList> context_items_;

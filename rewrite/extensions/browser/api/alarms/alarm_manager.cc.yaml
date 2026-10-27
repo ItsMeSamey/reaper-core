@@ -1,0 +1,157 @@
+# Copyright (c) 2026 The Reaper Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+substitutions:
+- description: Bind Android alarm restores to their activation generation (1).
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ std::move\(alarms\)\);\
+
+      \}\
+
+      \
+
+      void\ AlarmManager::ReadFromStorage\(const\ ExtensionId\&\ extension_id,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ base::TimeDelta\ min_delay,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ std::optional<base::Value>\ value\)\ \{\
+
+      \ \ if\ \(value\ \&\&\ value\->is_list\(\)\)\ \{\
+
+      \ \ \ \ AlarmList\ alarm_states\ =\ AlarmsFromValue\(min_delay,\ value\->GetList\(\)\);\
+
+      \ \ \ \ for\ \(auto\&\ alarm\ :\ alarm_states\)\ \{\
+
+      '
+    replace: "                             std::move(alarms));\n}\n\n#if BUILDFLAG(IS_ANDROID)\nvoid AlarmManager::ReadFromStorageForActivation(\n    const ExtensionId& extension_id,\n    base::TimeDelta min_delay,\n    base::UnguessableToken generation,\n    std::optional<base::Value> value) {\n  auto it = ready_actions_.find(extension_id);\n  if (it == ready_actions_.end() || it->second.generation != generation) {\n    return;\n  }\n  ReadFromStorage(extension_id, min_delay, std::move(value));\n}\n#endif\n\nvoid AlarmManager::ReadFromStorage(const ExtensionId& extension_id,\n                                   base::TimeDelta min_delay,\n                                   std::optional<base::Value> value) {\n#if BUILDFLAG(IS_ANDROID)\n  base::UnguessableToken generation;\n  {\n    auto pending = ready_actions_.find(extension_id);\n    if (pending != ready_actions_.end()) {\n      generation = pending->second.generation;\n    }\n  }\n#endif\n  if (value && value->is_list()) {\n    AlarmList alarm_states = AlarmsFromValue(min_delay, value->GetList());\n    for (auto& alarm : alarm_states) {\n"
+- description: Bind Android alarm restores to their activation generation (2).
+  regex:
+    re_pattern: '\ \ \ \ \}\
+
+      \ \ \}\
+
+      \
+
+      \ \ ReadyQueue\&\ extension_ready_queue\ =\ ready_actions_\[extension_id\];\
+
+      \ \ while\ \(!extension_ready_queue\.empty\(\)\)\ \{\
+
+      \ \ \ \ std::move\(extension_ready_queue\.front\(\)\)\.Run\(extension_id\);\
+
+      \ \ \ \ extension_ready_queue\.pop\(\);\
+
+      \ \ \}\
+
+      \ \ ready_actions_\.erase\(extension_id\);\
+
+      \}\
+
+      \
+
+      void\ AlarmManager::SetNextPollTime\(const\ base::Time\&\ time\)\ \{\
+
+      '
+    replace: "    }\n  }\n\n#if BUILDFLAG(IS_ANDROID)\n  // A ready action may unload/reload the extension or destroy this manager.\n  // Never retain a queue reference across its callback, or run an old action\n  // against a new activation of the same extension ID.\n  const base::WeakPtr<AlarmManager> weak_this = weak_ptr_factory_.GetWeakPtr();\n  while (weak_this) {\n    ReadyAction action;\n    {\n      auto it = weak_this->ready_actions_.find(extension_id);\n      if (it == weak_this->ready_actions_.end() ||\n          it->second.generation != generation) {\n        return;\n      }\n      ReadyQueue& actions = it->second.actions;\n      if (actions.empty()) {\n        weak_this->ready_actions_.erase(it);\n        return;\n      }\n      action = std::move(actions.front());\n      actions.pop();\n    }\n    std::move(action).Run(extension_id);\n  }\n#else\n  ReadyQueue& extension_ready_queue = ready_actions_[extension_id];\n  while (!extension_ready_queue.empty()) {\n    std::move(extension_ready_queue.front()).Run(extension_id);\n    extension_ready_queue.pop();\n  }\n  ready_actions_.erase(extension_id);\n#endif\n}\n\nvoid AlarmManager::SetNextPollTime(const base::Time& time) {\n"
+- description: Bind Android alarm restores to their activation generation (3).
+  regex:
+    re_pattern: '\ \ if\ \(it\ ==\ ready_actions_\.end\(\)\)\ \{\
+
+      \ \ \ \ std::move\(action\)\.Run\(extension_id\);\
+
+      \ \ \}\ else\ \{\
+
+      \ \ \ \ it\->second\.push\(std::move\(action\)\);\
+
+      \ \ \}\
+
+      \}\
+
+      \
+
+      '
+    replace: "  if (it == ready_actions_.end()) {\n    std::move(action).Run(extension_id);\n  } else {\n#if BUILDFLAG(IS_ANDROID)\n    it->second.actions.push(std::move(action));\n#else\n    it->second.push(std::move(action));\n#endif\n  }\n}\n\n"
+- description: Bind Android alarm restores to their activation generation (4).
+  regex:
+    re_pattern: '\ \ StateStore\*\ storage\ =\ ExtensionSystem::Get\(browser_context_\)\->state_store\(\);\
+
+      \ \ if\ \(storage\)\ \{\
+
+      \ \ \ \ bool\ is_unpacked\ =\ Manifest::IsUnpackedLocation\(extension\->location\(\)\);\
+
+      \ \ \ \ ready_actions_\.insert\(ReadyMap::value_type\(extension\->id\(\),\ ReadyQueue\(\)\)\);\
+
+      \ \ \ \ base::TimeDelta\ min_delay\ =\ alarms_api_constants::GetMinimumDelay\(\
+
+      \ \ \ \ \ \ \ \ is_unpacked,\ extension\->manifest_version\(\)\);\
+
+      \ \ \ \ storage\->GetExtensionValue\(extension\->id\(\),\ kRegisteredAlarms,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ base::BindOnce\(\&AlarmManager::ReadFromStorage,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ weak_ptr_factory_\.GetWeakPtr\(\),\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ extension\->id\(\),\ min_delay\)\);\
+
+      \ \ \}\
+
+      \}\
+
+      \
+
+      void\ AlarmManager::OnExtensionUnloaded\(content::BrowserContext\*\ browser_context,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ const\ Extension\*\ extension,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ UnloadedExtensionReason\ reason\)\ \{\
+
+      \ \ last_poll_times_\.erase\(extension\->id\(\)\);\
+
+      \ \ RemoveAllAlarmsInternal\(extension\->id\(\)\);\
+
+      \}\
+
+      '
+    replace: "  StateStore* storage = ExtensionSystem::Get(browser_context_)->state_store();\n  if (storage) {\n    bool is_unpacked = Manifest::IsUnpackedLocation(extension->location());\n#if BUILDFLAG(IS_ANDROID)\n    auto it =\n        ready_actions_.insert_or_assign(extension->id(), ReadyState()).first;\n#else\n    ready_actions_.insert(ReadyMap::value_type(extension->id(), ReadyQueue()));\n#endif\n    base::TimeDelta min_delay = alarms_api_constants::GetMinimumDelay(\n        is_unpacked, extension->manifest_version());\n#if BUILDFLAG(IS_ANDROID)\n    storage->GetExtensionValue(\n        extension->id(), kRegisteredAlarms,\n        base::BindOnce(&AlarmManager::ReadFromStorageForActivation,\n                       weak_ptr_factory_.GetWeakPtr(), extension->id(),\n                       min_delay, it->second.generation));\n#else\n    storage->GetExtensionValue(extension->id(), kRegisteredAlarms,\n                               base::BindOnce(&AlarmManager::ReadFromStorage,\n                                              weak_ptr_factory_.GetWeakPtr(),\n                                              extension->id(), min_delay));\n#endif\n  }\n}\n\nvoid AlarmManager::OnExtensionUnloaded(content::BrowserContext* browser_context,\n                                       const Extension* extension,\n                                       UnloadedExtensionReason reason) {\n#if BUILDFLAG(IS_ANDROID)\n  // Retire the activation before releasing callbacks. Their bound extension\n  // functions are allowed to be destroyed without responding after unload.\n  auto cancelled_restore = ready_actions_.extract(extension->id());\n#endif\n  last_poll_times_.erase(extension->id());\n  RemoveAllAlarmsInternal(extension->id());\n}\n"
+- description: Check Android alarm quota after the initial persisted alarm state is restored
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ std::move\(callback\)\)\);\
+
+      \}\
+
+      \
+
+      void\ AlarmManager::GetAlarm\(const\ ExtensionId\&\ extension_id,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ const\ std::string\&\ name,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ GetAlarmCallback\ callback\)\ \{\
+
+      '
+    replace: "                              std::move(callback)));\n}\n\n#if BUILDFLAG(IS_ANDROID)\nvoid AlarmManager::AddAlarmWithQuota(\n    const ExtensionId& extension_id,\n    Alarm alarm,\n    AddAlarmWithQuotaCallback callback) {\n  RunWhenReady(\n      extension_id,\n      base::BindOnce(&AlarmManager::AddAlarmWithQuotaWhenReady,\n                     weak_ptr_factory_.GetWeakPtr(), std::move(alarm),\n                     std::move(callback)));\n}\n#endif\n\nvoid AlarmManager::GetAlarm(const ExtensionId& extension_id,\n                            const std::string& name,\n                            GetAlarmCallback callback) {\n"
+- description: Check Android alarm quota after the initial persisted alarm state is restored
+  regex:
+    re_pattern: '\ \ WriteToStorage\(extension_id\);\
+
+      \ \ std::move\(callback\)\.Run\(\);\
+
+      \}\
+
+      \
+
+      void\ AlarmManager::GetAlarmWhenReady\(const\ std::string\&\ name,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ GetAlarmCallback\ callback,\
+
+      '
+    replace: "  WriteToStorage(extension_id);\n  std::move(callback).Run();\n}\n\n#if BUILDFLAG(IS_ANDROID)\nvoid AlarmManager::AddAlarmWithQuotaWhenReady(\n    Alarm alarm,\n    AddAlarmWithQuotaCallback callback,\n    const ExtensionId& extension_id) {\n  if (GetCountForExtension(extension_id) >= kMaxAlarmsPerExtension &&\n      GetAlarmIterator(extension_id, alarm.js_alarm->name).first ==\n          alarms_.end()) {\n    std::move(callback).Run(false);\n    return;\n  }\n  AddAlarmWhenReady(std::move(alarm),\n                    base::BindOnce(std::move(callback), true), extension_id);\n}\n#endif\n\nvoid AlarmManager::GetAlarmWhenReady(const std::string& name,\n                                     GetAlarmCallback callback,\n"
+- description: Android bounds the internal repeat interval while preserving alarm API data.
+  count: 1
+  regex:
+    re_pattern: "\\#include\\ \"extensions/common/extension_id\\.h\"\\\n"
+    replace: "#include \"extensions/common/extension_id.h\"\n#if BUILDFLAG(IS_ANDROID)\n\n#include <cmath>\n#endif\n"
+- description: Android bounds the internal repeat interval while preserving alarm API data.
+  count: 1
+  regex:
+    re_pattern: "\\ \\ \\ \\ //\\ Find\\ out\\ how\\ many\\ periods\\ have\\ transpired\\ since\\ the\\ alarm\\ last\\ went\\ off\\\n\\ \\ \\ \\ //\\ \\(it's\\ possible\\ that\\ we\\ missed\\ some\\)\\.\\\n\\ \\ \\ \\ int\\ transpired_periods\\ =\\ \\(clock_\\->Now\\(\\)\\.InMillisecondsFSinceUnixEpoch\\(\\)\\ \\-\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ alarm\\.js_alarm\\->scheduled_time\\)\\ /\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ period_in_js_time;\\\n"
+    replace: "#if BUILDFLAG(IS_ANDROID)\n    // Keep the requested period in the public/persisted alarm, but use the\n    // same positive minimum interval for rescheduling as for polling.\n    period_in_js_time = std::max(\n        alarm.minimum_granularity.InMillisecondsF(), period_in_js_time);\n    // Preserve the original phase without narrowing a missed-period count.\n    const double transpired_periods = std::max(\n        0.0, std::floor((clock_->Now().InMillisecondsFSinceUnixEpoch() -\n                         alarm.js_alarm->scheduled_time) /\n                        period_in_js_time));\n#else\n    // Find out how many periods have transpired since the alarm last went off\n    // (it's possible that we missed some).\n    int transpired_periods = (clock_->Now().InMillisecondsFSinceUnixEpoch() -\n                              alarm.js_alarm->scheduled_time) /\n                             period_in_js_time;\n#endif\n"

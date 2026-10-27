@@ -1,0 +1,344 @@
+# Android mixed native-tab and Java-window session restoration.
+substitutions:
+- description: Declare JNI environment, typed arrays and token conversions before generated restore bindings
+  count: 1
+  regex:
+    re_pattern: \#include\ "base/notimplemented\.h"
+    replace: '#include "base/android/jni_android.h"
+
+      #include "base/android/jni_array.h"
+
+      #include "base/android/jni_string.h"
+
+      #include "base/android/token_android.h"
+
+      #include "base/notimplemented.h"'
+- description: Read visual state from the actual native split collection
+  count: 1
+  regex:
+    re_pattern: \#include\ "components/split_tabs/split_tab_id\.h"
+    replace: '#include "components/split_tabs/split_tab_id.h"
+
+      #include "components/split_tabs/split_tab_visual_data.h"
+
+      #include "components/tabs/public/android/jni_conversion.h"
+
+      #include "components/tabs/public/split_tab_collection.h"
+
+      #include "components/tabs/public/split_tab_data.h"'
+- description: Declare existing bridge return-type conversions before generated JNI
+  count: 1
+  regex:
+    re_pattern: \#include\ "content/public/browser/restore_type\.h"
+    replace: '#include "content/public/browser/restore_type.h"
+
+      #include "content/public/browser/web_contents.h"
+
+      #include "url/android/gurl_android.h"'
+- description: Use the existing Java tab-model bridge to reconstruct native split collections
+  count: 1
+  regex:
+    re_pattern: AndroidLiveTabContext::AndroidLiveTabContext\(TabModel\*\ tab_model\)
+    replace: '// Must follow headers declaring JNI type conversions.
+
+      #include "chrome/android/chrome_jni_headers/TabModelJniBridge_jni.h"
+
+
+      AndroidLiveTabContext::AndroidLiveTabContext(TabModel* tab_model)'
+- description: Expose actual attached native split membership to session saving
+  count: 1
+  regex:
+    re_pattern: '\ \ //\ Split\ views\ are\ not\ currently\ supported\ on\ the\ Android\ platform\.\ This\
+
+      \ \ //\ function\ would\ get\ the\ SplitTabId\ implementation\ of\ a\ given\ tab\.\
+
+      \ \ return\ std::nullopt;'
+    replace: "  if (index < 0 || index >= tab_model_->GetTabCount()) {\n    return std::nullopt;\n  }\n  const TabAndroid* tab = tab_model_->GetTabAt(index);\n  return tab ? tab->GetSplit() : std::nullopt;"
+- description: Save split orientation and ratio from native ancestry rather than historical Java mirrors
+  count: 1
+  regex:
+    re_pattern: '\ \ //\ Split\ views\ are\ not\ currently\ supported\ on\ the\ Android\ platform\.\ This\
+
+      \ \ //\ function\ would\ return\ the\ visual\ data\ of\ the\ split\ \(orientation\ and\ ratio\)\.\
+
+      \ \ return\ nullptr;'
+    replace: "  for (int i = 0; i < tab_model_->GetTabCount(); ++i) {\n    const TabAndroid* tab = tab_model_->GetTabAt(i);\n    if (!tab || tab->GetSplit() != split_id) {\n      continue;\n    }\n    for (const tabs::TabCollection* collection = tab->GetParentCollection();\n         collection; collection = collection->GetParentCollection()) {\n      if (collection->type() == tabs::TabCollection::Type::SPLIT) {\n        return static_cast<const tabs::SplitTabCollection*>(collection)\n            ->data()->visual_data();\n      }\n    }\n  }\n  return nullptr;"
+- description: Restore session split pairs through the same validated native model as live splits
+  count: 1
+  regex:
+    re_pattern: '\ \ //\ Split\ views\ are\ currently\ not\ supported\ on\ the\ Android\ platform\.\
+
+      \ \ //\ This\ function\ serves\ as\ a\ placeholder\ to\ store\ the\ logic\ that\ would\ combine\
+
+      \ \ //\ two\ tabs\ into\ a\ singular\ SplitView\ object\.\
+
+      \ \ NOTIMPLEMENTED\(\);'
+    replace: "  if (!leading_tab || !trailing_tab) {\n    return;\n  }\n  auto* leading = TabAndroid::FromWebContents(\n      &static_cast<sessions::ContentLiveTab*>(leading_tab)->GetWebContents());\n  auto* trailing = TabAndroid::FromWebContents(\n      &static_cast<sessions::ContentLiveTab*>(trailing_tab)->GetWebContents());\n  if (leading && trailing) {\n    RestoreSplitByTabIds({leading->GetAndroidId(), trailing->GetAndroidId()},\n                        split_id, visual_data);\n  }"
+- description: Use typed token and member IDs without storing raw restored-tab pointers
+  count: 1
+  regex:
+    re_pattern: '//\ Currently\ does\ nothing\.\
+
+      void\ AndroidLiveTabContext::CloseTab\(\)'
+    replace: "bool AndroidLiveTabContext::RestoreSplitByTabIds(\n    const std::vector<int>& tab_ids,\n    split_tabs::SplitTabId split_id,\n    const split_tabs::SplitTabVisualData& visual_data) {\n  JNIEnv* env = base::android::AttachCurrentThread();\n  auto model = tab_model_->GetJavaObject();\n  if (!model) return false;\n  return Java_TabModelJniBridge_restoreSplit(\n      env, model, split_id.token(), tab_ids,\n      static_cast<int>(visual_data.split_layout()), visual_data.split_ratio());\n}\n\n// Currently does nothing.\nvoid AndroidLiveTabContext::CloseTab()"
+- description: Format modified Android split persistence implementation
+  count: 1
+  regex:
+    re_pattern: '\#include\ "components/sessions/core/session_types\.h"\
+
+      \#include\ "components/sessions/core/tab_restore_types\.h"\
+
+      \#include\ "components/split_tabs/split_tab_id\.h"\
+
+      \#include\ "components/split_tabs/split_tab_visual_data\.h"\
+
+      \#include\ "components/tabs/public/android/jni_conversion\.h"\
+
+      \#include\ "components/tabs/public/split_tab_collection\.h"\
+
+      \#include\ "components/tabs/public/split_tab_data\.h"\
+
+      \#include\ "components/tab_groups/tab_group_id\.h"\
+
+      \#include\ "components/tab_groups/tab_group_visual_data\.h"\
+
+      \#include\ "content/public/browser/browser_context\.h"\
+
+      \#include\ "content/public/browser/navigation_controller\.h"\
+
+      \#include\ "content/public/browser/navigation_entry\.h"\
+
+      \#include\ "content/public/browser/restore_type\.h"\
+
+      \#include\ "content/public/browser/web_contents\.h"\
+
+      \#include\ "url/android/gurl_android\.h"\
+
+      \#include\ "ui/base/mojom/window_show_state\.mojom\.h"\
+
+      \#include\ "ui/base/window_open_disposition\.h"\
+
+      \
+
+      //\ Must\ follow\ headers\ declaring\ JNI\ type\ conversions\.\
+
+      \#include\ "chrome/android/chrome_jni_headers/TabModelJniBridge_jni\.h"\
+
+      \
+
+      '
+    replace: '#include "components/sessions/core/session_types.h"
+
+      #include "components/sessions/core/tab_restore_types.h"
+
+      #include "components/split_tabs/split_tab_id.h"
+
+      #include "components/split_tabs/split_tab_visual_data.h"
+
+      #include "components/tab_groups/tab_group_id.h"
+
+      #include "components/tab_groups/tab_group_visual_data.h"
+
+      #include "components/tabs/public/android/jni_conversion.h"
+
+      #include "components/tabs/public/split_tab_collection.h"
+
+      #include "components/tabs/public/split_tab_data.h"
+
+      #include "content/public/browser/browser_context.h"
+
+      #include "content/public/browser/navigation_controller.h"
+
+      #include "content/public/browser/navigation_entry.h"
+
+      #include "content/public/browser/restore_type.h"
+
+      #include "content/public/browser/web_contents.h"
+
+      #include "ui/base/mojom/window_show_state.mojom.h"
+
+      #include "ui/base/window_open_disposition.h"
+
+      #include "url/android/gurl_android.h"
+
+
+      // Must follow headers declaring JNI type conversions.
+
+      #include "chrome/android/chrome_jni_headers/TabModelJniBridge_jni.h"
+
+
+      '
+- description: Format modified Android split persistence implementation
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ for\ \(const\ tabs::TabCollection\*\ collection\ =\ tab\->GetParentCollection\(\);\
+
+      \ \ \ \ \ \ \ \ \ collection;\ collection\ =\ collection\->GetParentCollection\(\)\)\ \{\
+
+      \ \ \ \ \ \ if\ \(collection\->type\(\)\ ==\ tabs::TabCollection::Type::SPLIT\)\ \{\
+
+      \ \ \ \ \ \ \ \ return\ static_cast<const\ tabs::SplitTabCollection\*>\(collection\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \->data\(\)\->visual_data\(\);\
+
+      \ \ \ \ \ \ \}\
+
+      \ \ \ \ \}\
+
+      \ \ \}\
+
+      \ \ return\ nullptr;\
+
+      '
+    replace: "    for (const tabs::TabCollection* collection = tab->GetParentCollection();\n         collection; collection = collection->GetParentCollection()) {\n      if (collection->type() == tabs::TabCollection::Type::SPLIT) {\n        return static_cast<const tabs::SplitTabCollection*>(collection)\n            ->data()\n            ->visual_data();\n      }\n    }\n  }\n  return nullptr;\n"
+- description: Format modified Android split persistence implementation
+  count: 1
+  regex:
+    re_pattern: '\ \ auto\*\ trailing\ =\ TabAndroid::FromWebContents\(\
+
+      \ \ \ \ \ \ \&static_cast<sessions::ContentLiveTab\*>\(trailing_tab\)\->GetWebContents\(\)\);\
+
+      \ \ if\ \(leading\ \&\&\ trailing\)\ \{\
+
+      \ \ \ \ RestoreSplitByTabIds\(\{leading\->GetAndroidId\(\),\ trailing\->GetAndroidId\(\)\},\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ split_id,\ visual_data\);\
+
+      \ \ \}\
+
+      \}\
+
+      \
+
+      bool\ AndroidLiveTabContext::RestoreSplitByTabIds\(\
+
+      '
+    replace: "  auto* trailing = TabAndroid::FromWebContents(\n      &static_cast<sessions::ContentLiveTab*>(trailing_tab)->GetWebContents());\n  if (leading && trailing) {\n    RestoreSplitByTabIds({leading->GetAndroidId(), trailing->GetAndroidId()},\n                         split_id, visual_data);\n  }\n}\n\nbool AndroidLiveTabContext::RestoreSplitByTabIds(\n"
+- description: Format modified Android split persistence implementation
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ split_tabs::SplitTabId\ split_id,\
+
+      \ \ \ \ const\ split_tabs::SplitTabVisualData\&\ visual_data\)\ \{\
+
+      \ \ JNIEnv\*\ env\ =\ base::android::AttachCurrentThread\(\);\
+
+      \ \ auto\ model\ =\ tab_model_\->GetJavaObject\(\);\
+
+      \ \ if\ \(!model\)\ return\ false;\
+
+      \ \ return\ Java_TabModelJniBridge_restoreSplit\(\
+
+      \ \ \ \ \ \ env,\ model,\ split_id\.token\(\),\ tab_ids,\
+
+      \ \ \ \ \ \ static_cast<int>\(visual_data\.split_layout\(\)\),\ visual_data\.split_ratio\(\)\);\
+
+      \}\
+
+      '
+    replace: "    split_tabs::SplitTabId split_id,\n    const split_tabs::SplitTabVisualData& visual_data) {\n  JNIEnv* env = base::android::AttachCurrentThread();\n  auto model = tab_model_->GetJavaObject();\n  if (!model)\n    return false;\n  return Java_TabModelJniBridge_restoreSplit(\n      env, model, split_id.token(), tab_ids,\n      static_cast<int>(visual_data.split_layout()), visual_data.split_ratio());\n}\n"
+- description: Check the registered model before deferred split reconstruction
+  regex:
+    re_pattern: \#include\ <memory>
+    replace: '#include <algorithm>
+
+      #include <memory>'
+- description: Avoid dereferencing a model closed by a previous Java group or split callback
+  regex:
+    re_pattern: '\ \ \ \ const\ split_tabs::SplitTabVisualData\&\ visual_data\)\ \{\
+
+      \ \ JNIEnv\*\ env\ =\ base::android::AttachCurrentThread\(\);'
+    replace: "    const split_tabs::SplitTabVisualData& visual_data) {\n  const auto& models = TabModelList::models();\n  if (std::ranges::find(models, tab_model_) == models.end()) {\n    return false;\n  }\n  JNIEnv* env = base::android::AttachCurrentThread();"
+- description: Preserve the existing split restore arguments and checks through the native JNI owner.
+  regex:
+    re_pattern: Java_TabModelJniBridge_restoreSplit\(
+    replace: TabModelJniBridge::RestoreSplit(
+- description: Use the ordinary native model bridge interface for split restoration.
+  regex:
+    re_pattern: '\#include\ "chrome/browser/ui/android/tab_model/tab_model\.h"\
+
+      '
+    replace: '#include "chrome/browser/ui/android/tab_model/tab_model.h"
+
+      #include "chrome/browser/ui/android/tab_model/tab_model_jni_bridge.h"
+
+      '
+- description: Remove the foreign owned JNI header from this split restoration caller.
+  regex:
+    re_pattern: '//\ Must\ follow\ headers\ declaring\ JNI\ type\ conversions\.\
+
+      \#include\ "chrome/android/chrome_jni_headers/TabModelJniBridge_jni\.h"\
+
+      \
+
+      '
+    replace: ''
+
+# Reaper Android containers lifecycle successor; retain the complete inherited recipe.
+- description: 'Reaper Android containers: immutable tab identity, trusted CCT admission, persistent partition/SQL/reference lifecycle.'
+  regex:
+    re_pattern: '\#include\ <memory>\
+
+      \#include\ <optional>\
+
+      \
+
+      \#include\ "base/android/jni_android\.h"\
+
+      \#include\ "base/android/jni_array\.h"\
+
+      \#include\ "base/android/jni_string\.h"\
+
+      '
+    replace: '#include <memory>
+
+      #include <optional>
+
+
+      #include "brave/browser/containers/android/containers_tab_lifecycle.h"
+
+      #include "base/android/jni_android.h"
+
+      #include "base/android/jni_array.h"
+
+      #include "base/android/jni_string.h"
+
+      '
+- description: 'Reaper Android containers: immutable tab identity, trusted CCT admission, persistent partition/SQL/reference lifecycle.'
+  regex:
+    re_pattern: '\ \ //\ Restore\ web\ contents\ with\ navigation\ history\.\ This\ is\ used\ for\ background\
+
+      \ \ //\ restore\ so\ start\ without\ a\ renderer\.\
+
+      \ \ auto\ params\ =\ content::WebContents::CreateParams\(profile\);\
+
+      \ \ params\.desired_renderer_state\ =\
+
+      \ \ \ \ \ \ content::WebContents::CreateParams::kNoRendererProcess;\
+
+      \ \ params\.initially_hidden\ =\ true;\
+
+      '
+    replace: "  // Restore web contents with navigation history. This is used for background\n  // restore so start without a renderer.\n  auto params = content::WebContents::CreateParams(profile);\n  auto container_id = containers::android::ConfigureContainerRestore(\n      profile, tab.navigations, tab.normalized_navigation_index(), &params);\n  if (!container_id) return nullptr;\n  params.desired_renderer_state =\n      content::WebContents::CreateParams::kNoRendererProcess;\n  params.initially_hidden = true;\n"
+- description: 'Reaper Android containers: immutable tab identity, trusted CCT admission, persistent partition/SQL/reference lifecycle.'
+  regex:
+    re_pattern: '\ \ content::WebContents\*\ web_contents\ =\ tab_model_\->GetActiveWebContents\(\);\
+
+      \ \ web_contents\ =\ SessionRestore::RestoreForeignSessionTab\(\
+
+      \ \ \ \ \ \ web_contents,\ session_tab,\ WindowOpenDisposition::CURRENT_TAB\);\
+
+      \ \ web_contents\->GetController\(\)\.LoadIfNecessary\(\);\
+
+      \ \ return\ sessions::ContentLiveTab::GetOrCreateForWebContents\(web_contents\);\
+
+      \}\
+
+      '
+    replace: "  content::WebContents* web_contents = tab_model_->GetActiveWebContents();\n  web_contents = SessionRestore::RestoreForeignSessionTab(\n      web_contents, session_tab, WindowOpenDisposition::CURRENT_TAB);\n  if (!web_contents) return nullptr;\n  web_contents->GetController().LoadIfNecessary();\n  return sessions::ContentLiveTab::GetOrCreateForWebContents(web_contents);\n}\n"
+
+- description: "Android AI closure 410: chrome/browser/ui/android/tab_model/android_live_tab_context.cc"
+  regex:
+    pattern: "// Copyright 2016 The Chromium Authors\n// Use of this source code is governed by a BSD-style license that can be\n// found in the LICENSE file.\n\n#include \"chrome/browser/ui/android/tab_model/android_live_tab_context.h\"\n\n#include <algorithm>\n#include <memory>\n#include <optional>\n\n#include \"brave/browser/containers/android/containers_tab_lifecycle.h\"\n#include \"base/android/jni_android.h\"\n#include \"base/android/jni_array.h\"\n#include \"base/android/jni_string.h\"\n#include \"base/android/token_android.h\"\n#include \"base/notimplemented.h\"\n#include \"base/uuid.h\"\n#include \"chrome/browser/android/tab_android.h\"\n#include \"chrome/browser/glic/glic_tab_restore_helper.h\"\n#include \"chrome/browser/profiles/profile.h\"\n#include \"chrome/browser/sessions/session_restore.h\"\n#include \"chrome/browser/ui/android/tab_model/tab_model.h\"\n#include \"chrome/browser/ui/android/tab_model/tab_model_jni_bridge.h\"\n#include \"chrome/browser/ui/android/tab_model/tab_model_list.h\"\n#include \"components/sessions/content/content_live_tab.h\"\n#include \"components/sessions/content/content_serialized_navigation_builder.h\"\n#include \"components/sessions/core/session_id.h\"\n#include \"components/sessions/core/session_types.h\"\n#include \"components/sessions/core/tab_restore_types.h\"\n#include \"components/split_tabs/split_tab_id.h\"\n#include \"components/split_tabs/split_tab_visual_data.h\"\n#include \"components/tab_groups/tab_group_id.h\"\n#include \"components/tab_groups/tab_group_visual_data.h\"\n#include \"components/tabs/public/android/jni_conversion.h\"\n#include \"components/tabs/public/split_tab_collection.h\"\n#include \"components/tabs/public/split_tab_data.h\"\n#include \"content/public/browser/browser_context.h\"\n#include \"content/public/browser/navigation_controller.h\"\n#include \"content/public/browser/navigation_entry.h\"\n#include \"content/public/browser/restore_type.h\"\n#include \"content/public/browser/web_contents.h\"\n#include \"ui/base/mojom/window_show_state.mojom.h\"\n#include \"ui/base/window_open_disposition.h\"\n#include \"url/android/gurl_android.h\"\n\nAndroidLiveTabContext::AndroidLiveTabContext(TabModel* tab_model)\n    : tab_model_(tab_model) {}\n\n// Called in tab restore service, but expected to do nothing on Android.\nvoid AndroidLiveTabContext::ShowBrowserWindow() {}\n\nSessionID AndroidLiveTabContext::GetSessionID() const {\n  return tab_model_->GetSessionId();\n}\n\nsessions::SessionWindow::WindowType AndroidLiveTabContext::GetWindowType()\n    const {\n  // Not applicable to android.\n  return sessions::SessionWindow::TYPE_NORMAL;\n}\n\nint AndroidLiveTabContext::GetTabCount() const {\n  return tab_model_->GetTabCount();\n}\n\nint AndroidLiveTabContext::GetSelectedIndex() const {\n  return tab_model_->GetActiveIndex();\n}\n\nstd::string AndroidLiveTabContext::GetAppName() const {\n  // Not applicable to android.\n  return std::string();\n}\n\nstd::string AndroidLiveTabContext::GetUserTitle() const {\n  return std::string();\n}\n\nsessions::LiveTab* AndroidLiveTabContext::GetLiveTabAt(int index) const {\n  TabAndroid* tab_android = tab_model_->GetTabAt(index);\n  if (!tab_android || !tab_android->web_contents()) {\n    return nullptr;\n  }\n\n  return sessions::ContentLiveTab::GetOrCreateForWebContents(\n      tab_android->web_contents());\n}\n\nsessions::LiveTab* AndroidLiveTabContext::GetActiveLiveTab() const {\n  content::WebContents* web_contents = tab_model_->GetActiveWebContents();\n  if (!web_contents) {\n    return nullptr;\n  }\n\n  return sessions::ContentLiveTab::GetOrCreateForWebContents(web_contents);\n}\n\nstd::map<std::string, std::string> AndroidLiveTabContext::GetExtraDataForTab(\n    int index) const {\n  std::map<std::string, std::string> extra_data;\n  TabAndroid* tab_android = tab_model_->GetTabAt(index);\n  if (tab_android) {\n    glic::PopulateGlicExtraData(tab_android, &extra_data);\n  }\n  return extra_data;\n}\n\nstd::map<std::string, std::string>\nAndroidLiveTabContext::GetExtraDataForWindow() const {\n  return std::map<std::string, std::string>();\n}\n\nstd::optional<tab_groups::TabGroupId> AndroidLiveTabContext::GetTabGroupForTab(\n    int index) const {\n  // Implemented in AndroidLiveTabContextCloseWrapper.\n  return std::optional<tab_groups::TabGroupId>();\n}\n\nstd::optional<split_tabs::SplitTabId> AndroidLiveTabContext::GetSplitForTab(\n    int index) const {\n  if (index < 0 || index >= tab_model_->GetTabCount()) {\n    return std::nullopt;\n  }\n  const TabAndroid* tab = tab_model_->GetTabAt(index);\n  return tab ? tab->GetSplit() : std::nullopt;\n}\n\nconst tab_groups::TabGroupVisualData*\nAndroidLiveTabContext::GetVisualDataForGroup(\n    const tab_groups::TabGroupId& group) const {\n  // Implemented in AndroidLiveTabContextCloseWrapper.\n\n  // Since we never return a group from GetTabGroupForTab(), this should never\n  // be called.\n  NOTREACHED();\n}\n\nconst split_tabs::SplitTabVisualData*\nAndroidLiveTabContext::GetVisualDataForSplit(\n    const split_tabs::SplitTabId& split_id) const {\n  for (int i = 0; i < tab_model_->GetTabCount(); ++i) {\n    const TabAndroid* tab = tab_model_->GetTabAt(i);\n    if (!tab || tab->GetSplit() != split_id) {\n      continue;\n    }\n    for (const tabs::TabCollection* collection = tab->GetParentCollection();\n         collection; collection = collection->GetParentCollection()) {\n      if (collection->type() == tabs::TabCollection::Type::SPLIT) {\n        return static_cast<const tabs::SplitTabCollection*>(collection)\n            ->data()\n            ->visual_data();\n      }\n    }\n  }\n  return nullptr;\n}\n\nconst std::optional<base::Uuid>\nAndroidLiveTabContext::GetSavedTabGroupIdForGroup(\n    const tab_groups::TabGroupId& group) const {\n  // Implemented in AndroidLiveTabContextCloseWrapper.\n  return std::nullopt;\n}\n\nconst std::optional<tab_groups::TabGroupId>\nAndroidLiveTabContext::GetGroupIdForSavedGroup(const base::Uuid& saved) const {\n  // Implemented in AndroidLiveTabContextCloseWrapper.\n  return std::nullopt;\n}\n\nbool AndroidLiveTabContext::IsTabPinned(int index) const {\n  TabAndroid* tab_android = tab_model_->GetTabAt(index);\n  return tab_android && tab_android->IsPinned();\n}\n\nvoid AndroidLiveTabContext::SetVisualDataForGroup(\n    const tab_groups::TabGroupId& group,\n    const tab_groups::TabGroupVisualData& group_visual_data) {\n  // Implemented in AndroidLiveTabContextRestoreWrapper.\n\n  // TODO(crbug.com/40647050): ensure this never gets called (or remove\n  // NOTREACHED) if we implement restoring groups for foreign session\n  // windows.\n  NOTREACHED();\n}\n\nconst std::optional<tab_groups::TabGroupId>\nAndroidLiveTabContext::GetInitialFocusedTabGroup() const {\n  // Android does not support focused tab groups.\n\n  // This function would return the tab group ID that was focused when the\n  // window was closed, so it can be restored to focus.\n  return std::nullopt;\n}\n\nvoid AndroidLiveTabContext::SetFocusedTabGroup(\n    const tab_groups::TabGroupId& group) {\n  // Android does not support focused tab groups.\n\n  // This function would set the focused tab group for the window, removing the\n  // visibility of other tabs to instead show just the given tab group.\n  NOTIMPLEMENTED();\n}\n\nconst gfx::Rect AndroidLiveTabContext::GetRestoredBounds() const {\n  // Not applicable to android.\n  return gfx::Rect();\n}\n\nui::mojom::WindowShowState AndroidLiveTabContext::GetRestoredState() const {\n  // Not applicable to android.\n  return ui::mojom::WindowShowState::kNormal;\n}\n\nstd::string AndroidLiveTabContext::GetWorkspace() const {\n  // Not applicable to android.\n  return std::string();\n}\n\nsessions::LiveTab* AndroidLiveTabContext::AddRestoredTab(\n    const sessions::tab_restore::Tab& tab,\n    int tab_index,\n    bool select,\n    bool is_restoring_group_or_window,\n    sessions::tab_restore::Type original_session_type) {\n  Profile* profile = tab_model_->GetProfile();\n\n  // Prepare navigation history.\n  std::vector<std::unique_ptr<content::NavigationEntry>> nav_entries =\n      sessions::ContentSerializedNavigationBuilder::ToNavigationEntries(\n          tab.navigations, profile);\n\n  // Restore web contents with navigation history. This is used for background\n  // restore so start without a renderer.\n  auto params = content::WebContents::CreateParams(profile);\n  auto container_id = containers::android::ConfigureContainerRestore(\n      profile, tab.navigations, tab.normalized_navigation_index(), &params);\n  if (!container_id) return nullptr;\n  params.desired_renderer_state =\n      content::WebContents::CreateParams::kNoRendererProcess;\n  params.initially_hidden = true;\n  std::unique_ptr<content::WebContents> web_contents =\n      content::WebContents::Create(params);\n  content::WebContents* raw_web_contents = web_contents.get();\n  glic::RestoreGlicStateFromExtraData(raw_web_contents, tab.extra_data);\n  web_contents->GetController().Restore(tab.normalized_navigation_index(),\n                                        content::RestoreType::kRestored,\n                                        &nav_entries);\n\n  // Create new tab. Ownership is passed into java, which in turn creates a new\n  // TabAndroid instance to own the WebContents. Only select the restored tab\n  // when restoring a single tab (not as part of a bulk window/group\n  // restoration).\n\n  // `tab_index` is ignored because TabRestoreServiceHelper resets it to the tab\n  // count when the disposition is not `UNKNOWN`. We want to restore the tab to\n  // its original index, so we use `tab.tabstrip_index` instead. The tab model\n  // will handle the case where the index is out of bounds.\n  TabModel::TabLaunchType type =\n      (original_session_type == sessions::tab_restore::TAB ||\n       (!is_restoring_group_or_window && select))\n          ? TabModel::TabLaunchType::FROM_RECENT_TABS_FOREGROUND\n          : TabModel::TabLaunchType::FROM_RECENT_TABS;\n  tab_model_->CreateTab(nullptr, std::move(web_contents), tab.tabstrip_index,\n                        type, tab.pinned);\n  // Don't load the tab yet. This prevents a renderer from starting which keeps\n  // the tab restore lightweight as the tab is opened in the background only.\n  // The tab will be in a \"renderer was lost\" state. This is recovered from when\n  // the tab is made active.\n  return sessions::ContentLiveTab::GetOrCreateForWebContents(raw_web_contents);\n}\n\nsessions::LiveTab* AndroidLiveTabContext::ReplaceRestoredTab(\n    const sessions::tab_restore::Tab& tab) {\n  // Prepare navigation history.\n  sessions::SessionTab session_tab;\n  session_tab.current_navigation_index = tab.normalized_navigation_index();\n  session_tab.navigations = tab.navigations;\n\n  // This is called only on replacement of the current tab.\n  content::WebContents* web_contents = tab_model_->GetActiveWebContents();\n  web_contents = SessionRestore::RestoreForeignSessionTab(\n      web_contents, session_tab, WindowOpenDisposition::CURRENT_TAB);\n  if (!web_contents) return nullptr;\n  web_contents->GetController().LoadIfNecessary();\n  return sessions::ContentLiveTab::GetOrCreateForWebContents(web_contents);\n}\n\nvoid AndroidLiveTabContext::ReconstructSplit(\n    sessions::LiveTab* leading_tab,\n    sessions::LiveTab* trailing_tab,\n    split_tabs::SplitTabId split_id,\n    const split_tabs::SplitTabVisualData& visual_data) {\n  if (!leading_tab || !trailing_tab) {\n    return;\n  }\n  auto* leading = TabAndroid::FromWebContents(\n      &static_cast<sessions::ContentLiveTab*>(leading_tab)->GetWebContents());\n  auto* trailing = TabAndroid::FromWebContents(\n      &static_cast<sessions::ContentLiveTab*>(trailing_tab)->GetWebContents());\n  if (leading && trailing) {\n    RestoreSplitByTabIds({leading->GetAndroidId(), trailing->GetAndroidId()},\n                         split_id, visual_data);\n  }\n}\n\nbool AndroidLiveTabContext::RestoreSplitByTabIds(\n    const std::vector<int>& tab_ids,\n    split_tabs::SplitTabId split_id,\n    const split_tabs::SplitTabVisualData& visual_data) {\n  const auto& models = TabModelList::models();\n  if (std::ranges::find(models, tab_model_) == models.end()) {\n    return false;\n  }\n  JNIEnv* env = base::android::AttachCurrentThread();\n  auto model = tab_model_->GetJavaObject();\n  if (!model)\n    return false;\n  return TabModelJniBridge::RestoreSplit(\n      env, model, split_id.token(), tab_ids,\n      static_cast<int>(visual_data.split_layout()), visual_data.split_ratio());\n}\n\n// Currently does nothing.\nvoid AndroidLiveTabContext::CloseTab() {\n  NOTIMPLEMENTED();\n}\n\n// static.\nsessions::LiveTabContext* AndroidLiveTabContext::FindContextForWebContents(\n    const content::WebContents* contents) {\n  const TabAndroid* tab_android = TabAndroid::FromWebContents(contents);\n  if (!tab_android) {\n    return nullptr;\n  }\n\n  TabModel* model =\n      TabModelList::FindTabModelWithWindowSessionId(tab_android->GetWindowId());\n\n  return model ? model->GetLiveTabContext() : nullptr;\n}\n\n// static.\nsessions::LiveTabContext* AndroidLiveTabContext::FindContextWithID(\n    SessionID desired_id) {\n  // Find the model with desired id.\n  TabModel* tab_model =\n      TabModelList::FindTabModelWithWindowSessionId(desired_id);\n\n  // If we can't find the correct model, fall back to first non-incognito model.\n  if (!tab_model || tab_model->IsOffTheRecord()) {\n    for (const TabModel* model : TabModelList::models()) {\n      if (!model->IsOffTheRecord()) {\n        return model->GetLiveTabContext();\n      }\n    }\n  }\n\n  return tab_model ? tab_model->GetLiveTabContext() : nullptr;\n}\n"
+    replace: "// Copyright 2016 The Chromium Authors\n// Use of this source code is governed by a BSD-style license that can be\n// found in the LICENSE file.\n\n#include \"chrome/browser/ui/android/tab_model/android_live_tab_context.h\"\n\n#include <algorithm>\n#include <memory>\n#include <optional>\n\n#include \"brave/browser/containers/android/containers_tab_lifecycle.h\"\n#include \"base/android/jni_android.h\"\n#include \"base/android/jni_array.h\"\n#include \"base/android/jni_string.h\"\n#include \"base/android/token_android.h\"\n#include \"base/notimplemented.h\"\n#include \"base/uuid.h\"\n#include \"chrome/browser/android/tab_android.h\"\n#include \"chrome/browser/profiles/profile.h\"\n#include \"chrome/browser/sessions/session_restore.h\"\n#include \"chrome/browser/ui/android/tab_model/tab_model.h\"\n#include \"chrome/browser/ui/android/tab_model/tab_model_jni_bridge.h\"\n#include \"chrome/browser/ui/android/tab_model/tab_model_list.h\"\n#include \"components/sessions/content/content_live_tab.h\"\n#include \"components/sessions/content/content_serialized_navigation_builder.h\"\n#include \"components/sessions/core/session_id.h\"\n#include \"components/sessions/core/session_types.h\"\n#include \"components/sessions/core/tab_restore_types.h\"\n#include \"components/split_tabs/split_tab_id.h\"\n#include \"components/split_tabs/split_tab_visual_data.h\"\n#include \"components/tab_groups/tab_group_id.h\"\n#include \"components/tab_groups/tab_group_visual_data.h\"\n#include \"components/tabs/public/android/jni_conversion.h\"\n#include \"components/tabs/public/split_tab_collection.h\"\n#include \"components/tabs/public/split_tab_data.h\"\n#include \"content/public/browser/browser_context.h\"\n#include \"content/public/browser/navigation_controller.h\"\n#include \"content/public/browser/navigation_entry.h\"\n#include \"content/public/browser/restore_type.h\"\n#include \"content/public/browser/web_contents.h\"\n#include \"ui/base/mojom/window_show_state.mojom.h\"\n#include \"ui/base/window_open_disposition.h\"\n#include \"url/android/gurl_android.h\"\n\nAndroidLiveTabContext::AndroidLiveTabContext(TabModel* tab_model)\n    : tab_model_(tab_model) {}\n\n// Called in tab restore service, but expected to do nothing on Android.\nvoid AndroidLiveTabContext::ShowBrowserWindow() {}\n\nSessionID AndroidLiveTabContext::GetSessionID() const {\n  return tab_model_->GetSessionId();\n}\n\nsessions::SessionWindow::WindowType AndroidLiveTabContext::GetWindowType()\n    const {\n  // Not applicable to android.\n  return sessions::SessionWindow::TYPE_NORMAL;\n}\n\nint AndroidLiveTabContext::GetTabCount() const {\n  return tab_model_->GetTabCount();\n}\n\nint AndroidLiveTabContext::GetSelectedIndex() const {\n  return tab_model_->GetActiveIndex();\n}\n\nstd::string AndroidLiveTabContext::GetAppName() const {\n  // Not applicable to android.\n  return std::string();\n}\n\nstd::string AndroidLiveTabContext::GetUserTitle() const {\n  return std::string();\n}\n\nsessions::LiveTab* AndroidLiveTabContext::GetLiveTabAt(int index) const {\n  TabAndroid* tab_android = tab_model_->GetTabAt(index);\n  if (!tab_android || !tab_android->web_contents()) {\n    return nullptr;\n  }\n\n  return sessions::ContentLiveTab::GetOrCreateForWebContents(\n      tab_android->web_contents());\n}\n\nsessions::LiveTab* AndroidLiveTabContext::GetActiveLiveTab() const {\n  content::WebContents* web_contents = tab_model_->GetActiveWebContents();\n  if (!web_contents) {\n    return nullptr;\n  }\n\n  return sessions::ContentLiveTab::GetOrCreateForWebContents(web_contents);\n}\n\nstd::map<std::string, std::string> AndroidLiveTabContext::GetExtraDataForTab(\n    int index) const {\n  std::map<std::string, std::string> extra_data;\n  return extra_data;\n}\n\nstd::map<std::string, std::string>\nAndroidLiveTabContext::GetExtraDataForWindow() const {\n  return std::map<std::string, std::string>();\n}\n\nstd::optional<tab_groups::TabGroupId> AndroidLiveTabContext::GetTabGroupForTab(\n    int index) const {\n  // Implemented in AndroidLiveTabContextCloseWrapper.\n  return std::optional<tab_groups::TabGroupId>();\n}\n\nstd::optional<split_tabs::SplitTabId> AndroidLiveTabContext::GetSplitForTab(\n    int index) const {\n  if (index < 0 || index >= tab_model_->GetTabCount()) {\n    return std::nullopt;\n  }\n  const TabAndroid* tab = tab_model_->GetTabAt(index);\n  return tab ? tab->GetSplit() : std::nullopt;\n}\n\nconst tab_groups::TabGroupVisualData*\nAndroidLiveTabContext::GetVisualDataForGroup(\n    const tab_groups::TabGroupId& group) const {\n  // Implemented in AndroidLiveTabContextCloseWrapper.\n\n  // Since we never return a group from GetTabGroupForTab(), this should never\n  // be called.\n  NOTREACHED();\n}\n\nconst split_tabs::SplitTabVisualData*\nAndroidLiveTabContext::GetVisualDataForSplit(\n    const split_tabs::SplitTabId& split_id) const {\n  for (int i = 0; i < tab_model_->GetTabCount(); ++i) {\n    const TabAndroid* tab = tab_model_->GetTabAt(i);\n    if (!tab || tab->GetSplit() != split_id) {\n      continue;\n    }\n    for (const tabs::TabCollection* collection = tab->GetParentCollection();\n         collection; collection = collection->GetParentCollection()) {\n      if (collection->type() == tabs::TabCollection::Type::SPLIT) {\n        return static_cast<const tabs::SplitTabCollection*>(collection)\n            ->data()\n            ->visual_data();\n      }\n    }\n  }\n  return nullptr;\n}\n\nconst std::optional<base::Uuid>\nAndroidLiveTabContext::GetSavedTabGroupIdForGroup(\n    const tab_groups::TabGroupId& group) const {\n  // Implemented in AndroidLiveTabContextCloseWrapper.\n  return std::nullopt;\n}\n\nconst std::optional<tab_groups::TabGroupId>\nAndroidLiveTabContext::GetGroupIdForSavedGroup(const base::Uuid& saved) const {\n  // Implemented in AndroidLiveTabContextCloseWrapper.\n  return std::nullopt;\n}\n\nbool AndroidLiveTabContext::IsTabPinned(int index) const {\n  TabAndroid* tab_android = tab_model_->GetTabAt(index);\n  return tab_android && tab_android->IsPinned();\n}\n\nvoid AndroidLiveTabContext::SetVisualDataForGroup(\n    const tab_groups::TabGroupId& group,\n    const tab_groups::TabGroupVisualData& group_visual_data) {\n  // Implemented in AndroidLiveTabContextRestoreWrapper.\n\n  // TODO(crbug.com/40647050): ensure this never gets called (or remove\n  // NOTREACHED) if we implement restoring groups for foreign session\n  // windows.\n  NOTREACHED();\n}\n\nconst std::optional<tab_groups::TabGroupId>\nAndroidLiveTabContext::GetInitialFocusedTabGroup() const {\n  // Android does not support focused tab groups.\n\n  // This function would return the tab group ID that was focused when the\n  // window was closed, so it can be restored to focus.\n  return std::nullopt;\n}\n\nvoid AndroidLiveTabContext::SetFocusedTabGroup(\n    const tab_groups::TabGroupId& group) {\n  // Android does not support focused tab groups.\n\n  // This function would set the focused tab group for the window, removing the\n  // visibility of other tabs to instead show just the given tab group.\n  NOTIMPLEMENTED();\n}\n\nconst gfx::Rect AndroidLiveTabContext::GetRestoredBounds() const {\n  // Not applicable to android.\n  return gfx::Rect();\n}\n\nui::mojom::WindowShowState AndroidLiveTabContext::GetRestoredState() const {\n  // Not applicable to android.\n  return ui::mojom::WindowShowState::kNormal;\n}\n\nstd::string AndroidLiveTabContext::GetWorkspace() const {\n  // Not applicable to android.\n  return std::string();\n}\n\nsessions::LiveTab* AndroidLiveTabContext::AddRestoredTab(\n    const sessions::tab_restore::Tab& tab,\n    int tab_index,\n    bool select,\n    bool is_restoring_group_or_window,\n    sessions::tab_restore::Type original_session_type) {\n  Profile* profile = tab_model_->GetProfile();\n\n  // Prepare navigation history.\n  std::vector<std::unique_ptr<content::NavigationEntry>> nav_entries =\n      sessions::ContentSerializedNavigationBuilder::ToNavigationEntries(\n          tab.navigations, profile);\n\n  // Restore web contents with navigation history. This is used for background\n  // restore so start without a renderer.\n  auto params = content::WebContents::CreateParams(profile);\n  auto container_id = containers::android::ConfigureContainerRestore(\n      profile, tab.navigations, tab.normalized_navigation_index(), &params);\n  if (!container_id) return nullptr;\n  params.desired_renderer_state =\n      content::WebContents::CreateParams::kNoRendererProcess;\n  params.initially_hidden = true;\n  std::unique_ptr<content::WebContents> web_contents =\n      content::WebContents::Create(params);\n  content::WebContents* raw_web_contents = web_contents.get();\n  web_contents->GetController().Restore(tab.normalized_navigation_index(),\n                                        content::RestoreType::kRestored,\n                                        &nav_entries);\n\n  // Create new tab. Ownership is passed into java, which in turn creates a new\n  // TabAndroid instance to own the WebContents. Only select the restored tab\n  // when restoring a single tab (not as part of a bulk window/group\n  // restoration).\n\n  // `tab_index` is ignored because TabRestoreServiceHelper resets it to the tab\n  // count when the disposition is not `UNKNOWN`. We want to restore the tab to\n  // its original index, so we use `tab.tabstrip_index` instead. The tab model\n  // will handle the case where the index is out of bounds.\n  TabModel::TabLaunchType type =\n      (original_session_type == sessions::tab_restore::TAB ||\n       (!is_restoring_group_or_window && select))\n          ? TabModel::TabLaunchType::FROM_RECENT_TABS_FOREGROUND\n          : TabModel::TabLaunchType::FROM_RECENT_TABS;\n  tab_model_->CreateTab(nullptr, std::move(web_contents), tab.tabstrip_index,\n                        type, tab.pinned);\n  // Don't load the tab yet. This prevents a renderer from starting which keeps\n  // the tab restore lightweight as the tab is opened in the background only.\n  // The tab will be in a \"renderer was lost\" state. This is recovered from when\n  // the tab is made active.\n  return sessions::ContentLiveTab::GetOrCreateForWebContents(raw_web_contents);\n}\n\nsessions::LiveTab* AndroidLiveTabContext::ReplaceRestoredTab(\n    const sessions::tab_restore::Tab& tab) {\n  // Prepare navigation history.\n  sessions::SessionTab session_tab;\n  session_tab.current_navigation_index = tab.normalized_navigation_index();\n  session_tab.navigations = tab.navigations;\n\n  // This is called only on replacement of the current tab.\n  content::WebContents* web_contents = tab_model_->GetActiveWebContents();\n  web_contents = SessionRestore::RestoreForeignSessionTab(\n      web_contents, session_tab, WindowOpenDisposition::CURRENT_TAB);\n  if (!web_contents) return nullptr;\n  web_contents->GetController().LoadIfNecessary();\n  return sessions::ContentLiveTab::GetOrCreateForWebContents(web_contents);\n}\n\nvoid AndroidLiveTabContext::ReconstructSplit(\n    sessions::LiveTab* leading_tab,\n    sessions::LiveTab* trailing_tab,\n    split_tabs::SplitTabId split_id,\n    const split_tabs::SplitTabVisualData& visual_data) {\n  if (!leading_tab || !trailing_tab) {\n    return;\n  }\n  auto* leading = TabAndroid::FromWebContents(\n      &static_cast<sessions::ContentLiveTab*>(leading_tab)->GetWebContents());\n  auto* trailing = TabAndroid::FromWebContents(\n      &static_cast<sessions::ContentLiveTab*>(trailing_tab)->GetWebContents());\n  if (leading && trailing) {\n    RestoreSplitByTabIds({leading->GetAndroidId(), trailing->GetAndroidId()},\n                         split_id, visual_data);\n  }\n}\n\nbool AndroidLiveTabContext::RestoreSplitByTabIds(\n    const std::vector<int>& tab_ids,\n    split_tabs::SplitTabId split_id,\n    const split_tabs::SplitTabVisualData& visual_data) {\n  const auto& models = TabModelList::models();\n  if (std::ranges::find(models, tab_model_) == models.end()) {\n    return false;\n  }\n  JNIEnv* env = base::android::AttachCurrentThread();\n  auto model = tab_model_->GetJavaObject();\n  if (!model)\n    return false;\n  return TabModelJniBridge::RestoreSplit(\n      env, model, split_id.token(), tab_ids,\n      static_cast<int>(visual_data.split_layout()), visual_data.split_ratio());\n}\n\n// Currently does nothing.\nvoid AndroidLiveTabContext::CloseTab() {\n  NOTIMPLEMENTED();\n}\n\n// static.\nsessions::LiveTabContext* AndroidLiveTabContext::FindContextForWebContents(\n    const content::WebContents* contents) {\n  const TabAndroid* tab_android = TabAndroid::FromWebContents(contents);\n  if (!tab_android) {\n    return nullptr;\n  }\n\n  TabModel* model =\n      TabModelList::FindTabModelWithWindowSessionId(tab_android->GetWindowId());\n\n  return model ? model->GetLiveTabContext() : nullptr;\n}\n\n// static.\nsessions::LiveTabContext* AndroidLiveTabContext::FindContextWithID(\n    SessionID desired_id) {\n  // Find the model with desired id.\n  TabModel* tab_model =\n      TabModelList::FindTabModelWithWindowSessionId(desired_id);\n\n  // If we can't find the correct model, fall back to first non-incognito model.\n  if (!tab_model || tab_model->IsOffTheRecord()) {\n    for (const TabModel* model : TabModelList::models()) {\n      if (!model->IsOffTheRecord()) {\n        return model->GetLiveTabContext();\n      }\n    }\n  }\n\n  return tab_model ? tab_model->GetLiveTabContext() : nullptr;\n}\n"
+  count: 1

@@ -1,0 +1,59 @@
+diff --git a/chrome/browser/extensions/extension_install_prompt.cc b/chrome/browser/extensions/extension_install_prompt.cc
+--- a/chrome/browser/extensions/extension_install_prompt.cc
++++ b/chrome/browser/extensions/extension_install_prompt.cc
+@@ -16,6 +16,9 @@
+ #include "chrome/browser/ui/extensions/extension_install_ui.h"
+ #include "chrome/common/buildflags.h"
+ #include "content/public/browser/web_contents.h"
++#if BUILDFLAG(IS_ANDROID)
++#include "content/public/browser/navigation_handle.h"
++#endif
+ #include "extensions/browser/disable_reason.h"
+ #include "extensions/browser/extension_dialog_auto_confirm.h"
+ #include "extensions/browser/extension_prefs.h"
+@@ -102,6 +105,29 @@
+ 
+ ExtensionInstallPrompt::~ExtensionInstallPrompt() = default;
+ 
++#if BUILDFLAG(IS_ANDROID)
++void ExtensionInstallPrompt::CancelOnNavigation(content::WebContents* contents) {
++  Observe(contents);
++}
++
++void ExtensionInstallPrompt::DidStartNavigation(
++    content::NavigationHandle* navigation) {
++  if (navigation->IsInPrimaryMainFrame() &&
++      !navigation->IsSameDocument()) {
++    canceled_by_navigation_ = true;
++  }
++}
++
++void ExtensionInstallPrompt::WebContentsDestroyed() {
++  canceled_by_navigation_ = true;
++}
++
++void ExtensionInstallPrompt::PrimaryMainFrameRenderProcessGone(
++    base::TerminationStatus status) {
++  canceled_by_navigation_ = true;
++}
++#endif
++
+ void ExtensionInstallPrompt::ShowDialog(
+     DoneCallback done_callback,
+     const Extension* extension,
+@@ -259,6 +285,15 @@
+ }
+ 
+ void ExtensionInstallPrompt::ShowConfirmation() {
++#if BUILDFLAG(IS_ANDROID)
++  // Check after asynchronous icon loading too. The original WebContents may
++  // still exist after its initiating document navigated away or lost its
++  // renderer. Only manual-import prompts opt into these observer callbacks.
++  if (canceled_by_navigation_) {
++    std::move(done_callback_).Run(DoneCallbackPayload(Result::ABORTED));
++    return;
++  }
++#endif
+   std::unique_ptr<const PermissionSet> permissions_to_display;
+ 
+   if (custom_permissions_.get()) {

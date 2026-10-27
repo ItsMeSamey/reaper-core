@@ -31,7 +31,6 @@ import org.chromium.build.annotations.MonotonicNonNull;
 import org.chromium.build.annotations.NullMarked;
 import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.R;
-import org.chromium.chrome.browser.price_tracking.PriceDropNotificationManager;
 import org.chromium.chrome.browser.profiles.Profile;
 import org.chromium.chrome.browser.ui.messages.snackbar.SnackbarManager;
 import org.chromium.components.bookmarks.BookmarkId;
@@ -90,7 +89,6 @@ class BraveBookmarkManagerMediator extends BookmarkManagerMediator
             BooleanSupplier canShowSigninPromo,
             Consumer<OnScrollListener> onScrollListenerConsumer,
             BookmarkManagerOpener bookmarkManagerOpener,
-            PriceDropNotificationManager priceDropNotificationManager,
             Clipboard clipboard) {
         super(
                 activity,
@@ -116,7 +114,6 @@ class BraveBookmarkManagerMediator extends BookmarkManagerMediator
                 canShowSigninPromo,
                 onScrollListenerConsumer,
                 bookmarkManagerOpener,
-                priceDropNotificationManager,
                 clipboard);
     }
 

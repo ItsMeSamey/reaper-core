@@ -1,0 +1,44 @@
+# Copyright 2026 The Reaper Authors.
+# Use of this source code is governed by the Mozilla Public License, v. 2.0.
+
+substitutions:
+- description: Scope raster allocation limits to Android.
+  regex:
+    re_pattern: \#include\ "base/containers/span\.h"
+    replace: '#include "base/containers/span.h"
+
+      #include "build/build_config.h"'
+- description: Bound Android PDF and per-page raster allocation.
+  regex:
+    re_pattern: \ \ auto\ pdf_data\ =\ pdf_mapping\.GetMemoryAsSpan<const\ uint8_t>\(\);
+    replace: "  auto pdf_data = pdf_mapping.GetMemoryAsSpan<const uint8_t>();\n#if BUILDFLAG(IS_ANDROID)\n  // Both the document and printer capabilities are extension-controlled.\n  // Bound every raster allocation before constructing the bitmap or encoder.\n  constexpr uint64_t kMaxPagePixels = 16 * 1024 * 1024;\n  constexpr size_t kMaxRasterBytes = 64 * 1024 * 1024;\n  if (pdf_data.size() > kMaxRasterBytes || settings.area.width() <= 0 ||\n      settings.area.height() <= 0 || settings.dpi.width() <= 0 ||\n      settings.dpi.height() <= 0 ||\n      static_cast<uint64_t>(settings.area.width()) * settings.area.height() >\n          kMaxPagePixels) {\n    return invalid_pwg_region;\n  }\n#endif"
+- description: Use physical bounds only for the Android PWG raster caller.
+  regex:
+    re_pattern: \ \ \ \ \ \ \.render_device_type\ =\ chrome_pdf::RenderDeviceType::kPrinter,
+    replace: "      .render_device_type = chrome_pdf::RenderDeviceType::kPrinter,\n#if BUILDFLAG(IS_ANDROID)\n      .bounds_are_device_units = true,\n#endif"
+- description: Bound Android page count before output reservation.
+  regex:
+    re_pattern: \ \ std::string\ pwg_data;
+    replace: "#if BUILDFLAG(IS_ANDROID)\n  if (total_page_count > 256)\n    return invalid_pwg_region;\n#endif\n  std::string pwg_data;"
+- description: Bound the complete Android raster document before appending each page.
+  regex:
+    re_pattern: \ \ \ \ pwg_data\ \+=\ pwg_page;
+    replace: "#if BUILDFLAG(IS_ANDROID)\n    if (pwg_page.size() > kMaxRasterBytes - pwg_data.size())\n      return invalid_pwg_region;\n#endif\n    pwg_data += pwg_page;"
+- description: Validate PDF page coordinates before Android integer rendering.
+  regex:
+    re_pattern: \#include\ <limits>
+    replace: '#include <algorithm>
+
+      #include <cmath>
+
+      #include <limits>'
+- description: Read Android PDF page geometry before rasterization.
+  regex:
+    re_pattern: \#include\ "printing/pdf_render_settings\.h"
+    replace: '#include "printing/pdf_render_settings.h"
+
+      #include "ui/gfx/geometry/size_f.h"'
+- description: Reject PDF page coordinates that overflow Android raster positioning.
+  regex:
+    re_pattern: \ \ \ \ if\ \(!chrome_pdf::RenderPDFPageToBitmap\(pdf_data,\ page_number,
+    replace: "#if BUILDFLAG(IS_ANDROID)\n    const auto page_size = chrome_pdf::GetPDFPageSizeByIndex(pdf_data, page_number);\n    if (!page_size || !std::isfinite(page_size->width()) ||\n        !std::isfinite(page_size->height()) || page_size->IsEmpty()) {\n      return invalid_pwg_region;\n    }\n    const double scale = std::max(settings.dpi.width(), settings.dpi.height()) / 72.0;\n    if (page_size->width() * scale >= std::numeric_limits<int>::max() ||\n        page_size->height() * scale >= std::numeric_limits<int>::max()) {\n      return invalid_pwg_region;\n    }\n#endif\n    if (!chrome_pdf::RenderPDFPageToBitmap(pdf_data, page_number,"

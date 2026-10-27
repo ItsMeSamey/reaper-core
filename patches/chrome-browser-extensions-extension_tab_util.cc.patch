@@ -1,0 +1,312 @@
+diff --git a/chrome/browser/extensions/extension_tab_util.cc b/chrome/browser/extensions/extension_tab_util.cc
+index 71c4c9d19078df3bef1b032e3c24e22da3fbe1e3..d612095912af9264dfda9cb7e48601041390bd82 100644
+--- a/chrome/browser/extensions/extension_tab_util.cc
++++ b/chrome/browser/extensions/extension_tab_util.cc
+@@ -45,6 +45,7 @@
+ #include "components/tab_groups/tab_group_visual_data.h"
+ #include "components/tabs/public/tab_group.h"
+ #include "components/tabs/public/tab_interface.h"
++#include "components/tabs/public/tab_handle_factory.h"
+ #include "components/url_formatter/url_fixer.h"
+ #include "content/public/browser/favicon_status.h"
+ #include "content/public/browser/navigation_controller.h"
+@@ -69,8 +70,12 @@
+ #include "url/url_constants.h"
+ 
+ #if BUILDFLAG(IS_ANDROID)
++#include "chrome/browser/android/tab_android.h"
+ #include "chrome/browser/ui/android/tab_model/tab_model.h"
+ #include "chrome/browser/ui/android/tab_model/tab_model_list.h"
++#include "components/performance_manager/public/decorators/page_live_state_decorator.h"
++#include "components/performance_manager/public/graph/page_node.h"
++#include "components/performance_manager/public/performance_manager.h"
+ #else
+ #include "chrome/browser/resource_coordinator/tab_lifecycle_unit_external.h"
+ // nogncheck
+@@ -343,6 +348,26 @@
+   return sessions::SessionTabHelper::IdForTab(web_contents).id();
+ }
+ 
++int ExtensionTabUtil::GetTabId(const tabs::TabInterface& tab) {
++  if (tab.GetContents()) {
++    return GetTabId(tab.GetContents());
++  }
++  return tabs::SessionMappedTabHandleFactory::GetInstance()
++      .GetSessionIdForHandle(tab.GetHandle().raw_value())
++      .value_or(api::tabs::TAB_ID_NONE);
++}
++
++int ExtensionTabUtil::GetWindowIdOfTab(const tabs::TabInterface& tab) {
++  if (tab.GetContents()) {
++    return GetWindowIdOfTab(tab.GetContents());
++  }
++#if BUILDFLAG(IS_ANDROID)
++  return TabAndroid::FromTabInterface(&tab)->GetWindowId().id();
++#else
++  return api::tabs::TAB_ID_NONE;
++#endif
++}
++
+ int ExtensionTabUtil::GetWindowIdOfTab(const WebContents* web_contents) {
+   return sessions::SessionTabHelper::IdForWindowContainingTab(web_contents)
+       .id();
+@@ -409,8 +434,8 @@
+ 
+ #if BUILDFLAG(IS_ANDROID)
+   tab_object.discarded = contents->WasDiscarded();
+-  // TODO(crbug.com/505306735): Determine auto-discardable and frozen states on
+-  // desktop Android where the TabLifecycleUnit is not available.
++  tab_object.auto_discardable = IsTabAutoDiscardable(contents);
++  tab_object.frozen = IsTabFrozen(contents);
+ #else
+   auto* tab_lifecycle_unit_external =
+       resource_coordinator::TabLifecycleUnitExternal::FromWebContents(contents);
+@@ -455,14 +480,103 @@
+     tabs::TabInterface* opener =
+         tab_list->GetOpenerForTab(tab_interface->GetHandle());
+     if (opener) {
+-      content::WebContents* opener_contents = opener->GetContents();
+-      CHECK(opener_contents);
+-      tab_object.opener_tab_id = GetTabIdForExtensions(*opener_contents);
++#if BUILDFLAG(IS_ANDROID)
++      if (auto* opener_contents = opener->GetContents()) {
++        tab_object.opener_tab_id = GetTabIdForExtensions(*opener_contents);
++      } else {
++        tab_object.opener_tab_id = GetTabId(*opener);
++      }
++#else
++      CHECK(opener->GetContents());
++      tab_object.opener_tab_id = GetTabIdForExtensions(*opener->GetContents());
++#endif
+     }
+   }
+ 
+   ScrubTabForExtension(extension, contents, &tab_object, scrub_tab_behavior);
+   return tab_object;
++}
++
++// static
++api::tabs::Tab ExtensionTabUtil::CreateTabObject(
++    tabs::TabInterface& tab,
++    ScrubTabBehavior scrub_tab_behavior,
++    const Extension* extension,
++    TabListInterface* tab_list,
++    int tab_index) {
++  if (tab.GetContents()) {
++    return CreateTabObject(tab.GetContents(), scrub_tab_behavior, extension,
++                           tab_list, tab_index);
++  }
++  auto* browser = tab.GetBrowserWindowInterface();
++  if (!tab_list && browser) {
++    tab_list = TabListInterface::From(browser);
++    if (tab_list) {
++      tab_index = tab_list->GetIndexOfTab(tab.GetHandle());
++    }
++  }
++  api::tabs::Tab object;
++  object.id = browser && !BrowserSupportsTabs(browser)
++                  ? api::tabs::TAB_ID_NONE : GetTabId(tab);
++  object.index = tab_index;
++  object.window_id = GetWindowIdOfTab(tab);
++  object.status = api::tabs::TabStatus::kUnloaded;
++  object.last_accessed = tab.GetLastActiveTime().InMillisecondsFSinceUnixEpoch();
++  object.active = tab.IsActivated();
++  object.selected = object.active;
++  object.highlighted = tab.IsSelected();
++  object.pinned = tab.IsPinned();
++  object.group_id = tab.GetGroup() ? GetGroupId(*tab.GetGroup()) : -1;
++  object.split_view_id = tab.GetSplit() ? GetSplitId(*tab.GetSplit()) : -1;
++  object.incognito = tab.GetProfile()->IsOffTheRecord();
++  // Absent contents have no live renderer, audible/capture or page-node state.
++  // Deferred session restores are unloaded, not necessarily discarded/frozen.
++  object.audible = false;
++  object.discarded = false;
++  object.frozen = false;
++  object.auto_discardable = true;
++  api::tabs::MutedInfo muted;
++  muted.muted = false;
++  object.muted_info = std::move(muted);
++#if BUILDFLAG(IS_ANDROID)
++  auto* android_tab = TabAndroid::FromTabInterface(&tab);
++  object.url = android_tab->GetCommittedURL().spec();
++  object.title = base::UTF16ToUTF8(android_tab->GetCommittedTitle());
++  const GURL pending_url = android_tab->GetPendingURL();
++  if (!pending_url.is_empty()) {
++    object.pending_url = pending_url.spec();
++  }
++#else
++  object.url = tab.GetURL().spec();
++  object.title = base::UTF16ToUTF8(tab.GetTitle());
++#endif
++  if (tab_list) {
++    if (auto* opener = tab_list->GetOpenerForTab(tab.GetHandle())) {
++      object.opener_tab_id = GetTabId(*opener);
++    }
++  }
++  ScrubTabForExtension(extension, nullptr, &object, scrub_tab_behavior);
++  return object;
++}
++
++// static
++ExtensionTabUtil::ScrubTabBehavior ExtensionTabUtil::GetScrubTabBehavior(
++    const Extension* extension,
++    mojom::ContextType context,
++    const tabs::TabInterface& tab) {
++  if (tab.GetContents()) {
++    return GetScrubTabBehavior(extension, context, tab.GetContents());
++  }
++  GURL committed_url = tab.GetURL();
++  GURL pending_url;
++#if BUILDFLAG(IS_ANDROID)
++  auto* android_tab = TabAndroid::FromTabInterface(&tab);
++  committed_url = android_tab->GetCommittedURL();
++  pending_url = android_tab->GetPendingURL();
++#endif
++  const int id = GetTabId(tab);
++  return {GetScrubTabBehaviorImpl(extension, context, committed_url, id),
++          GetScrubTabBehaviorImpl(extension, context, pending_url, id)};
+ }
+ 
+ // static
+@@ -616,7 +730,8 @@
+                                   bool include_incognito,
+                                   WindowController** out_window,
+                                   WebContents** out_contents,
+-                                  int* out_tab_index) {
++                                  int* out_tab_index,
++                                  tabs::TabInterface** out_tab) {
+   // Zero the output parameters so they have predictable values on failure.
+   if (out_window) {
+     *out_window = nullptr;
+@@ -628,6 +743,9 @@
+     *out_tab_index = api::tabs::TAB_INDEX_NONE;
+   }
+ 
++  if (out_tab) {
++    *out_tab = nullptr;
++  }
+   if (tab_id == api::tabs::TAB_ID_NONE)
+     return false;
+   // `browser_context` can be null during shutdown.
+@@ -652,8 +770,29 @@
+     }
+     for (int i = 0; i < window->GetTabCount(); ++i) {
+       WebContents* target_contents = window->GetWebContentsAt(i);
++#if BUILDFLAG(IS_ANDROID)
++      auto* tab_list = TabListInterface::From(window->GetBrowserWindowInterface());
++      auto* tab = tab_list ? tab_list->GetTab(i) : nullptr;
++      if ((tab ? GetTabId(*tab) : GetTabId(target_contents)) == tab_id) {
++        // Native structural and metadata callers must not load the tab. The
++        // legacy contents-only API is used by operations requiring a page.
++        if (!target_contents && out_contents && !out_tab && tab) {
++          tab->LoadIfNeeded();
++          target_contents = tab->GetContents();
++          if (!target_contents || GetTabId(target_contents) != tab_id) {
++            return false;
++          }
++        }
++        if (out_tab) {
++          *out_tab = tab;
++        }
++#else
+       if (sessions::SessionTabHelper::IdForTab(target_contents).id() ==
+           tab_id) {
++        if (out_tab) {
++          *out_tab = tabs::TabInterface::MaybeGetFromContents(target_contents);
++        }
++#endif
+         if (out_window) {
+           *out_window = window;
+         }
+@@ -1029,10 +1168,17 @@
+             browser_profile == incognito_profile) {
+           TabListInterface* tab_list = TabListInterface::From(browser);
+           if (tab_list) {
++#if BUILDFLAG(IS_ANDROID)
++            auto* tab = tab_list->GetActiveTab();
++            if (tab && tab->GetContents()) {
++              active_contents.push_back(tab->GetContents());
++            }
++#else
+             content::WebContents* tab_contents =
+                 tab_list->GetActiveTab()->GetContents();
+             CHECK(tab_contents);
+             active_contents.push_back(tab_contents);
++#endif
+           }
+         }
+         return true;
+@@ -1054,11 +1200,12 @@
+ void ExtensionTabUtil::NavigateToURL(WindowOpenDisposition disposition,
+                                      content::WebContents* source_contents,
+                                      const GURL& url,
+-                                     base::OnceClosure done_callback) {
++                                     base::OnceClosure done_callback,
++                                     BrowserWindowInterface* fallback_browser) {
+   BrowserWindowInterface* browser =
+       source_contents
+           ? browser_window_util::GetBrowserForTabContents(*source_contents)
+-          : nullptr;
++          : fallback_browser;
+   auto params = std::make_unique<NavigateParams>(browser, url,
+                                                  ui::PAGE_TRANSITION_FROM_API);
+   params->disposition = disposition;
+@@ -1184,7 +1331,13 @@
+ void ExtensionTabUtil::ForEachTab(
+     base::RepeatingCallback<void(WebContents*)> callback) {
+   tabs::ForEachTabInterface([&callback](tabs::TabInterface* tab) {
++#if BUILDFLAG(IS_ANDROID)
++    if (auto* contents = tab->GetContents()) {
++      callback.Run(contents);
++    }
++#else
+     callback.Run(tab->GetContents());
++#endif
+     return true;
+   });
+ }
+@@ -1269,6 +1422,44 @@
+   }));
+ }
+ 
++#if BUILDFLAG(IS_ANDROID)
++// static
++bool ExtensionTabUtil::IsTabAutoDiscardable(content::WebContents* contents) {
++  if (!performance_manager::PerformanceManager::IsAvailable() ||
++      !performance_manager::PerformanceManager::
++          GetPrimaryPageNodeForWebContents(contents)) {
++    return true;
++  }
++  return performance_manager::PageLiveStateDecorator::IsAutoDiscardable(
++      contents);
++}
++
++// static
++bool ExtensionTabUtil::IsTabFrozen(content::WebContents* contents) {
++  if (!performance_manager::PerformanceManager::IsAvailable()) {
++    return false;
++  }
++  auto page =
++      performance_manager::PerformanceManager::GetPrimaryPageNodeForWebContents(
++          contents);
++  return page && page->GetLifecycleState() ==
++                     performance_manager::PageNode::LifecycleState::kFrozen;
++}
++
++// static
++bool ExtensionTabUtil::SetTabAutoDiscardable(content::WebContents* contents,
++                                             bool value) {
++  if (!performance_manager::PerformanceManager::IsAvailable() ||
++      !performance_manager::PerformanceManager::
++          GetPrimaryPageNodeForWebContents(contents)) {
++    return false;
++  }
++  performance_manager::PageLiveStateDecorator::SetIsAutoDiscardable(contents,
++                                                                    value);
++  return true;
++}
++#endif  // BUILDFLAG(IS_ANDROID)
++
+ // static
+ bool ExtensionTabUtil::IsTabStripEditable(Profile& profile) {
+   if (g_disable_tab_list_editing_for_testing) {

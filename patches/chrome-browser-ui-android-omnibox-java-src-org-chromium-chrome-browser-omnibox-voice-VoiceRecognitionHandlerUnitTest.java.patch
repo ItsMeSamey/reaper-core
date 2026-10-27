@@ -1,0 +1,112 @@
+diff --git a/chrome/browser/ui/android/omnibox/java/src/org/chromium/chrome/browser/omnibox/voice/VoiceRecognitionHandlerUnitTest.java b/chrome/browser/ui/android/omnibox/java/src/org/chromium/chrome/browser/omnibox/voice/VoiceRecognitionHandlerUnitTest.java
+--- a/chrome/browser/ui/android/omnibox/java/src/org/chromium/chrome/browser/omnibox/voice/VoiceRecognitionHandlerUnitTest.java
++++ b/chrome/browser/ui/android/omnibox/java/src/org/chromium/chrome/browser/omnibox/voice/VoiceRecognitionHandlerUnitTest.java
+@@ -30,6 +30,31 @@
+ 
+ import androidx.annotation.Nullable;
+ 
++import org.chromium.base.supplier.ObservableSuppliers;
++import org.chromium.base.supplier.SettableMonotonicObservableSupplier;
++import org.chromium.base.test.BaseRobolectricTestRunner;
++import org.chromium.base.test.RobolectricUtil;
++import org.chromium.chrome.browser.omnibox.LocationBarDataProvider;
++import org.chromium.chrome.browser.omnibox.OmniboxStub;
++import org.chromium.chrome.browser.omnibox.suggestions.AutocompleteController;
++import org.chromium.chrome.browser.omnibox.suggestions.AutocompleteControllerJni;
++import org.chromium.chrome.browser.omnibox.suggestions.AutocompleteCoordinator;
++import org.chromium.chrome.browser.omnibox.voice.VoiceRecognitionIntentHandler.VoiceInteractionSource;
++import org.chromium.chrome.browser.omnibox.voice.VoiceRecognitionIntentHandler.VoiceResult;
++import org.chromium.chrome.browser.preferences.Pref;
++import org.chromium.chrome.browser.profiles.Profile;
++import org.chromium.chrome.browser.profiles.ProfileManager;
++import org.chromium.chrome.browser.search_engines.TemplateUrlServiceFactory;
++import org.chromium.chrome.browser.tab.Tab;
++import org.chromium.components.omnibox.AutocompleteMatch;
++import org.chromium.components.prefs.PrefService;
++import org.chromium.components.search_engines.TemplateUrlService;
++import org.chromium.components.user_prefs.UserPrefs;
++import org.chromium.ui.base.WindowAndroid;
++import org.chromium.ui.permissions.AndroidPermissionDelegate;
++import org.chromium.ui.permissions.PermissionCallback;
++import org.chromium.url.GURL;
++import org.chromium.url.JUnitTestGURLs;
+ import org.junit.After;
+ import org.junit.Before;
+ import org.junit.Rule;
+@@ -45,35 +70,6 @@
+ import org.robolectric.annotation.Config;
+ import org.robolectric.shadows.ShadowLog;
+ 
+-import org.chromium.base.supplier.ObservableSuppliers;
+-import org.chromium.base.supplier.SettableMonotonicObservableSupplier;
+-import org.chromium.base.test.BaseRobolectricTestRunner;
+-import org.chromium.base.test.RobolectricUtil;
+-import org.chromium.chrome.browser.omnibox.FuseboxSessionState;
+-import org.chromium.chrome.browser.omnibox.LocationBarDataProvider;
+-import org.chromium.chrome.browser.omnibox.OmniboxStub;
+-import org.chromium.chrome.browser.omnibox.suggestions.AutocompleteController;
+-import org.chromium.chrome.browser.omnibox.suggestions.AutocompleteControllerJni;
+-import org.chromium.chrome.browser.omnibox.suggestions.AutocompleteCoordinator;
+-import org.chromium.chrome.browser.omnibox.voice.VoiceRecognitionIntentHandler.VoiceInteractionSource;
+-import org.chromium.chrome.browser.omnibox.voice.VoiceRecognitionIntentHandler.VoiceResult;
+-import org.chromium.chrome.browser.preferences.Pref;
+-import org.chromium.chrome.browser.profiles.Profile;
+-import org.chromium.chrome.browser.profiles.ProfileManager;
+-import org.chromium.chrome.browser.search_engines.TemplateUrlServiceFactory;
+-import org.chromium.chrome.browser.tab.Tab;
+-import org.chromium.components.omnibox.AutocompleteInput;
+-import org.chromium.components.omnibox.AutocompleteMatch;
+-import org.chromium.components.omnibox.AutocompleteRequestType;
+-import org.chromium.components.prefs.PrefService;
+-import org.chromium.components.search_engines.TemplateUrlService;
+-import org.chromium.components.user_prefs.UserPrefs;
+-import org.chromium.ui.base.WindowAndroid;
+-import org.chromium.ui.permissions.AndroidPermissionDelegate;
+-import org.chromium.ui.permissions.PermissionCallback;
+-import org.chromium.url.GURL;
+-import org.chromium.url.JUnitTestGURLs;
+-
+ import java.lang.ref.WeakReference;
+ import java.util.List;
+ import java.util.concurrent.ExecutionException;
+@@ -97,16 +93,13 @@
+     @Mock private LocationBarDataProvider mDataProvider;
+     @Mock private OmniboxStub mOmniboxStub;
+     @Mock private AndroidPermissionDelegate mPermissionDelegate;
+-    @Mock private FuseboxSessionState mFuseboxSessionState;
+     @Mock private Profile mProfile;
+     @Mock private Profile mProfile2;
+     @Mock private PrefService mPrefs;
+     @Mock private TemplateUrlService mTemplateUrlService;
+     @Captor private ArgumentCaptor<List<VoiceResult>> mVoiceResults;
+     @Captor private ArgumentCaptor<WindowAndroid.IntentCallback> mIntentCallback;
+-    @Captor private ArgumentCaptor<AutocompleteInput> mInputCaptor;
+-
+-    private final AutocompleteInput mAutocompleteInput = new AutocompleteInput();
++
+     private VoiceRecognitionIntentHandler mIntentHandler;
+     private VoiceRecognitionHandler mHandler;
+     private WindowAndroid mWindowAndroid;
+@@ -469,22 +462,4 @@
+                 new String[] {"a", "www.b.co.uk", "engadget.com", "www.google.com"},
+                 new float[] {1.0f, 1.0f, 1.0f, 1.0f});
+     }
+-
+-    @Test
+-    public void testHandleTranscriptionResult_aimRequestLowConfidence_noUrlNavigation() {
+-        float confidence = 0;
+-        setVoiceResult(
+-                /* resultCode= */ Activity.RESULT_OK,
+-                /* text= */ "voice text",
+-                /* confidence= */ confidence);
+-
+-        mAutocompleteInput.setRequestType(AutocompleteRequestType.AI_MODE);
+-        doReturn(mFuseboxSessionState).when(mDataProvider).getFuseboxSessionState();
+-        doReturn(mAutocompleteInput).when(mFuseboxSessionState).getAutocompleteInput();
+-
+-        mHandler.startVoiceRecognition(VoiceInteractionSource.OMNIBOX, () -> {});
+-
+-        verify(mOmniboxStub).beginInput(mInputCaptor.capture());
+-        assertEquals(AutocompleteRequestType.AI_MODE, mInputCaptor.getValue().getRequestType());
+-    }
+ }

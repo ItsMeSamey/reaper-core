@@ -1,0 +1,135 @@
+# Connect Android split collections to model and transfer APIs.
+substitutions:
+- description: Connect Android split collection model, events and transfer semantics
+  regex:
+    re_pattern: '\ \ \ \ const\ ExtensionFunction\&\ function,\
+
+      \ \ \ \ const\ Params\&\ params\)\ \{\
+
+      \ \ auto\*\ const\ extension\ =\ function\.extension\(\);\
+
+      \
+
+      \#if\ BUILDFLAG\(IS_ANDROID\)\
+
+      \ \ //\ TODO\(https://crbug\.com/480192698\):\ Remove\ this\ restriction\ once\ split\ tabs\
+
+      \ \ //\ are\ supported\ on\ Desktop\ Android\.\
+
+      \ \ if\ \(params\.split_with_tab_id\.has_value\(\)\)\ \{\
+
+      \ \ \ \ return\ base::unexpected\(tabs_constants::kSplitViewCreationFailedError\);\
+
+      \ \ \}\
+
+      \#endif\
+
+      \
+
+      \ \ //\ DCHECK\ because\ the\ input\ should\ already\ have\ been\ validated,\ and\ this\ is\
+
+      \ \ //\ a\ somewhat\ costly\ function\.\
+
+      \ \ DCHECK\(ExtensionTabUtil::PrepareURLForNavigation\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ validated_url\.spec\(\),\ extension,\
+
+      '
+    replace: "    const ExtensionFunction& function,\n    const Params& params) {\n  auto* const extension = function.extension();\n\n  // DCHECK because the input should already have been validated, and this is\n  // a somewhat costly function.\n  DCHECK(ExtensionTabUtil::PrepareURLForNavigation(\n             validated_url.spec(), extension,\n"
+- description: Connect Android split collection model, events and transfer semantics
+  regex:
+    re_pattern: '\
+
+      \ \ //\ If\ splitWithTabId\ is\ specified,\ determine\ the\ relative\ positioning\ of\ the\
+
+      \ \ //\ new\ tab\.\ Defaults\ to\ the\ right\ of\ the\ target\ tab\ if\ index\ is\ not\ specified\.\
+
+      \ \ tabs::TabInterface\*\ split_tab\ =\ nullptr;\
+
+      \ \ if\ \(params\.split_with_tab_id\.has_value\(\)\ \&\&\
+
+      \ \ \ \ \ \ base::FeatureList::IsEnabled\(extensions_features::kApiTabsSplitView\)\)\ \{\
+
+      \ \ \ \ content::WebContents\*\ split_contents\ =\ nullptr;\
+
+      \ \ \ \ int\ split_index\ =\ \-1;\
+
+      '
+    replace: "\n  // If splitWithTabId is specified, determine the relative positioning of the\n  // new tab. Defaults to the right of the target tab if index is not specified.\n  tabs::TabInterface* split_tab = nullptr;\n#if BUILDFLAG(IS_ANDROID)\n  std::optional<tabs::TabHandle> split_handle;\n  auto browser_weak = browser.GetWeakPtr();\n  bool insert_before_split = false;\n#endif\n  if (params.split_with_tab_id.has_value() &&\n      base::FeatureList::IsEnabled(extensions_features::kApiTabsSplitView)) {\n    content::WebContents* split_contents = nullptr;\n    int split_index = -1;\n"
+- description: Connect Android split collection model, events and transfer semantics
+  regex:
+    re_pattern: '\ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ if\ \(split_contents\)\ \{\
+
+      \ \ \ \ \ \ \ \ split_tab\ =\ tabs::TabInterface::GetFromContents\(split_contents\);\
+
+      \ \ \ \ \ \ \ \ CHECK\(split_tab\);\
+
+      \ \ \ \ \ \ \}\
+
+      \ \ \ \ \}\
+
+      \ \ \}\
+
+      \
+
+      '
+    replace: "      }\n      if (split_contents) {\n        split_tab = tabs::TabInterface::GetFromContents(split_contents);\n        CHECK(split_tab);\n#if BUILDFLAG(IS_ANDROID)\n        split_handle = split_tab->GetHandle();\n        insert_before_split = index == split_index;\n#endif\n      }\n    }\n  }\n\n"
+- description: Connect Android split collection model, events and transfer semantics
+  regex:
+    re_pattern: '\ \ if\ \(!new_contents\)\ \{\
+
+      \ \ \ \ return\ base::unexpected\(ExtensionTabUtil::kLockedFullscreenModeNewTabError\);\
+
+      \ \ \}\
+
+      \
+
+      \ \ //\ Split\ the\ tab\ if\ the\ splitWithTabId\ is\ specified\ and\ the\ tab\ is\ valid\.\
+
+      \ \ //\ Returns\ an\ error\ and\ cleans\ up\ the\ newly\ created\ tab\ if\ the\ split\ view\
+
+      \ \ //\ cannot\ be\ created\.\
+
+      \ \ if\ \(split_tab\)\ \{\
+
+      '
+    replace: "  if (!new_contents) {\n    return base::unexpected(ExtensionTabUtil::kLockedFullscreenModeNewTabError);\n  }\n\n#if BUILDFLAG(IS_ANDROID)\n  // Android inserts an ordinary tab first. Group and move through the existing\n  // model before splitting. Each operation notifies synchronous Java observers,\n  // so revalidate weak handles after every operation (including split\n  // creation).\n  if (split_handle) {\n    if (!browser_weak) {\n      return base::unexpected(tabs_constants::kSplitViewCreationFailedError);\n    }\n    auto* created_tab = tabs::TabInterface::GetFromContents(new_contents);\n    if (!created_tab) {\n      return base::unexpected(tabs_constants::kSplitViewCreationFailedError);\n    }\n    const tabs::TabHandle created_handle = created_tab->GetHandle();\n    auto contents_weak = new_contents->GetWeakPtr();\n    auto current_list = [&]() -> TabListInterface* {\n      return browser_weak ? TabListInterface::From(browser_weak.get())\n                          : nullptr;\n    };\n    auto valid_pair = [&]() {\n      auto* list = current_list();\n      auto* target = split_handle->Get();\n      auto* created = created_handle.Get();\n      return list && target && created && contents_weak &&\n             created->GetContents() == contents_weak.get() &&\n             list->GetIndexOfTab(*split_handle) >= 0 &&\n             list->GetIndexOfTab(created_handle) >= 0 && !target->IsSplit() &&\n             !created->IsSplit();\n    };\n    auto fail_split =\n        [&]() -> base::expected<content::WebContents*, std::string> {\n      auto* list = current_list();\n      if (list && created_handle.Get() &&\n          list->GetIndexOfTab(created_handle) >= 0) {\n        list->CloseTab(created_handle);\n      }\n      return base::unexpected(tabs_constants::kSplitViewCreationFailedError);\n    };\n    if (!valid_pair())\n      return fail_split();\n    const auto target_group = split_handle->Get()->GetGroup();\n    if (target_group && created_handle.Get()->GetGroup() != target_group) {\n      if (!current_list()->AddTabsToGroup(target_group, {created_handle}) ||\n          !valid_pair()) {\n        return fail_split();\n      }\n    }\n    int target_index = current_list()->GetIndexOfTab(*split_handle);\n    int new_index = current_list()->GetIndexOfTab(created_handle);\n    if (new_index < target_index)\n      --target_index;\n    current_list()->MoveTab(created_handle,\n                            target_index + (insert_before_split ? 0 : 1));\n    if (!valid_pair() ||\n        !current_list()->CreateSplit({*split_handle, created_handle})) {\n      return fail_split();\n    }\n    if (!contents_weak || !current_list() || !created_handle.Get() ||\n        !split_handle->Get() ||\n        current_list()->GetIndexOfTab(*split_handle) < 0 ||\n        current_list()->GetIndexOfTab(created_handle) < 0 ||\n        !created_handle.Get()->GetSplit() ||\n        created_handle.Get()->GetSplit() != split_handle->Get()->GetSplit()) {\n      return fail_split();\n    }\n    new_contents = contents_weak.get();\n  }\n#else\n  // Split the tab if the splitWithTabId is specified and the tab is valid.\n  // Returns an error and cleans up the newly created tab if the split view\n  // cannot be created.\n  if (split_tab) {\n"
+- description: Connect Android split collection model, events and transfer semantics
+  regex:
+    re_pattern: '\ \ \ \ \ \ tab_list\->CloseTab\(new_tab\->GetHandle\(\)\);\
+
+      \ \ \ \ \ \ return\ base::unexpected\(tabs_constants::kSplitViewCreationFailedError\);\
+
+      \ \ \ \ \}\
+
+      \ \ \}\
+
+      \
+
+      \ \ if\ \(active\)\ \{\
+
+      \ \ \ \ new_contents\->SetInitialFocus\(\);\
+
+      \ \ \}\
+
+      '
+    replace: "      tab_list->CloseTab(new_tab->GetHandle());\n      return base::unexpected(tabs_constants::kSplitViewCreationFailedError);\n    }\n  }\n#endif\n\n  if (active) {\n    new_contents->SetInitialFocus();\n  }\n"
+
+- description: "Preserve explicit Android opener container before tab creation: Android-only existing API error formatting dependency"
+  count: 1
+  regex:
+    re_pattern: "\\#if\\ !BUILDFLAG\\(IS_ANDROID\\)\\\n\\#include\\ \"chrome/browser/ui/tabs/split_tab_metrics\\.h\""
+    replace: "#if BUILDFLAG(IS_ANDROID)\n#include \"extensions/common/error_utils.h\"\n#endif\n\n#if !BUILDFLAG(IS_ANDROID)\n#include \"chrome/browser/ui/tabs/split_tab_metrics.h\""
+
+- description: "Preserve explicit Android opener container before tab creation: fresh authorized same-window/profile opener before Navigate"
+  count: 1
+  regex:
+    re_pattern: "\\ \\ MaybeSetPdfNavigateParams\\(function,\\ navigate_params\\);\\\n\\\n\\ \\ base::WeakPtr<content::NavigationHandle>\\ handle\\ =\\ Navigate\\(\\&navigate_params\\);"
+    replace: "  MaybeSetPdfNavigateParams(function, navigate_params);\n\n#if BUILDFLAG(IS_ANDROID)\n  if (params.opener_tab_id) {\n    tabs::TabInterface* opener = nullptr;\n    if (!ExtensionTabUtil::GetTabById(\n            *params.opener_tab_id, function.browser_context(),\n            function.include_incognito_information(), nullptr, nullptr, nullptr,\n            &opener) ||\n        !opener || !opener->GetContents()) {\n      return base::unexpected(ErrorUtils::FormatErrorMessage(\n          ExtensionTabUtil::kTabNotFoundError,\n          base::NumberToString(*params.opener_tab_id)));\n    }\n    if (browser_window_util::GetBrowserForTabContents(*opener) != &browser ||\n        opener->GetContents()->GetBrowserContext() != browser.GetProfile()) {\n      return base::unexpected(\n          \"Tab opener must be in the same window as the updated tab.\");\n    }\n    navigate_params.source_contents = opener->GetContents();\n    navigate_params.tabstrip_add_types |= AddTabTypes::ADD_INHERIT_OPENER;\n  }\n#endif\n\n  base::WeakPtr<content::NavigationHandle> handle = Navigate(&navigate_params);"
+- description: Use the validated TabInterface window accessor instead of passing a TabInterface to a WebContents-only helper
+  regex:
+    pattern: browser_window_util::GetBrowserForTabContents(*opener) != &browser
+    replace: opener->GetBrowserWindowInterface() != &browser
+  count: 1

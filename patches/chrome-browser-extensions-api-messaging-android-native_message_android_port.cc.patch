@@ -1,0 +1,57 @@
+diff --git a/chrome/browser/extensions/api/messaging/android/native_message_android_port.cc b/chrome/browser/extensions/api/messaging/android/native_message_android_port.cc
+--- a/chrome/browser/extensions/api/messaging/android/native_message_android_port.cc
++++ b/chrome/browser/extensions/api/messaging/android/native_message_android_port.cc
+@@ -12,10 +12,12 @@
+ #include "base/containers/span.h"
+ #include "chrome/browser/extensions/chrome_content_verifier_delegate.h"
+ #include "chrome/browser/profiles/profile.h"
++#include "extensions/browser/api/messaging/message_service.h"
+ #include "extensions/browser/content_verifier/content_verifier_delegate.h"
+ #include "extensions/browser/extension_registry.h"
+ #include "extensions/common/api/messaging/message.h"
+ #include "extensions/common/extension.h"
++#include "extensions/common/mojom/message_port.mojom.h"
+ #include "third_party/jni_zero/default_conversions.h"
+ 
+ // Must come after all headers that specialize FromJniType() / ToJniType().
+@@ -24,6 +26,11 @@
+ namespace extensions {
+ 
+ namespace {
++
++// Match NativeMessageProcessHost's maximum host-to-browser JSON body size.
++constexpr size_t kMaximumNativeMessageSize = 1024 * 1024;
++constexpr char kNativeMessageError[] =
++    "Error when communicating with the native messaging host.";
+ 
+ // A fork of ToJavaArrayOfByteArray in base/android/jni_array.h for
+ // `std::array<uint8_t, 32>`.
+@@ -102,6 +109,7 @@
+ 
+   return Java_NativeMessageAndroidPort_connectToApp(
+       env, java_peer_, profile, package_name, extension_id, is_verified,
++      !MessageService::IsAndroidLegacyNativeMessagingExtensionId(extension_id),
+       certs_java_array);
+ }
+ 
+@@ -118,11 +126,20 @@
+ }
+ 
+ void NativeMessageAndroidPort::DispatchOnMessage(Message message) {
++  // Enforce the existing extension bound before converting to a Java String.
++  if (message.data().size() > mojom::kMaxMessageBytes) {
++    CloseChannel(kNativeMessageError);
++    return;
++  }
+   Java_NativeMessageAndroidPort_forwardMessageToApp(
+       base::android::AttachCurrentThread(), java_peer_, message.data());
+ }
+ 
+ void NativeMessageAndroidPort::PostMessageFromApp(const std::string& message) {
++  if (message.size() > kMaximumNativeMessageSize) {
++    CloseChannel(kNativeMessageError);
++    return;
++  }
+   if (weak_channel_delegate_) {
+     weak_channel_delegate_->PostMessage(
+         port_id_, Message(message, /*user_gesture=*/false));

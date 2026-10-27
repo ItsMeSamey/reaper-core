@@ -6,6 +6,8 @@
 #ifndef BRAVE_BROWSER_BRAVE_SEARCH_BACKUP_RESULTS_SERVICE_IMPL_H_
 #define BRAVE_BROWSER_BRAVE_SEARCH_BACKUP_RESULTS_SERVICE_IMPL_H_
 
+#include "build/build_config.h"
+
 #include <list>
 #include <memory>
 #include <optional>
@@ -14,7 +16,9 @@
 #include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/timer/timer.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_search/browser/backup_results_metrics.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_search/browser/backup_results_service.h"
 #include "chrome/browser/profiles/profile_observer.h"
 #include "content/public/browser/navigation_controller.h"
@@ -154,7 +158,9 @@ class BackupResultsServiceImpl : public BackupResultsService,
 
   PendingRequestList pending_requests_;
 
+#if !BUILDFLAG(IS_ANDROID)
   BackupResultsMetrics backup_results_metrics_;
+#endif  // !BUILDFLAG(IS_ANDROID)
 
   base::WeakPtrFactory<BackupResultsServiceImpl> weak_ptr_factory_{this};
 };

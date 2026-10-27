@@ -1,0 +1,133 @@
+diff --git a/chrome/browser/extensions/api/page_capture/page_capture_api.cc b/chrome/browser/extensions/api/page_capture/page_capture_api.cc
+index 1ec9e560dad3bdf5b7cd69b44fb4313f96a42b6d..7ef28141dd99490982678b14c9f5e465bbbb7b3d 100644
+--- a/chrome/browser/extensions/api/page_capture/page_capture_api.cc
++++ b/chrome/browser/extensions/api/page_capture/page_capture_api.cc
+@@ -20,6 +20,10 @@
+ #include "content/public/common/child_process_id.h"
+ #include "content/public/common/mhtml_generation_params.h"
+ #include "extensions/browser/extension_api_frame_id_map.h"
++#if BUILDFLAG(IS_ANDROID)
++#include "content/public/browser/render_frame_host.h"
++#include "extensions/browser/extension_function_dispatcher.h"
++#endif
+ #include "extensions/browser/extension_util.h"
+ #include "extensions/buildflags/buildflags.h"
+ #include "extensions/common/permissions/permissions_data.h"
+@@ -45,6 +49,10 @@ const char kTabNavigatedError[] =
+     "Tab navigated before capture could complete.";
+ const char kPageCaptureNotAllowed[] =
+     "Don't have permissions required to capture this page.";
++#if BUILDFLAG(IS_ANDROID)
++constexpr char kResponseRecipientGone[] =
++    "The requesting context is no longer available.";
++#endif
+ constexpr base::TaskTraits kCreateTemporaryFileTaskTraits = {
+     // Requires IO.
+     base::MayBlock(),
+@@ -94,6 +102,11 @@ ExtensionFunction::ResponseAction PageCaptureSaveAsMHTMLFunction::Run() {
+   // time we do the capture.
+   document_id_ = ExtensionApiFrameIdMap::GetDocumentId(
+       web_contents->GetPrimaryMainFrame());
++#if BUILDFLAG(IS_ANDROID)
++  if (render_frame_host()) {
++    sender_document_ = render_frame_host()->GetWeakDocumentPtr();
++  }
++#endif
+ 
+   base::ThreadPool::PostTask(
+       FROM_HERE, kCreateTemporaryFileTaskTraits,
+@@ -131,13 +144,36 @@ bool PageCaptureSaveAsMHTMLFunction::CanCaptureCurrentPage(
+ }
+ 
+ void PageCaptureSaveAsMHTMLFunction::OnResponseAck() {
++#if BUILDFLAG(IS_ANDROID)
++  // The dispatcher's extracted response owner releases its reference.
++#else
+   // The extension process has processed the response and has created a
+   // reference to the blob, it is safe for us to go away.
+   // This instance may be deleted after this call, so no code goes after
+   // this!!!
+   Release();  // Balanced in Run()
++#endif
+ }
+ 
++#if BUILDFLAG(IS_ANDROID)
++void PageCaptureSaveAsMHTMLFunction::OnBrowserContextShutdown() {
++  if (dispatcher()) {
++    dispatcher()->RemoveResponseTarget(this);
++  }
++}
++
++bool PageCaptureSaveAsMHTMLFunction::HasLiveResponseRecipient() const {
++  if (!browser_context() || !dispatcher()) {
++    return false;
++  }
++  if (is_from_service_worker()) {
++    return true;
++  }
++  auto* frame = sender_document_.AsRenderFrameHostIfValid();
++  return frame && frame == render_frame_host() && frame->IsRenderFrameLive();
++}
++#endif
++
+ void PageCaptureSaveAsMHTMLFunction::CreateTemporaryFile() {
+   bool success = base::CreateTemporaryFile(&mhtml_path_);
+   content::GetIOThreadTaskRunner({})->PostTask(
+@@ -202,6 +238,11 @@ void PageCaptureSaveAsMHTMLFunction::TemporaryFileCreatedOnUI(bool success) {
+ }
+ 
+ void PageCaptureSaveAsMHTMLFunction::MHTMLGenerated(int64_t mhtml_file_size) {
++#if BUILDFLAG(IS_ANDROID)
++  if (test_delegate_) {
++    test_delegate_->OnMHTMLGenerated(mhtml_file_size);
++  }
++#endif
+   if (mhtml_file_size <= 0) {
+     ReturnFailure(kMHTMLGenerationFailedError);
+     return;
+@@ -222,6 +263,14 @@ void PageCaptureSaveAsMHTMLFunction::ReturnFailure(const std::string& error) {
+ 
+ void PageCaptureSaveAsMHTMLFunction::ReturnSuccess(int file_size) {
+   DCHECK_CURRENTLY_ON(BrowserThread::UI);
++#if BUILDFLAG(IS_ANDROID)
++  // Keep the function alive if a test callback tears down its response owner.
++  scoped_refptr<PageCaptureSaveAsMHTMLFunction> keep_alive(this);
++  if (!HasLiveResponseRecipient()) {
++    ReturnFailure(kResponseRecipientGone);
++    return;
++  }
++#endif
+ 
+   WebContents* web_contents = GetWebContents();
+   if (!web_contents) {
+@@ -239,6 +288,12 @@ void PageCaptureSaveAsMHTMLFunction::ReturnSuccess(int file_size) {
+   response.Set("mhtmlFileLength", file_size);
+   response.Set("requestId", request_uuid().AsLowercaseString());
+ 
++#if BUILDFLAG(IS_ANDROID)
++  AddResponseTarget();
++  if (test_delegate_) {
++    test_delegate_->OnResponseTargetAdded();
++  }
++#else
+   // Add a reference, extending the lifespan of this extension function until
+   // the response has been received by the renderer. This function generates a
+   // blob which contains a reference scoped to this object. In order for the
+@@ -248,11 +303,17 @@ void PageCaptureSaveAsMHTMLFunction::ReturnSuccess(int file_size) {
+   // TODO(crbug.com/40673405): Potential memory leak here.
+   AddRef();  // Balanced in either OnMessageReceived()
+   AddResponseTarget();
++#endif
+ 
+   Respond(WithArguments(std::move(response)));
+ }
+ 
+ WebContents* PageCaptureSaveAsMHTMLFunction::GetWebContents() {
++#if BUILDFLAG(IS_ANDROID)
++  if (!browser_context()) {
++    return nullptr;
++  }
++#endif
+   content::WebContents* web_contents = nullptr;
+   if (!ExtensionTabUtil::GetTabById(params_->details.tab_id, browser_context(),
+                                     include_incognito_information(),

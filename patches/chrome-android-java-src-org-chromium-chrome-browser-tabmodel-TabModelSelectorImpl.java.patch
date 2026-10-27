@@ -1,0 +1,171 @@
+diff --git a/chrome/android/java/src/org/chromium/chrome/browser/tabmodel/TabModelSelectorImpl.java b/chrome/android/java/src/org/chromium/chrome/browser/tabmodel/TabModelSelectorImpl.java
+--- a/chrome/android/java/src/org/chromium/chrome/browser/tabmodel/TabModelSelectorImpl.java
++++ b/chrome/android/java/src/org/chromium/chrome/browser/tabmodel/TabModelSelectorImpl.java
+@@ -76,6 +76,10 @@
+     private @MonotonicNonNull RecentlyClosedBridge mRecentlyClosedBridge;
+     private @MonotonicNonNull TabModelSelectorTabObserver mTabModelSelectorTabObserver;
+     private @Nullable Tab mVisibleTab;
++    private @Nullable Tab mVisibleSplitPeer;
++    private @Nullable TabModelSelectorTabModelObserver mSplitObserver;
++    private boolean mDestroyingSplitVisibility;
++    private long mSplitVisibilityGeneration;
+ 
+     /**
+      * Builds a {@link TabModelSelectorImpl} instance.
+@@ -228,6 +232,15 @@
+             IncognitoTabModelInternal incognitoModel) {
+         mTabContentManager = tabContentProvider;
+         initialize(normalModel, incognitoModel);
++        mSplitObserver =
++                new TabModelSelectorTabModelObserver(this) {
++                    @Override
++                    public void didChangeSplit(int[] affectedTabIds, boolean membershipChanged) {
++                        if (!mDestroyingSplitVisibility) {
++                            refreshSplitVisibility();
++                        }
++                    }
++                };
+ 
+         addObserver(
+                 new TabModelSelectorObserver() {
+@@ -310,6 +323,9 @@
+ 
+     @Override
+     public @TabDestroyStatus int destroy() {
++        mDestroyingSplitVisibility = true;
++        if (mSplitObserver != null) mSplitObserver.destroy();
++        requestToShowTab(null, TabSelectionType.FROM_EXIT);
+         @TabDestroyStatus int status = super.destroy();
+         if (mRecentlyClosedBridge != null) mRecentlyClosedBridge.destroy();
+         if (mTabModelSelectorTabObserver != null) mTabModelSelectorTabObserver.destroy();
+@@ -346,8 +362,7 @@
+                                 // the re-auth to hide the dialog.
+                                 if (mIncognitoReauthDialogDelegate != null
+                                         && !newModel.isIncognito()) {
+-                                    mIncognitoReauthDialogDelegate
+-                                            .onAfterRegularTabModelChanged();
++                                    mIncognitoReauthDialogDelegate.onAfterRegularTabModelChanged();
+                                 }
+                             });
+         }
+@@ -413,46 +428,82 @@
+ 
+     @Override
+     public void requestToShowTab(@Nullable Tab tab, @TabSelectionType int type) {
+-        boolean isFromExternalApp =
+-                tab != null && tab.getLaunchType() == TabLaunchType.FROM_EXTERNAL_APP;
+-        if (mVisibleTab != null && mVisibleTab != tab && !mVisibleTab.needsReload()) {
+-            boolean attached =
+-                    mVisibleTab.getWebContents() != null
+-                            && mVisibleTab.getWebContents().getTopLevelNativeWindow() != null;
+-            if (mVisibleTab.isInitialized() && attached) {
+-                // TODO(dtrainor): Once we figure out why we can't grab a snapshot from the current
+-                // tab when we have other tabs loading from external apps remove the checks for
+-                // FROM_EXTERNAL_APP/FROM_NEW.
+-                if (!mVisibleTab.isClosing()
+-                        && (!isFromExternalApp || type != TabSelectionType.FROM_NEW)) {
+-                    cacheTabBitmap(mVisibleTab);
+-                }
+-                mVisibleTab.hide(TabHidingType.CHANGED_TABS);
+-                notifyTabHidden(mVisibleTab);
++        updateVisibleTabs(tab, type, type != TabSelectionType.FROM_EXIT);
++    }
++
++    @VisibleForTesting
++    void refreshSplitVisibility() {
++        Tab selected = getCurrentTab();
++        updateVisibleTabs(
++                selected, TabSelectionType.FROM_USER, selected != null && !selected.isHidden());
++    }
++
++    private void updateVisibleTabs(@Nullable Tab tab, @TabSelectionType int type, boolean show) {
++        if (mDestroyingSplitVisibility && tab != null) return;
++        long generation = ++mSplitVisibilityGeneration;
++        Tab peer = null;
++        if (tab != null && !mDestroyingSplitVisibility) {
++            TabModel model = getModelForTabId(tab.getId());
++            SplitInfo split = model == null ? null : model.getSplitInfoForTab(tab.getId());
++            if (split != null && model == getCurrentModel()) {
++                int peerId =
++                        split.getFirstTabId() == tab.getId()
++                                ? split.getSecondTabId()
++                                : split.getFirstTabId();
++                peer = model.getTabById(peerId);
++                if (peer != null
++                        && (peer.isDestroyed()
++                                || peer.isClosing()
++                                || peer.isDetachedFromActivity()
++                                || tab.getWindowAndroid() == null
++                                || peer.getProfile() != tab.getProfile()
++                                || peer.getWindowAndroid() != tab.getWindowAndroid())) peer = null;
+             }
+-            mVisibleTab = null;
+-        }
+-
+-        if (tab == null) {
+-            return;
+-        }
+-
+-        // We hit this case when the user enters tab switcher and comes back to the current tab
+-        // without actual tab switch.
+-        if (mVisibleTab == tab && !mVisibleTab.isHidden()) {
+-            // The current tab might have been killed by the os while in tab switcher.
+-            tab.loadIfNeeded(/* forceBackingSize= */ false);
+-            // |tabToDropImportance| must be null, so no need to drop importance.
+-            return;
+-        }
++        }
++        Tab previous = mVisibleTab;
++        Tab previousPeer = mVisibleSplitPeer;
++        // Publish the new visibility set before observer callbacks. A nested
++        // selection owns a newer generation and must not be overwritten here.
+         mVisibleTab = tab;
+-
+-        // Don't execute the tab display part if Chrome has just been sent to background. This
+-        // avoids unnecessary work (tab restore) and prevents pollution of tab display metrics - see
+-        // http://crbug.com/41071624.
+-        if (type != TabSelectionType.FROM_EXIT) {
+-            tab.show(type);
+-        }
++        mVisibleSplitPeer = peer;
++        if (!hideDepartedVisibleTab(previous, tab, peer, type, generation)) return;
++        if (previousPeer != previous
++                && !hideDepartedVisibleTab(previousPeer, tab, peer, type, generation)) return;
++        if (tab == null || !show) return;
++        if (tab.isDestroyed() || tab.isClosing() || tab.isDetachedFromActivity()) return;
++        tab.show(type);
++        if (generation != mSplitVisibilityGeneration) return;
++        if (peer != null
++                && !peer.isDestroyed()
++                && !peer.isClosing()
++                && !peer.isDetachedFromActivity()) peer.show(type);
++    }
++
++    private boolean hideDepartedVisibleTab(
++            @Nullable Tab oldTab,
++            @Nullable Tab selected,
++            @Nullable Tab peer,
++            @TabSelectionType int type,
++            long generation) {
++        if (oldTab == null || oldTab == selected || oldTab == peer || oldTab.isDestroyed())
++            return true;
++        boolean attached =
++                oldTab.getWebContents() != null
++                        && oldTab.getWebContents().getTopLevelNativeWindow() != null;
++        if (oldTab.isInitialized() && attached) {
++            boolean external =
++                    selected != null && selected.getLaunchType() == TabLaunchType.FROM_EXTERNAL_APP;
++            if (!oldTab.isClosing()
++                    && !oldTab.needsReload()
++                    && (!external || type != TabSelectionType.FROM_NEW)) {
++                cacheTabBitmap(oldTab);
++                if (generation != mSplitVisibilityGeneration) return false;
++            }
++            oldTab.hide(TabHidingType.CHANGED_TABS);
++            if (generation != mSplitVisibilityGeneration) return false;
++            notifyTabHidden(oldTab);
++        }
++        return generation == mSplitVisibilityGeneration;
+     }
+ 
+     private void cacheTabBitmap(Tab tabToCache) {

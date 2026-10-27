@@ -1,0 +1,161 @@
+diff --git a/chrome/browser/ui/android/tab_model/tab_collection_tab_model_impl.cc b/chrome/browser/ui/android/tab_model/tab_collection_tab_model_impl.cc
+--- a/chrome/browser/ui/android/tab_model/tab_collection_tab_model_impl.cc
++++ b/chrome/browser/ui/android/tab_model/tab_collection_tab_model_impl.cc
+@@ -5,6 +5,7 @@
+ #include "chrome/browser/ui/android/tab_model/tab_collection_tab_model_impl.h"
+ 
+ #include <algorithm>
++#include <cmath>
+ #include <memory>
+ #include <optional>
+ #include <utility>
+@@ -18,11 +19,14 @@
+ #include "chrome/browser/android/tab_android.h"
+ #include "chrome/browser/android/tab_group_android.h"
+ #include "chrome/browser/profiles/profile.h"
++#include "components/split_tabs/split_tab_id.h"
++#include "components/split_tabs/split_tab_visual_data.h"
+ #include "components/tab_groups/tab_group_color.h"
+ #include "components/tab_groups/tab_group_id.h"
+ #include "components/tab_groups/tab_group_visual_data.h"
+ #include "components/tabs/public/android/jni_conversion.h"
+ #include "components/tabs/public/pinned_tab_collection.h"
++#include "components/tabs/public/split_tab_collection.h"
+ #include "components/tabs/public/tab_group.h"
+ #include "components/tabs/public/tab_group_tab_collection.h"
+ #include "components/tabs/public/tab_interface.h"
+@@ -98,6 +102,16 @@
+   new_index = GetSafeIndex(/*is_tab_group=*/false, current_index, new_index,
+                            new_tab_group_id, new_is_pinned);
+ 
++  TabAndroid* moving = TabAndroid::FromTabInterface(
++      tab_strip_collection_->GetTabAtIndexRecursive(current_index));
++  // A split is a unit only for an enclosing multi-tab transaction. Java
++  // restores a complete, still-contiguous pair after that transaction;
++  // individual moves and pin/group changes must not leave a one-child
++  // collection behind.
++  if (auto split = moving->GetSplit()) {
++    tab_strip_collection_->Unsplit(*split);
++  }
++  UnsplitForInsertion(new_index, {moving});
+   tab_strip_collection_->MoveTabRecursive(current_index, new_index,
+                                           new_tab_group_id, new_is_pinned);
+   return base::checked_cast<int>(new_index);
+@@ -118,6 +132,7 @@
+   index = GetSafeIndex(/*is_tab_group=*/false, /*current_index=*/std::nullopt,
+                        index, tab_group_id, is_pinned);
+ 
++  UnsplitForInsertion(index);
+   // When the tab is attaching a detached group we first add the tab to the
+   // collection and then move the tab to the group.
+   tab_strip_collection_->AddTabRecursive(
+@@ -136,7 +151,66 @@
+                                                    TabAndroid* tab) {
+   int index = GetIndexOfTabRecursive(tab);
+   CHECK_NE(index, kInvalidTabIndex);
++  if (auto split = tab->GetSplit()) {
++    tab_strip_collection_->Unsplit(*split);
++  }
+   tab_strip_collection_->RemoveTabAtIndexRecursive(index);
++}
++
++bool TabCollectionTabModelImpl::CreateSplit(
++    JNIEnv* env,
++    const base::Token& token,
++    const std::vector<TabAndroid*>& tabs,
++    int layout,
++    double ratio) {
++  if (token.is_zero() || tabs.size() != 2 || !tabs[0] || !tabs[1] ||
++      tabs[0] == tabs[1] || layout < 0 || layout > 1 || !std::isfinite(ratio) ||
++      ratio <= 0 || ratio >= 1) {
++    return false;
++  }
++  auto split_id = split_tabs::SplitTabId::FromRawToken(token);
++  if (tab_strip_collection_->GetSplitTabCollection(split_id)) {
++    return false;
++  }
++  int first = GetIndexOfTabRecursive(tabs[0]);
++  int second = GetIndexOfTabRecursive(tabs[1]);
++  if (first < 0 || second != first + 1 || tabs[0]->GetSplit() ||
++      tabs[1]->GetSplit() || tabs[0]->profile() != profile_ ||
++      tabs[1]->profile() != profile_ ||
++      tabs[0]->GetParentCollection() != tabs[1]->GetParentCollection()) {
++    return false;
++  }
++  static_assert(static_cast<int>(split_tabs::SplitTabLayout::kSideBySide) == 0);
++  static_assert(static_cast<int>(split_tabs::SplitTabLayout::kStacked) == 1);
++  tab_strip_collection_->CreateSplit(
++      split_id, {tabs[0], tabs[1]},
++      split_tabs::SplitTabVisualData(
++          static_cast<split_tabs::SplitTabLayout>(layout), ratio));
++  return true;
++}
++
++void TabCollectionTabModelImpl::Unsplit(JNIEnv* env, const base::Token& token) {
++  if (!token.is_zero()) {
++    tab_strip_collection_->Unsplit(split_tabs::SplitTabId::FromRawToken(token));
++  }
++}
++
++void TabCollectionTabModelImpl::UnsplitForInsertion(
++    size_t index,
++    const std::vector<TabInterface*>& excluded_tabs) {
++  std::vector<TabInterface*> remaining;
++  for (TabInterface* tab : *tab_strip_collection_) {
++    if (std::ranges::find(excluded_tabs, tab) == excluded_tabs.end()) {
++      remaining.push_back(tab);
++    }
++  }
++  if (index == 0 || index >= remaining.size()) {
++    return;
++  }
++  auto split = remaining[index - 1]->GetSplit();
++  if (split && split == remaining[index]->GetSplit()) {
++    tab_strip_collection_->Unsplit(*split);
++  }
+ }
+ 
+ void TabCollectionTabModelImpl::CreateTabGroup(
+@@ -200,10 +274,18 @@
+ 
+ int TabCollectionTabModelImpl::GetIndividualTabAndGroupCount(
+     JNIEnv* env) const {
+-  // The direct child count of the pinned and unpinned collections will include
+-  // all individual tabs and tab groups.
+-  return tab_strip_collection_->unpinned_collection()->ChildCount() +
+-         tab_strip_collection_->pinned_collection()->ChildCount();
++  // A split contains two ordinary tabs. Only tab groups collapse to one
++  // representative in the Android tab switcher.
++  int count = 0;
++  std::optional<TabGroupId> previous_group;
++  for (TabInterface* tab : *tab_strip_collection_) {
++    auto group = tab->GetGroup();
++    if (!group || group != previous_group) {
++      ++count;
++    }
++    previous_group = group;
++  }
++  return count;
+ }
+ 
+ int TabCollectionTabModelImpl::GetTabGroupCount(JNIEnv* env) const {
+@@ -224,7 +306,8 @@
+     return kInvalidTabIndex;
+   }
+ 
+-  std::optional<size_t> index = group_collection->GetIndexOfTab(tab_android);
++  std::optional<size_t> index =
++      group_collection->GetIndexOfTabRecursive(tab_android);
+   return index ? base::checked_cast<int>(*index) : kInvalidTabIndex;
+ }
+ 
+@@ -256,6 +339,9 @@
+   static constexpr TabCollection::TypeEnumSet kRetainCollectionTypes{
+       tabs::TabCollection::Type::SPLIT, tabs::TabCollection::Type::GROUP};
+ 
++  UnsplitForInsertion(to_index,
++                      tab_strip_collection_->GetTabGroupCollection(tab_group_id)
++                          ->GetTabsRecursive());
+   tab_strip_collection_->MoveTabsRecursive(
+       tab_indices, static_cast<size_t>(to_index),
+       /*new_group_id=*/std::nullopt,

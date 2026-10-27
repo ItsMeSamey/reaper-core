@@ -1,0 +1,348 @@
+diff --git a/chrome/android/java/src/org/chromium/chrome/browser/compositor/overlays/strip/StripLayoutHelper.java b/chrome/android/java/src/org/chromium/chrome/browser/compositor/overlays/strip/StripLayoutHelper.java
+--- a/chrome/android/java/src/org/chromium/chrome/browser/compositor/overlays/strip/StripLayoutHelper.java
++++ b/chrome/android/java/src/org/chromium/chrome/browser/compositor/overlays/strip/StripLayoutHelper.java
+@@ -82,13 +82,12 @@
+ import org.chromium.chrome.browser.compositor.overlays.strip.reorder.ReorderDelegate.ReorderType;
+ import org.chromium.chrome.browser.compositor.overlays.strip.reorder.ReorderDelegate.StripUpdateDelegate;
+ import org.chromium.chrome.browser.compositor.overlays.strip.reorder.TabStripDragHandler;
+-import org.chromium.chrome.browser.contextual_tasks.ContextualTasksUtils;
++import org.chromium.chrome.browser.containers.ContainerMetadataObserver;
++import org.chromium.chrome.browser.containers.ContainerTabBadge;
+ import org.chromium.chrome.browser.data_sharing.DataSharingServiceFactory;
+ import org.chromium.chrome.browser.data_sharing.DataSharingTabManager;
+ import org.chromium.chrome.browser.feature_engagement.TrackerFactory;
+ import org.chromium.chrome.browser.flags.ChromeFeatureList;
+-import org.chromium.chrome.browser.glic.GlicEnabling;
+-import org.chromium.chrome.browser.glic.GlicUtils;
+ import org.chromium.chrome.browser.layouts.SceneOverlay;
+ import org.chromium.chrome.browser.layouts.animation.CompositorAnimationHandler;
+ import org.chromium.chrome.browser.layouts.animation.CompositorAnimator;
+@@ -458,12 +457,6 @@
+             };
+ 
+     public interface TrailingButtonDelegate {
+-        /** Returns true if the trailing button context menu is showing. */
+-        boolean isMenuShowing();
+-
+-        /** Dismisses the trailing button context menu if it is showing. */
+-        void dismissContextMenu();
+-
+         /**
+          * Fades out trailing buttons.
+          *
+@@ -471,14 +464,6 @@
+          */
+         void fadeCompositorButtons(boolean fade);
+ 
+-        /** Returns true if the Glic button is currently visible. */
+-        boolean isGlicButtonVisible();
+-
+-        /** Returns true if the Glic UI is currently visible (e.g. panel is open). */
+-        boolean isGlicUiVisible();
+-
+-        /** Returns the Glic button compositor instance. */
+-        @Nullable TintedCompositorButton getGlicButton();
+     }
+ 
+     public interface LeadingButtonDelegate {
+@@ -513,6 +498,16 @@
+     // Internal State
+     private StripLayoutView[] mStripViews = new StripLayoutView[0];
+     private StripLayoutTab[] mStripTabs = new StripLayoutTab[0];
++    private final ContainerMetadataObserver mContainerMetadataObserver =
++            new ContainerMetadataObserver(this::refreshContainerBadges);
++
++    private void refreshContainerBadges() {
++        for (StripLayoutTab tab : mStripTabs) {
++            setAccessibilityDescription(tab, getTabById(tab.getTabId()));
++        }
++        mUpdateHost.requestUpdate();
++    }
++
+     private StripLayoutTab[] mStripTabsToRender = new StripLayoutTab[0];
+     private StripLayoutGroupTitle[] mStripGroupTitles = new StripLayoutGroupTitle[0];
+     private StripLayoutGroupTitle[] mStripGroupTitlesToRender = new StripLayoutGroupTitle[0];
+@@ -696,8 +691,6 @@
+     private final List<QueuedIph> mQueuedIphList = new ArrayList<>();
+ 
+     private final StripLayoutTabDelegate mTabDelegate;
+-    private @Nullable TabUnderlineManager mTabUnderlineManager;
+-    private TabUnderlineManager.@Nullable Observer mTabUnderlineObserver;
+ 
+     // Pinned tabs.
+     private boolean mIsPinnedOnlyStripRecorded;
+@@ -857,24 +850,6 @@
+                     if (!mCloseAnimationsRequested) rebuildStripViews();
+                 });
+ 
+-        if (!mIncognito
+-                && (GlicEnabling.isEnabledByFlags()
+-                        || ContextualTasksUtils.isContextualTasksUiEnabled())) {
+-            mTabUnderlineManager = new TabUnderlineManager(windowAndroid);
+-            mTabUnderlineObserver =
+-                    new TabUnderlineManager.Observer() {
+-                        @Override
+-                        public void onIndicatorStateChanged(int tabId, boolean isActive) {
+-                            setTabUnderline(tabId, isActive);
+-                        }
+-
+-                        @Override
+-                        public void onResetAnimationCycle(int tabId) {
+-                            resetTabUnderlineAnimationCycle(tabId);
+-                        }
+-                    };
+-            mTabUnderlineManager.addObserver(mTabUnderlineObserver);
+-        }
+ 
+         mIsFirstLayoutPass = true;
+ 
+@@ -885,6 +860,7 @@
+     /** Cleans up internal state. An instance should not be used after this method is called. */
+     @SuppressWarnings("NullAway")
+     public void destroy() {
++        mContainerMetadataObserver.destroy();
+         mStripTabEventHandler.removeCallbacksAndMessages(null);
+         mLastHoveredTab = null;
+         if (mTabHoverCardView != null) {
+@@ -919,14 +895,6 @@
+         if (mTabStripContextMenuCoordinator != null) {
+             mTabStripContextMenuCoordinator.destroy();
+             mTabStripContextMenuCoordinator = null;
+-        }
+-        if (mTabUnderlineManager != null) {
+-            if (mTabUnderlineObserver != null) {
+-                mTabUnderlineManager.removeObserver(mTabUnderlineObserver);
+-                mTabUnderlineObserver = null;
+-            }
+-            mTabUnderlineManager.destroy();
+-            mTabUnderlineManager = null;
+         }
+     }
+ 
+@@ -1432,9 +1400,11 @@
+     public void setTabModel(TabModel model, TabCreator tabCreator, boolean tabStateInitialized) {
+         if (mModel == model) return;
+         if (mModel != null) {
++            mModel.removeObserver(mTabModelObserver);
+             mModel.removeTabGroupObserver(mTabGroupObserver);
+         }
+         mModel = model;
++        mContainerMetadataObserver.setProfile(model.getProfile());
+         mTabCreator = tabCreator;
+         mTabStateInitialized = tabStateInitialized;
+         // If the tabs are still restoring and the refactoring experiment is enabled, we'll create a
+@@ -1450,7 +1420,6 @@
+                     PLACEHOLDER_VISIBLE_DURATION_HISTOGRAM_NAME, 0L);
+ 
+             rebuildStripTabs(/* deferAnimations= */ false);
+-            registerTabsWithUnderlineManager();
+             finishAnimationsAndCloseDyingTabs();
+             computeAndUpdateTabWidth(/* animate= */ false, /* deferAnimations= */ false);
+         }
+@@ -1600,23 +1569,12 @@
+         // Recreate the StripLayoutTabs from the TabModel, now that all of the real Tabs have been
+         // restored. This will reuse valid tabs, discard invalid tabs, and correct tab orders.
+         rebuildStripTabs(/* deferAnimations= */ false);
+-        registerTabsWithUnderlineManager();
+         if (getSelectedTabId() != Tab.INVALID_TAB_ID) {
+             tabSelected(
+                     LayoutManagerImpl.time(),
+                     getSelectedTabId(),
+                     Tab.INVALID_TAB_ID,
+                     TabSelectionType.FROM_USER);
+-        }
+-    }
+-
+-    private void registerTabsWithUnderlineManager() {
+-        if (mTabUnderlineManager == null || mModel == null) return;
+-        for (int i = 0; i < mModel.getCount(); i++) {
+-            Tab tab = mModel.getTabAt(i);
+-            if (tab != null) {
+-                mTabUnderlineManager.registerTab(tab);
+-            }
+         }
+     }
+ 
+@@ -1784,46 +1742,6 @@
+         return true;
+     }
+ 
+-    private boolean attemptToShowGlicIph() {
+-        if (mModel == null || mTabStripIphController == null) return false;
+-        // Remove the showGlicIph callback from the queue, as showing IPH is not applicable in
+-        // these cases.
+-        Tab activeTab = mModel.getTabAt(mModel.index());
+-        if (!GlicUtils.isTabEligibleForGlicIph(activeTab)
+-                || !mTabStripIphController.wouldTriggerIph(IphType.GLIC_PROMO)
+-                || mTrailingButtonDelegate.isGlicUiVisible()) {
+-            return true;
+-        }
+-        // Return early if the tab strip is not visible on screen.
+-        if (Boolean.FALSE.equals(mTabStripVisibleSupplier.get())) {
+-            return false;
+-        }
+-        // Checked after tab strip visibility since a hidden strip makes Glic button visibility
+-        // return false, which would incorrectly discard the IPH instead of postponing it.
+-        TintedCompositorButton glicButton = mTrailingButtonDelegate.getGlicButton();
+-        if (glicButton == null || !mTrailingButtonDelegate.isGlicButtonVisible()) {
+-            return true;
+-        }
+-
+-        // Display IPH pointing to the Glic button.
+-        mTabStripIphController.showIphOnCompositorButton(
+-                glicButton, mControlContainer, IphType.GLIC_PROMO, /* enableSnoozeMode= */ false);
+-        return true;
+-    }
+-
+-    /**
+-     * Attempts to queue Glic IPH for a given tab if it is eligible.
+-     *
+-     * @param tab The current tab to check.
+-     */
+-    public void attemptToQueueGlicIph(@Nullable Tab tab) {
+-        if (mTabStripIphController != null
+-                && mTabStripIphController.wouldTriggerIph(IphType.GLIC_PROMO)
+-                && GlicUtils.isTabEligibleForGlicIph(tab)) {
+-            mQueuedIphList.add(() -> attemptToShowGlicIph());
+-        }
+-    }
+-
+     /** Attempts to queue the Vertical Tabs promo IPH if eligible. */
+     public void attemptToQueueVerticalTabsPromoIph(@Nullable Tab tab) {
+         if (mModel != null
+@@ -1846,11 +1764,6 @@
+         }
+     }
+ 
+-    /** Returns whether Glic IPH is currently showing on the tab strip. */
+-    public boolean isGlicIphShowing() {
+-        return mTabStripIphController != null && mTabStripIphController.isGlicIphShowing();
+-    }
+-
+     void setLastSyncedGroupIdForTesting(@Nullable Token tabGroupId) {
+         mLastSyncedGroupIdForIph = tabGroupId;
+     }
+@@ -1935,7 +1848,6 @@
+             setAccessibilityDescription(findTabById(prevId), getTabById(prevId));
+         }
+ 
+-        attemptToQueueGlicIph(tab);
+         attemptToQueueVerticalTabsPromoIph(tab);
+     }
+ 
+@@ -1997,9 +1909,6 @@
+             if (stripTab != null && !stripTab.isDying()) {
+                 mClosingTabs.add(stripTab);
+             }
+-            if (mTabUnderlineManager != null) {
+-                mTabUnderlineManager.unregisterTab(tab.getId());
+-            }
+         }
+         if (!mClosingTabs.isEmpty()) {
+             requestCloseAnimations();
+@@ -2074,9 +1983,6 @@
+         Tab tab = getTabById(id);
+         boolean collapsed = false;
+         if (tab != null) {
+-            if (mTabUnderlineManager != null) {
+-                mTabUnderlineManager.registerTab(tab);
+-            }
+             Token tabGroupId = tab.getTabGroupId();
+             updateGroupTextAndSharedState(tabGroupId);
+             if (tabGroupId != null && mModel != null && mModel.getTabGroupCollapsed(tabGroupId)) {
+@@ -2610,8 +2516,7 @@
+                 || (mTabContextMenuCoordinator != null
+                         && mTabContextMenuCoordinator.isMenuShowing())
+                 || (mTabStripContextMenuCoordinator != null
+-                        && mTabStripContextMenuCoordinator.isMenuShowing())
+-                || (mTrailingButtonDelegate != null && mTrailingButtonDelegate.isMenuShowing());
++                        && mTabStripContextMenuCoordinator.isMenuShowing());
+     }
+ 
+     @VisibleForTesting
+@@ -2619,9 +2524,6 @@
+         if (mTabGroupContextMenuCoordinator != null) mTabGroupContextMenuCoordinator.dismiss();
+         if (mTabContextMenuCoordinator != null) mTabContextMenuCoordinator.dismiss();
+         if (mTabStripContextMenuCoordinator != null) mTabStripContextMenuCoordinator.dismiss();
+-        if (mTrailingButtonDelegate != null) {
+-            mTrailingButtonDelegate.dismissContextMenu();
+-        }
+     }
+ 
+     /**
+@@ -3822,10 +3724,6 @@
+                 tab.addLoadingSpinnerRotation(degrees);
+                 tabHasSpinner = true;
+             }
+-            if (tab.getAlertState() == TabAlert.ACTOR_ACCESSING) {
+-                tab.addAlertIndicatorOverlayRotation(degrees);
+-                tabHasSpinner = true;
+-            }
+         }
+         mLastSpinnerUpdate = time;
+         if (tabHasSpinner) {
+@@ -4563,22 +4461,6 @@
+     @VisibleForTesting
+     public @Nullable StripLayoutTab findTabById(int id) {
+         return StripLayoutUtils.findTabById(mStripTabs, id);
+-    }
+-
+-    /** Set the underline state for a tab. */
+-    private void setTabUnderline(int tabId, boolean isUnderlined) {
+-        StripLayoutTab stripTab = findTabById(tabId);
+-        if (stripTab != null) {
+-            stripTab.setIsUnderlined(isUnderlined);
+-        }
+-    }
+-
+-    /** Reset the underline animation cycle for a tab. */
+-    private void resetTabUnderlineAnimationCycle(int tabId) {
+-        StripLayoutTab stripTab = findTabById(tabId);
+-        if (stripTab != null) {
+-            stripTab.resetUnderlineAnimationCycle();
+-        }
+     }
+ 
+     private int findIndexForTab(int id) {
+@@ -5476,7 +5358,11 @@
+     }
+ 
+     private void setAccessibilityDescription(@Nullable StripLayoutTab stripTab, @Nullable Tab tab) {
+-        if (tab != null) setAccessibilityDescription(stripTab, tab.getTitle(), tab.isHidden());
++        if (tab != null) {
++            setAccessibilityDescription(stripTab, tab.getTitle(), tab.isHidden());
++        } else if (stripTab != null) {
++            stripTab.setContainerBadge(null);
++        }
+     }
+ 
+     /**
+@@ -5489,6 +5375,8 @@
+     private void setAccessibilityDescription(
+             @Nullable StripLayoutTab stripTab, @Nullable String title, boolean isHidden) {
+         if (stripTab == null) return;
++        stripTab.setContainerBadge(
++                ContainerTabBadge.forTab(mContext, getTabById(stripTab.getTabId())));
+ 
+         @StringRes
+         int resId =
+@@ -5505,7 +5393,10 @@
+             return;
+         }
+ 
+-        final String description = mContext.getString(resId, title);
++        final String description =
++                String.valueOf(
++                        ContainerTabBadge.appendDescription(
++                                mContext.getString(resId, title), stripTab.getContainerBadge()));
+         stripTab.setAccessibilityDescription(description, title, resId);
+     }
+ 
+@@ -5945,7 +5836,4 @@
+                 dragStartPointF.x, dragStartPointF.y, clickedTab, ReorderType.START_DRAG_DROP);
+     }
+ 
+-    @Nullable TabUnderlineManager getTabUnderlineManagerForTesting() {
+-        return mTabUnderlineManager;
+-    }
+ }

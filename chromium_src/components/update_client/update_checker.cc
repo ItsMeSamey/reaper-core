@@ -5,6 +5,8 @@
 
 #include "components/update_client/update_checker.h"
 
+#include "build/build_config.h"
+
 #include <algorithm>
 #include <optional>
 
@@ -104,7 +106,9 @@ void SequentialUpdateChecker::CheckNext() {
     auto& crx_component = update_context_->components[id]->crx_component();
     component->set_crx_component(*crx_component);
     component->set_previous_version(crx_component->version);
+#if !BUILDFLAG(IS_ANDROID)
     component->set_previous_fp(crx_component->fingerprint);
+#endif  // !BUILDFLAG(IS_ANDROID)
     context->components_to_check_for_updates.push_back(id);
   }
 

@@ -10,7 +10,6 @@ import android.app.Activity;
 import org.chromium.base.Callback;
 import org.chromium.build.annotations.NullMarked;
 import org.chromium.build.annotations.Nullable;
-import org.chromium.chrome.browser.price_tracking.PriceDropNotificationManager;
 import org.chromium.chrome.browser.tab.Tab;
 import org.chromium.components.bookmarks.BookmarkId;
 import org.chromium.components.bookmarks.BookmarkItem;
@@ -37,9 +36,7 @@ class BraveBookmarkUtilsDummySuper extends BookmarkUtils {
             Activity activity,
             @BookmarkType int bookmarkType,
             Callback<List<@Nullable BookmarkId>> callback,
-            boolean fromExplicitTrackUi,
             BookmarkManagerOpener bookmarkManagerOpener,
-            PriceDropNotificationManager priceDropNotificationManager,
             boolean isBookmarkBarVisible) {
         assert false : "This class usage should be removed via bytecode modification!";
     }

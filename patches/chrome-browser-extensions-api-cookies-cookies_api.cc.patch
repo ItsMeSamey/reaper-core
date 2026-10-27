@@ -1,20 +1,376 @@
 diff --git a/chrome/browser/extensions/api/cookies/cookies_api.cc b/chrome/browser/extensions/api/cookies/cookies_api.cc
-index 0def08cdbfbf712acac9b6075cee341eca97c80a..702492caf92a61034edb59fe34c03eb6a4e98899 100644
 --- a/chrome/browser/extensions/api/cookies/cookies_api.cc
 +++ b/chrome/browser/extensions/api/cookies/cookies_api.cc
-@@ -147,6 +147,7 @@ CookiesEventRouter::~CookiesEventRouter() = default;
- 
+@@ -6,7 +6,9 @@
+
+ #include "chrome/browser/extensions/api/cookies/cookies_api.h"
+
++#include <map>
+ #include <memory>
++#include <set>
+ #include <utility>
+ #include <vector>
+
+@@ -14,6 +16,21 @@
+ #include "base/functional/bind.h"
+ #include "base/lazy_instance.h"
+ #include "base/time/time.h"
++#include "build/build_config.h"
++#if BUILDFLAG(IS_ANDROID)
++#include "brave/browser/containers/android/containers_bridge.h"
++#include "brave/browser/containers/containers_service_factory.h"
++#include "brave/components/containers/content/browser/storage_partition_utils.h"
++#include "brave/components/containers/core/browser/containers_service.h"
++#include "brave/components/containers/core/browser/pref_names.h"
++#include "brave/components/containers/core/mojom/containers.mojom.h"
++#include "chrome/browser/android/tab_android.h"
++#include "chrome/browser/ui/android/tab_model/tab_model.h"
++#include "chrome/browser/ui/android/tab_model/tab_model_list.h"
++#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
++#include "components/prefs/pref_service.h"
++#include "content/public/browser/storage_partition_config.h"
++#endif
+ #include "chrome/browser/extensions/api/cookies/cookies_helpers.h"
+ #include "chrome/browser/extensions/extension_tab_util.h"
+ #include "chrome/browser/extensions/window_controller_list.h"
+@@ -107,12 +124,13 @@
+     std::string* error) {
+   content::BrowserContext* store_context = nullptr;
+   if (!store_id->empty()) {
+-    store_context = cookies_helpers::ChooseBrowserContextFromStoreId(
++    auto* partition = cookies_helpers::ChooseStoragePartitionFromStoreId(
+         *store_id, function_context, include_incognito);
+-    if (!store_context) {
++    if (!partition) {
+       *error = ErrorUtils::FormatErrorMessage(kInvalidStoreIdError, *store_id);
+       return nullptr;
+     }
++    return partition->GetCookieManagerForBrowserProcess();
+   } else {
+     store_context = function_context;
+     *store_id = cookies_helpers::GetStoreIdFromBrowserContext(store_context);
+@@ -141,12 +159,46 @@
+       otr_profile_observation_(this) {
+   MaybeStartListening();
+   profile_observation_.Observe(profile_);
++#if BUILDFLAG(IS_ANDROID)
++  auto* service = !profile_->IsOffTheRecord()
++                      ? ContainersServiceFactory::GetForProfile(profile_)
++                      : nullptr;
++  if (service) {
++    container_storage_removal_subscription_ =
++        service->RegisterContainerStorageRemovalCompletedCallback(
++            base::BindRepeating(&CookiesEventRouter::RefreshContainerListeners,
++                                base::Unretained(this)));
++    container_pref_registrar_.Init(profile_->GetPrefs());
++    for (const char* pref : {containers::prefs::kContainersList,
++                             containers::prefs::kLocallyUsedContainers}) {
++      container_pref_registrar_.Add(
++          pref,
++          base::BindRepeating(&CookiesEventRouter::RefreshContainerListeners,
++                              base::Unretained(this)));
++    }
++    RefreshContainerListeners();
++  }
++#endif
+ }
+
+ CookiesEventRouter::~CookiesEventRouter() = default;
+
  void CookiesEventRouter::OnCookieChange(bool otr,
                                          const net::CookieChangeInfo& change) {
 +  if (otr && !profile_->GetPrimaryOTRProfile(/*create_if_needed=*/false)) return;
++  Profile* profile =
++      otr ? profile_->GetPrimaryOTRProfile(/*create_if_needed=*/false)
++          : profile_->GetOriginalProfile();
++  // Preserve the original off-the-record receiver's lifetime contract.
++  CHECK(profile);
++  OnCookieChangeInStore(
++      profile, cookies_helpers::GetStoreIdFromBrowserContext(profile), change);
++}
++
++void CookiesEventRouter::OnCookieChangeInStore(
++    Profile* profile,
++    const std::string& store_id,
++    const net::CookieChangeInfo& change) {
    DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
    // There is no way to represent non-serializable
    // partition keys in JS so return to prevent a crash.
-@@ -215,6 +216,7 @@ void CookiesEventRouter::OnCookieChange(bool otr,
+@@ -163,15 +215,8 @@
+                change.cause !=
+                    net::CookieChangeCause::INSERTED_NO_VALUE_CHANGE_OVERWRITE);
+
+-  Profile* profile =
+-      otr ? profile_->GetPrimaryOTRProfile(/*create_if_needed=*/false)
+-          : profile_->GetOriginalProfile();
+-  // TODO(407373848): OTR profile must exist when the cookie change event
+-  // arrived.
+-  CHECK(profile);
+-
+-  api::cookies::Cookie cookie = cookies_helpers::CreateCookie(
+-      change.cookie, cookies_helpers::GetStoreIdFromBrowserContext(profile));
++  api::cookies::Cookie cookie =
++      cookies_helpers::CreateCookie(change.cookie, store_id);
+   dict.Set(kCookieKey, cookie.ToValue());
+
+   // Map the internal cause to an external string.
+@@ -215,6 +260,7 @@
  }
- 
+
  void CookiesEventRouter::OnOffTheRecordProfileCreated(Profile* off_the_record) {
 +  if (off_the_record->IsTor()) return;
    // When an off-the-record spinoff of |profile_| is created, start listening
    // for cookie changes there. The OTR receiver should never be bound, since
    // there wasn't previously an OTR profile.
+@@ -232,6 +278,13 @@
+ }
+
+ void CookiesEventRouter::OnProfileWillBeDestroyed(Profile* profile) {
++#if BUILDFLAG(IS_ANDROID)
++  if (profile == profile_) {
++    container_storage_removal_subscription_ = {};
++    container_pref_registrar_.RemoveAll();
++    container_subscriptions_.clear();
++  }
++#endif
+   Profile* original_profile = profile_->GetOriginalProfile();
+   Profile* otr_profile =
+       original_profile->HasPrimaryOTRProfile()
+@@ -294,6 +347,98 @@
+   receiver->reset();
+   MaybeStartListening();
+ }
++
++#if BUILDFLAG(IS_ANDROID)
++CookiesEventRouter::ContainerSubscription::ContainerSubscription(
++    CookiesEventRouter* router,
++    const std::string& id)
++    : router(router), id(id), receiver(this) {}
++
++CookiesEventRouter::ContainerSubscription::~ContainerSubscription() = default;
++
++void CookiesEventRouter::ContainerSubscription::OnCookieChange(
++    const net::CookieChangeInfo& change) {
++  router->OnContainerCookieChange(id, change);
++}
++
++void CookiesEventRouter::RefreshContainerListeners() {
++  if (profile_->IsOffTheRecord()) {
++    return;
++  }
++  auto* service = ContainersServiceFactory::GetForProfile(profile_);
++  if (!service) {
++    return;
++  }
++  std::set<std::string> ids;
++  for (const auto& id : service->GetRuntimeContainerIds()) {
++    ids.insert(id);
++  }
++  profile_->ForEachLoadedStoragePartition([&](content::StoragePartition* part) {
++    const auto& config = part->GetConfig();
++    if (config.partition_domain() ==
++            containers::kContainersStoragePartitionDomain &&
++        !config.in_memory()) {
++      ids.insert(config.partition_name());
++    }
++  });
++  std::erase_if(ids, [&](const std::string& id) {
++    return id.empty() || !containers::android::IsContainerIdWellFormed(id) ||
++           !containers::android::ResolveContainerStoragePartition(profile_, id);
++  });
++  std::erase_if(container_subscriptions_,
++                [&](const auto& entry) { return !ids.contains(entry.first); });
++  for (const auto& id : ids) {
++    if (!container_subscriptions_.contains(id)) {
++      container_subscriptions_.emplace(
++          id, std::make_unique<ContainerSubscription>(this, id));
++    }
++    BindContainerListener(id);
++  }
++}
++
++void CookiesEventRouter::BindContainerListener(const std::string& id) {
++  if (id.empty() || !containers::android::IsContainerIdWellFormed(id)) {
++    return;
++  }
++  auto found = container_subscriptions_.find(id);
++  auto config =
++      containers::android::ResolveContainerStoragePartition(profile_, id);
++  if (found == container_subscriptions_.end() || !config ||
++      found->second->receiver.is_bound()) {
++    return;
++  }
++  auto* manager = profile_->GetStoragePartition(*config)
++                      ->GetCookieManagerForBrowserProcess();
++  if (!manager) {
++    return;
++  }
++  auto& receiver = found->second->receiver;
++  manager->AddGlobalChangeListener(receiver.BindNewPipeAndPassRemote());
++  receiver.set_disconnect_handler(
++      base::BindOnce(&CookiesEventRouter::OnContainerConnectionError,
++                     base::Unretained(this), id));
++}
++
++void CookiesEventRouter::OnContainerConnectionError(const std::string& id) {
++  auto found = container_subscriptions_.find(id);
++  if (found == container_subscriptions_.end()) {
++    return;
++  }
++  found->second->receiver.reset();
++  BindContainerListener(id);
++}
++
++void CookiesEventRouter::OnContainerCookieChange(
++    const std::string& id,
++    const net::CookieChangeInfo& change) {
++  if (!id.empty() && containers::android::IsContainerIdWellFormed(id) &&
++      container_subscriptions_.contains(id) &&
++      containers::android::ResolveContainerStoragePartition(profile_, id)) {
++    OnCookieChangeInStore(profile_, cookies_helpers::GetContainerStoreId(id),
++                          change);
++  }
++}
++#endif  // BUILDFLAG(IS_ANDROID)
+
+ void CookiesEventRouter::DispatchEvent(content::BrowserContext* context,
+                                        events::HistogramValue histogram_value,
+@@ -351,9 +496,13 @@
+     return RespondNow(Error(std::move(partition_key.error())));
+   }
+
++#if BUILDFLAG(IS_ANDROID)
++  parsed_args_->details.store_id = store_id;
++#else
+   if (!parsed_args_->details.store_id) {
+     parsed_args_->details.store_id = store_id;
+   }
++#endif
+
+   DCHECK(!url_.is_empty() && url_.is_valid());
+   cookies_helpers::GetCookieListFromManager(
+@@ -436,9 +585,13 @@
+     return RespondNow(Error(std::move(partition_key.error())));
+   }
+
++#if BUILDFLAG(IS_ANDROID)
++  parsed_args_->details.store_id = store_id;
++#else
+   if (!parsed_args_->details.store_id) {
+     parsed_args_->details.store_id = store_id;
+   }
++#endif
+
+   net::CookiePartitionKeyCollection cookie_partition_key_collection =
+       cookies_helpers::CookiePartitionKeyCollectionFromApiPartitionKey(
+@@ -562,9 +715,13 @@
+     return RespondNow(Error(std::move(net_partition_key.error())));
+   }
+
++#if BUILDFLAG(IS_ANDROID)
++  parsed_args_->details.store_id = store_id;
++#else
+   if (!parsed_args_->details.store_id) {
+     parsed_args_->details.store_id = store_id;
+   }
++#endif
+
+   base::Time expiration_time;
+   if (parsed_args_->details.expiration_date) {
+@@ -721,9 +878,13 @@
+     return RespondNow(Error(std::move(partition_key.error())));
+   }
+
++#if BUILDFLAG(IS_ANDROID)
++  parsed_args_->details.store_id = store_id;
++#else
+   if (!parsed_args_->details.store_id) {
+     parsed_args_->details.store_id = store_id;
+   }
++#endif
+
+   network::mojom::CookieDeletionFilterPtr filter(
+       network::mojom::CookieDeletionFilter::New());
+@@ -882,6 +1043,74 @@
+   }
+   DCHECK(original_profile != incognito_profile);
+
++#if BUILDFLAG(IS_ANDROID)
++  std::map<std::string, base::ListValue> ids_by_store;
++  for (WindowController* window : *WindowControllerList::GetInstance()) {
++    Profile* model_profile = window->profile();
++    if (model_profile != original_profile &&
++        model_profile != incognito_profile) {
++      continue;
++    }
++    BrowserWindowInterface* browser_window =
++        window->GetBrowserWindowInterface();
++    if (!browser_window || browser_window->GetProfile() != model_profile ||
++        browser_window->GetSessionID().id() != window->GetWindowId()) {
++      continue;
++    }
++    for (TabModel* model : TabModelList::models()) {
++      // Trusted extension popups use a standard Custom Tab model and a genuine
++      // popup browser window. Ordinary external CCTs retain TYPE_CUSTOM_TAB.
++      // A transient drag edit lock does not change cookie-store metadata.
++      const bool eligible_window =
++          (browser_window->GetType() == BrowserWindowInterface::TYPE_NORMAL &&
++           model->activity_type() == chrome::android::ActivityType::kTabbed) ||
++          (browser_window->GetType() == BrowserWindowInterface::TYPE_POPUP &&
++           model->activity_type() == chrome::android::ActivityType::kCustomTab);
++      if (!model_profile || !eligible_window ||
++          model->GetTabModelType() != TabModel::TabModelType::kStandard ||
++          model->GetProfile() != model_profile ||
++          model->GetSessionId().id() != window->GetWindowId()) {
++        continue;
++      }
++      for (int i = 0; i < model->GetTabCount(); ++i) {
++        TabAndroid* tab = model->GetTabAt(i);
++        if (!tab || tab->GetProfile() != model_profile) {
++          continue;
++        }
++        std::string store_id =
++            cookies_helpers::GetStoreIdFromBrowserContext(model_profile);
++        const std::string id = tab->GetContainerId();
++        if (!id.empty()) {
++          if (!containers::android::ResolveContainerStoragePartition(
++                  model_profile, id) ||
++              (tab->web_contents() &&
++               !containers::android::WebContentsMatchesContainer(
++                   model_profile, tab->web_contents(), id))) {
++            continue;
++          }
++          store_id = cookies_helpers::GetContainerStoreId(id);
++        } else if (tab->web_contents() &&
++                   !containers::android::WebContentsMatchesContainer(
++                       model_profile, tab->web_contents(), id)) {
++          continue;
++        }
++        const int tab_id = ExtensionTabUtil::GetTabId(*tab);
++        if (tab_id != api::tabs::TAB_ID_NONE) {
++          ids_by_store[store_id].Append(tab_id);
++        }
++      }
++    }
++  }
++  std::vector<api::cookies::CookieStore> cookie_stores;
++  for (auto& [store_id, ids] : ids_by_store) {
++    api::cookies::CookieStore store;
++    store.id = store_id;
++    for (const auto& id : ids) {
++      store.tab_ids.push_back(id.GetInt());
++    }
++    cookie_stores.push_back(std::move(store));
++  }
++#else
+   // Iterate through all browser instances, and for each browser,
+   // add its tab IDs to either the regular or incognito tab ID list depending
+   // whether the browser is regular or incognito.
+@@ -902,6 +1131,7 @@
+     cookie_stores.push_back(cookies_helpers::CreateCookieStore(
+         incognito_profile, std::move(incognito_tab_ids)));
+   }
++#endif  // BUILDFLAG(IS_ANDROID)
+   return RespondNow(ArgumentList(
+       api::cookies::GetAllCookieStores::Results::Create(cookie_stores)));
+ }

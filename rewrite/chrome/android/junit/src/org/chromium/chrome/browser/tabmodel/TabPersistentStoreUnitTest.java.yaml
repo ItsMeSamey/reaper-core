@@ -1,0 +1,659 @@
+# Android real split persistence and recently-closed restoration.
+substitutions:
+- description: Cover the real startup restore path with remapped IDs, delayed members, profile isolation and native rejection
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ @Before\
+
+      \ \ \ \ public\ void\ setUp\(\)'
+    replace: "    private void initializeSplitRestoreStore() {\n        mPersistentStore = new TabPersistentStoreImpl(TabOrchestratorType.TABBED,\n                mPersistencePolicy, mTabModelSelector, mTabCreatorManager, mTabWindowManager,\n                mCipherFactory, /* isAuthoritative= */ true, /* recordLegacyTabCountMetrics= */ true);\n        mPersistentStore.initializeRestoreVars(false, false);\n    }\n\n    private Tab restoreSavedSplitMember(int savedId, int actualId, int position, double ratio,\n            boolean incognito) {\n        TabState state = new TabState();\n        state.contentsState = mock(WebContentsState.class);\n        state.isIncognito = incognito;\n        state.splitTabId = new Token(73, 91);\n        state.splitLayout = 1;\n        state.splitRatio = ratio;\n        state.splitPosition = position;\n        Tab tab = mock(Tab.class);\n        when(tab.getId()).thenReturn(actualId);\n        when(tab.isIncognito()).thenReturn(incognito);\n        when(tab.getUrl()).thenReturn(new GURL(RESTORE_TAB_STRING_1));\n        TabCreator creator = incognito ? mIncognitoTabCreator : mNormalTabCreator;\n        TabModelInternal model = incognito ? mIncognitoTabModel : mNormalTabModel;\n        when(creator.createFrozenTab(eq(state), eq(savedId), anyInt())).thenReturn(tab);\n        when(model.getTabById(actualId)).thenReturn(tab);\n        mPersistentStore.restoreTab(new TabRestoreDetails(savedId, position,\n                incognito ? TriState.TRUE : TriState.FALSE, RESTORE_TAB_STRING_1, false), state, false);\n        return tab;\n    }\n\n    @Test\n    public void testRestoreSplitWaitsForBothMembersAndUsesRemappedIds() {\n        initializeSplitRestoreStore();\n        Tab trailing = restoreSavedSplitMember(31, 131, 1, 0.37, false);\n        verify(mNormalTabModel, never()).restoreSplit(any());\n        Tab leading = restoreSavedSplitMember(32, 132, 0, 0.37, false);\n        when(mNormalTabModel.restoreSplit(any())).thenReturn(true);\n        verify(mNormalTabModel, never()).restoreSplit(any());\n        mPersistentStore.restorePendingSplits();\n        verify(mNormalTabModel).restoreSplit(argThat(info -> info.getToken().equals(new Token(73, 91))\n                && info.getFirstTabId() == 132 && info.getSecondTabId() == 131\n                && info.getLayout() == 1 && info.getRatio() == 0.37));\n        verify(leading, never()).setSplitData(any(), anyInt(), org.mockito.ArgumentMatchers.anyDouble(), anyInt());\n        verify(trailing, never()).setSplitData(any(), anyInt(), org.mockito.ArgumentMatchers.anyDouble(), anyInt());\n        mPersistentStore.restorePendingSplits();\n        verify(mNormalTabModel, times(1)).restoreSplit(any());\n    }\n\n    @Test\n    public void testRestoreSplitRejectsMissingAndMismatchedMembers() {\n        initializeSplitRestoreStore();\n        Tab leading = restoreSavedSplitMember(31, 131, 0, 0.37, false);\n        mPersistentStore.restorePendingSplits();\n        verify(mNormalTabModel, never()).restoreSplit(any());\n        verify(leading).setSplitData(null, 0, 0.5, -1);\n\n        initializeSplitRestoreStore();\n        Tab first = restoreSavedSplitMember(31, 131, 0, 0.37, false);\n        Tab second = restoreSavedSplitMember(32, 132, 1, 0.63, false);\n        mPersistentStore.restorePendingSplits();\n        verify(mNormalTabModel, never()).restoreSplit(any());\n        verify(first).setSplitData(null, 0, 0.5, -1);\n        verify(second).setSplitData(null, 0, 0.5, -1);\n    }\n\n    @Test\n    public void testRestoreSplitNeverJoinsProfilesAndClearsRejectedNativePair() {\n        initializeSplitRestoreStore();\n        Tab regular = restoreSavedSplitMember(31, 131, 0, 0.37, false);\n        Tab incognito = restoreSavedSplitMember(32, 132, 1, 0.37, true);\n        mPersistentStore.restorePendingSplits();\n        verify(mNormalTabModel, never()).restoreSplit(any());\n        verify(mIncognitoTabModel, never()).restoreSplit(any());\n        verify(regular).setSplitData(null, 0, 0.5, -1);\n        verify(incognito).setSplitData(null, 0, 0.5, -1);\n\n        initializeSplitRestoreStore();\n        Tab first = restoreSavedSplitMember(31, 131, 0, 0.37, false);\n        Tab second = restoreSavedSplitMember(32, 132, 1, 0.37, false);\n        when(mNormalTabModel.restoreSplit(any())).thenReturn(false);\n        mPersistentStore.restorePendingSplits();\n        verify(mNormalTabModel).restoreSplit(any());\n        verify(first).setSplitData(null, 0, 0.5, -1);\n        verify(second).setSplitData(null, 0, 0.5, -1);\n    }\n\n\n    @Test\n    public void testFailedSavedSplitDoesNotClearAnExistingLivePair() {\n        initializeSplitRestoreStore();\n        Tab first = restoreSavedSplitMember(31, 131, 0, 0.37, false);\n        Tab second = restoreSavedSplitMember(32, 132, 1, 0.37, false);\n        SplitInfo live = new SplitInfo(new Token(83, 97), 131, 132, 0, 0.5);\n        when(mNormalTabModel.getSplitInfoForTab(131)).thenReturn(live);\n        when(mNormalTabModel.getSplitInfoForTab(132)).thenReturn(live);\n        when(mNormalTabModel.restoreSplit(any())).thenReturn(false);\n        mPersistentStore.restorePendingSplits();\n        verify(mNormalTabModel).restoreSplit(any());\n        verify(first, never()).setSplitData(any(), anyInt(), org.mockito.ArgumentMatchers.anyDouble(), anyInt());\n        verify(second, never()).setSplitData(any(), anyInt(), org.mockito.ArgumentMatchers.anyDouble(), anyInt());\n    }\n    @Before\n    public void setUp()"
+- description: Format modified Android split persistence Java sources
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ private\ TabPersistentStoreImpl\ mPersistentStore;\
+
+      \ \ \ \ private\ CipherFactory\ mCipherFactory;\
+
+      \
+
+      \ \ \ \ private\ void\ initializeSplitRestoreStore\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ mPersistentStore\ =\ new\ TabPersistentStoreImpl\(TabOrchestratorType\.TABBED,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mPersistencePolicy,\ mTabModelSelector,\ mTabCreatorManager,\ mTabWindowManager,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mCipherFactory,\ /\*\ isAuthoritative=\ \*/\ true,\ /\*\ recordLegacyTabCountMetrics=\ \*/\ true\);\
+
+      \ \ \ \ \ \ \ \ mPersistentStore\.initializeRestoreVars\(false,\ false\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ private\ Tab\ restoreSavedSplitMember\(int\ savedId,\ int\ actualId,\ int\ position,\ double\ ratio,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ boolean\ incognito\)\ \{\
+
+      \ \ \ \ \ \ \ \ TabState\ state\ =\ new\ TabState\(\);\
+
+      \ \ \ \ \ \ \ \ state\.contentsState\ =\ mock\(WebContentsState\.class\);\
+
+      \ \ \ \ \ \ \ \ state\.isIncognito\ =\ incognito;\
+
+      \ \ \ \ \ \ \ \ state\.splitTabId\ =\ new\ Token\(73,\ 91\);\
+
+      '
+    replace: "    private TabPersistentStoreImpl mPersistentStore;\n    private CipherFactory mCipherFactory;\n\n    private void initializeSplitRestoreStore() {\n        mPersistentStore =\n                new TabPersistentStoreImpl(\n                        TabOrchestratorType.TABBED,\n                        mPersistencePolicy,\n                        mTabModelSelector,\n                        mTabCreatorManager,\n                        mTabWindowManager,\n                        mCipherFactory,\n                        /* isAuthoritative= */ true,\n                        /* recordLegacyTabCountMetrics= */ true);\n        mPersistentStore.initializeRestoreVars(false, false);\n    }\n\n    private Tab restoreSavedSplitMember(\n            int savedId, int actualId, int position, double ratio, boolean incognito) {\n        TabState state = new TabState();\n        state.contentsState = mock(WebContentsState.class);\n        state.isIncognito = incognito;\n        state.splitTabId = new Token(73, 91);\n"
+- description: Format modified Android split persistence Java sources
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ TabCreator\ creator\ =\ incognito\ \?\ mIncognitoTabCreator\ :\ mNormalTabCreator;\
+
+      \ \ \ \ \ \ \ \ TabModelInternal\ model\ =\ incognito\ \?\ mIncognitoTabModel\ :\ mNormalTabModel;\
+
+      \ \ \ \ \ \ \ \ when\(creator\.createFrozenTab\(eq\(state\),\ eq\(savedId\),\ anyInt\(\)\)\)\.thenReturn\(tab\);\
+
+      \ \ \ \ \ \ \ \ when\(model\.getTabById\(actualId\)\)\.thenReturn\(tab\);\
+
+      \ \ \ \ \ \ \ \ mPersistentStore\.restoreTab\(new\ TabRestoreDetails\(savedId,\ position,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ incognito\ \?\ TriState\.TRUE\ :\ TriState\.FALSE,\ RESTORE_TAB_STRING_1,\ false\),\ state,\ false\);\
+
+      \ \ \ \ \ \ \ \ return\ tab;\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ @Test\
+
+      '
+    replace: "        TabCreator creator = incognito ? mIncognitoTabCreator : mNormalTabCreator;\n        TabModelInternal model = incognito ? mIncognitoTabModel : mNormalTabModel;\n        when(creator.createFrozenTab(eq(state), eq(savedId), anyInt())).thenReturn(tab);\n        when(model.getTabById(actualId)).thenReturn(tab);\n        mPersistentStore.restoreTab(\n                new TabRestoreDetails(\n                        savedId,\n                        position,\n                        incognito ? TriState.TRUE : TriState.FALSE,\n                        RESTORE_TAB_STRING_1,\n                        false),\n                state,\n                false);\n        return tab;\n    }\n\n    @Test\n"
+- description: Format modified Android split persistence Java sources
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ Tab\ leading\ =\ restoreSavedSplitMember\(32,\ 132,\ 0,\ 0\.37,\ false\);\
+
+      \ \ \ \ \ \ \ \ when\(mNormalTabModel\.restoreSplit\(any\(\)\)\)\.thenReturn\(true\);\
+
+      \ \ \ \ \ \ \ \ verify\(mNormalTabModel,\ never\(\)\)\.restoreSplit\(any\(\)\);\
+
+      \ \ \ \ \ \ \ \ mPersistentStore\.restorePendingSplits\(\);\
+
+      \ \ \ \ \ \ \ \ verify\(mNormalTabModel\)\.restoreSplit\(argThat\(info\ \->\ info\.getToken\(\)\.equals\(new\ Token\(73,\ 91\)\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \&\&\ info\.getFirstTabId\(\)\ ==\ 132\ \&\&\ info\.getSecondTabId\(\)\ ==\ 131\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \&\&\ info\.getLayout\(\)\ ==\ 1\ \&\&\ info\.getRatio\(\)\ ==\ 0\.37\)\);\
+
+      \ \ \ \ \ \ \ \ verify\(leading,\ never\(\)\)\.setSplitData\(any\(\),\ anyInt\(\),\ org\.mockito\.ArgumentMatchers\.anyDouble\(\),\ anyInt\(\)\);\
+
+      \ \ \ \ \ \ \ \ verify\(trailing,\ never\(\)\)\.setSplitData\(any\(\),\ anyInt\(\),\ org\.mockito\.ArgumentMatchers\.anyDouble\(\),\ anyInt\(\)\);\
+
+      \ \ \ \ \ \ \ \ mPersistentStore\.restorePendingSplits\(\);\
+
+      \ \ \ \ \ \ \ \ verify\(mNormalTabModel,\ times\(1\)\)\.restoreSplit\(any\(\)\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      '
+    replace: "        Tab leading = restoreSavedSplitMember(32, 132, 0, 0.37, false);\n        when(mNormalTabModel.restoreSplit(any())).thenReturn(true);\n        verify(mNormalTabModel, never()).restoreSplit(any());\n        mPersistentStore.restorePendingSplits();\n        verify(mNormalTabModel)\n                .restoreSplit(\n                        argThat(\n                                info ->\n                                        info.getToken().equals(new Token(73, 91))\n                                                && info.getFirstTabId() == 132\n                                                && info.getSecondTabId() == 131\n                                                && info.getLayout() == 1\n                                                && info.getRatio() == 0.37));\n        verify(leading, never())\n                .setSplitData(any(), anyInt(), org.mockito.ArgumentMatchers.anyDouble(), anyInt());\n        verify(trailing, never())\n                .setSplitData(any(), anyInt(), org.mockito.ArgumentMatchers.anyDouble(), anyInt());\n        mPersistentStore.restorePendingSplits();\n        verify(mNormalTabModel, times(1)).restoreSplit(any());\n    }\n\n"
+- description: Format modified Android split persistence Java sources
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ verify\(mNormalTabModel\)\.restoreSplit\(any\(\)\);\
+
+      \ \ \ \ \ \ \ \ verify\(first\)\.setSplitData\(null,\ 0,\ 0\.5,\ \-1\);\
+
+      \ \ \ \ \ \ \ \ verify\(second\)\.setSplitData\(null,\ 0,\ 0\.5,\ \-1\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \
+
+      \ \ \ \ @Test\
+
+      \ \ \ \ public\ void\ testFailedSavedSplitDoesNotClearAnExistingLivePair\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ initializeSplitRestoreStore\(\);\
+
+      '
+    replace: "        verify(mNormalTabModel).restoreSplit(any());\n        verify(first).setSplitData(null, 0, 0.5, -1);\n        verify(second).setSplitData(null, 0, 0.5, -1);\n    }\n\n    @Test\n    public void testFailedSavedSplitDoesNotClearAnExistingLivePair() {\n        initializeSplitRestoreStore();\n"
+- description: Format modified Android split persistence Java sources
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ when\(mNormalTabModel\.getSplitInfoForTab\(132\)\)\.thenReturn\(live\);\
+
+      \ \ \ \ \ \ \ \ when\(mNormalTabModel\.restoreSplit\(any\(\)\)\)\.thenReturn\(false\);\
+
+      \ \ \ \ \ \ \ \ mPersistentStore\.restorePendingSplits\(\);\
+
+      \ \ \ \ \ \ \ \ verify\(mNormalTabModel\)\.restoreSplit\(any\(\)\);\
+
+      \ \ \ \ \ \ \ \ verify\(first,\ never\(\)\)\.setSplitData\(any\(\),\ anyInt\(\),\ org\.mockito\.ArgumentMatchers\.anyDouble\(\),\ anyInt\(\)\);\
+
+      \ \ \ \ \ \ \ \ verify\(second,\ never\(\)\)\.setSplitData\(any\(\),\ anyInt\(\),\ org\.mockito\.ArgumentMatchers\.anyDouble\(\),\ anyInt\(\)\);\
+
+      \ \ \ \ \}\
+
+      \ \ \ \ @Before\
+
+      \ \ \ \ public\ void\ setUp\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ when\(mIncognitoTabModel\.isIncognito\(\)\)\.thenReturn\(true\);\
+
+      \ \ \ \ \ \ \ \ when\(mIncognitoTabModel\.iterator\(\)\)\.thenAnswer\(inv\ \->\ Collections\.emptyList\(\)\.iterator\(\)\);\
+
+      '
+    replace: "        when(mNormalTabModel.getSplitInfoForTab(132)).thenReturn(live);\n        when(mNormalTabModel.restoreSplit(any())).thenReturn(false);\n        mPersistentStore.restorePendingSplits();\n        verify(mNormalTabModel).restoreSplit(any());\n        verify(first, never())\n                .setSplitData(any(), anyInt(), org.mockito.ArgumentMatchers.anyDouble(), anyInt());\n        verify(second, never())\n                .setSplitData(any(), anyInt(), org.mockito.ArgumentMatchers.anyDouble(), anyInt());\n    }\n\n    @Before\n    public void setUp() {\n        when(mIncognitoTabModel.isIncognito()).thenReturn(true);\n        when(mIncognitoTabModel.iterator()).thenAnswer(inv -> Collections.emptyList().iterator());\n"
+- description: Remove the dedicated retired Actor-only case testRestoreTab_interceptedByBackgroundTabPool.
+  regex:
+    pattern: "    @Test\n    @EnableFeatures(ChromeFeatureList.GLIC_BACKGROUND_ACTUATION)\n    public void testRestoreTab_interceptedByBackgroundTabPool()\
+      \ {\n        BackgroundTabPoolManager.setPoolForTesting(mBackgroundTabPool);\n        TabRestoreDetails details =\n\
+      \                new TabRestoreDetails(\n                        101, 0, TriState.FALSE, \"https://google.com/\", /*\
+      \ fromMerge= */ false);\n        Tab realizedTab = mock(Tab.class);\n        when(realizedTab.getId()).thenReturn(101);\n\
+      \        when(mBackgroundTabPool.getAllPlaceholderTabIds()).thenReturn(Set.of(101));\n        BackgroundPoolTab backgroundPoolTab\
+      \ = mock(BackgroundPoolTab.class);\n        when(mBackgroundTabPool.loadTabByPlaceholderId(101)).thenReturn(backgroundPoolTab);\n\
+      \        when(backgroundPoolTab.attachTab(eq(mNormalTabModel), eq(0))).thenReturn(realizedTab);\n        when(mNormalTabModel.indexOf(realizedTab)).thenReturn(0);\n\
+      \n        mPersistentStore =\n                new TabPersistentStoreImpl(\n                        TabOrchestratorType.TABBED,\n\
+      \                        mPersistencePolicy,\n                        mTabModelSelector,\n                        mTabCreatorManager,\n\
+      \                        mTabWindowManager,\n                        mCipherFactory,\n                        /* isAuthoritative=\
+      \ */ true,\n                        /* recordLegacyTabCountMetrics= */ true);\n\n        mPersistentStore.initializeRestoreVars(\n\
+      \                /* ignoreIncognitoFiles= */ false, /* ignoreRegularFiles= */ false);\n        mPersistentStore.restoreTabs(/*\
+      \ setActiveTab= */ true);\n        mPersistentStore.restoreTab(details, /* tabState= */ null, /* setAsActive= */ false);\n\
+      \n        verify(mBackgroundTabPool).getAllPlaceholderTabIds();\n        verify(mBackgroundTabPool).loadTabByPlaceholderId(101);\n\
+      \        verify(backgroundPoolTab).attachTab(eq(mNormalTabModel), eq(0));\n        verify(mNormalTabCreator, never()).createNewTab(any(),\
+      \ anyInt(), any(), anyInt());\n    }\n\n"
+    replace: ''
+  count: 1
+- description: Remove the dedicated retired Actor-only case testRestoreTabs_restoresRemainingBackgroundTabsAtEnd.
+  regex:
+    pattern: "    @Test\n    @EnableFeatures(ChromeFeatureList.GLIC_BACKGROUND_ACTUATION)\n    public void testRestoreTabs_restoresRemainingBackgroundTabsAtEnd()\
+      \ {\n        BackgroundTabPoolManager.setPoolForTesting(mBackgroundTabPool);\n        when(mBackgroundTabPool.claimTabIdsWithoutPlaceholders()).thenReturn(Set.of(201));\n\
+      \        when(mBackgroundTabPool.getLiveTab(201)).thenReturn(null);\n        BackgroundPoolTab remainingTab = mock(BackgroundPoolTab.class);\n\
+      \        Tab restoredTab = mock(Tab.class);\n        when(restoredTab.getId()).thenReturn(201);\n        when(mBackgroundTabPool.loadTabByOriginalId(201)).thenReturn(remainingTab);\n\
+      \        when(mNormalTabModel.getCount()).thenReturn(2);\n        when(remainingTab.attachTab(eq(mNormalTabModel), eq(2))).thenReturn(restoredTab);\n\
+      \n        mPersistentStore =\n                new TabPersistentStoreImpl(\n                        TabOrchestratorType.TABBED,\n\
+      \                        mPersistencePolicy,\n                        mTabModelSelector,\n                        mTabCreatorManager,\n\
+      \                        mTabWindowManager,\n                        mCipherFactory,\n                        /* isAuthoritative=\
+      \ */ true,\n                        /* recordLegacyTabCountMetrics= */ true);\n\n        mPersistentStore.initializeRestoreVars(\n\
+      \                /* ignoreIncognitoFiles= */ false, /* ignoreRegularFiles= */ false);\n        mPersistentStore.restoreTabs(/*\
+      \ setActiveTab= */ false);\n\n        verify(mBackgroundTabPool).claimTabIdsWithoutPlaceholders();\n        verify(mBackgroundTabPool).loadTabByOriginalId(201);\n\
+      \        verify(remainingTab).attachTab(eq(mNormalTabModel), eq(2));\n        verify(mBackgroundTabPool).cleanupPostRestore();\n\
+      \    }\n\n"
+    replace: ''
+  count: 1
+- description: Remove the dedicated retired Actor-only case testRestoreTabs_claimsRemainingBackgroundTabsAndRestoresAtEnd.
+  regex:
+    pattern: "    @Test\n    @EnableFeatures(ChromeFeatureList.GLIC_BACKGROUND_ACTUATION)\n    public void testRestoreTabs_claimsRemainingBackgroundTabsAndRestoresAtEnd()\
+      \ {\n        BackgroundTabPoolManager.setPoolForTesting(mBackgroundTabPool);\n        when(mBackgroundTabPool.getAllPlaceholderTabIds()).thenReturn(Set.of(101));\n\
+      \        when(mBackgroundTabPool.claimTabIdsWithoutPlaceholders()).thenReturn(Set.of(201));\n        when(mBackgroundTabPool.getLiveTab(201)).thenReturn(null);\n\
+      \n        // Placeholder tab for 101\n        BackgroundPoolTab placeholderTab101 = mock(BackgroundPoolTab.class);\n\
+      \        Tab restoredTab101 = mock(Tab.class);\n        when(restoredTab101.getId()).thenReturn(101);\n        when(mBackgroundTabPool.loadTabByPlaceholderId(101)).thenReturn(placeholderTab101);\n\
+      \        when(placeholderTab101.attachTab(eq(mNormalTabModel), eq(0))).thenReturn(restoredTab101);\n\n        // Remaining\
+      \ tab for 201\n        BackgroundPoolTab remainingTab201 = mock(BackgroundPoolTab.class);\n        Tab restoredTab201\
+      \ = mock(Tab.class);\n        when(restoredTab201.getId()).thenReturn(201);\n        when(mBackgroundTabPool.loadTabByOriginalId(201)).thenReturn(remainingTab201);\n\
+      \        when(mNormalTabModel.getCount()).thenReturn(1).thenReturn(2);\n        when(remainingTab201.attachTab(eq(mNormalTabModel),\
+      \ eq(1))).thenReturn(restoredTab201);\n\n        mPersistentStore =\n                new TabPersistentStoreImpl(\n \
+      \                       TabOrchestratorType.TABBED,\n                        mPersistencePolicy,\n                 \
+      \       mTabModelSelector,\n                        mTabCreatorManager,\n                        mTabWindowManager,\n\
+      \                        mCipherFactory,\n                        /* isAuthoritative= */ true,\n                   \
+      \     /* recordLegacyTabCountMetrics= */ true);\n\n        mPersistentStore.initializeRestoreVars(\n               \
+      \ /* ignoreIncognitoFiles= */ false, /* ignoreRegularFiles= */ false);\n\n        // Metadata restoration restores placeholder\
+      \ 101\n        TabRestoreDetails details101 =\n                new TabRestoreDetails(101, 0, TriState.FALSE, \"https://google.com/\"\
+      , false);\n        mPersistentStore.restoreTabs(/* setActiveTab= */ false);\n        mPersistentStore.restoreTab(details101,\
+      \ null, /* setAsActive= */ false);\n\n        verify(mBackgroundTabPool).getAllPlaceholderTabIds();\n        verify(mBackgroundTabPool).loadTabByPlaceholderId(101);\n\
+      \        verify(placeholderTab101).attachTab(eq(mNormalTabModel), eq(0));\n\n        // Remaining tab 201 claimed and\
+      \ restored at end of restore\n        verify(mBackgroundTabPool).claimTabIdsWithoutPlaceholders();\n        verify(mBackgroundTabPool).loadTabByOriginalId(201);\n\
+      \        verify(remainingTab201).attachTab(eq(mNormalTabModel), eq(1));\n\n        // Calling restoreTab with 201 should\
+      \ be ignored because it is in mSeenTabIds\n        TabRestoreDetails details201 =\n                new TabRestoreDetails(201,\
+      \ 1, TriState.FALSE, \"https://example.com/\", false);\n        mPersistentStore.restoreTab(details201, null, /* setAsActive=\
+      \ */ false);\n        verify(mNormalTabCreator, never()).createNewTab(any(), eq(201), any(), anyInt());\n    }\n"
+    replace: ''
+  count: 1
+- description: Preserve ordinary restoration assertions while retiring Actor setup in testRestoreTab_nonAuthoritativeStore_skipsBackgroundTabPool.
+  regex:
+    pattern: "    @Test\n    @EnableFeatures(ChromeFeatureList.GLIC_BACKGROUND_ACTUATION)\n    public void testRestoreTab_nonAuthoritativeStore_skipsBackgroundTabPool()\
+      \ {\n        BackgroundTabPoolManager.setPoolForTesting(mBackgroundTabPool);\n        TabRestoreDetails details =\n\
+      \                new TabRestoreDetails(101, 0, TriState.FALSE, \"https://google.com/\", false);\n        Tab newTab\
+      \ = mock(Tab.class);\n        when(newTab.getId()).thenReturn(101);\n        when(mNormalTabCreator.createNewTab(any(),\
+      \ anyInt(), any(), anyInt())).thenReturn(newTab);\n        when(mNormalTabModel.indexOf(newTab)).thenReturn(0);\n  \
+      \      when(mBackgroundTabPool.getAllPlaceholderTabIds()).thenReturn(Set.of(101));\n\n        mPersistentStore =\n \
+      \               new TabPersistentStoreImpl(\n                        TabOrchestratorType.TABBED,\n                 \
+      \       mPersistencePolicy,\n                        mTabModelSelector,\n                        mTabCreatorManager,\n\
+      \                        mTabWindowManager,\n                        mCipherFactory,\n                        /* isAuthoritative=\
+      \ */ false,\n                        /* recordLegacyTabCountMetrics= */ true);\n\n        mPersistentStore.initializeRestoreVars(\n\
+      \                /* ignoreIncognitoFiles= */ false, /* ignoreRegularFiles= */ false);\n        mPersistentStore.restoreTabs(true);\n\
+      \        mPersistentStore.restoreTab(details, null, /* setAsActive= */ false);\n\n        verify(mBackgroundTabPool,\
+      \ never()).getAllPlaceholderTabIds();\n        verify(mBackgroundTabPool, never()).loadTabByPlaceholderId(anyInt());\n\
+      \        verify(mNormalTabCreator).createNewTab(any(), anyInt(), any(), anyInt());\n    }\n"
+    replace: "    @Test\n    public void testRestoreTab_nonAuthoritativeStore_urlOnly() {\n        TabRestoreDetails details\
+      \ =\n                new TabRestoreDetails(101, 0, TriState.FALSE, \"https://google.com/\", false);\n        Tab newTab\
+      \ = mock(Tab.class);\n        when(newTab.getId()).thenReturn(101);\n        when(mNormalTabCreator.createNewTab(any(),\
+      \ anyInt(), any(), anyInt())).thenReturn(newTab);\n        when(mNormalTabModel.indexOf(newTab)).thenReturn(0);\n\n\
+      \        mPersistentStore =\n                new TabPersistentStoreImpl(\n                        TabOrchestratorType.TABBED,\n\
+      \                        mPersistencePolicy,\n                        mTabModelSelector,\n                        mTabCreatorManager,\n\
+      \                        mTabWindowManager,\n                        mCipherFactory,\n                        /* isAuthoritative=\
+      \ */ false,\n                        /* recordLegacyTabCountMetrics= */ true);\n\n        mPersistentStore.initializeRestoreVars(\n\
+      \                /* ignoreIncognitoFiles= */ false, /* ignoreRegularFiles= */ false);\n        mPersistentStore.restoreTabs(true);\n\
+      \        mPersistentStore.restoreTab(details, null, /* setAsActive= */ false);\n\n        verify(mNormalTabCreator).createNewTab(any(),\
+      \ anyInt(), any(), anyInt());\n    }\n"
+  count: 1
+- description: Preserve ordinary restoration assertions while retiring Actor setup in testRestoreTab_backgroundTabDeduplicationViaSeenTabIds.
+  regex:
+    pattern: "    @Test\n    @EnableFeatures(ChromeFeatureList.GLIC_BACKGROUND_ACTUATION)\n    public void testRestoreTab_backgroundTabDeduplicationViaSeenTabIds()\
+      \ {\n        BackgroundTabPoolManager.setPoolForTesting(mBackgroundTabPool);\n        TabRestoreDetails details =\n\
+      \                new TabRestoreDetails(101, 0, TriState.FALSE, \"https://google.com/\", false);\n        BackgroundPoolTab\
+      \ backgroundPoolTab = mock(BackgroundPoolTab.class);\n        Tab restoredTab = mock(Tab.class);\n        when(restoredTab.getId()).thenReturn(101);\n\
+      \        when(backgroundPoolTab.attachTab(eq(mNormalTabModel), eq(0))).thenReturn(restoredTab);\n        when(mBackgroundTabPool.loadTabByPlaceholderId(101)).thenReturn(backgroundPoolTab);\n\
+      \        when(mBackgroundTabPool.getAllPlaceholderTabIds()).thenReturn(Set.of(101));\n\n        mPersistentStore =\n\
+      \                new TabPersistentStoreImpl(\n                        TabOrchestratorType.TABBED,\n                \
+      \        mPersistencePolicy,\n                        mTabModelSelector,\n                        mTabCreatorManager,\n\
+      \                        mTabWindowManager,\n                        mCipherFactory,\n                        /* isAuthoritative=\
+      \ */ true,\n                        /* recordLegacyTabCountMetrics= */ true);\n\n        mPersistentStore.initializeRestoreVars(\n\
+      \                /* ignoreIncognitoFiles= */ false, /* ignoreRegularFiles= */ false);\n        mPersistentStore.restoreTabs(true);\n\
+      \        mPersistentStore.restoreTab(details, null, /* setAsActive= */ false);\n\n        // First call restores via\
+      \ pool.\n        verify(mBackgroundTabPool, times(1)).loadTabByPlaceholderId(101);\n\n        // Second call with same\
+      \ tab ID should be ignored because of mSeenTabIds.\n        mPersistentStore.restoreTab(details, null, /* setAsActive=\
+      \ */ false);\n        verify(mBackgroundTabPool, times(1)).loadTabByPlaceholderId(101);\n        verify(mNormalTabCreator,\
+      \ never()).createNewTab(any(), anyInt(), any(), anyInt());\n    }\n"
+    replace: "    @Test\n    @EnableFeatures(ChromeFeatureList.ANDROID_TAB_DECLUTTER_DEDUPE_TAB_IDS_KILL_SWITCH)\n    public\
+      \ void testRestoreTab_frozenTabDeduplicationViaSeenTabIds() {\n        TabRestoreDetails details =\n               \
+      \ new TabRestoreDetails(101, 0, TriState.FALSE, \"https://google.com/\", false);\n        TabState state = new TabState();\n\
+      \        Tab restoredTab = mock(Tab.class);\n        when(restoredTab.getId()).thenReturn(101);\n        when(restoredTab.getUrl()).thenReturn(new\
+      \ GURL(\"https://google.com/\"));\n        when(mNormalTabCreator.createFrozenTab(eq(state), eq(101), eq(0)))\n    \
+      \            .thenReturn(restoredTab);\n        when(mNormalTabModel.indexOf(restoredTab)).thenReturn(0);\n\n      \
+      \  mPersistentStore =\n                new TabPersistentStoreImpl(\n                        TabOrchestratorType.TABBED,\n\
+      \                        mPersistencePolicy,\n                        mTabModelSelector,\n                        mTabCreatorManager,\n\
+      \                        mTabWindowManager,\n                        mCipherFactory,\n                        /* isAuthoritative=\
+      \ */ true,\n                        /* recordLegacyTabCountMetrics= */ true);\n\n        mPersistentStore.initializeRestoreVars(\n\
+      \                /* ignoreIncognitoFiles= */ false, /* ignoreRegularFiles= */ false);\n        mPersistentStore.restoreTabs(true);\n\
+      \        mPersistentStore.restoreTab(details, state, /* setAsActive= */ false);\n\n        // First call restores the\
+      \ ordinary frozen tab.\n        verify(mNormalTabCreator, times(1)).createFrozenTab(eq(state), eq(101), eq(0));\n\n\
+      \        // Second call with same tab ID should be ignored because of mSeenTabIds.\n        mPersistentStore.restoreTab(details,\
+      \ state, /* setAsActive= */ false);\n        verify(mNormalTabCreator, times(1)).createFrozenTab(eq(state), eq(101),\
+      \ eq(0));\n        verify(mNormalTabCreator, never()).createNewTab(any(), anyInt(), any(), anyInt());\n    }\n"
+  count: 1
+- description: Preserve ordinary restoration assertions while retiring Actor setup in testRestoreTab_nonTabbed_skipsBackgroundTabPool.
+  regex:
+    pattern: "    @Test\n    @EnableFeatures(ChromeFeatureList.GLIC_BACKGROUND_ACTUATION)\n    public void testRestoreTab_nonTabbed_skipsBackgroundTabPool()\
+      \ {\n        BackgroundTabPoolManager.setPoolForTesting(mBackgroundTabPool);\n        TabRestoreDetails details =\n\
+      \                new TabRestoreDetails(\n                        101, 0, TriState.FALSE, \"https://google.com/\", /*\
+      \ fromMerge= */ false);\n        Tab newTab = mock(Tab.class);\n        when(newTab.getId()).thenReturn(101);\n    \
+      \    when(mNormalTabCreator.createNewTab(any(), anyInt(), any(), anyInt())).thenReturn(newTab);\n        when(mNormalTabModel.indexOf(newTab)).thenReturn(0);\n\
+      \        when(mBackgroundTabPool.getAllPlaceholderTabIds()).thenReturn(Set.of(101));\n\n        mPersistentStore =\n\
+      \                new TabPersistentStoreImpl(\n                        TabOrchestratorType.CUSTOM,\n                \
+      \        mPersistencePolicy,\n                        mTabModelSelector,\n                        mTabCreatorManager,\n\
+      \                        mTabWindowManager,\n                        mCipherFactory,\n                        /* isAuthoritative=\
+      \ */ true,\n                        /* recordLegacyTabCountMetrics= */ true);\n\n        mPersistentStore.initializeRestoreVars(\n\
+      \                /* ignoreIncognitoFiles= */ false, /* ignoreRegularFiles= */ false);\n        mPersistentStore.restoreTabs(/*\
+      \ setActiveTab= */ true);\n        mPersistentStore.restoreTab(details, /* tabState= */ null, /* setAsActive= */ false);\n\
+      \n        verify(mBackgroundTabPool, never()).getAllPlaceholderTabIds();\n        verify(mBackgroundTabPool, never()).loadTabByPlaceholderId(anyInt());\n\
+      \        verify(mNormalTabCreator).createNewTab(any(), anyInt(), any(), anyInt());\n    }\n"
+    replace: "    @Test\n    public void testRestoreTab_nonTabbed_urlOnly() {\n        TabRestoreDetails details =\n     \
+      \           new TabRestoreDetails(\n                        101, 0, TriState.FALSE, \"https://google.com/\", /* fromMerge=\
+      \ */ false);\n        Tab newTab = mock(Tab.class);\n        when(newTab.getId()).thenReturn(101);\n        when(mNormalTabCreator.createNewTab(any(),\
+      \ anyInt(), any(), anyInt())).thenReturn(newTab);\n        when(mNormalTabModel.indexOf(newTab)).thenReturn(0);\n\n\
+      \        mPersistentStore =\n                new TabPersistentStoreImpl(\n                        TabOrchestratorType.CUSTOM,\n\
+      \                        mPersistencePolicy,\n                        mTabModelSelector,\n                        mTabCreatorManager,\n\
+      \                        mTabWindowManager,\n                        mCipherFactory,\n                        /* isAuthoritative=\
+      \ */ true,\n                        /* recordLegacyTabCountMetrics= */ true);\n\n        mPersistentStore.initializeRestoreVars(\n\
+      \                /* ignoreIncognitoFiles= */ false, /* ignoreRegularFiles= */ false);\n        mPersistentStore.restoreTabs(/*\
+      \ setActiveTab= */ true);\n        mPersistentStore.restoreTab(details, /* tabState= */ null, /* setAsActive= */ false);\n\
+      \n        verify(mNormalTabCreator).createNewTab(any(), anyInt(), any(), anyInt());\n    }\n"
+  count: 1
+- description: Preserve ordinary restoration assertions while retiring Actor setup in testRestoreTab_backgroundTabPoolFeatureDisabled.
+  regex:
+    pattern: "    @Test\n    @DisableFeatures(ChromeFeatureList.GLIC_BACKGROUND_ACTUATION)\n    public void testRestoreTab_backgroundTabPoolFeatureDisabled()\
+      \ {\n        BackgroundTabPoolManager.setPoolForTesting(mBackgroundTabPool);\n        TabRestoreDetails details =\n\
+      \                new TabRestoreDetails(\n                        101, 0, TriState.FALSE, \"https://google.com/\", /*\
+      \ fromMerge= */ false);\n        Tab newTab = mock(Tab.class);\n        when(newTab.getId()).thenReturn(101);\n    \
+      \    when(mNormalTabCreator.createNewTab(any(), anyInt(), any(), anyInt())).thenReturn(newTab);\n        when(mNormalTabModel.indexOf(newTab)).thenReturn(0);\n\
+      \n        mPersistentStore =\n                new TabPersistentStoreImpl(\n                        TabOrchestratorType.TABBED,\n\
+      \                        mPersistencePolicy,\n                        mTabModelSelector,\n                        mTabCreatorManager,\n\
+      \                        mTabWindowManager,\n                        mCipherFactory,\n                        /* isAuthoritative=\
+      \ */ true,\n                        /* recordLegacyTabCountMetrics= */ true);\n\n        mPersistentStore.initializeRestoreVars(\n\
+      \                /* ignoreIncognitoFiles= */ false, /* ignoreRegularFiles= */ false);\n        mPersistentStore.restoreTabs(/*\
+      \ setActiveTab= */ true);\n        mPersistentStore.restoreTab(details, /* tabState= */ null, /* setAsActive= */ false);\n\
+      \n        verify(mBackgroundTabPool, never()).getAllPlaceholderTabIds();\n        verify(mBackgroundTabPool, never()).loadTabByPlaceholderId(anyInt());\n\
+      \        verify(mNormalTabCreator).createNewTab(any(), anyInt(), any(), anyInt());\n    }\n"
+    replace: "    @Test\n    public void testRestoreTab_urlOnlyUsesNormalCreator() {\n        TabRestoreDetails details =\n\
+      \                new TabRestoreDetails(\n                        101, 0, TriState.FALSE, \"https://google.com/\", /*\
+      \ fromMerge= */ false);\n        Tab newTab = mock(Tab.class);\n        when(newTab.getId()).thenReturn(101);\n    \
+      \    when(mNormalTabCreator.createNewTab(any(), anyInt(), any(), anyInt())).thenReturn(newTab);\n        when(mNormalTabModel.indexOf(newTab)).thenReturn(0);\n\
+      \n        mPersistentStore =\n                new TabPersistentStoreImpl(\n                        TabOrchestratorType.TABBED,\n\
+      \                        mPersistencePolicy,\n                        mTabModelSelector,\n                        mTabCreatorManager,\n\
+      \                        mTabWindowManager,\n                        mCipherFactory,\n                        /* isAuthoritative=\
+      \ */ true,\n                        /* recordLegacyTabCountMetrics= */ true);\n\n        mPersistentStore.initializeRestoreVars(\n\
+      \                /* ignoreIncognitoFiles= */ false, /* ignoreRegularFiles= */ false);\n        mPersistentStore.restoreTabs(/*\
+      \ setActiveTab= */ true);\n        mPersistentStore.restoreTab(details, /* tabState= */ null, /* setAsActive= */ false);\n\
+      \n        verify(mNormalTabCreator).createNewTab(any(), anyInt(), any(), anyInt());\n    }\n"
+  count: 1
+- description: Preserve ordinary restoration assertions while retiring Actor setup in testRestoreTab_incognito_skipsBackgroundTabPool.
+  regex:
+    pattern: "    @Test\n    @EnableFeatures(ChromeFeatureList.GLIC_BACKGROUND_ACTUATION)\n    public void testRestoreTab_incognito_skipsBackgroundTabPool()\
+      \ {\n        BackgroundTabPoolManager.setPoolForTesting(mBackgroundTabPool);\n        TabRestoreDetails details =\n\
+      \                new TabRestoreDetails(\n                        101, 0, TriState.TRUE, \"https://google.com/\", /*\
+      \ fromMerge= */ false);\n        Tab tab = mock(Tab.class);\n        when(tab.getId()).thenReturn(101);\n        TabState\
+      \ tabState = new TabState();\n        tabState.isIncognito = true;\n        when(mIncognitoTabCreator.createFrozenTab(eq(tabState),\
+      \ eq(101), eq(0))).thenReturn(tab);\n        when(mIncognitoTabModel.indexOf(tab)).thenReturn(0);\n\n        mPersistentStore\
+      \ =\n                new TabPersistentStoreImpl(\n                        TabOrchestratorType.TABBED,\n            \
+      \            mPersistencePolicy,\n                        mTabModelSelector,\n                        mTabCreatorManager,\n\
+      \                        mTabWindowManager,\n                        mCipherFactory,\n                        /* isAuthoritative=\
+      \ */ true,\n                        /* recordLegacyTabCountMetrics= */ true);\n\n        mPersistentStore.initializeRestoreVars(\n\
+      \                /* ignoreIncognitoFiles= */ false, /* ignoreRegularFiles= */ false);\n        mPersistentStore.restoreTabs(/*\
+      \ setActiveTab= */ true);\n        mPersistentStore.restoreTab(details, tabState, /* setAsActive= */ false);\n\n   \
+      \     verify(mBackgroundTabPool, never()).loadTabByPlaceholderId(anyInt());\n        verify(mIncognitoTabCreator).createFrozenTab(eq(tabState),\
+      \ eq(101), eq(0));\n    }\n"
+    replace: "    @Test\n    public void testRestoreTab_incognito_frozenTab() {\n        TabRestoreDetails details =\n   \
+      \             new TabRestoreDetails(\n                        101, 0, TriState.TRUE, \"https://google.com/\", /* fromMerge=\
+      \ */ false);\n        Tab tab = mock(Tab.class);\n        when(tab.getId()).thenReturn(101);\n        TabState tabState\
+      \ = new TabState();\n        tabState.isIncognito = true;\n        when(mIncognitoTabCreator.createFrozenTab(eq(tabState),\
+      \ eq(101), eq(0))).thenReturn(tab);\n        when(mIncognitoTabModel.indexOf(tab)).thenReturn(0);\n\n        mPersistentStore\
+      \ =\n                new TabPersistentStoreImpl(\n                        TabOrchestratorType.TABBED,\n            \
+      \            mPersistencePolicy,\n                        mTabModelSelector,\n                        mTabCreatorManager,\n\
+      \                        mTabWindowManager,\n                        mCipherFactory,\n                        /* isAuthoritative=\
+      \ */ true,\n                        /* recordLegacyTabCountMetrics= */ true);\n\n        mPersistentStore.initializeRestoreVars(\n\
+      \                /* ignoreIncognitoFiles= */ false, /* ignoreRegularFiles= */ false);\n        mPersistentStore.restoreTabs(/*\
+      \ setActiveTab= */ true);\n        mPersistentStore.restoreTab(details, tabState, /* setAsActive= */ false);\n\n   \
+      \     verify(mIncognitoTabCreator).createFrozenTab(eq(tabState), eq(101), eq(0));\n    }\n"
+  count: 1
+- description: Preserve ordinary restoration assertions while retiring Actor setup in testRestoreTab_poolLoadFailure_fallsBackToTabCreator.
+  regex:
+    pattern: "    @Test\n    @EnableFeatures(ChromeFeatureList.GLIC_BACKGROUND_ACTUATION)\n    public void testRestoreTab_poolLoadFailure_fallsBackToTabCreator()\
+      \ {\n        BackgroundTabPoolManager.setPoolForTesting(mBackgroundTabPool);\n        when(mBackgroundTabPool.getAllPlaceholderTabIds()).thenReturn(Set.of(101));\n\
+      \        when(mBackgroundTabPool.loadTabByPlaceholderId(101)).thenReturn(null);\n\n        TabRestoreDetails details\
+      \ =\n                new TabRestoreDetails(\n                        101, 0, TriState.FALSE, \"https://google.com/\"\
+      , /* fromMerge= */ false);\n        TabState tabState = new TabState();\n        Tab fallbackTab = mock(Tab.class);\n\
+      \        when(fallbackTab.getId()).thenReturn(101);\n        when(fallbackTab.getUrl()).thenReturn(new GURL(\"https://google.com/\"\
+      ));\n        when(mNormalTabCreator.createFrozenTab(eq(tabState), eq(101), eq(0)))\n                .thenReturn(fallbackTab);\n\
+      \        when(mNormalTabModel.indexOf(fallbackTab)).thenReturn(0);\n\n        mPersistentStore =\n                new\
+      \ TabPersistentStoreImpl(\n                        TabOrchestratorType.TABBED,\n                        mPersistencePolicy,\n\
+      \                        mTabModelSelector,\n                        mTabCreatorManager,\n                        mTabWindowManager,\n\
+      \                        mCipherFactory,\n                        /* isAuthoritative= */ true,\n                   \
+      \     /* recordLegacyTabCountMetrics= */ true);\n\n        mPersistentStore.initializeRestoreVars(\n               \
+      \ /* ignoreIncognitoFiles= */ false, /* ignoreRegularFiles= */ false);\n        mPersistentStore.restoreTabs(/* setActiveTab=\
+      \ */ true);\n        mPersistentStore.restoreTab(details, tabState, /* setAsActive= */ false);\n\n        verify(mBackgroundTabPool).getAllPlaceholderTabIds();\n\
+      \        verify(mBackgroundTabPool).loadTabByPlaceholderId(101);\n        verify(mNormalTabCreator).createFrozenTab(eq(tabState),\
+      \ eq(101), eq(0));\n    }\n"
+    replace: "    @Test\n    public void testRestoreTab_regular_frozenTab() {\n\n        TabRestoreDetails details =\n   \
+      \             new TabRestoreDetails(\n                        101, 0, TriState.FALSE, \"https://google.com/\", /* fromMerge=\
+      \ */ false);\n        TabState tabState = new TabState();\n        Tab fallbackTab = mock(Tab.class);\n        when(fallbackTab.getId()).thenReturn(101);\n\
+      \        when(fallbackTab.getUrl()).thenReturn(new GURL(\"https://google.com/\"));\n        when(mNormalTabCreator.createFrozenTab(eq(tabState),\
+      \ eq(101), eq(0)))\n                .thenReturn(fallbackTab);\n        when(mNormalTabModel.indexOf(fallbackTab)).thenReturn(0);\n\
+      \n        mPersistentStore =\n                new TabPersistentStoreImpl(\n                        TabOrchestratorType.TABBED,\n\
+      \                        mPersistencePolicy,\n                        mTabModelSelector,\n                        mTabCreatorManager,\n\
+      \                        mTabWindowManager,\n                        mCipherFactory,\n                        /* isAuthoritative=\
+      \ */ true,\n                        /* recordLegacyTabCountMetrics= */ true);\n\n        mPersistentStore.initializeRestoreVars(\n\
+      \                /* ignoreIncognitoFiles= */ false, /* ignoreRegularFiles= */ false);\n        mPersistentStore.restoreTabs(/*\
+      \ setActiveTab= */ true);\n        mPersistentStore.restoreTab(details, tabState, /* setAsActive= */ false);\n\n   \
+      \     verify(mNormalTabCreator).createFrozenTab(eq(tabState), eq(101), eq(0));\n    }\n"
+  count: 1
+- description: Remove retired Actor-only imports.
+  regex:
+    pattern: 'import org.chromium.chrome.browser.actor.BackgroundPoolTab;
+
+      import org.chromium.chrome.browser.actor.BackgroundTabPool;
+
+      import org.chromium.chrome.browser.actor.BackgroundTabPoolManager;
+
+      '
+    replace: ''
+  count: 1
+- description: Remove the unused Actor fixture mock.
+  regex:
+    pattern: '    @Mock private BackgroundTabPool mBackgroundTabPool;
+
+      '
+    replace: ''
+  count: 1
+- description: Remove the retired Actor singleton teardown.
+  regex:
+    pattern: '        BackgroundTabPoolManager.resetForTesting();
+
+      '
+    replace: ''
+  count: 1
+- description: Remove the Set import used only by retired Actor setup.
+  regex:
+    pattern: 'import java.util.Set;
+
+      '
+    replace: ''
+  count: 1
+- description: Import the existing Robolectric shadow annotations.
+  regex:
+    pattern: 'import org.mockito.junit.MockitoRule;
+
+      '
+    replace: 'import org.mockito.junit.MockitoRule;
+
+      import org.robolectric.annotation.Config;
+
+      import org.robolectric.annotation.Implementation;
+
+      import org.robolectric.annotation.Implements;
+
+      '
+  count: 1
+- description: Import the retained container identity boundary.
+  regex:
+    pattern: 'import org.chromium.chrome.browser.crypto.CipherFactory;
+
+      '
+    replace: 'import org.chromium.chrome.browser.containers.ContainersBridge;
+
+      import org.chromium.chrome.browser.crypto.CipherFactory;
+
+      '
+  count: 1
+- description: Use the existing local identity-shadow pattern for ordinary restore tests.
+  regex:
+    pattern: '@RunWith(BaseRobolectricTestRunner.class)
+
+      '
+    replace: '@RunWith(BaseRobolectricTestRunner.class)
+
+      @Config(shadows = {TabPersistentStoreUnitTest.ShadowContainersBridge.class})
+
+      '
+  count: 1
+- description: Add the narrow identity boundary shadow and reset its observations per test.
+  regex:
+    pattern: '    private CipherFactory mCipherFactory;
+
+      '
+    replace: "    private CipherFactory mCipherFactory;\n\n    private static final String CONTAINER_ID = \"11111111-2222-4333-8444-555555555555\"\
+      ;\n\n    /** Exercises creator dispatch without initializing the native identity service. */\n    @Implements(value\
+      \ = ContainersBridge.class, isInAndroidSdk = false)\n    public static class ShadowContainersBridge {\n        private\
+      \ static boolean sRestoreSucceeded;\n        private static Profile sRestoredProfile;\n        private static String\
+      \ sRestoredContainerId;\n        private static int sRestoreCallCount;\n\n        @Implementation\n        protected\
+      \ static boolean restoreContainerIdentity(Profile profile, String containerId) {\n            sRestoredProfile = profile;\n\
+      \            sRestoredContainerId = containerId;\n            sRestoreCallCount++;\n            return sRestoreSucceeded;\n\
+      \        }\n    }\n\n    private RecordingTabCreatorManager initializeRecordingRestoreStore(\n            @TabOrchestratorType\
+      \ int orchestratorType) {\n        RecordingTabCreatorManager manager = new RecordingTabCreatorManager(mTabCreatorManager);\n\
+      \        mPersistentStore =\n                new TabPersistentStoreImpl(\n                        orchestratorType,\n\
+      \                        mPersistencePolicy,\n                        mTabModelSelector,\n                        manager,\n\
+      \                        mTabWindowManager,\n                        mCipherFactory,\n                        /* isAuthoritative=\
+      \ */ true,\n                        /* recordLegacyTabCountMetrics= */ true);\n        mPersistentStore.initializeRestoreVars(\n\
+      \                /* ignoreIncognitoFiles= */ false, /* ignoreRegularFiles= */ false);\n        return manager;\n   \
+      \ }\n"
+  count: 1
+- description: Reset only the new local shadow observations before each existing setup.
+  regex:
+    pattern: '    public void setUp() {
+
+      '
+    replace: "    public void setUp() {\n        ShadowContainersBridge.sRestoreSucceeded = false;\n        ShadowContainersBridge.sRestoredProfile\
+      \ = null;\n        ShadowContainersBridge.sRestoredContainerId = null;\n        ShadowContainersBridge.sRestoreCallCount\
+      \ = 0;\n"
+  count: 1
+- description: Add four ordinary real recording-manager regressions for legacy URL fallback.
+  regex:
+    pattern: "    @Test\n    public void testSeenTabUrlMap_lifecycleAndMetrics() {"
+    replace: "    @Test\n    @EnableFeatures(ChromeFeatureList.TAB_STORAGE_SQLITE_PROTOTYPE)\n    public void testRestoreTab_recordingManagerNamedContainer()\
+      \ {\n        ChromeTabCreator creator = mock(ChromeTabCreator.class);\n        when(mTabCreatorManager.getTabCreator(false)).thenReturn(creator);\n\
+      \        Tab restoredTab = mock(Tab.class);\n        when(restoredTab.getId()).thenReturn(201);\n        when(mNormalTabModel.indexOf(restoredTab)).thenReturn(0);\n\
+      \        when(creator.createNewTabInContainer(\n                        any(), eq(TabLaunchType.FROM_RESTORE), eq(CONTAINER_ID),\
+      \ eq(0)))\n                .thenReturn(restoredTab);\n        ShadowContainersBridge.sRestoreSucceeded = true;\n   \
+      \     RecordingTabCreatorManager manager =\n                initializeRecordingRestoreStore(TabOrchestratorType.TABBED);\n\
+      \n        mPersistentStore.restoreTab(\n                new TabRestoreDetails(\n                        101, 0, TriState.FALSE,\
+      \ REGULAR_TAB_STRING_1, false, CONTAINER_ID),\n                /* tabState= */ null,\n                /* setAsActive=\
+      \ */ false);\n\n        verify(creator)\n                .createNewTabInContainer(\n                        argThat(new\
+      \ LoadUrlParamsUrlMatcher(REGULAR_TAB_STRING_1)),\n                        eq(TabLaunchType.FROM_RESTORE),\n       \
+      \                 eq(CONTAINER_ID),\n                        eq(0));\n        verify(creator, never()).createNewTab(any(),\
+      \ anyInt(), any(), anyInt());\n        verify(mNormalTabModel).indexOf(restoredTab);\n        assertEquals(mProfile,\
+      \ ShadowContainersBridge.sRestoredProfile);\n        assertEquals(CONTAINER_ID, ShadowContainersBridge.sRestoredContainerId);\n\
+      \        assertEquals(1, ShadowContainersBridge.sRestoreCallCount);\n        RecordingTabCreator recorder = manager.getRecorder(/*\
+      \ incognito= */ false);\n        assertThat(recorder).isNotNull();\n        assertThat(recorder.getRegularFallbackTabs()).containsExactly(101,\
+      \ REGULAR_TAB_STRING_1);\n        assertEquals(1, recorder.getTabCount());\n        assertThat(recorder.getNewTabCreationData()).hasSize(1);\n\
+      \        assertEquals(REGULAR_TAB_STRING_1, recorder.getNewTabCreationData().get(0).url);\n    }\n\n    @Test\n    @EnableFeatures(ChromeFeatureList.TAB_STORAGE_SQLITE_PROTOTYPE)\n\
+      \    public void testRestoreTab_recordingManagerArchivedContainer() {\n        ArchivedTabCreator creator = mock(ArchivedTabCreator.class);\n\
+      \        when(mTabCreatorManager.getTabCreator(false)).thenReturn(creator);\n        Tab restoredTab = mock(Tab.class);\n\
+      \        when(restoredTab.getId()).thenReturn(201);\n        when(mNormalTabModel.indexOf(restoredTab)).thenReturn(0);\n\
+      \        when(creator.createNewTabInContainer(\n                        any(), eq(TabLaunchType.FROM_RESTORE), eq(CONTAINER_ID),\
+      \ eq(0)))\n                .thenReturn(restoredTab);\n        ShadowContainersBridge.sRestoreSucceeded = true;\n   \
+      \     RecordingTabCreatorManager manager =\n                initializeRecordingRestoreStore(TabOrchestratorType.ARCHIVED);\n\
+      \n        mPersistentStore.restoreTab(\n                new TabRestoreDetails(\n                        101, 0, TriState.FALSE,\
+      \ REGULAR_TAB_STRING_1, false, CONTAINER_ID),\n                /* tabState= */ null,\n                /* setAsActive=\
+      \ */ false);\n\n        verify(creator)\n                .createNewTabInContainer(\n                        argThat(new\
+      \ LoadUrlParamsUrlMatcher(REGULAR_TAB_STRING_1)),\n                        eq(TabLaunchType.FROM_RESTORE),\n       \
+      \                 eq(CONTAINER_ID),\n                        eq(0));\n        verify(creator, never()).createNewTab(any(),\
+      \ anyInt(), any(), anyInt());\n        verify(mNormalTabModel).indexOf(restoredTab);\n        assertEquals(mProfile,\
+      \ ShadowContainersBridge.sRestoredProfile);\n        assertEquals(CONTAINER_ID, ShadowContainersBridge.sRestoredContainerId);\n\
+      \        assertEquals(1, ShadowContainersBridge.sRestoreCallCount);\n        RecordingTabCreator recorder = manager.getRecorder(/*\
+      \ incognito= */ false);\n        assertThat(recorder).isNotNull();\n        assertThat(recorder.getRegularFallbackTabs()).containsExactly(101,\
+      \ REGULAR_TAB_STRING_1);\n        assertEquals(1, recorder.getTabCount());\n        assertThat(recorder.getNewTabCreationData()).hasSize(1);\n\
+      \        assertEquals(REGULAR_TAB_STRING_1, recorder.getNewTabCreationData().get(0).url);\n    }\n\n    @Test\n    @EnableFeatures(ChromeFeatureList.TAB_STORAGE_SQLITE_PROTOTYPE)\n\
+      \    public void testRestoreTab_recordingManagerDefaultContainer() {\n        Tab restoredTab = mock(Tab.class);\n \
+      \       when(restoredTab.getId()).thenReturn(201);\n        when(mNormalTabModel.indexOf(restoredTab)).thenReturn(0);\n\
+      \        when(mNormalTabCreator.createNewTab(\n                        any(), eq(TabLaunchType.FROM_RESTORE), isNull(),\
+      \ eq(0)))\n                .thenReturn(restoredTab);\n        RecordingTabCreatorManager manager =\n               \
+      \ initializeRecordingRestoreStore(TabOrchestratorType.TABBED);\n\n        mPersistentStore.restoreTab(\n           \
+      \     new TabRestoreDetails(\n                        101, 0, TriState.FALSE, REGULAR_TAB_STRING_1, false, \"\"),\n\
+      \                /* tabState= */ null,\n                /* setAsActive= */ false);\n\n        verify(mNormalTabCreator)\n\
+      \                .createNewTab(\n                        argThat(new LoadUrlParamsUrlMatcher(REGULAR_TAB_STRING_1)),\n\
+      \                        eq(TabLaunchType.FROM_RESTORE),\n                        isNull(),\n                      \
+      \  eq(0));\n        verify(mNormalTabCreator, never())\n                .createNewTabInContainer(any(), anyInt(), any(),\
+      \ anyInt());\n        verify(mNormalTabModel).indexOf(restoredTab);\n        assertEquals(0, ShadowContainersBridge.sRestoreCallCount);\n\
+      \        RecordingTabCreator recorder = manager.getRecorder(/* incognito= */ false);\n        assertThat(recorder).isNotNull();\n\
+      \        assertThat(recorder.getRegularFallbackTabs()).containsExactly(101, REGULAR_TAB_STRING_1);\n        assertEquals(1,\
+      \ recorder.getTabCount());\n        assertThat(recorder.getNewTabCreationData()).hasSize(1);\n        assertEquals(REGULAR_TAB_STRING_1,\
+      \ recorder.getNewTabCreationData().get(0).url);\n    }\n\n    @Test\n    @EnableFeatures(ChromeFeatureList.TAB_STORAGE_SQLITE_PROTOTYPE)\n\
+      \    public void testRestoreTab_recordingManagerUnavailableContainer() {\n        RecordingTabCreatorManager manager\
+      \ =\n                initializeRecordingRestoreStore(TabOrchestratorType.TABBED);\n\n        mPersistentStore.restoreTab(\n\
+      \                new TabRestoreDetails(\n                        101, 0, TriState.FALSE, REGULAR_TAB_STRING_1, false,\
+      \ CONTAINER_ID),\n                /* tabState= */ null,\n                /* setAsActive= */ false);\n\n        verify(mNormalTabCreator,\
+      \ never())\n                .createNewTabInContainer(any(), anyInt(), any(), anyInt());\n        verify(mNormalTabCreator,\
+      \ never()).createNewTab(any(), anyInt(), any(), anyInt());\n        assertEquals(mProfile, ShadowContainersBridge.sRestoredProfile);\n\
+      \        assertEquals(CONTAINER_ID, ShadowContainersBridge.sRestoredContainerId);\n        assertEquals(1, ShadowContainersBridge.sRestoreCallCount);\n\
+      \        RecordingTabCreator recorder = manager.getRecorder(/* incognito= */ false);\n        assertThat(recorder).isNotNull();\n\
+      \        assertThat(recorder.getRegularFallbackTabs()).containsExactly(101, REGULAR_TAB_STRING_1);\n        assertEquals(0,\
+      \ recorder.getTabCount());\n        assertThat(recorder.getNewTabCreationData()).isEmpty();\n    }\n\n    @Test\n  \
+      \  public void testSeenTabUrlMap_lifecycleAndMetrics() {"
+  count: 1
+- description: Read the saved metadata in the interrupted-restore regression
+  regex:
+    pattern: 'import java.io.File;
+
+      '
+    replace: 'import java.io.DataInputStream;
+
+      import java.io.File;
+
+      import java.io.FileInputStream;
+
+      '
+  count: 1
+- description: Extend queued-tab serialization coverage to unknown legacy identities
+  regex:
+    pattern: "                RESTORE_TAB_STRING_3,\n                metadata.incognitoModelMetadata.urls.get(3));\n    }\n"
+    replace: "                RESTORE_TAB_STRING_3,\n                metadata.incognitoModelMetadata.urls.get(3));\n        // Queued pre-container rows must not become explicit Default on an intervening save.\n        assertNull(metadata.normalModelMetadata.containerIds.get(1));\n        assertNull(metadata.incognitoModelMetadata.containerIds.get(2));\n        assertNull(metadata.incognitoModelMetadata.containerIds.get(3));\n    }\n"
+  count: 1
+- description: Cover save/read before restoring an authoritative named legacy TabState
+  regex:
+    pattern: "    @Test\n    public void testRestoreTab_regular_frozenTab() {"
+    replace: "    @Test\n    public void testRestoreNamedLegacyTabAfterMetadataSaveDuringRestore() throws Exception {\n        when(mNormalTabModel.index()).thenReturn(TabModel.INVALID_TAB_INDEX);\n        when(mIncognitoTabModel.index()).thenReturn(TabModel.INVALID_TAB_INDEX);\n        TabRestoreDetails pending =\n                new TabRestoreDetails(\n                        101, 0, TriState.FALSE, REGULAR_TAB_STRING_1, /* fromMerge= */ false);\n        TabModelSelectorMetadata metadata =\n                TabPersistentStoreImpl.extractTabMetadataFromSelector(\n                        mTabModelSelector, List.of(pending), /* isRecreating= */ false);\n        File file = mTemporaryFolder.newFile(\"legacy_container_metadata\");\n        TabMetadataFileManager.saveListToFile(file, metadata);\n        List<TabRestoreDetails> reread = new ArrayList<>();\n        try (DataInputStream stream = new DataInputStream(new FileInputStream(file))) {\n            TabMetadataFileManager.readSavedMetadataFile(\n\
+      \                    stream,\n                    new TabMetadataFileManager.OnTabStateReadCallback() {\n                        @Override\n                        public void onDetailsRead(\n                                int index, int id, String url, int incognito,\n                                boolean normalActive, boolean otrActive) {}\n\n                        @Override\n                        public void onDetailsReadWithContainer(\n                                int index, int id, String url, int incognito,\n                                boolean normalActive, boolean otrActive, String containerId) {\n                            reread.add(\n                                    new TabRestoreDetails(\n                                            id, index, incognito, url, false, containerId));\n                        }\n                    },\n                    null);\n        }\n        assertEquals(1, reread.size());\n        assertNull(reread.get(0).containerId);\n\
+      \n        // The saved per-tab state, not an invented Default identity, chooses this tab's jar.\n        TabState state = new TabState();\n        state.containerId = CONTAINER_ID;\n        Tab restoredTab = mock(Tab.class);\n        when(restoredTab.getId()).thenReturn(101);\n        when(restoredTab.getUrl()).thenReturn(new GURL(REGULAR_TAB_STRING_1));\n        when(mNormalTabCreator.createFrozenTab(eq(state), eq(101), eq(0)))\n                .thenReturn(restoredTab);\n        when(mNormalTabModel.indexOf(restoredTab)).thenReturn(0);\n        mPersistentStore =\n                new TabPersistentStoreImpl(\n                        TabOrchestratorType.TABBED,\n                        mPersistencePolicy,\n                        mTabModelSelector,\n                        mTabCreatorManager,\n                        mTabWindowManager,\n                        mCipherFactory,\n                        /* isAuthoritative= */ true,\n                        /* recordLegacyTabCountMetrics=\
+      \ */ true);\n        mPersistentStore.initializeRestoreVars(\n                /* ignoreIncognitoFiles= */ false, /* ignoreRegularFiles= */ false);\n        mPersistentStore.restoreTabs(/* setActiveTab= */ true);\n        mPersistentStore.restoreTab(reread.get(0), state, /* setAsActive= */ false);\n        verify(mNormalTabCreator).createFrozenTab(eq(state), eq(101), eq(0));\n    }\n\n    @Test\n    public void testRestoreTab_regular_frozenTab() {"
+  count: 1
+- description: Use existing metadata model type in mixed-mode persistence regression
+  regex:
+    pattern: 'import org.chromium.chrome.browser.tabpersistence.TabMetadataFileManager;
+
+      '
+    replace: 'import org.chromium.chrome.browser.tabpersistence.TabMetadataFileManager;
+
+      import org.chromium.chrome.browser.tabpersistence.TabMetadataFileManager.TabModelMetadata;
+
+      '
+  count: 1
+- description: Cover mixed pending metadata over two disk saves and state-authoritative normal restore
+  regex:
+    pattern: "    @Test\n    public void testRestoreTab_regular_frozenTab() {\n"
+    replace: "    @Test\n    public void testMixedPendingContainerMetadataSurvivesTwoSavesAndUsesTabStateMode()\n            throws Exception {\n        when(mNormalTabModel.index()).thenReturn(TabModel.INVALID_TAB_INDEX);\n        when(mIncognitoTabModel.index()).thenReturn(TabModel.INVALID_TAB_INDEX);\n        List<TabRestoreDetails> pending =\n                List.of(\n                        new TabRestoreDetails(\n                                101, 0, TriState.NOT_SET, REGULAR_TAB_STRING_1, false),\n                        new TabRestoreDetails(\n                                102, 1, TriState.FALSE, REGULAR_TAB_STRING_1 + \"?legacy\", false),\n                        new TabRestoreDetails(\n                                103, 2, TriState.FALSE, REGULAR_TAB_STRING_1 + \"?default\", false, \"\"),\n                        new TabRestoreDetails(\n                                104, 3, TriState.FALSE, REGULAR_TAB_STRING_1 + \"?named\", false,\n                                CONTAINER_ID),\n\
+      \                        new TabRestoreDetails(\n                                105, 4, TriState.FALSE, REGULAR_TAB_STRING_1 + \"?temporary\", false,\n                                \"t-\" + CONTAINER_ID),\n                        new TabRestoreDetails(\n                                201, 5, TriState.TRUE, INCOGNITO_TAB_STRING_1 + \"?legacy\", false),\n                        new TabRestoreDetails(\n                                202, 6, TriState.TRUE, INCOGNITO_TAB_STRING_1 + \"?default\", false,\n                                \"\"));\n        TabModelSelectorMetadata metadata =\n                TabPersistentStoreImpl.extractTabMetadataFromSelector(\n                        mTabModelSelector, pending, /* isRecreating= */ false);\n        // Select pending rows at nonzero local indices in both models. The normal index must\n        // account for the OTR prefix on disk, including the legacy row of still-unknown mode.\n        metadata.normalModelMetadata.index = 2;\n       \
+      \ metadata.incognitoModelMetadata.index = 1;\n        assertEquals(List.of(102, 103, 104, 105), metadata.normalModelMetadata.ids);\n        assertEquals(List.of(101, 201, 202), metadata.incognitoModelMetadata.ids);\n\n        List<Integer> expectedIds = List.of(101, 201, 202, 102, 103, 104, 105);\n        List<String> expectedUrls =\n                List.of(\n                        REGULAR_TAB_STRING_1,\n                        INCOGNITO_TAB_STRING_1 + \"?legacy\",\n                        INCOGNITO_TAB_STRING_1 + \"?default\",\n                        REGULAR_TAB_STRING_1 + \"?legacy\",\n                        REGULAR_TAB_STRING_1 + \"?default\",\n                        REGULAR_TAB_STRING_1 + \"?named\",\n                        REGULAR_TAB_STRING_1 + \"?temporary\");\n        List<String> expectedIdentities =\n                java.util.Arrays.asList(null, null, \"\", null, \"\", CONTAINER_ID, \"t-\" + CONTAINER_ID);\n        List<TabRestoreDetails> reread = new ArrayList<>();\n\
+      \        for (int cycle = 0; cycle < 2; cycle++) {\n            File file = mTemporaryFolder.newFile(\"mixed_container_metadata_\" + cycle);\n            TabMetadataFileManager.saveListToFile(file, metadata);\n            TabModelMetadata copiedNormal = new TabModelMetadata(TabModel.INVALID_TAB_INDEX);\n            TabModelMetadata copiedOtr = new TabModelMetadata(TabModel.INVALID_TAB_INDEX);\n            List<Integer> callbackIndices = new ArrayList<>();\n            reread.clear();\n            try (DataInputStream stream = new DataInputStream(new FileInputStream(file))) {\n                int nextId =\n                        TabMetadataFileManager.readSavedMetadataFile(\n                                stream,\n                                new TabMetadataFileManager.OnTabStateReadCallback() {\n                                    @Override\n                                    public void onDetailsRead(\n                                            int index, int id, String url,\
+      \ int incognito,\n                                            boolean normalActive, boolean otrActive) {}\n\n                                    @Override\n                                    public void onDetailsReadWithContainer(\n                                            int index, int id, String url, int incognito,\n                                            boolean normalActive, boolean otrActive,\n                                            String containerId) {\n                                        callbackIndices.add(index);\n                                        assertEquals(expectedIds.get(index).intValue(), id);\n                                        assertEquals(expectedUrls.get(index), url);\n                                        assertEquals(expectedIdentities.get(index), containerId);\n                                        assertEquals(\n                                                index < 3 ? TriState.TRUE : TriState.FALSE,\n                       \
+      \                         incognito);\n                                        assertEquals(index == 5, normalActive);\n                                        assertEquals(index == 1, otrActive);\n                                        TabModelMetadata copied =\n                                                incognito == TriState.TRUE\n                                                        ? copiedOtr : copiedNormal;\n                                        int localIndex = copied.ids.size();\n                                        copied.ids.add(id);\n                                        copied.urls.add(url);\n                                        copied.containerIds.add(containerId);\n                                        if (normalActive) copiedNormal.index = localIndex;\n                                        if (otrActive) copiedOtr.index = localIndex;\n                                        reread.add(\n                                                new TabRestoreDetails(\n\
+      \                                                        id, index, incognito, url, false,\n                                                        containerId));\n                                    }\n                                },\n                                null);\n                assertEquals(203, nextId);\n            }\n            assertEquals(List.of(0, 1, 2, 3, 4, 5, 6), callbackIndices);\n            assertEquals(7, reread.size());\n            assertEquals(2, copiedNormal.index);\n            assertEquals(1, copiedOtr.index);\n            assertEquals(List.of(102, 103, 104, 105), copiedNormal.ids);\n            assertEquals(List.of(101, 201, 202), copiedOtr.ids);\n            assertEquals(\n                    java.util.Arrays.asList(null, \"\", CONTAINER_ID, \"t-\" + CONTAINER_ID),\n                    copiedNormal.containerIds);\n            assertEquals(java.util.Arrays.asList(null, null, \"\"), copiedOtr.containerIds);\n            // The second iteration writes\
+      \ what the real reader returned, without converting null\n            // identities to explicit Default or changing either active model index.\n            metadata = new TabModelSelectorMetadata(copiedNormal, copiedOtr);\n        }\n\n        // NOT_SET is parked in the OTR metadata prefix, but a recovered normal TabState must\n        // still choose the normal model. Named/temp identities above belong only to normal rows.\n        assertEquals(TriState.NOT_SET, pending.get(0).isIncognito);\n        assertEquals(TriState.TRUE, reread.get(0).isIncognito);\n        assertNull(reread.get(0).containerId);\n        TabState state = new TabState();\n        state.isIncognito = false;\n        state.containerId = CONTAINER_ID;\n        Tab restoredTab = mock(Tab.class);\n        when(restoredTab.getId()).thenReturn(101);\n        when(restoredTab.getUrl()).thenReturn(new GURL(REGULAR_TAB_STRING_1));\n        when(mNormalTabCreator.createFrozenTab(eq(state), eq(101), eq(0)))\n          \
+      \      .thenReturn(restoredTab);\n        when(mNormalTabModel.indexOf(restoredTab)).thenReturn(0);\n        mPersistentStore =\n                new TabPersistentStoreImpl(\n                        TabOrchestratorType.TABBED,\n                        mPersistencePolicy,\n                        mTabModelSelector,\n                        mTabCreatorManager,\n                        mTabWindowManager,\n                        mCipherFactory,\n                        /* isAuthoritative= */ true,\n                        /* recordLegacyTabCountMetrics= */ true);\n        mPersistentStore.initializeRestoreVars(\n                /* ignoreIncognitoFiles= */ false, /* ignoreRegularFiles= */ false);\n        mPersistentStore.restoreTabs(/* setActiveTab= */ true);\n        mPersistentStore.restoreTab(reread.get(0), state, /* setAsActive= */ false);\n        verify(mNormalTabCreator).createFrozenTab(eq(state), eq(101), eq(0));\n\n        // A known Default row must still conflict with named\
+      \ state, and a genuine OTR row\n        // without per-tab state must not fall back to loading its non-NTP URL.\n        assertEquals(\"\", reread.get(4).containerId);\n        assertEquals(TriState.FALSE, reread.get(4).isIncognito);\n        mPersistentStore.restoreTab(reread.get(4), state, /* setAsActive= */ false);\n        assertEquals(TriState.TRUE, reread.get(1).isIncognito);\n        assertNull(reread.get(1).containerId);\n        mPersistentStore.restoreTab(reread.get(1), null, /* setAsActive= */ false);\n        verifyNoMoreInteractions(mNormalTabCreator, mIncognitoTabCreator);\n    }\n\n    @Test\n    public void testRestoreTab_regular_frozenTab() {\n"
+  count: 1
+- description: "Replace application shadows with explicit test seams (1)"
+  regex:
+    pattern: "import org.mockito.Mock;\nimport org.mockito.junit.MockitoJUnit;\nimport org.mockito.junit.MockitoRule;\nimport org.robolectric.annotation.Config;\nimport org.robolectric.annotation.Implementation;\nimport org.robolectric.annotation.Implements;\n\nimport org.chromium.base.Token;\nimport org.chromium.base.TriState;\n"
+    replace: "import org.mockito.Mock;\nimport org.mockito.junit.MockitoJUnit;\nimport org.mockito.junit.MockitoRule;\n\nimport org.chromium.base.Token;\nimport org.chromium.base.TriState;\n"
+  count: 1
+- description: "Replace application shadows with explicit test seams (2)"
+  regex:
+    pattern: "import org.chromium.base.test.util.Features.EnableFeatures;\nimport org.chromium.base.test.util.HistogramWatcher;\nimport org.chromium.chrome.browser.app.tabmodel.AsyncTabParamsManagerSingleton;\nimport org.chromium.chrome.browser.containers.ContainersBridge;\nimport org.chromium.chrome.browser.crypto.CipherFactory;\nimport org.chromium.chrome.browser.flags.ChromeFeatureList;\nimport org.chromium.chrome.browser.profiles.Profile;\n"
+    replace: "import org.chromium.base.test.util.Features.EnableFeatures;\nimport org.chromium.base.test.util.HistogramWatcher;\nimport org.chromium.chrome.browser.app.tabmodel.AsyncTabParamsManagerSingleton;\nimport org.chromium.chrome.browser.containers.ContainersBridgeRestoreTestSupport;\nimport org.chromium.chrome.browser.crypto.CipherFactory;\nimport org.chromium.chrome.browser.flags.ChromeFeatureList;\nimport org.chromium.chrome.browser.profiles.Profile;\n"
+  count: 1
+- description: "Replace application shadows with explicit test seams (3)"
+  regex:
+    pattern: "\n/** Unit tests for the tab persistent store logic. */\n@RunWith(BaseRobolectricTestRunner.class)\n@Config(shadows = {TabPersistentStoreUnitTest.ShadowContainersBridge.class})\npublic class TabPersistentStoreUnitTest {\n    private static final @TabId int RESTORE_TAB_ID_1 = 31;\n    private static final @TabId int RESTORE_TAB_ID_2 = 32;\n"
+    replace: "\n/** Unit tests for the tab persistent store logic. */\n@RunWith(BaseRobolectricTestRunner.class)\npublic class TabPersistentStoreUnitTest {\n    private static final @TabId int RESTORE_TAB_ID_1 = 31;\n    private static final @TabId int RESTORE_TAB_ID_2 = 32;\n"
+  count: 1
+- description: "Replace application shadows with explicit test seams (4)"
+  regex:
+    pattern: "\n    private static final String CONTAINER_ID = \"11111111-2222-4333-8444-555555555555\";\n\n    /** Exercises creator dispatch without initializing the native identity service. */\n    @Implements(value = ContainersBridge.class, isInAndroidSdk = false)\n    public static class ShadowContainersBridge {\n        private static boolean sRestoreSucceeded;\n        private static Profile sRestoredProfile;\n        private static String sRestoredContainerId;\n        private static int sRestoreCallCount;\n\n        @Implementation\n        protected static boolean restoreContainerIdentity(Profile profile, String containerId) {\n            sRestoredProfile = profile;\n            sRestoredContainerId = containerId;\n            sRestoreCallCount++;\n            return sRestoreSucceeded;\n        }\n    }\n\n    private RecordingTabCreatorManager initializeRecordingRestoreStore(\n            @TabOrchestratorType int orchestratorType) {\n"
+    replace: "\n    private static final String CONTAINER_ID = \"11111111-2222-4333-8444-555555555555\";\n\n    private ContainersBridgeRestoreTestSupport mContainerRestore;\n\n    private RecordingTabCreatorManager initializeRecordingRestoreStore(\n            @TabOrchestratorType int orchestratorType) {\n"
+  count: 1
+- description: "Replace application shadows with explicit test seams (5)"
+  regex:
+    pattern: "\n    @Before\n    public void setUp() {\n        ShadowContainersBridge.sRestoreSucceeded = false;\n        ShadowContainersBridge.sRestoredProfile = null;\n        ShadowContainersBridge.sRestoredContainerId = null;\n        ShadowContainersBridge.sRestoreCallCount = 0;\n        when(mIncognitoTabModel.isIncognito()).thenReturn(true);\n        when(mIncognitoTabModel.iterator()).thenAnswer(inv -> Collections.emptyList().iterator());\n        when(mNormalTabModel.iterator()).thenAnswer(inv -> Collections.emptyList().iterator());\n"
+    replace: "\n    @Before\n    public void setUp() {\n        mContainerRestore = new ContainersBridgeRestoreTestSupport();\n        when(mIncognitoTabModel.isIncognito()).thenReturn(true);\n        when(mIncognitoTabModel.iterator()).thenAnswer(inv -> Collections.emptyList().iterator());\n        when(mNormalTabModel.iterator()).thenAnswer(inv -> Collections.emptyList().iterator());\n"
+  count: 1
+- description: "Replace application shadows with explicit test seams (6)"
+  regex:
+    pattern: "        when(creator.createNewTabInContainer(\n                        any(), eq(TabLaunchType.FROM_RESTORE), eq(CONTAINER_ID), eq(0)))\n                .thenReturn(restoredTab);\n        ShadowContainersBridge.sRestoreSucceeded = true;\n        RecordingTabCreatorManager manager =\n                initializeRecordingRestoreStore(TabOrchestratorType.TABBED);\n\n        mPersistentStore.restoreTab(\n                new TabRestoreDetails(\n                        101, 0, TriState.FALSE, REGULAR_TAB_STRING_1, false, CONTAINER_ID),\n                /* tabState= */ null,\n                /* setAsActive= */ false);\n\n        verify(creator)\n                .createNewTabInContainer(\n                        argThat(new LoadUrlParamsUrlMatcher(REGULAR_TAB_STRING_1)),\n                        eq(TabLaunchType.FROM_RESTORE),\n                        eq(CONTAINER_ID),\n                        eq(0));\n        verify(creator, never()).createNewTab(any(), anyInt(), any(), anyInt());\n        verify(mNormalTabModel).indexOf(restoredTab);\n        assertEquals(mProfile, ShadowContainersBridge.sRestoredProfile);\n        assertEquals(CONTAINER_ID, ShadowContainersBridge.sRestoredContainerId);\n        assertEquals(1, ShadowContainersBridge.sRestoreCallCount);\n        RecordingTabCreator recorder = manager.getRecorder(/* incognito= */ false);\n        assertThat(recorder).isNotNull();\n        assertThat(recorder.getRegularFallbackTabs()).containsExactly(101, REGULAR_TAB_STRING_1);\n"
+    replace: "        when(creator.createNewTabInContainer(\n                        any(), eq(TabLaunchType.FROM_RESTORE), eq(CONTAINER_ID), eq(0)))\n                .thenReturn(restoredTab);\n        mContainerRestore.restoreSucceeded = true;\n        RecordingTabCreatorManager manager =\n                initializeRecordingRestoreStore(TabOrchestratorType.TABBED);\n\n        mPersistentStore.restoreTab(\n                new TabRestoreDetails(\n                        101, 0, TriState.FALSE, REGULAR_TAB_STRING_1, false, CONTAINER_ID),\n                /* tabState= */ null,\n                /* setAsActive= */ false);\n\n        verify(creator)\n                .createNewTabInContainer(\n                        argThat(new LoadUrlParamsUrlMatcher(REGULAR_TAB_STRING_1)),\n                        eq(TabLaunchType.FROM_RESTORE),\n                        eq(CONTAINER_ID),\n                        eq(0));\n        verify(creator, never()).createNewTab(any(), anyInt(), any(), anyInt());\n        verify(mNormalTabModel).indexOf(restoredTab);\n        assertEquals(mProfile, mContainerRestore.restoredProfile);\n        assertEquals(CONTAINER_ID, mContainerRestore.restoredContainerId);\n        assertEquals(1, mContainerRestore.restoreCallCount);\n        RecordingTabCreator recorder = manager.getRecorder(/* incognito= */ false);\n        assertThat(recorder).isNotNull();\n        assertThat(recorder.getRegularFallbackTabs()).containsExactly(101, REGULAR_TAB_STRING_1);\n"
+  count: 1
+- description: "Replace application shadows with explicit test seams (7)"
+  regex:
+    pattern: "        when(creator.createNewTabInContainer(\n                        any(), eq(TabLaunchType.FROM_RESTORE), eq(CONTAINER_ID), eq(0)))\n                .thenReturn(restoredTab);\n        ShadowContainersBridge.sRestoreSucceeded = true;\n        RecordingTabCreatorManager manager =\n                initializeRecordingRestoreStore(TabOrchestratorType.ARCHIVED);\n\n"
+    replace: "        when(creator.createNewTabInContainer(\n                        any(), eq(TabLaunchType.FROM_RESTORE), eq(CONTAINER_ID), eq(0)))\n                .thenReturn(restoredTab);\n        mContainerRestore.restoreSucceeded = true;\n        RecordingTabCreatorManager manager =\n                initializeRecordingRestoreStore(TabOrchestratorType.ARCHIVED);\n\n"
+  count: 1
+- description: "Replace application shadows with explicit test seams (8)"
+  regex:
+    pattern: "                        eq(0));\n        verify(creator, never()).createNewTab(any(), anyInt(), any(), anyInt());\n        verify(mNormalTabModel).indexOf(restoredTab);\n        assertEquals(mProfile, ShadowContainersBridge.sRestoredProfile);\n        assertEquals(CONTAINER_ID, ShadowContainersBridge.sRestoredContainerId);\n        assertEquals(1, ShadowContainersBridge.sRestoreCallCount);\n        RecordingTabCreator recorder = manager.getRecorder(/* incognito= */ false);\n        assertThat(recorder).isNotNull();\n        assertThat(recorder.getRegularFallbackTabs()).containsExactly(101, REGULAR_TAB_STRING_1);\n"
+    replace: "                        eq(0));\n        verify(creator, never()).createNewTab(any(), anyInt(), any(), anyInt());\n        verify(mNormalTabModel).indexOf(restoredTab);\n        assertEquals(mProfile, mContainerRestore.restoredProfile);\n        assertEquals(CONTAINER_ID, mContainerRestore.restoredContainerId);\n        assertEquals(1, mContainerRestore.restoreCallCount);\n        RecordingTabCreator recorder = manager.getRecorder(/* incognito= */ false);\n        assertThat(recorder).isNotNull();\n        assertThat(recorder.getRegularFallbackTabs()).containsExactly(101, REGULAR_TAB_STRING_1);\n"
+  count: 1
+- description: "Replace application shadows with explicit test seams (9)"
+  regex:
+    pattern: "        verify(mNormalTabCreator, never())\n                .createNewTabInContainer(any(), anyInt(), any(), anyInt());\n        verify(mNormalTabModel).indexOf(restoredTab);\n        assertEquals(0, ShadowContainersBridge.sRestoreCallCount);\n        RecordingTabCreator recorder = manager.getRecorder(/* incognito= */ false);\n        assertThat(recorder).isNotNull();\n        assertThat(recorder.getRegularFallbackTabs()).containsExactly(101, REGULAR_TAB_STRING_1);\n"
+    replace: "        verify(mNormalTabCreator, never())\n                .createNewTabInContainer(any(), anyInt(), any(), anyInt());\n        verify(mNormalTabModel).indexOf(restoredTab);\n        assertEquals(0, mContainerRestore.restoreCallCount);\n        RecordingTabCreator recorder = manager.getRecorder(/* incognito= */ false);\n        assertThat(recorder).isNotNull();\n        assertThat(recorder.getRegularFallbackTabs()).containsExactly(101, REGULAR_TAB_STRING_1);\n"
+  count: 1
+- description: "Replace application shadows with explicit test seams (10)"
+  regex:
+    pattern: "        verify(mNormalTabCreator, never())\n                .createNewTabInContainer(any(), anyInt(), any(), anyInt());\n        verify(mNormalTabCreator, never()).createNewTab(any(), anyInt(), any(), anyInt());\n        assertEquals(mProfile, ShadowContainersBridge.sRestoredProfile);\n        assertEquals(CONTAINER_ID, ShadowContainersBridge.sRestoredContainerId);\n        assertEquals(1, ShadowContainersBridge.sRestoreCallCount);\n        RecordingTabCreator recorder = manager.getRecorder(/* incognito= */ false);\n        assertThat(recorder).isNotNull();\n        assertThat(recorder.getRegularFallbackTabs()).containsExactly(101, REGULAR_TAB_STRING_1);\n"
+    replace: "        verify(mNormalTabCreator, never())\n                .createNewTabInContainer(any(), anyInt(), any(), anyInt());\n        verify(mNormalTabCreator, never()).createNewTab(any(), anyInt(), any(), anyInt());\n        assertEquals(mProfile, mContainerRestore.restoredProfile);\n        assertEquals(CONTAINER_ID, mContainerRestore.restoredContainerId);\n        assertEquals(1, mContainerRestore.restoreCallCount);\n        RecordingTabCreator recorder = manager.getRecorder(/* incognito= */ false);\n        assertThat(recorder).isNotNull();\n        assertThat(recorder.getRegularFallbackTabs()).containsExactly(101, REGULAR_TAB_STRING_1);\n"
+  count: 1

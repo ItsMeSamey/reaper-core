@@ -1,8 +1,52 @@
 diff --git a/scripts/build/devtools_plugin.js b/scripts/build/devtools_plugin.js
-index 740572e382e9cc25b699a89def1594176d63bb2d..c945a975162b62357fadbaace7fc7976db4b7c53 100644
+index 740572e382e9cc25b699a89def1594176d63bb2d..53d7d4437cfc20556f9b9e3f0865c8cac1967eda 100644
 --- a/scripts/build/devtools_plugin.js
 +++ b/scripts/build/devtools_plugin.js
-@@ -168,6 +168,7 @@ export function esbuildPlugin(outdir, genRoot, rootDir, externalFiles, bundleAll
+@@ -92,7 +92,9 @@
+   };
+ }
+ 
+-export function esbuildPlugin(outdir, genRoot, rootDir, externalFiles, bundleAll = false) {
++export function esbuildPlugin(
++    outdir, genRoot, rootDir, externalFiles, bundleAll = false, preferGeneratedTs = false,
++    processedSources = new Set()) {
+   if (!bundleAll && (!externalFiles || !(externalFiles instanceof Set))) {
+     throw new Error('esbuildPlugin requires an externalFiles Set');
+   }
+@@ -139,6 +141,32 @@
+       };
+     }
+ 
++    // Android conditional sources mirror the original tree under gen. Prefer
++    // the staged TS, while ordinary unstaged dependencies keep their original
++    // source resolution. Generated CSS/JS still follows the existing fallback.
++    if (preferGeneratedTs && res.id.endsWith('.js')) {
++      const relativePath = isUnderGenRoot ? path.relative(normGenRoot, res.id) : path.relative(root, res.id);
++      if (relativePath !== '..' && !relativePath.startsWith('..' + path.sep) && !path.isAbsolute(relativePath)) {
++        const generatedTs = path.join(normGenRoot, relativePath.slice(0, -3) + '.ts');
++        const generatedKey = path.relative(normGenRoot, generatedTs).replaceAll('\\', '/');
++        if (processedSources.has(generatedKey)) {
++          // This is a declared current producer output. Missing output must
++          // fail the build instead of falling back to unprocessed source.
++          return {path: generatedTs};
++        }
++        if (isUnderGenRoot) {
++          const originalJs = path.join(root, relativePath);
++          if (fs.existsSync(originalJs)) {
++            return {path: originalJs};
++          }
++          const originalTs = originalJs.slice(0, -3) + '.ts';
++          if (fs.existsSync(originalTs)) {
++            return {path: originalTs};
++          }
++        }
++      }
++    }
++
+     // For non-external imports to inline:
+     // 1. If exact JS file exists in source tree:
+     if (fs.existsSync(res.id)) {
+@@ -168,6 +196,7 @@
        }
      }
  

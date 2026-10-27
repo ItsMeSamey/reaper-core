@@ -1,0 +1,141 @@
+diff --git a/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/adaptive/AdaptiveToolbarStatePredictorTest.java b/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/adaptive/AdaptiveToolbarStatePredictorTest.java
+--- a/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/adaptive/AdaptiveToolbarStatePredictorTest.java
++++ b/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/adaptive/AdaptiveToolbarStatePredictorTest.java
+@@ -11,6 +11,19 @@
+ 
+ import androidx.test.filters.SmallTest;
+ 
++import org.chromium.base.Callback;
++import org.chromium.base.test.BaseRobolectricTestRunner;
++import org.chromium.base.test.util.Features.DisableFeatures;
++import org.chromium.base.test.util.Features.EnableFeatures;
++import org.chromium.chrome.browser.flags.ChromeFeatureList;
++import org.chromium.chrome.browser.omnibox.voice.VoiceRecognitionUtil;
++import org.chromium.chrome.browser.preferences.Pref;
++import org.chromium.chrome.browser.profiles.Profile;
++import org.chromium.chrome.browser.toolbar.adaptive.AdaptiveToolbarStatePredictor.UiState;
++import org.chromium.components.prefs.PrefService;
++import org.chromium.components.segmentation_platform.proto.SegmentationProto.SegmentId;
++import org.chromium.components.user_prefs.UserPrefs;
++import org.chromium.ui.permissions.AndroidPermissionDelegate;
+ import org.junit.After;
+ import org.junit.Before;
+ import org.junit.Rule;
+@@ -21,22 +34,6 @@
+ import org.mockito.junit.MockitoRule;
+ import org.robolectric.Robolectric;
+ 
+-import org.chromium.base.Callback;
+-import org.chromium.base.test.BaseRobolectricTestRunner;
+-import org.chromium.base.test.util.Features.DisableFeatures;
+-import org.chromium.base.test.util.Features.EnableFeatures;
+-import org.chromium.chrome.browser.flags.ChromeFeatureList;
+-import org.chromium.chrome.browser.glic.GlicEnabling;
+-import org.chromium.chrome.browser.glic.GlicEnablingJni;
+-import org.chromium.chrome.browser.omnibox.voice.VoiceRecognitionUtil;
+-import org.chromium.chrome.browser.preferences.Pref;
+-import org.chromium.chrome.browser.profiles.Profile;
+-import org.chromium.chrome.browser.toolbar.adaptive.AdaptiveToolbarStatePredictor.UiState;
+-import org.chromium.components.prefs.PrefService;
+-import org.chromium.components.segmentation_platform.proto.SegmentationProto.SegmentId;
+-import org.chromium.components.user_prefs.UserPrefs;
+-import org.chromium.ui.permissions.AndroidPermissionDelegate;
+-
+ import java.util.ArrayList;
+ import java.util.List;
+ 
+@@ -49,7 +46,6 @@
+     @Mock private Profile mProfile;
+     @Mock private AndroidPermissionDelegate mAndroidPermissionDelegate;
+     @Mock private PrefService mPrefService;
+-    @Mock private GlicEnabling.Natives mGlicEnablingNatives;
+ 
+     @Before
+     public void setUp() {
+@@ -58,8 +54,6 @@
+         AdaptiveToolbarFeatures.clearParsedParamsForTesting();
+         UserPrefs.setPrefServiceForTesting(mPrefService);
+         when(mPrefService.getBoolean(Pref.OFFER_TRANSLATE_ENABLED)).thenReturn(true);
+-        GlicEnablingJni.setInstanceForTesting(mGlicEnablingNatives);
+-        when(mGlicEnablingNatives.isEnabledForProfile(mProfile)).thenReturn(true);
+     }
+ 
+     @After
+@@ -222,12 +216,11 @@
+ 
+     @Test
+     @SmallTest
+-    @EnableFeatures(ChromeFeatureList.GLIC)
+     @DisableFeatures({
+         ChromeFeatureList.ENABLE_ANDROID_SIDE_PANEL,
+         ChromeFeatureList.ANDROID_BOTTOM_BAR
+     })
+-    public void testGlicEnabled_GlicNotRecommendedInAuto() {
++    public void testAutoKeepsVoiceAheadOfShare() {
+         AdaptiveToolbarFeatures.setDefaultSegmentForTesting(AdaptiveToolbarFeatures.SHARE);
+ 
+         AdaptiveToolbarStatePredictor statePredictor =
+@@ -236,7 +229,7 @@
+                         AdaptiveToolbarButtonVariant.UNKNOWN,
+                         List.of(AdaptiveToolbarButtonVariant.VOICE));
+ 
+-        // Glic should NOT be included in results when in AUTO.
++        // Automatic selection preserves the normal voice and Share ranking.
+         UiState expected =
+                 new UiState(
+                         true,
+@@ -251,12 +244,11 @@
+ 
+     @Test
+     @SmallTest
+-    @EnableFeatures(ChromeFeatureList.GLIC)
+     @DisableFeatures({
+         ChromeFeatureList.ENABLE_ANDROID_SIDE_PANEL,
+         ChromeFeatureList.ANDROID_BOTTOM_BAR
+     })
+-    public void testGlicManualOverride() {
++    public void testRemovedGlicManualOverrideFallsBackToAuto() {
+         AdaptiveToolbarFeatures.setDefaultSegmentForTesting(AdaptiveToolbarFeatures.SHARE);
+ 
+         AdaptiveToolbarStatePredictor statePredictor =
+@@ -265,21 +257,23 @@
+                         AdaptiveToolbarButtonVariant.GLIC,
+                         List.of(AdaptiveToolbarButtonVariant.VOICE));
+ 
+-        // Manual override of GLIC should be respected.
+-        UiState expected =
+-                new UiState(
+-                        true,
+-                        new ArrayList<Integer>(List.of(AdaptiveToolbarButtonVariant.GLIC)),
+-                        AdaptiveToolbarButtonVariant.GLIC,
++        // A saved removed ID must not replace the ordinary automatic choices.
++        UiState expected =
++                new UiState(
++                        true,
++                        new ArrayList<Integer>(
++                                List.of(
++                                        AdaptiveToolbarButtonVariant.VOICE,
++                                        AdaptiveToolbarButtonVariant.SHARE)),
++                        AdaptiveToolbarButtonVariant.AUTO,
+                         AdaptiveToolbarButtonVariant.VOICE);
+         statePredictor.recomputeUiState(verifyResultCallback(expected));
+     }
+ 
+     @Test
+     @SmallTest
+-    @EnableFeatures(ChromeFeatureList.GLIC)
+     @DisableFeatures(ChromeFeatureList.ENABLE_ANDROID_SIDE_PANEL)
+-    public void testGlicEnabled_ManualOverride() {
++    public void testManualShareOverride() {
+         AdaptiveToolbarFeatures.setDefaultSegmentForTesting(AdaptiveToolbarFeatures.SHARE);
+ 
+         AdaptiveToolbarStatePredictor statePredictor =
+@@ -288,7 +282,7 @@
+                         AdaptiveToolbarButtonVariant.SHARE,
+                         List.of(AdaptiveToolbarButtonVariant.VOICE));
+ 
+-        // Manual override should be respected even if Glic is enabled.
++        // A normal Share override still wins over the voice recommendation.
+         UiState expected =
+                 new UiState(
+                         true,

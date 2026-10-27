@@ -10,10 +10,16 @@
 #include <utility>
 #include <vector>
 
+#include "build/build_config.h"
+
+#if !BUILDFLAG(IS_ANDROID)
 #include "base/rand_util.h"
+#endif
 #include "base/strings/strcat.h"
 #include "base/task/single_thread_task_runner.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "base/trace_event/trace_event.h"
+#endif
 #include "brave/components/brave_shields/content/browser/ad_block_custom_filter_reset_util.h"
 #include "brave/components/brave_shields/core/browser/ad_block_filters_provider_manager.h"
 #include "brave/components/brave_shields/core/browser/brave_shields_utils.h"
@@ -26,10 +32,14 @@ namespace {
 
 void AddDATBufferToFilterSet(uint8_t permission_mask,
                              DATFileDataBuffer buffer,
+#if !BUILDFLAG(IS_ANDROID)
                              uint64_t flow_id,
+#endif
                              rust::Box<adblock::FilterSet>* filter_set) {
+#if !BUILDFLAG(IS_ANDROID)
   TRACE_EVENT("brave.adblock", "AddDATBufferToFilterSet_CustomFiltersProvider",
               perfetto::TerminatingFlow::ProcessScoped(flow_id));
+#endif
   (*filter_set)->add_filter_list_with_permissions(buffer, permission_mask);
 }
 
@@ -120,9 +130,11 @@ bool AdBlockCustomFiltersProvider::UpdateCustomFiltersFromSettings(
 void AdBlockCustomFiltersProvider::LoadFilterSet(
     base::OnceCallback<
         void(base::OnceCallback<void(rust::Box<adblock::FilterSet>*)>)> cb) {
+#if !BUILDFLAG(IS_ANDROID)
   const uint64_t flow_id = base::RandUint64();
   TRACE_EVENT("brave.adblock", "AdBlockCustomFiltersProvider::LoadFilterSet",
               perfetto::TerminatingFlow::ProcessScoped(flow_id));
+#endif
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   std::string custom_filters = "! Title: User-defined custom filters\n";
   custom_filters += GetCustomFilters();
@@ -135,7 +147,11 @@ void AdBlockCustomFiltersProvider::LoadFilterSet(
       FROM_HERE, base::BindOnce(std::move(cb),
                                 base::BindOnce(&AddDATBufferToFilterSet,
                                                kCustomFiltersPermissionLevel,
+#if BUILDFLAG(IS_ANDROID)
+                                               buffer)));
+#else
                                                buffer, flow_id)));
+#endif
 }
 
 }  // namespace brave_shields

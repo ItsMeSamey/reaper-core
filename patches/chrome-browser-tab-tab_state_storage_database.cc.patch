@@ -1,0 +1,52 @@
+diff --git a/chrome/browser/tab/tab_state_storage_database.cc b/chrome/browser/tab/tab_state_storage_database.cc
+index 606618f733d043dfce1dd53f48f0b190b4dde296..095e8009223b2d864a20c50b796a17ae136708a5 100644
+--- a/chrome/browser/tab/tab_state_storage_database.cc
++++ b/chrome/browser/tab/tab_state_storage_database.cc
+@@ -23,6 +23,10 @@
+ #include "chrome/browser/tab/payload_util.h"
+ #include "chrome/browser/tab/protocol/children.pb.h"
+ #include "chrome/browser/tab/protocol/token.pb.h"
++#if BUILDFLAG(IS_ANDROID)
++#include "base/uuid.h"
++#include "chrome/browser/tab/protocol/tab_state.pb.h"
++#endif
+ #include "chrome/browser/tab/storage_id.h"
+ #include "chrome/browser/tab/storage_loaded_data.h"
+ #include "sql/database.h"
+@@ -489,6 +493,36 @@ std::unique_ptr<StorageLoadedData> TabStateStorageDatabase::LoadAllNodes(
+   return builder->Build(base::PassKey<TabStateStorageDatabase>(), this);
+ }
+ 
++#if BUILDFLAG(IS_ANDROID)
++std::optional<std::vector<std::string>>
++TabStateStorageDatabase::GetPersistedContainerIds() {
++  if (!db_.is_open()) return std::nullopt;
++  sql::Statement rows(db_.GetCachedStatement(
++      SQL_FROM_HERE,
++      "SELECT payload FROM nodes WHERE is_off_the_record = 0 AND type = ?"));
++  if (!rows.is_valid()) return std::nullopt;
++  rows.BindInt(0, static_cast<int>(TabStorageType::kTab));
++  std::vector<std::string> ids;
++  while (rows.Step()) {
++    auto payload = rows.ColumnBlob(0);
++    tabs_pb::TabState state;
++    if (!state.ParseFromArray(payload.data(), payload.size())) return std::nullopt;
++    if (!state.container_id().empty()) {
++      std::string_view uuid = state.container_id();
++      if (uuid.starts_with("t-"))
++        uuid.remove_prefix(2);
++      // A malformed persisted identity makes the inventory incomplete. Never
++      // publish partial references that could authorize deleting a live jar.
++      if (!base::Uuid::ParseLowercase(uuid).is_valid())
++        return std::nullopt;
++      ids.push_back(state.container_id());
++    }
++  }
++  if (!rows.Succeeded()) return std::nullopt;
++  return ids;
++}
++#endif
++
+ int TabStateStorageDatabase::CountTabsForWindow(std::string_view window_tag,
+                                                 bool is_off_the_record) {
+   static constexpr char kCountTabsForWindowSql[] =

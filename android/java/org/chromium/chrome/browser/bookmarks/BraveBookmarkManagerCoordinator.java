@@ -11,7 +11,6 @@ import android.view.View;
 import org.chromium.build.annotations.NullMarked;
 import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.browser.back_press.BackPressManager;
-import org.chromium.chrome.browser.price_tracking.PriceDropNotificationManager;
 import org.chromium.chrome.browser.profiles.Profile;
 import org.chromium.chrome.browser.ui.messages.snackbar.SnackbarManager;
 import org.chromium.chrome.browser.ui.signin.SigninAndHistorySyncActivityLauncher;
@@ -41,7 +40,6 @@ public class BraveBookmarkManagerCoordinator extends BookmarkManagerCoordinator 
             BookmarkUiPrefs bookmarkUiPrefs,
             BookmarkOpener bookmarkOpener,
             BookmarkManagerOpener bookmarkManagerOpener,
-            PriceDropNotificationManager priceDropNotificationManager,
             @Nullable Function<View, EdgeToEdgePadAdjuster> edgeToEdgePadAdjusterGenerator,
             @Nullable BackPressManager backPressManager,
             SigninAndHistorySyncActivityLauncher signinAndHistorySyncActivityLauncher,
@@ -57,7 +55,6 @@ public class BraveBookmarkManagerCoordinator extends BookmarkManagerCoordinator 
                 bookmarkUiPrefs,
                 bookmarkOpener,
                 bookmarkManagerOpener,
-                priceDropNotificationManager,
                 edgeToEdgePadAdjusterGenerator,
                 backPressManager,
                 signinAndHistorySyncActivityLauncher,

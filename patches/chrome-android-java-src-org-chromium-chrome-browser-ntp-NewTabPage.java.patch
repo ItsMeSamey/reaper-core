@@ -1,8 +1,268 @@
 diff --git a/chrome/android/java/src/org/chromium/chrome/browser/ntp/NewTabPage.java b/chrome/android/java/src/org/chromium/chrome/browser/ntp/NewTabPage.java
-index 34e76fe0c4a0ab8ed374cf4b97bf044b5f349d13..1f23f46a68af28aa8ee0ebb5b933394aaafd5cc0 100644
+index 34e76fe0c4a0ab8ed374cf4b97bf044b5f349d13..6b8d5f0d2ab08c2257d1a38a0ced4077ae6c3e29 100644
 --- a/chrome/android/java/src/org/chromium/chrome/browser/ntp/NewTabPage.java
 +++ b/chrome/android/java/src/org/chromium/chrome/browser/ntp/NewTabPage.java
-@@ -856,7 +856,7 @@ public class NewTabPage
+@@ -4,7 +4,6 @@
+ 
+ package org.chromium.chrome.browser.ntp;
+ 
+-import static org.chromium.build.NullUtil.assumeNonNull;
+ 
+ import android.app.Activity;
+ import android.content.Context;
+@@ -39,24 +38,11 @@
+ import org.chromium.build.annotations.Nullable;
+ import org.chromium.cc.input.BrowserControlsState;
+ import org.chromium.chrome.R;
+-import org.chromium.chrome.browser.app.feed.FeedActionDelegateImpl;
+ import org.chromium.chrome.browser.back_press.BackPressManager;
+-import org.chromium.chrome.browser.bookmarks.BookmarkModel;
+ import org.chromium.chrome.browser.browser_controls.BrowserControlsStateProvider;
+ import org.chromium.chrome.browser.browser_controls.BrowserControlsUtils;
+ import org.chromium.chrome.browser.browser_controls.BrowserControlsVisibilityManager;
+-import org.chromium.chrome.browser.device_lock.DeviceLockActivityLauncherImpl;
+ import org.chromium.chrome.browser.feature_engagement.TrackerFactory;
+-import org.chromium.chrome.browser.feed.FeedActionDelegate;
+-import org.chromium.chrome.browser.feed.FeedReliabilityLogger;
+-import org.chromium.chrome.browser.feed.FeedSurfaceCoordinator;
+-import org.chromium.chrome.browser.feed.FeedSurfaceDelegate;
+-import org.chromium.chrome.browser.feed.FeedSurfaceLifecycleManager;
+-import org.chromium.chrome.browser.feed.FeedSurfaceProvider;
+-import org.chromium.chrome.browser.feed.FeedSwipeRefreshLayout;
+-import org.chromium.chrome.browser.feed.NtpFeedSurfaceLifecycleManager;
+-import org.chromium.chrome.browser.feed.componentinterfaces.SurfaceCoordinator;
+-import org.chromium.chrome.browser.glic.GlicHelper;
+ import org.chromium.chrome.browser.layouts.LayoutType;
+ import org.chromium.chrome.browser.lifecycle.ActivityLifecycleDispatcher;
+ import org.chromium.chrome.browser.lifecycle.LifecycleObserver;
+@@ -72,13 +58,9 @@
+ import org.chromium.chrome.browser.omnibox.OmniboxStub;
+ import org.chromium.chrome.browser.omnibox.voice.VoiceRecognitionHandler;
+ import org.chromium.chrome.browser.omnibox.voice.VoiceRecognitionIntentHandler;
+-import org.chromium.chrome.browser.privacy.settings.PrivacyPreferencesManagerImpl;
+ import org.chromium.chrome.browser.profiles.Profile;
+-import org.chromium.chrome.browser.readaloud.ReadAloudController;
+-import org.chromium.chrome.browser.readaloud.ReadAloudController.Entrypoint;
+ import org.chromium.chrome.browser.search_engines.TemplateUrlServiceFactory;
+ import org.chromium.chrome.browser.share.ShareDelegate;
+-import org.chromium.chrome.browser.signin.SigninAndHistorySyncActivityLauncherImpl;
+ import org.chromium.chrome.browser.suggestions.SuggestionsMetrics;
+ import org.chromium.chrome.browser.suggestions.SuggestionsNavigationDelegate;
+ import org.chromium.chrome.browser.suggestions.SuggestionsUiDelegateImpl;
+@@ -136,7 +118,7 @@
+                 InvalidationAwareThumbnailProvider,
+                 TemplateUrlServiceObserver,
+                 BrowserControlsStateProvider.Observer,
+-                FeedSurfaceDelegate,
++                StaticNtpSurfaceCoordinator.Delegate,
+                 VoiceRecognitionHandler.Observer,
+                 SnackbarManageable {
+     private static final String TAG = "NewTabPage";
+@@ -164,11 +146,10 @@
+     private final boolean mIsLff;
+     private final boolean mIsNtpCustomizationSyncEnabled;
+     private final BrowserControlsStateProvider mBrowserControlsStateProvider;
+-    private final BottomSheetController mBottomSheetController;
+     private final NewTabPageLayout mNewTabPageLayout;
+     private final NewTabPageCoordinator mNewTabPageCoordinator;
+ 
+-    private FeedSurfaceProvider mFeedSurfaceProvider;
++    private StaticNtpSurfaceCoordinator mStaticSurface;
+     private @Nullable TabObserver mTabObserver;
+     private @Nullable LifecycleObserver mLifecycleObserver;
+     protected boolean mSearchProviderHasLogo;
+@@ -178,7 +159,6 @@
+     private @Nullable VoiceRecognitionHandler mVoiceRecognitionHandler;
+ 
+     // The timestamp at which the constructor was called.
+-    protected final long mConstructedTimeNs;
+ 
+     // The timestamp at which this NTP was last shown to the user.
+     private long mLastShownTimeNs;
+@@ -190,7 +170,6 @@
+ 
+     private final int mToolbarHeight;
+ 
+-    private final Supplier<Toolbar> mToolbarSupplier;
+     private final TemplateUrlService mTemplateUrlService;
+     private final NonNullObservableSupplier<Integer> mTabStripHeightSupplier;
+ 
+@@ -289,20 +268,12 @@
+                 boolean showFuseboxPopup,
+                 @Nullable String pastedText) {
+             if (mIsDestroyed) return;
+-            FeedReliabilityLogger feedReliabilityLogger =
+-                    mFeedSurfaceProvider.getReliabilityLogger();
+             if (mVoiceRecognitionHandler != null && beginVoiceSearch) {
+-                if (feedReliabilityLogger != null) {
+-                    feedReliabilityLogger.onVoiceSearch();
+-                }
+                 mVoiceRecognitionHandler.startVoiceRecognition(
+                         VoiceRecognitionIntentHandler.VoiceInteractionSource.NTP,
+                         CallbackUtils.emptyRunnable());
+                 mTracker.notifyEvent(EventConstants.NTP_VOICE_SEARCH_BUTTON_CLICKED);
+             } else if (mOmniboxStub != null) {
+-                if (feedReliabilityLogger != null) {
+-                    feedReliabilityLogger.onOmniboxFocused();
+-                }
+ 
+                 @OmniboxFocusReason
+                 int focusReason =
+@@ -451,7 +422,6 @@
+             OneshotSupplier<SideUiStateProvider> sideUiStateProviderSupplier,
+             StartupMetricsTracker startupMetricsTracker,
+             BackPressManager backPressManager) {
+-        mConstructedTimeNs = System.nanoTime();
+         long startMs = tab.getNavigationStartMs();
+         mNavigationStartMs = startMs > 0 ? startMs : SystemClock.uptimeMillis();
+         TraceEvent.begin(TAG);
+@@ -460,9 +430,7 @@
+         mActivityTabProvider = activityTabProvider;
+         mActivityLifecycleDispatcher = lifecycleDispatcher;
+         mTab = tab;
+-        mToolbarSupplier = toolbarSupplier;
+         mBrowserControlsStateProvider = browserControlsStateProvider;
+-        mBottomSheetController = bottomSheetController;
+         mIsInNightMode = isInNightMode;
+         mIsNtpCustomizationSyncEnabled = NtpCustomizationUtils.isNTPCustomizationSyncEnabled();
+         mTabStripHeightSupplier = tabStripHeightSupplier;
+@@ -558,18 +526,7 @@
+                         homeSurfaceTracker,
+                         backPressManager);
+ 
+-        initializeFeedSurfaceProvider(
+-                activity,
+-                windowAndroid,
+-                activityResultTracker,
+-                snackbarManager,
+-                isInNightMode,
+-                shareDelegateSupplier,
+-                modalDialogManager,
+-                edgeToEdgeControllerSupplier,
+-                startupMetricsTracker,
+-                tabModelSelector,
+-                moduleRegistrySupplier);
++        initializeStaticSurface(activity, edgeToEdgeControllerSupplier, startupMetricsTracker);
+ 
+         View view = getView();
+         view.addOnAttachStateChangeListener(
+@@ -607,17 +564,15 @@
+             initUseLightIconTint();
+         }
+ 
+-        NewTabPageUma.recordContentSuggestionsDisplayStatus(profile);
+-
+         mNewTabPageCoordinator.initialize(
+                 mTileGroupDelegate,
+                 mSearchProviderHasLogo,
+                 mIsDefaultSearchEngineGoogle,
+-                mFeedSurfaceProvider.getScrollDelegate(),
+-                mFeedSurfaceProvider.getTouchEnabledDelegate(),
+-                mFeedSurfaceProvider.getUiConfig(),
++                mStaticSurface.getScrollDelegate(),
++                mStaticSurface.getTouchEnabledDelegate(),
++                mStaticSurface.getUiConfig(),
+                 lifecycleDispatcher,
+-                () -> assumeNonNull(mTemplateUrlService.getComposeplateUrl()));
++                () -> mTemplateUrlService.getComposeplateUrl());
+ 
+         sTotalCount++;
+         NewTabPageUma.recordSimultaneousNtpCount(sTotalCount);
+@@ -656,81 +611,22 @@
+                 });
+     }
+ 
+-    /**
+-     * Create and initialize the FeedSurfaceProvider of this NewTabPage.
+-     *
+-     * @param activity The activity used to initialize the view.
+-     * @param windowAndroid Provides the current active tab.
+-     * @param activityResultTracker Tracker of activity results.
+-     * @param snackbarManager {@link SnackbarManager} object.
+-     * @param isInNightMode {@code true} if the night mode setting is on.
+-     * @param shareDelegateSupplier Supplies a delegate used to open SharingHub.
+-     * @param modalDialogManager Manager for displaying modal dialogs.
+-     * @param edgeToEdgeControllerSupplier The supplier to {@link EdgeToEdgeController}.
+-     * @param startupMetricsTracker Used to record NTP startup metric.
+-     * @param tabModelSelector Selector for accessing tab models.
+-     * @param moduleRegistrySupplier Supplier providing the module registry.
+-     */
+-    @EnsuresNonNull({"mFeedSurfaceProvider"})
+-    protected void initializeFeedSurfaceProvider(
++    /** Initialize the local NTP header and its window policies. */
++    @EnsuresNonNull({"mStaticSurface"})
++    private void initializeStaticSurface(
+             Activity activity,
+-            WindowAndroid windowAndroid,
+-            ActivityResultTracker activityResultTracker,
+-            SnackbarManager snackbarManager,
+-            boolean isInNightMode,
+-            Supplier<@Nullable ShareDelegate> shareDelegateSupplier,
+-            ModalDialogManager modalDialogManager,
+             MonotonicObservableSupplier<EdgeToEdgeController> edgeToEdgeControllerSupplier,
+-            StartupMetricsTracker startupMetricsTracker,
+-            TabModelSelector tabModelSelector,
+-            OneshotSupplier<ModuleRegistry> moduleRegistrySupplier) {
+-        Profile profile = mTab.getProfile();
+-
+-        FeedSurfaceCoordinator.ActionDelegateFactory createActionDelegate =
+-                () ->
+-                        new FeedActionDelegateImpl(
+-                                activity,
+-                                windowAndroid,
+-                                activityResultTracker,
+-                                SigninAndHistorySyncActivityLauncherImpl.get(),
+-                                DeviceLockActivityLauncherImpl.get(),
+-                                snackbarManager,
+-                                modalDialogManager,
+-                                mNewTabPageManager.getNavigationDelegate(),
+-                                BookmarkModel.getForProfile(profile),
+-                                profile,
+-                                mBottomSheetController) {
+-                            @Override
+-                            public void openHelpPage() {
+-                                NewTabPageUma.recordAction(NewTabPageUma.ACTION_CLICKED_LEARN_MORE);
+-                                super.openHelpPage();
+-                            }
+-                        };
+-
+-        mFeedSurfaceProvider =
+-                new FeedSurfaceCoordinator(
++            StartupMetricsTracker startupMetricsTracker) {
++        mStaticSurface =
++                new StaticNtpSurfaceCoordinator(
+                         activity,
+-                        snackbarManager,
+-                        windowAndroid,
++                        mTab,
++                        mNewTabPageLayout,
+                         new SnapScrollHelperImpl(mNewTabPageManager, mNewTabPageCoordinator),
+-                        mNewTabPageLayout,
+-                        mBrowserControlsStateProvider.getTopControlsHeight(),
+-                        isInNightMode,
+-                        this,
+-                        profile,
+-                        mBottomSheetController,
+-                        shareDelegateSupplier,
+-                        /* externalScrollableContainerDelegate= */ null,
+-                        PrivacyPreferencesManagerImpl.getInstance(),
+-                        mToolbarSupplier,
+-                        mConstructedTimeNs,
+-                        FeedSwipeRefreshLayout.create(activity, R.id.toolbar_container),
+-                        /* overScrollDisabled= */ false,
+-                        createActionDelegate,
+-                        mTabStripHeightSupplier,
+-                        edgeToEdgeControllerSupplier,
+-                        assumeNonNull(moduleRegistrySupplier).get());
+-        startupMetricsTracker.registerNtpViewObserver(mFeedSurfaceProvider.getView());
++                        this);
++        mStaticSurface.initializeWindow(
++                activity, mTabStripHeightSupplier, edgeToEdgeControllerSupplier);
++        startupMetricsTracker.registerNtpViewObserver(mStaticSurface.getView());
+     }
+ 
+     /** Initialize the single tab card on home surface NTP or magic stack. */
+@@ -856,7 +752,7 @@
       *     NTP.
       */
      public static boolean isInSingleUrlBarMode(boolean isLff) {
@@ -11,3 +271,157 @@ index 34e76fe0c4a0ab8ed374cf4b97bf044b5f349d13..1f23f46a68af28aa8ee0ebb5b933394a
      }
  
      /**
+@@ -1034,12 +930,6 @@
+             // state from the location bar when we get a reference to it as a workaround.
+             mNewTabPageCoordinator.setUrlFocusChangeAnimationPercent(
+                     omniboxStub.isUrlBarFocused() ? 1f : 0f);
+-
+-            FeedReliabilityLogger feedReliabilityLogger =
+-                    mFeedSurfaceProvider.getReliabilityLogger();
+-            if (feedReliabilityLogger != null) {
+-                mOmniboxStub.addUrlFocusChangeListener(feedReliabilityLogger);
+-            }
+         }
+ 
+         mVoiceRecognitionHandler = mOmniboxStub.getVoiceRecognitionHandler();
+@@ -1058,14 +948,6 @@
+     }
+ 
+     @Override
+-    public void notifyHidingWithBack() {
+-        FeedReliabilityLogger feedReliabilityLogger = mFeedSurfaceProvider.getReliabilityLogger();
+-        if (feedReliabilityLogger != null) {
+-            feedReliabilityLogger.onNavigateBack();
+-        }
+-    }
+-
+-    @Override
+     public void onVoiceAvailabilityImpacted() {
+         mNewTabPageCoordinator.updateActionButtonVisibility();
+     }
+@@ -1083,8 +965,6 @@
+         mLastShownTimeNs = System.nanoTime();
+         RecordUserAction.record("MobileNTPShown");
+         SuggestionsMetrics.recordSurfaceVisible();
+-        GlicHelper.maybeShowGlicTaskInProgressSnackbar(
+-                this, mTab.getProfile(), mActivity, GlicHelper.Caller.NEW_TAB_PAGE);
+     }
+ 
+     /** Records UMA for the NTP being hidden and the time spent on it. */
+@@ -1147,11 +1027,7 @@
+         mActivityLifecycleDispatcher.unregister(mLifecycleObserver);
+         mLifecycleObserver = null;
+         mBrowserControlsStateProvider.removeObserver(this);
+-        FeedReliabilityLogger feedReliabilityLogger = mFeedSurfaceProvider.getReliabilityLogger();
+-        if (mOmniboxStub != null && feedReliabilityLogger != null) {
+-            mOmniboxStub.removeUrlFocusChangeListener(feedReliabilityLogger);
+-        }
+-        mFeedSurfaceProvider.destroy();
++        mStaticSurface.destroy();
+         if (mVoiceRecognitionHandler != null) {
+             mVoiceRecognitionHandler.removeObserver(this);
+         }
+@@ -1233,7 +1109,7 @@
+ 
+     @Override
+     public View getView() {
+-        return mFeedSurfaceProvider.getView();
++        return mStaticSurface.getView();
+     }
+ 
+     @Override
+@@ -1251,7 +1127,7 @@
+ 
+     @Override
+     public void reload() {
+-        mFeedSurfaceProvider.reload();
++        mStaticSurface.reload();
+         mNewTabPageCoordinator.reload();
+     }
+ 
+@@ -1265,25 +1141,18 @@
+     @Override
+     public boolean shouldCaptureThumbnail() {
+         return mNewTabPageCoordinator.shouldCaptureThumbnail()
+-                || mFeedSurfaceProvider.shouldCaptureThumbnail()
++                || mStaticSurface.shouldCaptureThumbnail()
+                 || mSnapshotSingleTabCardChanged;
+     }
+ 
+     @Override
+     public void captureThumbnail(Canvas canvas) {
+         mNewTabPageCoordinator.onPreCaptureThumbnail();
+-        mFeedSurfaceProvider.captureThumbnail(canvas);
++        mStaticSurface.captureThumbnail(canvas);
+         mSnapshotSingleTabCardChanged = false;
+     }
+ 
+-    // Implements FeedSurfaceDelegate
+-    @Override
+-    public FeedSurfaceLifecycleManager createStreamLifecycleManager(
+-            Activity activity, SurfaceCoordinator coordinator, Profile profile) {
+-        return new NtpFeedSurfaceLifecycleManager(
+-                activity, mTab, (FeedSurfaceCoordinator) coordinator);
+-    }
+-
++    // Implements the local NTP input delegate.
+     @Override
+     public void sendMotionEventForInputTracking(MotionEvent ev) {
+         if (ev.getAction() == MotionEvent.ACTION_DOWN) {
+@@ -1298,19 +1167,8 @@
+                 && (mOmniboxStub != null && mOmniboxStub.isUrlBarFocused());
+     }
+ 
+-    public void listenToFeed(
+-            MonotonicObservableSupplier<ReadAloudController> readAloudControllerSupplier) {
+-        ReadAloudController readAloudController = readAloudControllerSupplier.get();
+-        if (readAloudController == null) return;
+-
+-        List<String> feedUrls = mFeedSurfaceProvider.getFeedUrls();
+-        if (feedUrls == null || feedUrls.isEmpty()) return;
+-
+-        readAloudController.playOverviewForUrls(feedUrls, Entrypoint.FEED_PLAYBACK);
+-    }
+-
+-    public FeedSurfaceCoordinator getCoordinatorForTesting() {
+-        return (FeedSurfaceCoordinator) mFeedSurfaceProvider;
++    public StaticNtpSurfaceCoordinator getCoordinatorForTesting() {
++        return mStaticSurface;
+     }
+ 
+     public NewTabPageManager getNewTabPageManagerForTesting() {
+@@ -1323,11 +1181,6 @@
+ 
+     public TileGroup.Delegate getTileGroupDelegateForTesting() {
+         return mTileGroupDelegate;
+-    }
+-
+-    public FeedActionDelegate getFeedActionDelegateForTesting() {
+-        return ((FeedSurfaceCoordinator) mFeedSurfaceProvider)
+-                .getActionDelegateForTesting(); // IN-TEST
+     }
+ 
+     /**
+@@ -1361,7 +1214,7 @@
+         if (mSmoothTransitionDelegate == null) {
+             mSmoothTransitionDelegate =
+                     new NtpSmoothTransitionDelegate(
+-                            getView(), mFeedSurfaceProvider.getRestoringStateSupplier());
++                            getView(), mStaticSurface.getRestoringStateSupplier());
+         }
+         return mSmoothTransitionDelegate;
+     }
+@@ -1375,12 +1228,9 @@
+     }
+ 
+     private void updateNtpScrollListener(boolean attach) {
+-        if (!(mFeedSurfaceProvider instanceof FeedSurfaceCoordinator)) return;
+-
+         if (!BottomBarConfigUtils.isNtpScrollOffEnabled(mTab, mContext)) return;
+ 
+-        RecyclerView recyclerView =
+-                ((FeedSurfaceCoordinator) mFeedSurfaceProvider).getRecyclerView();
++        RecyclerView recyclerView = mStaticSurface.getRecyclerView();
+         if (recyclerView == null) {
+             if (mNtpScrollListener != null) {
+                 mNtpScrollListener = null;

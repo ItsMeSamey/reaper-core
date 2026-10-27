@@ -9,3 +9,124 @@ substitutions:
     regex:
       pattern: 'BUILDFLAG(ENABLE_DESKTOP_ANDROID_EXTENSIONS)'
       replace: 'BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_EXTENSIONS_CORE)'
+  - description: Cancel retired Android extension authentication requests (1).
+    regex:
+      re_pattern: '\
+
+        void\ WebAuthFlow::DetachDelegateAndDelete\(\)\ \{\
+
+        \ \ delegate_\ =\ nullptr;\
+
+        \
+
+        \ \ //\ WebAuthFlow\ must\ be\ destroyed\ asynchronously\ to\ avoid\ reentrancy\ issues\.\
+
+        \ \ //\
+
+        '
+      replace: "\nvoid WebAuthFlow::DetachDelegateAndDelete() {\n  delegate_ = nullptr;\n#if BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_EXTENSIONS_CORE)\n  // Window creation can finish before the deferred deletion below. It must not\n  // invoke a detached delegate or attach the cancelled authentication contents.\n  weak_factory_.InvalidateWeakPtrs();\n#endif\n\n  // WebAuthFlow must be destroyed asynchronously to avoid reentrancy issues.\n  //\n"
+  - description: Prevent duplicate pending Android authentication popups (1).
+    regex:
+      re_pattern: '\#if\ BUILDFLAG\(IS_ANDROID\)\ \&\&\ BUILDFLAG\(ENABLE_EXTENSIONS_CORE\)\
+
+        void\ WebAuthFlow::OnBrowserWindowInterfaceInitialized\(\
+
+        \ \ \ \ BrowserWindowInterface\*\ browser\)\ \{\
+
+        \ \ if\ \(!browser\)\ \{\
+
+        \ \ \ \ delegate_\->OnAuthFlowFailure\(WebAuthFlow::Failure::CANNOT_CREATE_WINDOW\);\
+
+        \ \ \ \ return;\
+
+        '
+      replace: "#if BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_EXTENSIONS_CORE)\nvoid WebAuthFlow::OnBrowserWindowInterfaceInitialized(\n    BrowserWindowInterface* browser) {\n  popup_creation_pending_ = false;\n  if (!browser) {\n    delegate_->OnAuthFlowFailure(WebAuthFlow::Failure::CANNOT_CREATE_WINDOW);\n    return;\n"
+  - description: Prevent duplicate pending Android authentication popups (2).
+    regex:
+      re_pattern: '\ \ base::OnceCallback<void\(BrowserWindowInterface\*\)>\ callback\ =\
+
+        \ \ \ \ \ \ base::BindOnce\(\&WebAuthFlow::OnBrowserWindowInterfaceInitialized,\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ weak_factory_\.GetWeakPtr\(\)\);\
+
+        \ \ CreateBrowserWindow\(std::move\(params\),\ std::move\(callback\)\);\
+
+        \#endif\
+
+        \
+
+        '
+      replace: "  base::OnceCallback<void(BrowserWindowInterface*)> callback =\n      base::BindOnce(&WebAuthFlow::OnBrowserWindowInterfaceInitialized,\n                     weak_factory_.GetWeakPtr());\n  // Keep ownership of the auth contents until the asynchronous window is ready,\n  // but do not let another completed navigation request a second window.\n  popup_creation_pending_ = true;\n  CreateBrowserWindow(std::move(params), std::move(callback));\n#endif\n\n"
+  - description: Prevent duplicate pending Android authentication popups (3).
+    regex:
+      re_pattern: '\ \ \ \ \}\
+
+        \ \ \ \ return;\
+
+        \ \ \}\
+
+        \
+
+        \ \ //\ If\ `web_contents_`\ is\ nullptr,\ this\ means\ that\ the\ interactive\ tab\ has\
+
+        \ \ //\ already\ been\ opened\ once\.\
+
+        '
+      replace: "    }\n    return;\n  }\n\n#if BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_EXTENSIONS_CORE)\n  if (popup_creation_pending_) {\n    return;\n  }\n#endif\n\n  // If `web_contents_` is nullptr, this means that the interactive tab has\n  // already been opened once.\n"
+
+  - description: Owned Android window/auth/options/fullscreen and fixture routing final integration (1)
+    regex:
+      re_pattern: '\ \ if\ \(popup_bounds_\.has_value\(\)\)\ \{\
+
+        \ \ \ \ params\.initial_bounds\ =\ popup_bounds_\.value\(\);\
+
+        \ \ \}\
+
+        \
+
+        \ \ base::OnceCallback<void\(BrowserWindowInterface\*\)>\ callback\ =\
+
+        \ \ \ \ \ \ base::BindOnce\(\&WebAuthFlow::OnBrowserWindowInterfaceInitialized,\
+
+        \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ weak_factory_\.GetWeakPtr\(\)\);\
+
+        \ \ //\ Keep\ ownership\ of\ the\ auth\ contents\ until\ the\ asynchronous\ window\ is\ ready,\
+
+        \ \ //\ but\ do\ not\ let\ another\ completed\ navigation\ request\ a\ second\ window\.\
+
+        \ \ popup_creation_pending_\ =\ true;\
+
+        \ \ CreateBrowserWindow\(std::move\(params\),\ std::move\(callback\)\);\
+
+        '
+      replace: "  if (popup_bounds_.has_value()) {\n    params.initial_bounds = popup_bounds_.value();\n  }\n\n  base::OnceCallback<void(BrowserWindowInterface*)>\
+        \ callback = base::BindOnce(\n      [](base::WeakPtr<WebAuthFlow> flow, BrowserWindowInterface* browser) {\n       \
+        \ // This completion owns the result of this fresh TYPE_POPUP request.\n        // Cancelling the flow must still retire\
+        \ its late-created window.\n        if (!flow || !flow->delegate_ || !flow->profile_ ||\n            flow->profile_->ShutdownStarted())\
+        \ {\n          if (browser) {\n            browser->GetWindow()->Close();\n          }\n          return;\n        }\n\
+        \        flow->OnBrowserWindowInterfaceInitialized(browser);\n      },\n      weak_factory_.GetWeakPtr());\n  // Keep\
+        \ ownership of the auth contents until the asynchronous window is ready,\n  // but do not let another completed navigation\
+        \ request a second window.\n  popup_creation_pending_ = true;\n  CreateBrowserWindow(std::move(params), std::move(callback));\n"
+  - description: Owned Android window/auth/options/fullscreen and fixture routing final integration (2)
+    regex:
+      re_pattern: '\ \ //\ WebContents\ are\ being\ destroyed\.\ It\ would\ be\ cleaner\ to\ send\ a\ "profile\
+
+        \ \ //\ destroyed"\ notification\ to\ the\ delegate,\ but\ all\ the\ current\ delegates\
+
+        \ \ //\ already\ observe\ Profile\ destruction,\ so\ we\ can\ just\ be\ silent\ here\.\
+
+        \ \ delegate_\ =\ nullptr;\
+
+        \
+
+        \ \ BrowserWindowInterface\*\ popup_browser\ =\
+
+        \ \ \ \ \ \ web_contents\(\)\
+
+        \ \ \ \ \ \ \ \ \ \ \?\ browser_window_util::GetBrowserForTabContents\(\*web_contents\(\)\)\
+
+        '
+      replace: "  // WebContents are being destroyed. It would be cleaner to send a \"profile\n  // destroyed\" notification\
+        \ to the delegate, but all the current delegates\n  // already observe Profile destruction, so we can just be silent\
+        \ here.\n  delegate_ = nullptr;\n#if BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_EXTENSIONS_CORE)\n  weak_factory_.InvalidateWeakPtrs();\n\
+        #endif\n\n  BrowserWindowInterface* popup_browser =\n      web_contents()\n          ? browser_window_util::GetBrowserForTabContents(*web_contents())\n"

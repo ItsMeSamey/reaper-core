@@ -1,13 +1,316 @@
 diff --git a/chrome/android/java/src/org/chromium/chrome/browser/tabbed_mode/TabbedAppMenuPropertiesDelegate.java b/chrome/android/java/src/org/chromium/chrome/browser/tabbed_mode/TabbedAppMenuPropertiesDelegate.java
-index c16621be2e6d350925a7ceb5e05489f15c8a4e84..784986ae7cd657aedb3fa88a554b8ef2125ce37c 100644
+index c16621be2e6d350925a7ceb5e05489f15c8a4e84..6731b4e82bc36df7f500ce99c5dea0fa3b27b18f 100644
 --- a/chrome/android/java/src/org/chromium/chrome/browser/tabbed_mode/TabbedAppMenuPropertiesDelegate.java
 +++ b/chrome/android/java/src/org/chromium/chrome/browser/tabbed_mode/TabbedAppMenuPropertiesDelegate.java
-@@ -1536,7 +1536,7 @@ public class TabbedAppMenuPropertiesDelegate extends AppMenuPropertiesDelegateIm
-         return new MVCListAdapter.ListItem(AppMenuHandler.AppMenuItemType.STANDARD, model);
+@@ -13,7 +13,6 @@
+ import android.view.View;
+ 
+ import androidx.annotation.IntDef;
+-import androidx.annotation.StringRes;
+ import androidx.annotation.VisibleForTesting;
+ import androidx.appcompat.content.res.AppCompatResources;
+ import androidx.core.graphics.drawable.DrawableCompat;
+@@ -26,6 +25,7 @@
+ import org.chromium.base.supplier.NonNullObservableSupplier;
+ import org.chromium.base.supplier.NullableObservableSupplier;
+ import org.chromium.base.supplier.OneshotSupplier;
++import org.chromium.build.BuildConfig;
+ import org.chromium.build.annotations.Contract;
+ import org.chromium.build.annotations.NullMarked;
+ import org.chromium.build.annotations.Nullable;
+@@ -36,17 +36,13 @@
+ import org.chromium.chrome.browser.app.appmenu.AppMenuPropertiesDelegateImpl;
+ import org.chromium.chrome.browser.bookmarks.BookmarkImageFetcher;
+ import org.chromium.chrome.browser.bookmarks.BookmarkModel;
+-import org.chromium.chrome.browser.device.DeviceConditions;
+ import org.chromium.chrome.browser.enterprise.util.ManagedBrowserUtils;
+-import org.chromium.chrome.browser.feed.FeedFeatures;
+ import org.chromium.chrome.browser.feedback.HelpAndFeedbackLauncher;
+ import org.chromium.chrome.browser.flags.ChromeFeatureList;
+-import org.chromium.chrome.browser.glic.GlicEnabling;
+ import org.chromium.chrome.browser.homepage.HomepageManager;
+ import org.chromium.chrome.browser.hub.HubManager;
+ import org.chromium.chrome.browser.hub.Pane;
+ import org.chromium.chrome.browser.hub.PaneId;
+-import org.chromium.chrome.browser.image_descriptions.ImageDescriptionsController;
+ import org.chromium.chrome.browser.incognito.IncognitoUtils;
+ import org.chromium.chrome.browser.incognito.reauth.IncognitoReauthController;
+ import org.chromium.chrome.browser.layouts.LayoutStateProvider;
+@@ -74,11 +70,8 @@
+ import org.chromium.chrome.browser.ui.default_browser_promo.DefaultBrowserPromoUtils;
+ import org.chromium.chrome.browser.ui.favicon.FaviconHelper;
+ import org.chromium.chrome.browser.ui.favicon.FaviconUtils;
+-import org.chromium.chrome.browser.ui.lens.LensOverlayTabHelper;
+ import org.chromium.chrome.browser.ui.messages.snackbar.SnackbarManager;
+ import org.chromium.chrome.browser.ui.native_page.NativePage;
+-import org.chromium.chrome.browser.ui.side_panel.AndroidSidePanelEnabledFn;
+-import org.chromium.chrome.browser.ui.side_ui.SideUiCoordinator.SideUiId;
+ import org.chromium.chrome.browser.ui.side_ui.SideUiStateProvider;
+ import org.chromium.components.browser_ui.accessibility.PageZoomManager;
+ import org.chromium.components.browser_ui.widget.RoundedIconGenerator;
+@@ -86,7 +79,6 @@
+ import org.chromium.components.embedder_support.util.UrlUtilities;
+ import org.chromium.components.tab_group_sync.TabGroupSyncService;
+ import org.chromium.components.user_prefs.UserPrefs;
+-import org.chromium.net.ConnectionType;
+ import org.chromium.ui.base.DeviceFormFactor;
+ import org.chromium.ui.modaldialog.ModalDialogManager;
+ import org.chromium.ui.modelutil.LayoutViewBuilder;
+@@ -149,7 +141,6 @@
+     private final FaviconHelper.DefaultFaviconHelper mDefaultFaviconHelper;
+     private final RoundedIconGenerator mRoundedIconGenerator;
+     private final Supplier<RecentlyClosedEntriesManager> mRecentlyClosedEntriesManagerSupplier;
+-    private final Supplier<SideUiStateProvider> mSideUiStateProviderSupplier;
+ 
+     public TabbedAppMenuPropertiesDelegate(
+             Context context,
+@@ -191,7 +182,6 @@
+         mDefaultFaviconHelper = new FaviconHelper.DefaultFaviconHelper();
+         mRoundedIconGenerator = FaviconUtils.createCircularIconGenerator(mContext);
+         mRecentlyClosedEntriesManagerSupplier = recentlyClosedEntriesManagerSupplier;
+-        mSideUiStateProviderSupplier = sideUiStateProviderSupplier;
+ 
+         incognitoReauthControllerOneshotSupplier.onAvailable(
+                 mIncognitoReauthCallbackController.makeCancelable(
+@@ -467,20 +457,8 @@
+             modelList.add(buildPrintItem(currentTab));
+         }
+ 
+-        // Price Tracking (enable / disable)
+-        ListItem priceTrackingItem =
+-                maybeBuildPriceTrackingListItem(currentTab, shouldShowIconBeforeItem);
+-        if (priceTrackingItem != null) modelList.add(priceTrackingItem);
+-
+-        // Glic
+-        ListItem openGlicItem = maybeBuildOpenGlicItem(currentTab);
+-        if (openGlicItem != null) modelList.add(openGlicItem);
+-
+         // Find in page
+         if (shouldShowFindInPageItem(currentTab)) modelList.add(buildFindInPageItem(currentTab));
+-
+-        // Lens Overlay
+-        if (shouldShowLensOverlayItem(currentTab)) modelList.add(buildLensOverlayItem(currentTab));
+ 
+         // Translate
+         if (shouldShowTranslateMenuItem(currentTab)) {
+@@ -528,16 +506,6 @@
+         // Paint Preview
+         if (mSaveAndShareItemBuilder.shouldShowPaintPreview(isNativePage, currentTab)) {
+             modelList.add(mSaveAndShareItemBuilder.buildPaintPreviewItem(shouldShowIconBeforeItem));
+-        }
+-
+-        // Get Image Descriptions
+-        if (shouldShowGetImageDescriptionsItem(currentTab)) {
+-            modelList.add(buildGetImageDescriptionsItem(currentTab));
+-        }
+-
+-        // Listen to the Feed
+-        if (shouldShowListenToFeedItem(currentTab)) {
+-            modelList.add(buildListenToFeedItem());
+         }
+ 
+         // Divider Line
+@@ -670,26 +638,15 @@
+                             currentTab, isNativePage, isFileScheme, isContentScheme, url));
+         }
+ 
+-        // Glic
+-        ListItem openGlicItem = maybeBuildOpenGlicItem(currentTab);
+-        if (openGlicItem != null) modelList.add(openGlicItem);
+-
+         // Print
+         if (shouldShowPrintItem(currentTab)) {
+             modelList.add(buildPrintItem(currentTab));
+         }
+ 
+-        // Price Tracking (enable / disable)
+         boolean shouldShowIconBeforeItem = shouldShowIconBeforeItem();
+-        ListItem priceTrackingItem =
+-                maybeBuildPriceTrackingListItem(currentTab, shouldShowIconBeforeItem);
+-        if (priceTrackingItem != null) modelList.add(priceTrackingItem);
+ 
+         // Find in page
+         if (shouldShowFindInPageItem(currentTab)) modelList.add(buildFindInPageItem(currentTab));
+-
+-        // Lens Overlay
+-        if (shouldShowLensOverlayItem(currentTab)) modelList.add(buildLensOverlayItem(currentTab));
+ 
+         // Translate
+         if (shouldShowTranslateMenuItem(currentTab)) {
+@@ -699,6 +656,10 @@
+         // More tools
+         if (mMoreToolsItemBuilder.shouldShowMoreToolsItem(currentTab)) {
+             modelList.add(buildMoreToolsItem(currentTab));
++        } else if (BuildConfig.IS_DESKTOP_ANDROID
++                && !isSubmenusEnabled(mContext)
++                && mMoreToolsItemBuilder.shouldShowDevToolsItem(currentTab)) {
++            modelList.add(mMoreToolsItemBuilder.buildDevToolsItem());
+         }
+ 
+         // Open with ...
+@@ -720,16 +681,6 @@
+         // Auto Dark
+         if (shouldShowAutoDarkItem(currentTab, isNativePage)) {
+             modelList.add(buildAutoDarkItem(currentTab, isNativePage, shouldShowIconBeforeItem));
+-        }
+-
+-        // Get Image Descriptions
+-        if (shouldShowGetImageDescriptionsItem(currentTab)) {
+-            modelList.add(buildGetImageDescriptionsItem(currentTab));
+-        }
+-
+-        // Listen to the Feed
+-        if (shouldShowListenToFeedItem(currentTab)) {
+-            modelList.add(buildListenToFeedItem());
+         }
+ 
+         // Divider Line
+@@ -1255,42 +1206,6 @@
+                                 ? R.drawable.ic_more_tools_24dp
+                                 : Resources.ID_NULL,
+                         submenuItemsSupplier,
+-                        isMenuIconAtStart()));
+-    }
+-
+-    @Contract("null -> false")
+-    private boolean shouldShowGetImageDescriptionsItem(@Nullable Tab currentTab) {
+-        return currentTab != null
+-                && shouldShowWebContentsDependentMenuItem(currentTab)
+-                && ImageDescriptionsController.getInstance().shouldShowImageDescriptionsMenuItem();
+-    }
+-
+-    private ListItem buildGetImageDescriptionsItem(Tab currentTab) {
+-        assert shouldShowGetImageDescriptionsItem(currentTab);
+-
+-        @StringRes int titleId = R.string.menu_stop_image_descriptions;
+-        Profile profile = currentTab.getProfile();
+-        // If image descriptions are not enabled, then we want the menu item to be "Get".
+-        if (!ImageDescriptionsController.getInstance().imageDescriptionsEnabled(profile)) {
+-            titleId = R.string.menu_get_image_descriptions;
+-        } else if (ImageDescriptionsController.getInstance().onlyOnWifiEnabled(profile)
+-                && DeviceConditions.getCurrentNetConnectionType(mContext)
+-                        != ConnectionType.CONNECTION_WIFI) {
+-            // If image descriptions are enabled, then we want "Stop", except in the special
+-            // case that the user specified only on Wifi, and we are not currently on Wifi.
+-            titleId = R.string.menu_get_image_descriptions;
+-        }
+-
+-        return new ListItem(
+-                AppMenuHandler.AppMenuItemType.STANDARD,
+-                AppMenuItemUtils.buildModelForStandardMenuItem(
+-                        mContext,
+-                        getAppMenuItemTheme(),
+-                        R.id.get_image_descriptions_id,
+-                        titleId,
+-                        shouldShowIconBeforeItem()
+-                                ? R.drawable.ic_image_descriptions
+-                                : Resources.ID_NULL,
+                         isMenuIconAtStart()));
      }
  
+@@ -1368,37 +1283,6 @@
+                         isMenuIconAtStart()));
+     }
+ 
+-    @Contract("null -> false")
+-    private boolean shouldShowListenToFeedItem(@Nullable Tab currentTab) {
+-        if (currentTab == null
+-                || isIncognitoShowing()
+-                || !UrlUtilities.isNtpUrl(currentTab.getUrl())
+-                || !ChromeFeatureList.isEnabled(ChromeFeatureList.FEED_AUDIO_OVERVIEWS)) {
+-            return false;
+-        }
+-
+-        Profile profile = currentTab.getProfile();
+-        if (!FeedFeatures.isFeedEnabled(profile)
+-                || !UserPrefs.get(profile).getBoolean(Pref.ARTICLES_LIST_VISIBLE)) {
+-            return false;
+-        }
+-
+-        ReadAloudController readAloudController = mReadAloudControllerSupplier.get();
+-        return readAloudController != null && readAloudController.isAvailable();
+-    }
+-
+-    private ListItem buildListenToFeedItem() {
+-        return new ListItem(
+-                AppMenuHandler.AppMenuItemType.STANDARD,
+-                AppMenuItemUtils.buildModelForStandardMenuItem(
+-                        mContext,
+-                        getAppMenuItemTheme(),
+-                        R.id.listen_to_feed_id,
+-                        R.string.menu_listen_to_feed,
+-                        R.drawable.ic_play_circle,
+-                        isMenuIconAtStart()));
+-    }
+-
+     private ListItem buildHelpItem() {
+         int helpString = HelpAndFeedbackLauncher.getHelpMenuStringRes();
+         return new ListItem(
+@@ -1512,31 +1396,7 @@
+                         isMenuIconAtStart()));
+     }
+ 
+-    private boolean shouldShowLensOverlayItem(@Nullable Tab currentTab) {
+-        return LensOverlayTabHelper.shouldShowLensOverlay(currentTab);
+-    }
+-
+-    private MVCListAdapter.ListItem buildLensOverlayItem(@Nullable Tab currentTab) {
+-        assert shouldShowLensOverlayItem(currentTab);
+-        PropertyModel model =
+-                AppMenuItemUtils.buildModelForStandardMenuItem(
+-                        mContext,
+-                        getAppMenuItemTheme(),
+-                        R.id.lens_overlay_menu_id,
+-                        R.string.menu_search_tab_with_google_lens,
+-                        shouldShowIconBeforeItem()
+-                                ? R.drawable.lens_camera_icon
+-                                : Resources.ID_NULL,
+-                        isMenuIconAtStart());
+-
+-        // Disable the item if the overlay is already showing.
+-        model.set(
+-                AppMenuItemProperties.ENABLED, !LensOverlayTabHelper.isOverlayShowing(currentTab));
+-
+-        return new MVCListAdapter.ListItem(AppMenuHandler.AppMenuItemType.STANDARD, model);
+-    }
+-
 -    private boolean shouldShowDefaultBrowserPromo() {
 +    protected boolean shouldShowDefaultBrowserPromo() {
          return DefaultBrowserPromoUtils.getInstance().shouldShowAppMenuItemEntryPoint()
                  && ChromeFeatureList.sDefaultBrowserPromoEntryPointShowAppMenu.getValue();
      }
+@@ -1561,34 +1421,6 @@
+         model.set(AppMenuItemProperties.ICON_NO_TINT, true);
+ 
+         return new ListItem(AppMenuHandler.AppMenuItemType.STANDARD, model);
+-    }
+-
+-    private @Nullable ListItem maybeBuildOpenGlicItem(@Nullable Tab currentTab) {
+-        if (currentTab == null
+-                || currentTab.isIncognito()
+-                || currentTab.getWebContents() == null
+-                || !GlicEnabling.isEnabledForProfile(currentTab.getProfile())) {
+-            return null;
+-        }
+-        // Only enforce width constraints if side panel feature is enabled on the device.
+-        // TODO(crbug.com/519680563): Remove this side panel check once bottom sheet enabled on LFF.
+-        if (AndroidSidePanelEnabledFn.isEnabled()) {
+-            SideUiStateProvider sideUiStateProvider = mSideUiStateProviderSupplier.get();
+-            assert sideUiStateProvider != null;
+-            if (!sideUiStateProvider.canShowSideUi(SideUiId.SIDE_PANEL)) {
+-                return null;
+-            }
+-        }
+-
+-        return new ListItem(
+-                AppMenuHandler.AppMenuItemType.STANDARD,
+-                AppMenuItemUtils.buildModelForStandardMenuItem(
+-                        mContext,
+-                        getAppMenuItemTheme(),
+-                        R.id.glic_menu_id,
+-                        R.string.glic_button_entrypoint_ask_gemini_label,
+-                        shouldShowIconBeforeItem() ? R.drawable.ic_spark_24dp : Resources.ID_NULL,
+-                        isMenuIconAtStart()));
+     }
+ 
+     /**

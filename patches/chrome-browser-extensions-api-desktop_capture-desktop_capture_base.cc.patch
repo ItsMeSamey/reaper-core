@@ -1,0 +1,77 @@
+diff --git a/chrome/browser/extensions/api/desktop_capture/desktop_capture_base.cc b/chrome/browser/extensions/api/desktop_capture/desktop_capture_base.cc
+index bb268f83a895a17a93a074470ce53a7c619a9156..bd12659f3a8c839c7f3cdcbcf5f42bdfc8e0af71 100644
+--- a/chrome/browser/extensions/api/desktop_capture/desktop_capture_base.cc
++++ b/chrome/browser/extensions/api/desktop_capture/desktop_capture_base.cc
+@@ -76,12 +76,43 @@ void DesktopCaptureChooseDesktopMediaFunctionBase::Cancel() {
+   // we return.
+   scoped_refptr<DesktopCaptureChooseDesktopMediaFunctionBase> self(this);
+ 
++#if BUILDFLAG(IS_ANDROID)
++  if (did_respond()) {
++    return;
++  }
++  registry_observation_.Reset();
++#endif
++
+   // If this picker dialog is open, this will close it.
+   picker_controller_.reset();
+ 
+   Respond(ArgumentList(Create(std::string(), Options())));
+ }
+ 
++#if BUILDFLAG(IS_ANDROID)
++void DesktopCaptureChooseDesktopMediaFunctionBase::OnExtensionUnloaded(
++    content::BrowserContext* browser_context,
++    const Extension* unloaded_extension,
++    UnloadedExtensionReason reason) {
++  if (unloaded_extension == extension()) {
++    Cancel();
++  }
++}
++
++void DesktopCaptureChooseDesktopMediaFunctionBase::OnShutdown(
++    ExtensionRegistry* registry) {
++  Cancel();
++}
++
++void DesktopCaptureChooseDesktopMediaFunctionBase::OnBrowserContextShutdown() {
++  if (picker_controller_) {
++    Cancel();
++  } else {
++    registry_observation_.Reset();
++  }
++}
++#endif
++
+ ExtensionFunction::ResponseAction
+ DesktopCaptureChooseDesktopMediaFunctionBase::Execute(
+     const std::vector<api::desktop_capture::DesktopCaptureSourceType>& sources,
+@@ -182,6 +213,7 @@ DesktopCaptureChooseDesktopMediaFunctionBase::Execute(
+   // TODO(crbug.com/405218400): Add more Android-specific parameters here, like
+   // Params::capture_this_tab and Params::exclude_monitor_type_surfaces.
+ #if BUILDFLAG(IS_ANDROID)
++  picker_params.android_request_document = render_frame_host->GetWeakDocumentPtr();
+   picker_params.exclude_self_browser_surface = exclude_self_browser_surface;
+   picker_params.allowed_capture_level = capture_level;
+ #endif
+@@ -189,6 +221,10 @@ DesktopCaptureChooseDesktopMediaFunctionBase::Execute(
+       std::make_unique<DesktopMediaPickerController>(g_picker_factory);
+   picker_params.restricted_by_policy =
+       (capture_level != AllowedScreenCaptureLevel::kUnrestricted);
++#if BUILDFLAG(IS_ANDROID)
++  // A worker's target tab can outlive the extension that requested the picker.
++  registry_observation_.Observe(ExtensionRegistry::Get(browser_context()));
++#endif
+   picker_controller_->Show(picker_params, std::move(media_types),
+                            std::move(callback));
+   return RespondLater();
+@@ -209,6 +245,9 @@ void DesktopCaptureChooseDesktopMediaFunctionBase::OnPickerDialogResults(
+     const content::GlobalRenderFrameHostId& render_frame_host_id,
+     const std::string& err,
+     DesktopMediaID source) {
++#if BUILDFLAG(IS_ANDROID)
++  registry_observation_.Reset();
++#endif
+   picker_controller_.reset();
+ 
+   if (!err.empty()) {

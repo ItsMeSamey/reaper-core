@@ -1,0 +1,115 @@
+substitutions:
+- description: Validate the actual Activity before constructing a permission dialog.
+  regex:
+    pattern: import android.content.Context;
+    replace: 'import android.app.Activity;
+
+      import android.content.Context;'
+- description: Expose only the creation entry point for missing-window regressions.
+  regex:
+    pattern: "    @CalledByNative\n    private static @Nullable ExtensionInstallDialogBridge create("
+    replace: "    @CalledByNative\n    @VisibleForTesting\n    static @Nullable ExtensionInstallDialogBridge create("
+- description: Reject unavailable, finishing, or destroyed Activities and missing managers.
+  regex:
+    pattern: "        Context context = windowAndroid.getActivity().get();\n        ModalDialogManager modalDialogManager = windowAndroid.getModalDialogManager();\n        if (context == null || modalDialogManager == null) {"
+    replace: "        Activity activity = windowAndroid.getActivity().get();\n        ModalDialogManager modalDialogManager = windowAndroid.getModalDialogManager();\n        if (activity == null\n                || activity.isFinishing()\n                || activity.isDestroyed()\n                || modalDialogManager == null) {"
+- description: Use the validated Activity as the dialog context.
+  regex:
+    pattern: nativeExtensionInstallDialogView, context, modalDialogManager);
+    replace: nativeExtensionInstallDialogView, activity, modalDialogManager);
+- description: Consume dismissal ownership before callbacks can reenter the UI.
+  regex:
+    pattern: "        if (mNativeExtensionInstallDialogView == 0) return;\n        switch (dismissalCause) {"
+    replace: "        if (mNativeExtensionInstallDialogView == 0) return;\n        long nativeView = mNativeExtensionInstallDialogView;\n        // Completion can synchronously tear down UI. Stale or reentrant dismissal\n        // callbacks must neither complete again nor delete the native view twice.\n        mNativeExtensionInstallDialogView = 0;\n        switch (dismissalCause) {"
+- description: Complete acceptance using the consumed native handle.
+  regex:
+    pattern: .onDialogAccepted(mNativeExtensionInstallDialogView, justificationText);
+    replace: .onDialogAccepted(nativeView, justificationText);
+- description: Complete cancellation using the consumed native handle.
+  regex:
+    pattern: .onDialogCanceled(mNativeExtensionInstallDialogView);
+    replace: .onDialogCanceled(nativeView);
+- description: Complete dismissal using the consumed native handle.
+  regex:
+    pattern: .onDialogDismissed(mNativeExtensionInstallDialogView);
+    replace: .onDialogDismissed(nativeView);
+- description: Destroy the consumed view exactly once after completion.
+  regex:
+    pattern: ExtensionInstallDialogBridgeJni.get().destroy(mNativeExtensionInstallDialogView);
+    replace: ExtensionInstallDialogBridgeJni.get().destroy(nativeView);
+- description: Preserve Android install dialog requesting-tab ownership (1).
+  regex:
+    re_pattern: '\
+
+      import\ org\.chromium\.build\.annotations\.NullMarked;\
+
+      import\ org\.chromium\.build\.annotations\.Nullable;\
+
+      import\ org\.chromium\.ui\.UiUtils;\
+
+      import\ org\.chromium\.ui\.base\.WindowAndroid;\
+
+      import\ org\.chromium\.ui\.modaldialog\.DialogDismissalCause;\
+
+      '
+    replace: '
+
+      import org.chromium.build.annotations.NullMarked;
+
+      import org.chromium.build.annotations.Nullable;
+
+      import org.chromium.content_public.browser.WebContents;
+
+      import org.chromium.ui.UiUtils;
+
+      import org.chromium.ui.base.WindowAndroid;
+
+      import org.chromium.ui.modaldialog.DialogDismissalCause;
+
+      '
+- description: Preserve Android install dialog requesting-tab ownership (2).
+  regex:
+    re_pattern: '\ \ \ \ \ \*\
+
+      \ \ \ \ \ \*\ @param\ nativeExtensionInstallDialogView\ The\ pointer\ to\ the\ native\ object\.\
+
+      \ \ \ \ \ \*\ @param\ windowAndroid\ The\ current\ \{@link\ WindowAndroid\}\ object\.\
+
+      \ \ \ \ \ \*/\
+
+      \ \ \ \ @CalledByNative\
+
+      \ \ \ \ @VisibleForTesting\
+
+      \ \ \ \ static\ @Nullable\ ExtensionInstallDialogBridge\ create\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ long\ nativeExtensionInstallDialogView,\ WindowAndroid\ windowAndroid\)\ \{\
+
+      \ \ \ \ \ \ \ \ Activity\ activity\ =\ windowAndroid\.getActivity\(\)\.get\(\);\
+
+      \ \ \ \ \ \ \ \ ModalDialogManager\ modalDialogManager\ =\ windowAndroid\.getModalDialogManager\(\);\
+
+      \ \ \ \ \ \ \ \ if\ \(activity\ ==\ null\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \|\|\ activity\.isFinishing\(\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \|\|\ activity\.isDestroyed\(\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \|\|\ modalDialogManager\ ==\ null\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ return\ null;\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ return\ new\ ExtensionInstallDialogBridge\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ nativeExtensionInstallDialogView,\ activity,\ modalDialogManager\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ /\*\*\
+
+      '
+    replace: "     *\n     * @param nativeExtensionInstallDialogView The pointer to the native object.\n     * @param windowAndroid The current {@link WindowAndroid} object.\n     * @param webContents The requesting contents, or null for a native-window-only prompt.\n     */\n    @CalledByNative\n    @VisibleForTesting\n    static @Nullable ExtensionInstallDialogBridge create(\n            long nativeExtensionInstallDialogView,\n            WindowAndroid windowAndroid,\n            @JniType(\"content::WebContents*\") @Nullable WebContents webContents) {\n        Activity activity = windowAndroid.getActivity().get();\n        ModalDialogManager modalDialogManager = windowAndroid.getModalDialogManager();\n        if (activity == null\n                || activity.isFinishing()\n                || activity.isDestroyed()\n                || modalDialogManager == null\n                || (webContents != null\n                        && (webContents.isDestroyed()\n                                || webContents.getTopLevelNativeWindow() != windowAndroid))) {\n            return null;\n        }\n        ExtensionInstallDialogBridge bridge =\n                new ExtensionInstallDialogBridge(\n                        nativeExtensionInstallDialogView, activity, modalDialogManager);\n        // Parsing and icon loading may finish after another tab becomes selected.\n        // The shared queue/presenter must follow the original requesting tab. A\n        // native-window-only prompt deliberately retains its selected-tab fallback.\n        bridge.mPropertyModelBuilder.with(ModalDialogProperties.TAB_MODAL_OWNER, webContents);\n        return bridge;\n    }\n\n    /**\n"

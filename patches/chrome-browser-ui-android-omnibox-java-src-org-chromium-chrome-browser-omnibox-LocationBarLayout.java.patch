@@ -1,0 +1,271 @@
+diff --git a/chrome/browser/ui/android/omnibox/java/src/org/chromium/chrome/browser/omnibox/LocationBarLayout.java b/chrome/browser/ui/android/omnibox/java/src/org/chromium/chrome/browser/omnibox/LocationBarLayout.java
+--- a/chrome/browser/ui/android/omnibox/java/src/org/chromium/chrome/browser/omnibox/LocationBarLayout.java
++++ b/chrome/browser/ui/android/omnibox/java/src/org/chromium/chrome/browser/omnibox/LocationBarLayout.java
+@@ -16,9 +16,7 @@
+ import android.widget.ImageButton;
+ 
+ import androidx.annotation.CallSuper;
+-import androidx.annotation.ColorInt;
+ import androidx.annotation.DrawableRes;
+-import androidx.annotation.Px;
+ import androidx.annotation.VisibleForTesting;
+ import androidx.appcompat.widget.TooltipCompat;
+ import androidx.constraintlayout.widget.ConstraintLayout;
+@@ -31,35 +29,25 @@
+ import org.chromium.build.annotations.Nullable;
+ import org.chromium.chrome.browser.flags.ChromeFeatureList;
+ import org.chromium.chrome.browser.lens.LensEntryPoint;
+-import org.chromium.chrome.browser.omnibox.fusebox.FuseboxCoordinator.FuseboxLayoutMode;
+-import org.chromium.chrome.browser.omnibox.fusebox.FuseboxCoordinator.FuseboxState;
+ import org.chromium.chrome.browser.omnibox.status.StatusCoordinator;
+ import org.chromium.chrome.browser.omnibox.status.StatusView;
+-import org.chromium.chrome.browser.omnibox.styles.OmniboxResourceProvider;
+ import org.chromium.chrome.browser.omnibox.suggestions.AutocompleteCoordinator;
+ import org.chromium.chrome.browser.omnibox.voice.VoiceRecognitionIntentHandler;
+ import org.chromium.chrome.browser.ui.theme.BrandedColorScheme;
+ import org.chromium.chrome.browser.util.BrowserUiUtils;
+ import org.chromium.components.browser_ui.widget.CompositeTouchDelegate;
+-import org.chromium.components.browser_ui.widget.chips.ChipView;
++import org.chromium.components.omnibox.AutocompleteInput.AutocompleteState;
+ import org.chromium.ui.base.DeviceFormFactor;
+ import org.chromium.ui.base.WindowAndroid;
+ 
+ /** This class represents the location bar where the user types in URLs and search terms. */
+ @NullMarked
+ public class LocationBarLayout extends ConstraintLayout {
+-    private static final int[][] HOVER_STATES =
+-            new int[][] {
+-                new int[] {android.R.attr.state_hovered}, new int[] {} // Default, must be last
+-            };
+-
+     protected ImageButton mDeleteButton;
+     protected ImageButton mMicButton;
+     protected ImageButton mLensButton;
+     protected ImageButton mZoomButton;
+     protected ImageButton mInstallButton;
+-    protected final View mNavigateButton;
+-    protected final ChipView mActivationChip;
+     protected UrlBar mUrlBar;
+     protected final View mLocationBarStatusView;
+     protected final View mFocusThief;
+@@ -74,8 +62,6 @@
+     protected boolean mNativeInitialized;
+     private final View mMarginSpacer;
+     private final int mLocationBarIconStartingPadding;
+-    @VisibleForTesting
+-    protected final @Px int mMinWidthForExpandedActivationChip;
+ 
+     protected @Nullable CompositeTouchDelegate mCompositeTouchDelegate;
+     protected @Nullable SearchEngineService mSearchEngineService;
+@@ -90,7 +76,7 @@
+     private boolean mShowMicButton;
+     private boolean mShowLensButton;
+     private boolean mShowDeleteButton;
+-    private boolean mShowNavigateButton;
++    private @AutocompleteState int mCurrentAutocompleteState = AutocompleteState.DISABLED;
+ 
+     private Runnable mOnSizeChangedRunnable = CallbackUtils.emptyRunnable();
+ 
+@@ -113,8 +99,6 @@
+         mLensButton = findViewById(R.id.lens_camera_button);
+         mZoomButton = findViewById(R.id.zoom_button);
+         mInstallButton = findViewById(R.id.install_button);
+-        mNavigateButton = findViewById(R.id.navigate_button);
+-        mActivationChip = findViewById(R.id.fusebox_activation_chip);
+         mMarginSpacer = findViewById(R.id.margin_spacer);
+         mFocusThief = findViewById(R.id.focus_thief);
+ 
+@@ -123,9 +107,6 @@
+                 res.getDimensionPixelOffset(R.dimen.location_bar_url_action_offset);
+         mLocationBarIconStartingPadding =
+                 res.getDimensionPixelSize(R.dimen.location_bar_icon_starting_padding);
+-        mMinWidthForExpandedActivationChip =
+-                res.getDimensionPixelSize(
+-                        R.dimen.fusebox_compact_activation_chip_min_width_required);
+     }
+ 
+     /** Called when activity is being destroyed. */
+@@ -231,31 +212,8 @@
+         mDeleteButton.setBackgroundResource(resourceId);
+     }
+ 
+-    /* package */ void updateVisualsForState(@BrandedColorScheme int brandedColorScheme) {
+-        updateActivationChipVisuals(brandedColorScheme);
+-    }
+-
+-    private void updateActivationChipVisuals(@BrandedColorScheme int brandedColorScheme) {
+-        Context context = getContext();
+-        @ColorInt
+-        int buttonColor =
+-                OmniboxResourceProvider.getColorSurfaceContainerHigh(context, brandedColorScheme);
+-        @ColorInt
+-        int buttonColorHovered =
+-                OmniboxResourceProvider.getColorSurfaceContainerHighest(
+-                        context, brandedColorScheme);
+-        int[] backgroundColors = new int[] {buttonColorHovered, buttonColor};
+-
+-        mActivationChip.setBackgroundTintList(new ColorStateList(HOVER_STATES, backgroundColors));
+-
+-        @ColorInt
+-        int colorOnSurface = OmniboxResourceProvider.getColorOnSurface(context, brandedColorScheme);
+-        mActivationChip.setIconTint(ColorStateList.valueOf(colorOnSurface));
+-        @ColorInt
+-        int focusRingColor = OmniboxResourceProvider.getColorPrimary(context, brandedColorScheme);
+-        mActivationChip.setForegroundTintList(ColorStateList.valueOf(focusRingColor));
+-        mActivationChip.setTextColor(colorOnSurface);
+-    }
++    /** Refreshes form-factor-specific backgrounds for the current browser theme. */
++    /* package */ void updateVisualsForState(@BrandedColorScheme int brandedColorScheme) {}
+ 
+     /* package */ void setLensButtonTint(ColorStateList colorStateList) {
+         ImageViewCompat.setImageTintList(mLensButton, colorStateList);
+@@ -342,12 +300,6 @@
+                 (statusVisible || isBackButtonVisible()) ? 0 : mLocationBarIconStartingPadding);
+     }
+ 
+-    /** Sets the visibility of the Navigate. */
+-    /* package */ void setNavigateButtonVisibility(boolean shouldShow) {
+-        mShowNavigateButton = shouldShow;
+-        setButtonVisibility(mNavigateButton, shouldShow);
+-    }
+-
+     /** Sets the visibility of the mic button. */
+     /* package */ void setMicButtonVisibility(boolean shouldShow) {
+         mShowMicButton = shouldShow;
+@@ -384,7 +336,6 @@
+         setMicButtonVisibility(mShowMicButton);
+         setLensButtonVisibility(mShowLensButton);
+         setDeleteButtonVisibility(mShowDeleteButton);
+-        setNavigateButtonVisibility(mShowNavigateButton);
+     }
+ 
+     /**
+@@ -540,15 +491,6 @@
+     }
+ 
+     /**
+-     * This should be called when the state of the fusebox shown in the LocationBar changes; it is
+-     * assumed to start in the DISABLED state.
+-     */
+-    /* package */ void onFuseboxStateChanged(@FuseboxState int state) {}
+-
+-    /** Notify the layout that it has been reparented to a popover container. */
+-    /* package */ void setReparentedToPopover(boolean isReparented) {}
+-
+-    /**
+      * Returns the view to which the omnibox suggestions list should be aligned to horizontally and
+      * vertically.
+      */
+@@ -559,7 +501,7 @@
+     /**
+      * Returns the target width (in px) that the dropdown embedder should use to align the
+      * suggestions window, defaulting to the alignment view's measured width. Subclasses (such as
+-     * {@link LocationBarTablet}) may override this to publish an explicit popover alignment width.
++     * {@link LocationBarTablet}) may use their holder as the alignment view.
+      */
+     /* package */ int getAlignmentViewTargetWidth() {
+         return getAlignmentView().getMeasuredWidth();
+@@ -572,13 +514,6 @@
+     /* package */ int getAlignmentViewLeftOffset() {
+         return 0;
+     }
+-
+-    /**
+-     * This should be called when the autocomplete request type for the active omnibox session
+-     * changes to/from specialized (e.g. aim)/conventional (e.g. plain old search). It is not
+-     * assumed that this will be called when the session ends.
+-     */
+-    public void onSpecializedFuseboxModeActivated(boolean isSpecializedRequestType) {}
+ 
+     /**
+      * Signal that the list of suggestions shown in the associated omnibox suggestions list has
+@@ -605,12 +540,6 @@
+      * @param verticalScrollOffset The current vertical scroll offset.
+      */
+     void onSuggestionsListScrollOffsetChanged(int verticalScrollOffset) {}
+-
+-    /**
+-     * Set the fusebox layout mode, which describes how the fusebox should lay itself out w.r.t. the
+-     * suggestions list. See {@link FuseboxLayoutMode}.
+-     */
+-    void setFuseboxLayoutMode(@FuseboxLayoutMode int layoutMode) {}
+ 
+     /** Sets the visibility of the UrlBar and StatusView group. */
+     /* package */ void setUrlAndStatusGroupVisibility(boolean visible) {
+@@ -619,6 +548,14 @@
+         mLocationBarStatusView.setVisibility(visibility);
+     }
+ 
++    /** Applies the ordinary autocomplete focus state to the location bar. */
++    void onAutocompleteStateChanged(@AutocompleteState int state) {
++        if (mUrlCoordinator == null || state == mCurrentAutocompleteState) return;
++        mCurrentAutocompleteState = state;
++        updateCenteringUrlAndStatusState();
++        if (getWidth() > 0) checkUrlContainerWidth();
++    }
++
+     /** Informs the location bar whether the focus ring should be shown. */
+     void setShowFocusRing(boolean showFocusRing) {}
+ 
+@@ -630,22 +567,6 @@
+         return mMicButton;
+     }
+ 
+-    View getNavigateButton() {
+-        return mNavigateButton;
+-    }
+-
+-    /* package */ void setActivationChipVisibility(boolean shouldShow) {
+-        setButtonVisibility(mActivationChip, shouldShow);
+-    }
+-
+-    /* package */ void setActivationChipCompact(boolean isCompact) {
+-        mActivationChip.setIsCompact(isCompact);
+-    }
+-
+-    ChipView getActivationChip() {
+-        return mActivationChip;
+-    }
+-
+     View getDeleteButton() {
+         return mDeleteButton;
+     }
+@@ -654,38 +575,6 @@
+         return mFocusThief;
+     }
+ 
+-    /* package */ @Px
+-    int getUrlBarTextWidth() {
+-        return mUrlBar.getTextWidth();
+-    }
+-
+-    /* package */ @Px
+-    int getUrlBarWidth() {
+-        return mUrlBar.getWidthWithoutCompoundPadding();
+-    }
+-
+-    /* package */ @Px
+-    int getActivationChipCompactWidthDelta() {
+-        return mActivationChip.getCompactWidthDelta();
+-    }
+-
+-    /* package */ boolean isActivationChipCompact() {
+-        return mActivationChip.isCompact();
+-    }
+-
+-    /** Returns whether the URL bar text would overflow if the activation chip were expanded. */
+-    /* package */ boolean isUrlBarTextOverflowing() {
+-        @Px int currentWidth = getUrlBarWidth();
+-        @Px int chipDelta = getActivationChipCompactWidthDelta();
+-        boolean isCompact = isActivationChipCompact();
+-        @Px int expandedUrlBarWidth = isCompact ? (currentWidth - chipDelta) : currentWidth;
+-        return getUrlBarTextWidth() > expandedUrlBarWidth;
+-    }
+-
+-    /* package */ boolean isTooNarrowForExpandedActivationChip() {
+-        return false;
+-    }
+-
+     public StatusCoordinator getStatusCoordinatorForTesting() {
+         return mStatusCoordinator;
+     }

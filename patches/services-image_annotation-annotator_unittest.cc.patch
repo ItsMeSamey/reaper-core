@@ -1,0 +1,868 @@
+diff --git a/services/image_annotation/annotator_unittest.cc b/services/image_annotation/annotator_unittest.cc
+index aeeaffc3a51bdce863a66a12d0f19ce9651a4016..5a4457e9a253b3561056e62f73760bece098209f 100644
+--- a/services/image_annotation/annotator_unittest.cc
++++ b/services/image_annotation/annotator_unittest.cc
+@@ -21,8 +21,11 @@
+ #include "base/test/task_environment.h"
+ #include "base/time/time.h"
+ #include "base/values.h"
++#include "build/build_config.h"
++#if !BUILDFLAG(IS_ANDROID)
+ #include "components/manta/anchovy/anchovy_provider.h"
+ #include "components/manta/manta_status.h"
++#endif  // !BUILDFLAG(IS_ANDROID)
+ #include "mojo/public/cpp/bindings/pending_remote.h"
+ #include "mojo/public/cpp/bindings/receiver_set.h"
+ #include "net/base/net_errors.h"
+@@ -417,11 +420,15 @@ TEST(AnnotatorTest, OcrSuccessAndCache) {
+       "https://ia-pa.googleapis.com/v1/");
+   base::HistogramTester histogram_tester;
+ 
+-  Annotator annotator(
+-      GURL(kTestServerUrl), GURL(""), std::string() /* api_key */, kThrottle,
+-      1 /* batch_size */, 1.0 /* min_ocr_confidence */,
+-      test_url_factory.AsSharedURLLoaderFactory(), /*anchovy_provider=*/nullptr,
+-      std::make_unique<TestAnnotatorClient>());
++  Annotator annotator(GURL(kTestServerUrl), GURL(""),
++                      std::string() /* api_key */, kThrottle,
++                      1 /* batch_size */, 1.0 /* min_ocr_confidence */,
++                      test_url_factory.AsSharedURLLoaderFactory(),
++#if !BUILDFLAG(IS_ANDROID)
++                      /*anchovy_provider=*/nullptr,
++#endif  // !BUILDFLAG(IS_ANDROID)
++
++                      std::make_unique<TestAnnotatorClient>());
+   TestImageProcessor processor;
+ 
+   // First call performs original image annotation.
+@@ -515,6 +522,120 @@ TEST(AnnotatorTest, OcrSuccessAndCache) {
+   }
+ }
+ 
++#if BUILDFLAG(IS_ANDROID)
++TEST(AnnotatorTest, AndroidLegacyRequestsIgnoreAlternateRouting) {
++  base::test::ScopedFeatureList enabled_features;
++  enabled_features.InitAndEnableFeature(
++      features::kImageDescriptionsAlternateRouting);
++  base::test::TaskEnvironment test_task_env(
++      base::test::TaskEnvironment::TimeSource::MOCK_TIME);
++  TestServerURLLoaderFactory test_url_factory(
++      "https://ia-pa.googleapis.com/v1/");
++  base::HistogramTester histogram_tester;
++
++  Annotator annotator(GURL(kTestServerUrl), GURL(""),
++                      std::string() /* api_key */, kThrottle,
++                      1 /* batch_size */, 1.0 /* min_ocr_confidence */,
++                      test_url_factory.AsSharedURLLoaderFactory(),
++#if !BUILDFLAG(IS_ANDROID)
++                      /*anchovy_provider=*/nullptr,
++#endif  // !BUILDFLAG(IS_ANDROID)
++
++                      std::make_unique<TestAnnotatorClient>());
++  TestImageProcessor processor;
++
++  // First call performs original image annotation.
++  {
++    std::optional<mojom::AnnotateImageError> error;
++    std::vector<mojom::Annotation> annotations;
++
++    annotator.AnnotateImage(
++        kImage1Url, kDescLang, processor.GetPendingRemote(),
++        base::BindOnce(&ReportResult, &error, &annotations));
++    test_task_env.RunUntilIdle();
++
++    // Annotator should have asked processor for pixels.
++    ASSERT_THAT(processor.callbacks(), SizeIs(1));
++
++    // Send back image data.
++    std::move(processor.callbacks()[0]).Run({1, 2, 3}, kDescDim, kDescDim);
++    processor.callbacks().pop_back();
++    test_task_env.RunUntilIdle();
++
++    // No request should be sent yet (because service is waiting to batch up
++    // multiple requests).
++    EXPECT_THAT(test_url_factory.requests(), IsEmpty());
++    test_task_env.FastForwardBy(base::Seconds(1));
++    test_task_env.RunUntilIdle();
++
++    // HTTP request should have been made.
++    const std::string request =
++        ReformatJson(base::StringPrintf(kTemplateRequest, kImage1Url, "AQID"));
++    test_url_factory.ExpectRequestAndSimulateResponse(
++        "annotation", {} /* expected_headers */, request, kOcrSuccessResponse,
++        net::HTTP_OK);
++    test_task_env.RunUntilIdle();
++
++    // HTTP response should have completed and callback should have been called.
++    ASSERT_THAT(error, Eq(std::nullopt));
++    EXPECT_THAT(annotations,
++                UnorderedElementsAre(AnnotatorEq(mojom::AnnotationType::kOcr,
++                                                 1.0, "Region 1\nRegion 2")));
++
++    // Metrics should have been logged for the major actions of the service.
++    histogram_tester.ExpectUniqueSample(metrics_internal::kCacheHit, false, 1);
++    histogram_tester.ExpectUniqueSample(metrics_internal::kPixelFetchSuccess,
++                                        true, 1);
++    histogram_tester.ExpectUniqueSample(metrics_internal::kServerRequestSize,
++                                        request.size() / 1024, 1);
++    histogram_tester.ExpectUniqueSample(metrics_internal::kServerNetError,
++                                        net::Error::OK, 1);
++    histogram_tester.ExpectUniqueSample(
++        metrics_internal::kServerHttpResponseCode, net::HTTP_OK, 1);
++    histogram_tester.ExpectUniqueSample(metrics_internal::kServerResponseSize,
++                                        std::strlen(kOcrSuccessResponse), 1);
++    histogram_tester.ExpectUniqueSample(metrics_internal::kJsonParseSuccess,
++                                        true, 1);
++    histogram_tester.ExpectUniqueSample(
++        base::StringPrintf(metrics_internal::kAnnotationStatus, "Ocr"),
++        0 /* OK RPC status */, 1);
++    histogram_tester.ExpectUniqueSample(
++        base::StringPrintf(metrics_internal::kAnnotationStatus, "Desc"),
++        0 /* OK RPC status */, 1);
++    histogram_tester.ExpectUniqueSample(
++        base::StringPrintf(metrics_internal::kAnnotationConfidence, "Ocr"), 100,
++        1);
++    histogram_tester.ExpectUniqueSample(
++        base::StringPrintf(metrics_internal::kAnnotationEmpty, "Ocr"), false,
++        1);
++  }
++
++  // Second call uses cached results.
++  {
++    std::optional<mojom::AnnotateImageError> error;
++    std::vector<mojom::Annotation> annotations;
++
++    annotator.AnnotateImage(
++        kImage1Url, kDescLang, processor.GetPendingRemote(),
++        base::BindOnce(&ReportResult, &error, &annotations));
++    test_task_env.RunUntilIdle();
++
++    // Pixels shouldn't be requested.
++    ASSERT_THAT(processor.callbacks(), IsEmpty());
++
++    // Results should have been directly returned without any server call.
++    ASSERT_THAT(error, Eq(std::nullopt));
++    EXPECT_THAT(annotations,
++                UnorderedElementsAre(AnnotatorEq(mojom::AnnotationType::kOcr,
++                                                 1.0, "Region 1\nRegion 2")));
++
++    // Metrics should have been logged for a cache hit.
++    EXPECT_THAT(histogram_tester.GetAllSamples(metrics_internal::kCacheHit),
++                UnorderedElementsAre(Bucket(false, 1), Bucket(true, 1)));
++  }
++}
++#endif  // BUILDFLAG(IS_ANDROID)
++
+ // Test that description annotations are successfully returned.
+ TEST(AnnotatorTest, DescriptionSuccess) {
+   base::test::TaskEnvironment test_task_env(
+@@ -523,11 +644,15 @@ TEST(AnnotatorTest, DescriptionSuccess) {
+       "https://ia-pa.googleapis.com/v1/");
+   base::HistogramTester histogram_tester;
+ 
+-  Annotator annotator(
+-      GURL(kTestServerUrl), GURL(""), std::string() /* api_key */, kThrottle,
+-      1 /* batch_size */, 1.0 /* min_ocr_confidence */,
+-      test_url_factory.AsSharedURLLoaderFactory(), /*anchovy_provider=*/nullptr,
+-      std::make_unique<TestAnnotatorClient>());
++  Annotator annotator(GURL(kTestServerUrl), GURL(""),
++                      std::string() /* api_key */, kThrottle,
++                      1 /* batch_size */, 1.0 /* min_ocr_confidence */,
++                      test_url_factory.AsSharedURLLoaderFactory(),
++#if !BUILDFLAG(IS_ANDROID)
++                      /*anchovy_provider=*/nullptr,
++#endif  // !BUILDFLAG(IS_ANDROID)
++
++                      std::make_unique<TestAnnotatorClient>());
+   TestImageProcessor processor;
+ 
+   std::optional<mojom::AnnotateImageError> error;
+@@ -630,11 +755,15 @@ TEST(AnnotatorTest, DoubleOcrResult) {
+       "https://ia-pa.googleapis.com/v1/");
+   base::HistogramTester histogram_tester;
+ 
+-  Annotator annotator(
+-      GURL(kTestServerUrl), GURL(""), std::string() /* api_key */, kThrottle,
+-      1 /* batch_size */, 1.0 /* min_ocr_confidence */,
+-      test_url_factory.AsSharedURLLoaderFactory(), /*anchovy_provider=*/nullptr,
+-      std::make_unique<TestAnnotatorClient>());
++  Annotator annotator(GURL(kTestServerUrl), GURL(""),
++                      std::string() /* api_key */, kThrottle,
++                      1 /* batch_size */, 1.0 /* min_ocr_confidence */,
++                      test_url_factory.AsSharedURLLoaderFactory(),
++#if !BUILDFLAG(IS_ANDROID)
++                      /*anchovy_provider=*/nullptr,
++#endif  // !BUILDFLAG(IS_ANDROID)
++
++                      std::make_unique<TestAnnotatorClient>());
+   TestImageProcessor processor;
+ 
+   std::optional<mojom::AnnotateImageError> error;
+@@ -745,11 +874,15 @@ TEST(AnnotatorTest, HttpError) {
+       "https://ia-pa.googleapis.com/v1/");
+   base::HistogramTester histogram_tester;
+ 
+-  Annotator annotator(
+-      GURL(kTestServerUrl), GURL(""), std::string() /* api_key */, kThrottle,
+-      1 /* batch_size */, 1.0 /* min_ocr_confidence */,
+-      test_url_factory.AsSharedURLLoaderFactory(), /*anchovy_provider=*/nullptr,
+-      std::make_unique<TestAnnotatorClient>());
++  Annotator annotator(GURL(kTestServerUrl), GURL(""),
++                      std::string() /* api_key */, kThrottle,
++                      1 /* batch_size */, 1.0 /* min_ocr_confidence */,
++                      test_url_factory.AsSharedURLLoaderFactory(),
++#if !BUILDFLAG(IS_ANDROID)
++                      /*anchovy_provider=*/nullptr,
++#endif  // !BUILDFLAG(IS_ANDROID)
++
++                      std::make_unique<TestAnnotatorClient>());
+ 
+   TestImageProcessor processor;
+   std::optional<mojom::AnnotateImageError> error;
+@@ -801,11 +934,15 @@ TEST(AnnotatorTest, BackendError) {
+       "https://ia-pa.googleapis.com/v1/");
+   base::HistogramTester histogram_tester;
+ 
+-  Annotator annotator(
+-      GURL(kTestServerUrl), GURL(""), std::string() /* api_key */, kThrottle,
+-      1 /* batch_size */, 1.0 /* min_ocr_confidence */,
+-      test_url_factory.AsSharedURLLoaderFactory(), /*anchovy_provider=*/nullptr,
+-      std::make_unique<TestAnnotatorClient>());
++  Annotator annotator(GURL(kTestServerUrl), GURL(""),
++                      std::string() /* api_key */, kThrottle,
++                      1 /* batch_size */, 1.0 /* min_ocr_confidence */,
++                      test_url_factory.AsSharedURLLoaderFactory(),
++#if !BUILDFLAG(IS_ANDROID)
++                      /*anchovy_provider=*/nullptr,
++#endif  // !BUILDFLAG(IS_ANDROID)
++
++                      std::make_unique<TestAnnotatorClient>());
+ 
+   TestImageProcessor processor;
+   std::optional<mojom::AnnotateImageError> error;
+@@ -884,11 +1021,15 @@ TEST(AnnotatorTest, OcrBackendError) {
+       "https://ia-pa.googleapis.com/v1/");
+   base::HistogramTester histogram_tester;
+ 
+-  Annotator annotator(
+-      GURL(kTestServerUrl), GURL(""), std::string() /* api_key */, kThrottle,
+-      1 /* batch_size */, 1.0 /* min_ocr_confidence */,
+-      test_url_factory.AsSharedURLLoaderFactory(), /*anchovy_provider=*/nullptr,
+-      std::make_unique<TestAnnotatorClient>());
++  Annotator annotator(GURL(kTestServerUrl), GURL(""),
++                      std::string() /* api_key */, kThrottle,
++                      1 /* batch_size */, 1.0 /* min_ocr_confidence */,
++                      test_url_factory.AsSharedURLLoaderFactory(),
++#if !BUILDFLAG(IS_ANDROID)
++                      /*anchovy_provider=*/nullptr,
++#endif  // !BUILDFLAG(IS_ANDROID)
++
++                      std::make_unique<TestAnnotatorClient>());
+ 
+   TestImageProcessor processor;
+   std::optional<mojom::AnnotateImageError> error;
+@@ -978,11 +1119,15 @@ TEST(AnnotatorTest, DescriptionBackendError) {
+       "https://ia-pa.googleapis.com/v1/");
+   base::HistogramTester histogram_tester;
+ 
+-  Annotator annotator(
+-      GURL(kTestServerUrl), GURL(""), std::string() /* api_key */, kThrottle,
+-      1 /* batch_size */, 1.0 /* min_ocr_confidence */,
+-      test_url_factory.AsSharedURLLoaderFactory(), /*anchovy_provider=*/nullptr,
+-      std::make_unique<TestAnnotatorClient>());
++  Annotator annotator(GURL(kTestServerUrl), GURL(""),
++                      std::string() /* api_key */, kThrottle,
++                      1 /* batch_size */, 1.0 /* min_ocr_confidence */,
++                      test_url_factory.AsSharedURLLoaderFactory(),
++#if !BUILDFLAG(IS_ANDROID)
++                      /*anchovy_provider=*/nullptr,
++#endif  // !BUILDFLAG(IS_ANDROID)
++
++                      std::make_unique<TestAnnotatorClient>());
+ 
+   TestImageProcessor processor;
+   std::optional<mojom::AnnotateImageError> error;
+@@ -1068,11 +1213,15 @@ TEST(AnnotatorTest, ServerError) {
+       "https://ia-pa.googleapis.com/v1/");
+   base::HistogramTester histogram_tester;
+ 
+-  Annotator annotator(
+-      GURL(kTestServerUrl), GURL(""), std::string() /* api_key */, kThrottle,
+-      1 /* batch_size */, 1.0 /* min_ocr_confidence */,
+-      test_url_factory.AsSharedURLLoaderFactory(), /*anchovy_provider=*/nullptr,
+-      std::make_unique<TestAnnotatorClient>());
++  Annotator annotator(GURL(kTestServerUrl), GURL(""),
++                      std::string() /* api_key */, kThrottle,
++                      1 /* batch_size */, 1.0 /* min_ocr_confidence */,
++                      test_url_factory.AsSharedURLLoaderFactory(),
++#if !BUILDFLAG(IS_ANDROID)
++                      /*anchovy_provider=*/nullptr,
++#endif  // !BUILDFLAG(IS_ANDROID)
++
++                      std::make_unique<TestAnnotatorClient>());
+ 
+   TestImageProcessor processor;
+   std::optional<mojom::AnnotateImageError> error;
+@@ -1126,11 +1275,15 @@ TEST(AnnotatorTest, AdultError) {
+       "https://ia-pa.googleapis.com/v1/");
+   base::HistogramTester histogram_tester;
+ 
+-  Annotator annotator(
+-      GURL(kTestServerUrl), GURL(""), std::string() /* api_key */, kThrottle,
+-      1 /* batch_size */, 1.0 /* min_ocr_confidence */,
+-      test_url_factory.AsSharedURLLoaderFactory(), /*anchovy_provider=*/nullptr,
+-      std::make_unique<TestAnnotatorClient>());
++  Annotator annotator(GURL(kTestServerUrl), GURL(""),
++                      std::string() /* api_key */, kThrottle,
++                      1 /* batch_size */, 1.0 /* min_ocr_confidence */,
++                      test_url_factory.AsSharedURLLoaderFactory(),
++#if !BUILDFLAG(IS_ANDROID)
++                      /*anchovy_provider=*/nullptr,
++#endif  // !BUILDFLAG(IS_ANDROID)
++
++                      std::make_unique<TestAnnotatorClient>());
+ 
+   TestImageProcessor processor;
+   std::optional<mojom::AnnotateImageError> error;
+@@ -1201,11 +1354,15 @@ TEST(AnnotatorTest, ProcessorFails) {
+       "https://ia-pa.googleapis.com/v1/");
+   base::HistogramTester histogram_tester;
+ 
+-  Annotator annotator(
+-      GURL(kTestServerUrl), GURL(""), std::string() /* api_key */, kThrottle,
+-      1 /* batch_size */, 1.0 /* min_ocr_confidence */,
+-      test_url_factory.AsSharedURLLoaderFactory(), /*anchovy_provider=*/nullptr,
+-      std::make_unique<TestAnnotatorClient>());
++  Annotator annotator(GURL(kTestServerUrl), GURL(""),
++                      std::string() /* api_key */, kThrottle,
++                      1 /* batch_size */, 1.0 /* min_ocr_confidence */,
++                      test_url_factory.AsSharedURLLoaderFactory(),
++#if !BUILDFLAG(IS_ANDROID)
++                      /*anchovy_provider=*/nullptr,
++#endif  // !BUILDFLAG(IS_ANDROID)
++
++                      std::make_unique<TestAnnotatorClient>());
+ 
+   std::array<TestImageProcessor, 3> processor;
+   std::array<std::optional<mojom::AnnotateImageError>, 3> error;
+@@ -1281,11 +1438,15 @@ TEST(AnnotatorTest, ProcessorFailedPreviously) {
+       "https://ia-pa.googleapis.com/v1/");
+   base::HistogramTester histogram_tester;
+ 
+-  Annotator annotator(
+-      GURL(kTestServerUrl), GURL(""), std::string() /* api_key */, kThrottle,
+-      1 /* batch_size */, 1.0 /* min_ocr_confidence */,
+-      test_url_factory.AsSharedURLLoaderFactory(), /*anchovy_provider=*/nullptr,
+-      std::make_unique<TestAnnotatorClient>());
++  Annotator annotator(GURL(kTestServerUrl), GURL(""),
++                      std::string() /* api_key */, kThrottle,
++                      1 /* batch_size */, 1.0 /* min_ocr_confidence */,
++                      test_url_factory.AsSharedURLLoaderFactory(),
++#if !BUILDFLAG(IS_ANDROID)
++                      /*anchovy_provider=*/nullptr,
++#endif  // !BUILDFLAG(IS_ANDROID)
++
++                      std::make_unique<TestAnnotatorClient>());
+ 
+   std::array<TestImageProcessor, 2> processor;
+   std::array<std::optional<mojom::AnnotateImageError>, 2> error;
+@@ -1350,11 +1511,15 @@ TEST(AnnotatorTest, ProcessorDies) {
+       "https://ia-pa.googleapis.com/v1/");
+   base::HistogramTester histogram_tester;
+ 
+-  Annotator annotator(
+-      GURL(kTestServerUrl), GURL(""), std::string() /* api_key */, kThrottle,
+-      1 /* batch_size */, 1.0 /* min_ocr_confidence */,
+-      test_url_factory.AsSharedURLLoaderFactory(), /*anchovy_provider=*/nullptr,
+-      std::make_unique<TestAnnotatorClient>());
++  Annotator annotator(GURL(kTestServerUrl), GURL(""),
++                      std::string() /* api_key */, kThrottle,
++                      1 /* batch_size */, 1.0 /* min_ocr_confidence */,
++                      test_url_factory.AsSharedURLLoaderFactory(),
++#if !BUILDFLAG(IS_ANDROID)
++                      /*anchovy_provider=*/nullptr,
++#endif  // !BUILDFLAG(IS_ANDROID)
++
++                      std::make_unique<TestAnnotatorClient>());
+ 
+   std::array<TestImageProcessor, 3> processor;
+   std::array<std::optional<mojom::AnnotateImageError>, 3> error;
+@@ -1425,11 +1590,15 @@ TEST(AnnotatorTest, ConcurrentSameBatch) {
+       "https://ia-pa.googleapis.com/v1/");
+   base::HistogramTester histogram_tester;
+ 
+-  Annotator annotator(
+-      GURL(kTestServerUrl), GURL(""), std::string() /* api_key */, kThrottle,
+-      3 /* batch_size */, 1.0 /* min_ocr_confidence */,
+-      test_url_factory.AsSharedURLLoaderFactory(), /*anchovy_provider=*/nullptr,
+-      std::make_unique<TestAnnotatorClient>());
++  Annotator annotator(GURL(kTestServerUrl), GURL(""),
++                      std::string() /* api_key */, kThrottle,
++                      3 /* batch_size */, 1.0 /* min_ocr_confidence */,
++                      test_url_factory.AsSharedURLLoaderFactory(),
++#if !BUILDFLAG(IS_ANDROID)
++                      /*anchovy_provider=*/nullptr,
++#endif  // !BUILDFLAG(IS_ANDROID)
++
++                      std::make_unique<TestAnnotatorClient>());
+ 
+   std::array<TestImageProcessor, 3> processor;
+   std::array<std::optional<mojom::AnnotateImageError>, 3> error;
+@@ -1512,11 +1681,15 @@ TEST(AnnotatorTest, ConcurrentSeparateBatches) {
+       "https://ia-pa.googleapis.com/v1/");
+   base::HistogramTester histogram_tester;
+ 
+-  Annotator annotator(
+-      GURL(kTestServerUrl), GURL(""), std::string() /* api_key */, kThrottle,
+-      3 /* batch_size */, 1.0 /* min_ocr_confidence */,
+-      test_url_factory.AsSharedURLLoaderFactory(), /*anchovy_provider=*/nullptr,
+-      std::make_unique<TestAnnotatorClient>());
++  Annotator annotator(GURL(kTestServerUrl), GURL(""),
++                      std::string() /* api_key */, kThrottle,
++                      3 /* batch_size */, 1.0 /* min_ocr_confidence */,
++                      test_url_factory.AsSharedURLLoaderFactory(),
++#if !BUILDFLAG(IS_ANDROID)
++                      /*anchovy_provider=*/nullptr,
++#endif  // !BUILDFLAG(IS_ANDROID)
++
++                      std::make_unique<TestAnnotatorClient>());
+ 
+   std::array<TestImageProcessor, 2> processor;
+   std::array<std::optional<mojom::AnnotateImageError>, 2> error;
+@@ -1656,11 +1829,15 @@ TEST(AnnotatorTest, DuplicateWork) {
+       "https://ia-pa.googleapis.com/v1/");
+   base::HistogramTester histogram_tester;
+ 
+-  Annotator annotator(
+-      GURL(kTestServerUrl), GURL(""), std::string() /* api_key */, kThrottle,
+-      1 /* batch_size */, 1.0 /* min_ocr_confidence */,
+-      test_url_factory.AsSharedURLLoaderFactory(), /*anchovy_provider=*/nullptr,
+-      std::make_unique<TestAnnotatorClient>());
++  Annotator annotator(GURL(kTestServerUrl), GURL(""),
++                      std::string() /* api_key */, kThrottle,
++                      1 /* batch_size */, 1.0 /* min_ocr_confidence */,
++                      test_url_factory.AsSharedURLLoaderFactory(),
++#if !BUILDFLAG(IS_ANDROID)
++                      /*anchovy_provider=*/nullptr,
++#endif  // !BUILDFLAG(IS_ANDROID)
++
++                      std::make_unique<TestAnnotatorClient>());
+ 
+   std::array<TestImageProcessor, 4> processor;
+   std::array<std::optional<mojom::AnnotateImageError>, 4> error;
+@@ -1764,11 +1941,15 @@ TEST(AnnotatorTest, DescPolicy) {
+       "https://ia-pa.googleapis.com/v1/");
+   base::HistogramTester histogram_tester;
+ 
+-  Annotator annotator(
+-      GURL(kTestServerUrl), GURL(""), std::string() /* api_key */, kThrottle,
+-      3 /* batch_size */, 1.0 /* min_ocr_confidence */,
+-      test_url_factory.AsSharedURLLoaderFactory(), /*anchovy_provider=*/nullptr,
+-      std::make_unique<TestAnnotatorClient>());
++  Annotator annotator(GURL(kTestServerUrl), GURL(""),
++                      std::string() /* api_key */, kThrottle,
++                      3 /* batch_size */, 1.0 /* min_ocr_confidence */,
++                      test_url_factory.AsSharedURLLoaderFactory(),
++#if !BUILDFLAG(IS_ANDROID)
++                      /*anchovy_provider=*/nullptr,
++#endif  // !BUILDFLAG(IS_ANDROID)
++
++                      std::make_unique<TestAnnotatorClient>());
+ 
+   std::array<TestImageProcessor, 3> processor;
+   std::array<std::optional<mojom::AnnotateImageError>, 3> error;
+@@ -1968,11 +2149,15 @@ TEST(AnnotatorTest, DescLanguage) {
+       "https://ia-pa.googleapis.com/v1/");
+   base::HistogramTester histogram_tester;
+ 
+-  Annotator annotator(
+-      GURL(kTestServerUrl), GURL(""), std::string() /* api_key */, kThrottle,
+-      3 /* batch_size */, 1.0 /* min_ocr_confidence */,
+-      test_url_factory.AsSharedURLLoaderFactory(), /*anchovy_provider=*/nullptr,
+-      std::make_unique<TestAnnotatorClient>());
++  Annotator annotator(GURL(kTestServerUrl), GURL(""),
++                      std::string() /* api_key */, kThrottle,
++                      3 /* batch_size */, 1.0 /* min_ocr_confidence */,
++                      test_url_factory.AsSharedURLLoaderFactory(),
++#if !BUILDFLAG(IS_ANDROID)
++                      /*anchovy_provider=*/nullptr,
++#endif  // !BUILDFLAG(IS_ANDROID)
++
++                      std::make_unique<TestAnnotatorClient>());
+   annotator.server_languages_ = {"en", "it", "fr"};
+ 
+   std::array<TestImageProcessor, 3> processor;
+@@ -2166,11 +2351,15 @@ TEST(AnnotatorTest, LanguageFallback) {
+       "https://ia-pa.googleapis.com/v1/");
+   base::HistogramTester histogram_tester;
+ 
+-  Annotator annotator(
+-      GURL(kTestServerUrl), GURL(""), std::string() /* api_key */, kThrottle,
+-      1 /* batch_size */, 1.0 /* min_ocr_confidence */,
+-      test_url_factory.AsSharedURLLoaderFactory(), /*anchovy_provider=*/nullptr,
+-      std::make_unique<TestAnnotatorClient>());
++  Annotator annotator(GURL(kTestServerUrl), GURL(""),
++                      std::string() /* api_key */, kThrottle,
++                      1 /* batch_size */, 1.0 /* min_ocr_confidence */,
++                      test_url_factory.AsSharedURLLoaderFactory(),
++#if !BUILDFLAG(IS_ANDROID)
++                      /*anchovy_provider=*/nullptr,
++#endif  // !BUILDFLAG(IS_ANDROID)
++
++                      std::make_unique<TestAnnotatorClient>());
+   annotator.server_languages_ = {"en", "it", "fr"};
+ 
+   TestImageProcessor processor;
+@@ -2273,7 +2462,11 @@ TEST(AnnotatorTest, ApiKey) {
+     Annotator annotator(GURL(kTestServerUrl), GURL(""), "my_api_key", kThrottle,
+                         1 /* batch_size */, 1.0 /* min_ocr_confidence */,
+                         test_url_factory.AsSharedURLLoaderFactory(),
++
++#if !BUILDFLAG(IS_ANDROID)
+                         /*anchovy_provider=*/nullptr,
++#endif  // !BUILDFLAG(IS_ANDROID)
++
+                         std::make_unique<TestAnnotatorClient>());
+     TestImageProcessor processor;
+ 
+@@ -2308,7 +2501,11 @@ TEST(AnnotatorTest, ApiKey) {
+                         GURL(""), "my_api_key", kThrottle, 1 /* batch_size */,
+                         1.0 /* min_ocr_confidence */,
+                         test_url_factory.AsSharedURLLoaderFactory(),
++
++#if !BUILDFLAG(IS_ANDROID)
+                         /*anchovy_provider=*/nullptr,
++#endif  // !BUILDFLAG(IS_ANDROID)
++
+                         std::make_unique<TestAnnotatorClient>());
+     TestImageProcessor processor;
+ 
+@@ -2336,11 +2533,15 @@ TEST(AnnotatorTest, ApiKey) {
+   {
+     TestServerURLLoaderFactory test_url_factory("https://datascraper.com/");
+ 
+-    Annotator annotator(
+-        GURL("https://datascraper.com/annotation"), GURL(""), "my_api_key",
+-        kThrottle, 1 /* batch_size */, 1.0 /* min_ocr_confidence */,
+-        test_url_factory.AsSharedURLLoaderFactory(),
+-        /*anchovy_provider=*/nullptr, std::make_unique<TestAnnotatorClient>());
++    Annotator annotator(GURL("https://datascraper.com/annotation"), GURL(""),
++                        "my_api_key", kThrottle, 1 /* batch_size */,
++                        1.0 /* min_ocr_confidence */,
++                        test_url_factory.AsSharedURLLoaderFactory(),
++
++#if !BUILDFLAG(IS_ANDROID)
++                        /*anchovy_provider=*/nullptr,
++#endif  // !BUILDFLAG(IS_ANDROID)
++                        std::make_unique<TestAnnotatorClient>());
+     TestImageProcessor processor;
+ 
+     annotator.AnnotateImage(kImage1Url, kDescLang, processor.GetPendingRemote(),
+@@ -2371,11 +2572,15 @@ TEST(AnnotatorTest, ComputePreferredLanguage) {
+   TestAnnotatorClient* annotator_client = new TestAnnotatorClient();
+   TestServerURLLoaderFactory test_url_factory(
+       "https://ia-pa.googleapis.com/v1/");
+-  Annotator annotator(
+-      GURL("https://datascraper.com/annotation"), GURL(""), "my_api_key",
+-      kThrottle, 1 /* batch_size */, 1.0 /* min_ocr_confidence */,
+-      test_url_factory.AsSharedURLLoaderFactory(), /*anchovy_provider=*/nullptr,
+-      base::WrapUnique(annotator_client));
++  Annotator annotator(GURL("https://datascraper.com/annotation"), GURL(""),
++                      "my_api_key", kThrottle, 1 /* batch_size */,
++                      1.0 /* min_ocr_confidence */,
++                      test_url_factory.AsSharedURLLoaderFactory(),
++#if !BUILDFLAG(IS_ANDROID)
++                      /*anchovy_provider=*/nullptr,
++#endif  // !BUILDFLAG(IS_ANDROID)
++
++                      base::WrapUnique(annotator_client));
+ 
+   // Simplest case: the page language is in the list of top languages,
+   // accept languages, and server languages.
+@@ -2438,11 +2643,15 @@ TEST(AnnotatorTest, FetchServerLanguages) {
+   TestServerURLLoaderFactory test_url_factory(
+       "https://ia-pa.googleapis.com/v1/");
+ 
+-  Annotator annotator(
+-      GURL(kTestServerUrl), GURL(kLangsServerUrl), std::string() /* api_key */,
+-      kThrottle, 1 /* batch_size */, 1.0 /* min_ocr_confidence */,
+-      test_url_factory.AsSharedURLLoaderFactory(), /*anchovy_provider=*/nullptr,
+-      std::make_unique<TestAnnotatorClient>());
++  Annotator annotator(GURL(kTestServerUrl), GURL(kLangsServerUrl),
++                      std::string() /* api_key */, kThrottle,
++                      1 /* batch_size */, 1.0 /* min_ocr_confidence */,
++                      test_url_factory.AsSharedURLLoaderFactory(),
++#if !BUILDFLAG(IS_ANDROID)
++                      /*anchovy_provider=*/nullptr,
++#endif  // !BUILDFLAG(IS_ANDROID)
++
++                      std::make_unique<TestAnnotatorClient>());
+ 
+   // Assert that initially server_languages_ doesn't contain the made-up
+   // language code zz.
+@@ -2472,11 +2681,15 @@ TEST(AnnotatorTest, ServerLanguagesMustContainEnglish) {
+   TestServerURLLoaderFactory test_url_factory(
+       "https://ia-pa.googleapis.com/v1/");
+ 
+-  Annotator annotator(
+-      GURL(kTestServerUrl), GURL(kLangsServerUrl), std::string() /* api_key */,
+-      kThrottle, 1 /* batch_size */, 1.0 /* min_ocr_confidence */,
+-      test_url_factory.AsSharedURLLoaderFactory(), /*anchovy_provider=*/nullptr,
+-      std::make_unique<TestAnnotatorClient>());
++  Annotator annotator(GURL(kTestServerUrl), GURL(kLangsServerUrl),
++                      std::string() /* api_key */, kThrottle,
++                      1 /* batch_size */, 1.0 /* min_ocr_confidence */,
++                      test_url_factory.AsSharedURLLoaderFactory(),
++#if !BUILDFLAG(IS_ANDROID)
++                      /*anchovy_provider=*/nullptr,
++#endif  // !BUILDFLAG(IS_ANDROID)
++
++                      std::make_unique<TestAnnotatorClient>());
+ 
+   // Assert that initially server_languages_ does contain "en" but
+   // doesn't contain the made-up language code zz.
+@@ -2501,6 +2714,7 @@ TEST(AnnotatorTest, ServerLanguagesMustContainEnglish) {
+   EXPECT_FALSE(std::ranges::contains(annotator.server_languages_, "zz"));
+ }
+ 
++#if !BUILDFLAG(IS_ANDROID)
+ // Alternative Routing Tests.
+ 
+ class FakeAnchovyProvider : public manta::AnchovyProvider {
+@@ -2676,4 +2890,236 @@ TEST(AnnotatorTest, CrashIfNoAnchovyProvider) {
+   EXPECT_DEATH_IF_SUPPORTED(RunAnchovyAnnotatorTest(nullptr, {}), "");
+ }
+ 
++#endif  // !BUILDFLAG(IS_ANDROID)
++
++#if BUILDFLAG(IS_ANDROID)
++TEST(AnnotatorTest,
++     AndroidSuccessfulCallbackCanDestroyAnnotatorWithOtherClients) {
++  base::test::TaskEnvironment test_task_env(
++      base::test::TaskEnvironment::TimeSource::MOCK_TIME);
++  TestServerURLLoaderFactory test_url_factory(
++      "https://ia-pa.googleapis.com/v1/");
++  auto annotator = std::make_unique<Annotator>(
++      GURL(kTestServerUrl), GURL(""), std::string(), kThrottle, 1, 1.0,
++      test_url_factory.AsSharedURLLoaderFactory(),
++      std::make_unique<TestAnnotatorClient>());
++  TestImageProcessor first_processor;
++  TestImageProcessor second_processor;
++  std::optional<mojom::AnnotateImageError> error;
++  std::vector<mojom::Annotation> annotations;
++  int first_completions = 0;
++  int second_completions = 0;
++  annotator->AnnotateImage(
++      kImage1Url, kDescLang, first_processor.GetPendingRemote(),
++      base::BindOnce([&](mojom::AnnotateImageResultPtr result) {
++        ++first_completions;
++        ReportResult(&error, &annotations, std::move(result));
++        annotator.reset();
++      }));
++  annotator->AnnotateImage(
++      kImage1Url, kDescLang, second_processor.GetPendingRemote(),
++      base::BindOnce(
++          [&](mojom::AnnotateImageResultPtr result) { ++second_completions; }));
++  test_task_env.RunUntilIdle();
++  ASSERT_THAT(first_processor.callbacks(), SizeIs(1));
++  EXPECT_THAT(second_processor.callbacks(), IsEmpty());
++  std::move(first_processor.callbacks()[0]).Run({1, 2, 3}, kDescDim, kDescDim);
++  first_processor.callbacks().pop_back();
++  test_task_env.RunUntilIdle();
++  test_task_env.FastForwardBy(kThrottle);
++  test_url_factory.ExpectRequestAndSimulateResponse(
++      "annotation", {},
++      ReformatJson(base::StringPrintf(kTemplateRequest, kImage1Url, "AQID")),
++      kOcrSuccessResponse, net::HTTP_OK);
++  test_task_env.RunUntilIdle();
++  EXPECT_EQ(annotator, nullptr);
++  EXPECT_EQ(first_completions, 1);
++  EXPECT_EQ(second_completions, 0);
++  EXPECT_EQ(error, std::nullopt);
++  EXPECT_THAT(annotations,
++              UnorderedElementsAre(AnnotatorEq(mojom::AnnotationType::kOcr, 1.0,
++                                               "Region 1\nRegion 2")));
++}
++
++TEST(AnnotatorTest, AndroidFailedBatchCallbackCanDestroyAnnotator) {
++  base::test::TaskEnvironment test_task_env(
++      base::test::TaskEnvironment::TimeSource::MOCK_TIME);
++  TestServerURLLoaderFactory test_url_factory(
++      "https://ia-pa.googleapis.com/v1/");
++  auto annotator = std::make_unique<Annotator>(
++      GURL(kTestServerUrl), GURL(""), std::string(), kThrottle, 3, 1.0,
++      test_url_factory.AsSharedURLLoaderFactory(),
++      std::make_unique<TestAnnotatorClient>());
++  std::array<TestImageProcessor, 3> processors;
++  const std::array<const char*, 3> image_urls = {kImage1Url, kImage2Url,
++                                                 kImage3Url};
++  std::optional<mojom::AnnotateImageError> error;
++  std::vector<mojom::Annotation> annotations;
++  int completions = 0;
++  for (size_t i = 0; i < processors.size(); ++i) {
++    annotator->AnnotateImage(
++        image_urls[i], kDescLang, processors[i].GetPendingRemote(),
++        base::BindOnce([&](mojom::AnnotateImageResultPtr result) {
++          ++completions;
++          ReportResult(&error, &annotations, std::move(result));
++          annotator.reset();
++        }));
++  }
++  test_task_env.RunUntilIdle();
++  const std::array<std::vector<uint8_t>, 3> pixels = {
++      {{1, 2, 3}, {4, 5, 6}, {7, 8, 9}}};
++  for (size_t i = 0; i < processors.size(); ++i) {
++    ASSERT_THAT(processors[i].callbacks(), SizeIs(1));
++    std::move(processors[i].callbacks()[0]).Run(pixels[i], kDescDim, kDescDim);
++    processors[i].callbacks().pop_back();
++  }
++  test_task_env.RunUntilIdle();
++  test_task_env.FastForwardBy(kThrottle);
++  test_url_factory.ExpectRequestAndSimulateResponse(
++      "annotation", {}, ReformatJson(kBatchRequest), "",
++      net::HTTP_INTERNAL_SERVER_ERROR);
++  test_task_env.RunUntilIdle();
++  EXPECT_EQ(annotator, nullptr);
++  EXPECT_EQ(completions, 1);
++  EXPECT_EQ(error, mojom::AnnotateImageError::kFailure);
++  EXPECT_THAT(annotations, IsEmpty());
++}
++
++TEST(AnnotatorTest, AndroidFailedResultCallbackCanRetrySameImage) {
++  base::test::TaskEnvironment test_task_env(
++      base::test::TaskEnvironment::TimeSource::MOCK_TIME);
++  TestServerURLLoaderFactory test_url_factory(
++      "https://ia-pa.googleapis.com/v1/");
++  Annotator annotator(GURL(kTestServerUrl), GURL(""), std::string(), kThrottle,
++                      1, 1.0, test_url_factory.AsSharedURLLoaderFactory(),
++                      std::make_unique<TestAnnotatorClient>());
++  TestImageProcessor first_processor;
++  TestImageProcessor retry_processor;
++  std::optional<mojom::AnnotateImageError> first_error;
++  std::optional<mojom::AnnotateImageError> retry_error;
++  std::vector<mojom::Annotation> first_annotations;
++  std::vector<mojom::Annotation> retry_annotations;
++  int first_completions = 0;
++  int retry_completions = 0;
++  annotator.AnnotateImage(
++      kImage1Url, kDescLang, first_processor.GetPendingRemote(),
++      base::BindOnce([&](mojom::AnnotateImageResultPtr result) {
++        ++first_completions;
++        ReportResult(&first_error, &first_annotations, std::move(result));
++        annotator.AnnotateImage(
++            kImage1Url, kDescLang, retry_processor.GetPendingRemote(),
++            base::BindOnce([&](mojom::AnnotateImageResultPtr retry_result) {
++              ++retry_completions;
++              ReportResult(&retry_error, &retry_annotations,
++                           std::move(retry_result));
++            }));
++      }));
++  test_task_env.RunUntilIdle();
++  ASSERT_THAT(first_processor.callbacks(), SizeIs(1));
++  std::move(first_processor.callbacks()[0]).Run({1, 2, 3}, kDescDim, kDescDim);
++  first_processor.callbacks().pop_back();
++  test_task_env.RunUntilIdle();
++  test_task_env.FastForwardBy(kThrottle);
++  const std::string request =
++      ReformatJson(base::StringPrintf(kTemplateRequest, kImage1Url, "AQID"));
++  test_url_factory.ExpectRequestAndSimulateResponse(
++      "annotation", {}, request, "", net::HTTP_INTERNAL_SERVER_ERROR);
++  test_task_env.RunUntilIdle();
++  EXPECT_EQ(first_completions, 1);
++  EXPECT_EQ(first_error, mojom::AnnotateImageError::kFailure);
++  EXPECT_THAT(first_annotations, IsEmpty());
++  EXPECT_EQ(retry_completions, 0);
++  ASSERT_THAT(retry_processor.callbacks(), SizeIs(1));
++  std::move(retry_processor.callbacks()[0]).Run({1, 2, 3}, kDescDim, kDescDim);
++  retry_processor.callbacks().pop_back();
++  test_task_env.RunUntilIdle();
++  test_task_env.FastForwardBy(kThrottle);
++  test_url_factory.ExpectRequestAndSimulateResponse(
++      "annotation", {}, request, kOcrSuccessResponse, net::HTTP_OK);
++  test_task_env.RunUntilIdle();
++  EXPECT_EQ(retry_completions, 1);
++  EXPECT_EQ(retry_error, std::nullopt);
++  EXPECT_THAT(retry_annotations,
++              UnorderedElementsAre(AnnotatorEq(mojom::AnnotationType::kOcr, 1.0,
++                                               "Region 1\nRegion 2")));
++  TestImageProcessor cached_processor;
++  int cached_completions = 0;
++  annotator.AnnotateImage(
++      kImage1Url, kDescLang, cached_processor.GetPendingRemote(),
++      base::BindOnce([&](mojom::AnnotateImageResultPtr result) {
++        ++cached_completions;
++        ASSERT_EQ(result->which(),
++                  mojom::AnnotateImageResult::Tag::kAnnotations);
++        EXPECT_THAT(result->get_annotations(), SizeIs(1));
++      }));
++  test_task_env.RunUntilIdle();
++  EXPECT_EQ(cached_completions, 1);
++  EXPECT_THAT(cached_processor.callbacks(), IsEmpty());
++  EXPECT_THAT(test_url_factory.requests(), IsEmpty());
++}
++
++TEST(AnnotatorTest, AndroidPixelFailureCallbackCanDestroyAnnotator) {
++  base::test::TaskEnvironment test_task_env(
++      base::test::TaskEnvironment::TimeSource::MOCK_TIME);
++  TestServerURLLoaderFactory test_url_factory(
++      "https://ia-pa.googleapis.com/v1/");
++  auto annotator = std::make_unique<Annotator>(
++      GURL(kTestServerUrl), GURL(""), std::string(), kThrottle, 1, 1.0,
++      test_url_factory.AsSharedURLLoaderFactory(),
++      std::make_unique<TestAnnotatorClient>());
++  TestImageProcessor processor;
++  std::optional<mojom::AnnotateImageError> error;
++  std::vector<mojom::Annotation> annotations;
++  int completions = 0;
++  annotator->AnnotateImage(
++      kImage1Url, kDescLang, processor.GetPendingRemote(),
++      base::BindOnce([&](mojom::AnnotateImageResultPtr result) {
++        ++completions;
++        ReportResult(&error, &annotations, std::move(result));
++        annotator.reset();
++      }));
++  test_task_env.RunUntilIdle();
++  ASSERT_THAT(processor.callbacks(), SizeIs(1));
++  std::move(processor.callbacks()[0]).Run({}, 0, 0);
++  processor.callbacks().pop_back();
++  test_task_env.RunUntilIdle();
++  EXPECT_EQ(annotator, nullptr);
++  EXPECT_EQ(completions, 1);
++  EXPECT_EQ(error, mojom::AnnotateImageError::kFailure);
++  EXPECT_THAT(annotations, IsEmpty());
++  EXPECT_THAT(test_url_factory.requests(), IsEmpty());
++}
++
++TEST(AnnotatorTest, AndroidDisconnectCallbackCanDestroyAnnotator) {
++  base::test::TaskEnvironment test_task_env(
++      base::test::TaskEnvironment::TimeSource::MOCK_TIME);
++  TestServerURLLoaderFactory test_url_factory(
++      "https://ia-pa.googleapis.com/v1/");
++  auto annotator = std::make_unique<Annotator>(
++      GURL(kTestServerUrl), GURL(""), std::string(), kThrottle, 1, 1.0,
++      test_url_factory.AsSharedURLLoaderFactory(),
++      std::make_unique<TestAnnotatorClient>());
++  TestImageProcessor processor;
++  std::optional<mojom::AnnotateImageError> error;
++  std::vector<mojom::Annotation> annotations;
++  int completions = 0;
++  annotator->AnnotateImage(
++      kImage1Url, kDescLang, processor.GetPendingRemote(),
++      base::BindOnce([&](mojom::AnnotateImageResultPtr result) {
++        ++completions;
++        ReportResult(&error, &annotations, std::move(result));
++        annotator.reset();
++      }));
++  test_task_env.RunUntilIdle();
++  ASSERT_THAT(processor.callbacks(), SizeIs(1));
++  processor.Reset();
++  test_task_env.RunUntilIdle();
++  EXPECT_EQ(annotator, nullptr);
++  EXPECT_EQ(completions, 1);
++  EXPECT_EQ(error, mojom::AnnotateImageError::kCanceled);
++  EXPECT_THAT(annotations, IsEmpty());
++  EXPECT_THAT(test_url_factory.requests(), IsEmpty());
++}
++#endif  // BUILDFLAG(IS_ANDROID)
++
+ }  // namespace image_annotation

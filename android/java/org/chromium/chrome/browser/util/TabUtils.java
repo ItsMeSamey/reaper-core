@@ -20,7 +20,6 @@ import android.provider.Browser;
 import android.view.ContextThemeWrapper;
 import android.view.MenuItem;
 import android.view.View;
-import android.widget.FrameLayout;
 import android.widget.PopupMenu;
 
 import androidx.appcompat.view.menu.MenuPopupHelper;
@@ -277,26 +276,6 @@ public class TabUtils {
             }
         } catch (BraveActivity.BraveActivityNotFoundException e) {
             Log.e(TAG, "reloadIgnoringCache " + e);
-        }
-    }
-
-    public static void enableRewardsButton() {
-        try {
-            BraveActivity braveActivity = BraveActivity.getBraveActivity();
-            if (braveActivity.getToolbarManager() == null) {
-                return;
-            }
-            View toolbarView = braveActivity.findViewById(R.id.toolbar);
-            if (toolbarView == null) {
-                return;
-            }
-            FrameLayout rewardsLayout = toolbarView.findViewById(R.id.brave_rewards_button_layout);
-            if (rewardsLayout == null) {
-                return;
-            }
-            rewardsLayout.setVisibility(View.VISIBLE);
-        } catch (BraveActivity.BraveActivityNotFoundException e) {
-            Log.e(TAG, "enableRewardsButton " + e);
         }
     }
 

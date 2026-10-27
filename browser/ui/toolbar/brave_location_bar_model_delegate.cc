@@ -35,8 +35,11 @@ BraveLocationBarModelDelegate::~BraveLocationBarModelDelegate() = default;
 void BraveLocationBarModelDelegate::FormattedStringFromURL(
     const GURL& url,
     std::u16string* new_formatted_url) {
-  // Replace chrome:// with brave://
+#if !BUILDFLAG(IS_ANDROID)
+  // Keep canonical internal URLs in Android display and editing text.
+  // Desktop retains Brave's existing presentation alias.
   brave_utils::ReplaceChromeToBraveScheme(*new_formatted_url);
+#endif
 }
 
 std::u16string

@@ -1,0 +1,111 @@
+diff --git a/build/android/pylib/local/device/local_device_environment.py b/build/android/pylib/local/device/local_device_environment.py
+--- a/build/android/pylib/local/device/local_device_environment.py
++++ b/build/android/pylib/local/device/local_device_environment.py
+@@ -93,6 +93,11 @@
+ # TODO(crbug.com/40799394): After Telemetry is supported by python3 we can
+ # re-add super without arguments in this script.
+ # pylint: disable=super-with-arguments
++def GetSystemCrashRetryOptions(env):
++    # Keep the existing call signature and retry default unless explicitly disabled.
++    return {'retries': 0} if env.disable_device_recovery is True else {}
++
++
+ class LocalDeviceEnvironment(environment.Environment):
+     def __init__(self, args, output_manager, _error_func):
+         super(LocalDeviceEnvironment, self).__init__(output_manager)
+@@ -106,6 +111,9 @@
+         self._devices_lock = threading.Lock()
+         self._devices = None
+         self._concurrent_adb = args.enable_concurrent_adb
++        self._preserve_shared_device_state = getattr(
++            args, 'preserve_shared_device_state', False
++        )
+         self._enable_device_cache = args.enable_device_cache
+         self._logcat_monitors = []
+         self._logcat_output_dir = args.logcat_output_dir
+@@ -113,6 +121,11 @@
+         self._max_tries = 1 + args.num_retries
+         self._preferred_abis = None
+         self._recover_devices = args.recover_devices
++        self._disable_device_recovery = getattr(
++            args, 'disable_device_recovery', False
++        )
++        if self._disable_device_recovery and self._recover_devices:
++            raise ValueError('Device recovery opt-out cannot be combined with --recover-devices')
+         self._skip_clear_data = args.skip_clear_data
+         self._trace_output = None
+         # Must check if arg exist because this class is used by
+@@ -170,16 +183,29 @@
+         if self._device_serials:
+             device_arg = self._device_serials
+ 
++        if self._disable_device_recovery and (
++            len(device_arg) != 1 or not isinstance(device_arg[0], str) or not device_arg[0]
++        ):
++            raise ValueError(
++                '--disable-device-recovery requires one explicit --device'
++            )
++
+         self._devices = device_utils.DeviceUtils.HealthyDevices(
+             self._denylist,
+-            retries=5,
+-            enable_usb_resets=True,
++            retries=0 if self._disable_device_recovery else 5,
++            enable_usb_resets=not self._disable_device_recovery,
+             enable_device_files_cache=self._enable_device_cache,
+             default_retries=self._max_tries - 1,
+             device_arg=device_arg,
+             abis=self._preferred_abis,
+             persistent_shell=self._use_persistent_shell,
+         )
++
++        if self._disable_device_recovery:
++            if (len(self._devices) != 1 or str(self._devices[0]) != device_arg[0]
++                    or not self._devices[0].IsOnline(retries=0)):
++                self._devices = None
++                raise device_errors.DeviceUnreachableError('Explicit test device is not online')
+ 
+         if self._logcat_output_file:
+             self._logcat_output_dir = tempfile.mkdtemp()
+@@ -234,7 +260,7 @@
+                 )
+                 monitor = logcat_monitor.LogcatMonitor(
+                     d.adb,
+-                    clear=True,
++                    clear=not self.preserve_shared_device_state,
+                     output_file=logcat_file,
+                     check_error=False,
+                 )
+@@ -243,7 +269,9 @@
+ 
+             # There is a change in soft keyboard behavior since Android 16.
+             # See https://crbug.com/443782461 for more details.
+-            if d.build_version_sdk >= version_codes.BAKLAVA and d.HasRoot():
++            if (not self.preserve_shared_device_state
++                    and d.build_version_sdk >= version_codes.BAKLAVA
++                    and d.HasRoot()):
+                 # On desktop, we do not want to force the soft keyboard.
+                 if not d.is_desktop and d.IsApplicationInstalled(
+                     device_utils.GBOARD_PKG
+@@ -278,6 +306,10 @@
+         return self._denylist
+ 
+     @property
++    def preserve_shared_device_state(self):
++        return self._preserve_shared_device_state
++
++    @property
+     def concurrent_adb(self):
+         return self._concurrent_adb
+ 
+@@ -296,6 +328,10 @@
+     @property
+     def parallel_devices(self):
+         return parallelizer.SyncParallelizer(self.devices)
++
++    @property
++    def disable_device_recovery(self):
++        return self._disable_device_recovery
+ 
+     @property
+     def recover_devices(self):

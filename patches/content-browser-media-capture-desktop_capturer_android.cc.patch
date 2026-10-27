@@ -1,0 +1,437 @@
+diff --git a/content/browser/media/capture/desktop_capturer_android.cc b/content/browser/media/capture/desktop_capturer_android.cc
+--- a/content/browser/media/capture/desktop_capturer_android.cc
++++ b/content/browser/media/capture/desktop_capturer_android.cc
+@@ -4,10 +4,25 @@
+ 
+ #include "content/browser/media/capture/desktop_capturer_android.h"
+ 
++#include <map>
++
+ #include "base/android/callback_android.h"
+ #include "base/android/jni_android.h"
+ #include "base/android/jni_bytebuffer.h"
++#include "base/containers/span.h"
++#include "base/functional/bind.h"
++#include "base/functional/callback_helpers.h"
++#include "base/no_destructor.h"
+ #include "base/numerics/checked_math.h"
++#include "base/numerics/safe_conversions.h"
++#include "content/public/browser/browser_thread.h"
++#include "content/public/browser/navigation_handle.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/weak_document_ptr.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_observer.h"
++#include "media/base/limits.h"
++#include "third_party/libyuv/include/libyuv/convert_argb.h"
+ #include "third_party/webrtc/api/video/video_common.h"
+ 
+ // Must come after all headers that specialize FromJniType() / ToJniType().
+@@ -16,6 +31,137 @@
+ namespace content {
+ 
+ namespace {
++
++// A Java WebContents observer alone cannot see a requesting subframe enter
++// BFCache, navigate, or disappear. Keep the original document until grant
++// expiry or projection completion, including after the picker itself has been
++// destroyed.
++class ScreenCaptureDocumentObserver final : public WebContentsObserver {
++ public:
++  static bool Register(WebContents* owner,
++                       RenderFrameHost* frame,
++                       int32_t source_id,
++                       base::OnceClosure on_revoke) {
++    DCHECK_CURRENTLY_ON(BrowserThread::UI);
++    if (!owner || owner->IsBeingDestroyed() || !frame || !frame->IsActive() ||
++        WebContents::FromRenderFrameHost(frame) != owner || source_id <= 0 ||
++        !on_revoke || Observers().contains(source_id)) {
++      return false;
++    }
++    Observers().emplace(source_id,
++                        std::make_unique<ScreenCaptureDocumentObserver>(
++                            frame, source_id, std::move(on_revoke)));
++    return true;
++  }
++
++  static void Release(int32_t source_id) {
++    DCHECK_CURRENTLY_ON(BrowserThread::UI);
++    Observers().erase(source_id);
++  }
++
++  ScreenCaptureDocumentObserver(RenderFrameHost* frame,
++                                int32_t source_id,
++                                base::OnceClosure on_revoke)
++      : WebContentsObserver(WebContents::FromRenderFrameHost(frame)),
++        document_(frame->GetWeakDocumentPtr()),
++        frame_id_(frame->GetGlobalId()),
++        source_id_(source_id),
++        on_revoke_(std::move(on_revoke)) {}
++
++  void DidStartNavigation(NavigationHandle* navigation) override {
++    auto* frame = document_.AsRenderFrameHostIfValid();
++    if (!frame ||
++        (!navigation->IsSameDocument() &&
++         navigation->GetFrameTreeNodeId() == frame->GetFrameTreeNodeId())) {
++      Revoke();
++    }
++  }
++
++  void DidFinishNavigation(NavigationHandle* navigation) override {
++    if (!document_.AsRenderFrameHostIfValid())
++      Revoke();
++  }
++
++  void RenderFrameHostStateChanged(
++      RenderFrameHost* frame,
++      RenderFrameHost::LifecycleState old_state,
++      RenderFrameHost::LifecycleState new_state) override {
++    if (frame->GetGlobalId() == frame_id_ &&
++        new_state != RenderFrameHost::LifecycleState::kActive)
++      Revoke();
++  }
++
++  void RenderFrameDeleted(RenderFrameHost* frame) override {
++    if (frame->GetGlobalId() == frame_id_)
++      Revoke();
++  }
++
++  void WebContentsDestroyed() override { Revoke(); }
++
++ private:
++  static std::map<int32_t, std::unique_ptr<ScreenCaptureDocumentObserver>>&
++  Observers() {
++    static base::NoDestructor<
++        std::map<int32_t, std::unique_ptr<ScreenCaptureDocumentObserver>>>
++        observers;
++    return *observers;
++  }
++
++  void Revoke() {
++    DCHECK_CURRENTLY_ON(BrowserThread::UI);
++    auto it = Observers().find(source_id_);
++    if (it == Observers().end() || it->second.get() != this)
++      return;
++    // Remove the entry before Java can synchronously release it. Keep this
++    // observer alive until the callback returns, with no remaining
++    // observations.
++    auto keep_alive = std::move(it->second);
++    Observers().erase(it);
++    Observe(nullptr);
++    std::move(on_revoke_).Run();
++  }
++
++  const WeakDocumentPtr document_;
++  const GlobalRenderFrameHostId frame_id_;
++  const int32_t source_id_;
++  base::OnceClosure on_revoke_;
++};
++
++// Android planes may omit the final row's padding from their ByteBuffer.
++std::optional<base::span<const uint8_t>> GetCroppedPlaneData(
++    JNIEnv* env,
++    const base::android::JavaRef<jobject>& buffer,
++    int pixel_stride,
++    int row_stride,
++    int left,
++    int top,
++    int width,
++    int height) {
++  if (buffer.is_null() || pixel_stride <= 0 || row_stride <= 0 || left < 0 ||
++      top < 0 || width <= 0 || height <= 0) {
++    return std::nullopt;
++  }
++  auto bytes = base::android::MaybeJavaByteBufferToSpan(env, buffer);
++  if (!bytes) {
++    return std::nullopt;
++  }
++  const auto row_end =
++      (base::CheckedNumeric<size_t>(left) + width - 1) * pixel_stride + 1;
++  size_t checked_row_end;
++  size_t checked_end;
++  size_t checked_offset;
++  if (!row_end.AssignIfValid(&checked_row_end) ||
++      checked_row_end > static_cast<size_t>(row_stride) ||
++      !((base::CheckedNumeric<size_t>(top) + height - 1) * row_stride + row_end)
++           .AssignIfValid(&checked_end) ||
++      checked_end > bytes->size() ||
++      !(base::CheckedNumeric<size_t>(top) * row_stride +
++        base::CheckedNumeric<size_t>(left) * pixel_stride)
++           .AssignIfValid(&checked_offset)) {
++    return std::nullopt;
++  }
++  return bytes->subspan(checked_offset, checked_end - checked_offset);
++}
+ 
+ class DesktopCapturerAndroidJni : public DesktopCapturerAndroidJniInterface {
+  public:
+@@ -26,8 +172,9 @@
+     return Java_ScreenCapture_create(env, native_ptr);
+   }
+   bool StartCapture(JNIEnv* env,
+-                    const base::android::JavaRef<jobject>& obj) override {
+-    return Java_ScreenCapture_startCapture(env, obj);
++                    const base::android::JavaRef<jobject>& obj,
++                    int32_t source_id) override {
++    return Java_ScreenCapture_startCapture(env, obj, source_id);
+   }
+   void Destroy(JNIEnv* env,
+                const base::android::JavaRef<jobject>& obj) override {
+@@ -36,6 +183,37 @@
+ };
+ 
+ }  // namespace
++
++bool RegisterScreenCaptureDocument(WebContents* owner,
++                                   RenderFrameHost* frame,
++                                   int32_t source_id,
++                                   base::OnceClosure on_revoke) {
++  return ScreenCaptureDocumentObserver::Register(owner, frame, source_id,
++                                                 std::move(on_revoke));
++}
++
++void ReleaseScreenCaptureDocument(int32_t source_id) {
++  ScreenCaptureDocumentObserver::Release(source_id);
++}
++
++static bool JNI_ScreenCapture_RegisterDocumentObserver(JNIEnv* env,
++                                                       WebContents* owner,
++                                                       RenderFrameHost* frame,
++                                                       int32_t source_id) {
++  return RegisterScreenCaptureDocument(
++      owner, frame, source_id,
++      base::BindOnce(
++          [](int32_t id) {
++            Java_ScreenCapture_cancelPick(base::android::AttachCurrentThread(),
++                                          id);
++          },
++          source_id));
++}
++
++static void JNI_ScreenCapture_ReleaseDocumentObserver(JNIEnv* env,
++                                                      int32_t source_id) {
++  ReleaseScreenCaptureDocument(source_id);
++}
+ 
+ DesktopCapturerAndroid::PlaneInfo::PlaneInfo() = default;
+ 
+@@ -57,20 +235,32 @@
+     : jni_interface_(std::move(jni_interface)) {}
+ 
+ DesktopCapturerAndroid::~DesktopCapturerAndroid() {
+-  JNIEnv* env = base::android::AttachCurrentThread();
+-  jni_interface_->Destroy(env, screen_capture_);
++  if (!screen_capture_.is_null()) {
++    JNIEnv* env = base::android::AttachCurrentThread();
++    jni_interface_->Destroy(env, screen_capture_);
++  }
+ }
+ 
+ void DesktopCapturerAndroid::Start(Callback* callback) {
++  CHECK(callback);
++  // A consumed picker grant cannot be used to start another session.
++  if (callback_) {
++    Shutdown();
++    return;
++  }
+   callback_ = callback;
++  if (finishing_ || !source_id_) {
++    Shutdown();
++    return;
++  }
+ 
+   JNIEnv* env = base::android::AttachCurrentThread();
+   screen_capture_.Reset(
+       jni_interface_->Create(env, reinterpret_cast<intptr_t>(this)));
+ 
+-  if (!jni_interface_->StartCapture(env, screen_capture_)) {
+-    // Error immediately if we can't start capture.
+-    finishing_ = true;
++  if (screen_capture_.is_null() ||
++      !jni_interface_->StartCapture(env, screen_capture_, *source_id_)) {
++    Shutdown();
+   }
+ }
+ 
+@@ -98,6 +288,13 @@
+ }
+ 
+ bool DesktopCapturerAndroid::SelectSource(SourceId id) {
++  if (callback_ || finishing_ || id <= 0 ||
++      !base::IsValueInRangeForNumericType<int32_t>(id) ||
++      (source_id_ && id != *source_id_)) {
++    Shutdown();
++    return false;
++  }
++  source_id_ = base::checked_cast<int32_t>(id);
+   return true;
+ }
+ 
+@@ -144,8 +341,73 @@
+     int32_t unchecked_crop_top,
+     int32_t unchecked_crop_right,
+     int32_t unchecked_crop_bottom) {
+-  // TODO(crbug.com/352187279): Implement processing of I420 frames.
+-  NOTREACHED();
++  base::ScopedClosureRunner release(base::BindOnce(
++      &jni_zero::RunRunnable,
++      base::android::ScopedJavaGlobalRef<jobject>(env, release_cb)));
++  if (finishing_) {
++    return;
++  }
++
++  // YUV_420_888 has one-byte Y pixels and matching U/V pixel strides.
++  if (unchecked_crop_left < 0 || unchecked_crop_top < 0 ||
++      unchecked_crop_right <= unchecked_crop_left ||
++      unchecked_crop_bottom <= unchecked_crop_top ||
++      unchecked_crop_right > media::limits::kMaxDimension ||
++      unchecked_crop_bottom > media::limits::kMaxDimension ||
++      y_unchecked_pixel_stride != 1 ||
++      (u_unchecked_pixel_stride != 1 && u_unchecked_pixel_stride != 2) ||
++      u_unchecked_pixel_stride != v_unchecked_pixel_stride) {
++    Shutdown();
++    return;
++  }
++
++  // Convert from a chroma-aligned origin so odd crops retain the original
++  // two-by-two chroma sampling. Remove the leading edge after conversion.
++  const int left = unchecked_crop_left & ~1;
++  const int top = unchecked_crop_top & ~1;
++  const int width = unchecked_crop_right - left;
++  const int height = unchecked_crop_bottom - top;
++  if (int64_t{width} * height > media::limits::kMaxCanvas) {
++    Shutdown();
++    return;
++  }
++  const auto y =
++      GetCroppedPlaneData(env, y_buf, y_unchecked_pixel_stride,
++                          y_unchecked_row_stride, left, top, width, height);
++  const auto u = GetCroppedPlaneData(env, u_buf, u_unchecked_pixel_stride,
++                                     u_unchecked_row_stride, left / 2, top / 2,
++                                     (width + 1) / 2, (height + 1) / 2);
++  const auto v = GetCroppedPlaneData(env, v_buf, v_unchecked_pixel_stride,
++                                     v_unchecked_row_stride, left / 2, top / 2,
++                                     (width + 1) / 2, (height + 1) / 2);
++  if (!y || !u || !v) {
++    Shutdown();
++    return;
++  }
++
++  auto converted = std::make_unique<webrtc::BasicDesktopFrame>(
++      webrtc::DesktopSize(width, height), webrtc::FOURCC_ABGR);
++  if (libyuv::Android420ToABGR(
++          y->data(), y_unchecked_row_stride, u->data(), u_unchecked_row_stride,
++          v->data(), v_unchecked_row_stride, u_unchecked_pixel_stride,
++          converted->data(), converted->stride(), width, height) != 0) {
++    Shutdown();
++    return;
++  }
++
++  const webrtc::DesktopVector offset(unchecked_crop_left - left,
++                                     unchecked_crop_top - top);
++  if (offset.is_zero()) {
++    next_frame_ = std::move(converted);
++  } else {
++    const webrtc::DesktopSize size(unchecked_crop_right - unchecked_crop_left,
++                                   unchecked_crop_bottom - unchecked_crop_top);
++    next_frame_ =
++        std::make_unique<webrtc::BasicDesktopFrame>(size, webrtc::FOURCC_ABGR);
++    next_frame_->CopyPixelsFrom(*converted, offset,
++                                webrtc::DesktopRect::MakeSize(size));
++  }
++  SetFrameMetadata(*next_frame_, timestamp_ns);
+ }
+ 
+ void DesktopCapturerAndroid::OnStop(JNIEnv* env) {
+@@ -153,8 +415,47 @@
+ }
+ 
+ void DesktopCapturerAndroid::Shutdown() {
+-  CHECK(!finishing_);
+   finishing_ = true;
++  next_frame_.reset();
++}
++
++void DesktopCapturerAndroid::SetFrameMetadata(webrtc::DesktopFrame& frame,
++                                              int64_t timestamp_ns) {
++  // We don't have access to this information to Android, but this is only
++  // used for mouse cursor stuff, which we don't support currently.
++  frame.set_top_left(webrtc::DesktopVector());
++
++  // We don't have damage information on Android, so damage the whole frame.
++  frame.mutable_updated_region()->SetRect(
++      webrtc::DesktopRect::MakeSize(frame.size()));
++
++  // TODO(crbug.com/352187279): Set DPI based on display.
++  frame.set_dpi(webrtc::DesktopVector());
++
++  // TODO(crbug.com/352187279): The cursor is captured for screen capture but
++  // not for window capture. Currently there is no way to determine if we are
++  // doing screen or window capture on Android. If we can determine this and set
++  // it conditionally here we also need a way to get the cursor position by
++  // implementing `MouseCursorMonitor`.
++  frame.set_may_contain_cursor(true);
++
++  // Calculate the time delta from the previous frame's timestamp. It does not
++  // seem guaranteed that the timestamp we get from Android is always monotonic,
++  // and there's no guarantee about how it is not monotonic (e.g. unsigned
++  // wrapping), so don't provide a timestamp in this case.
++  if (last_frame_time_ns_ == 0 || timestamp_ns <= last_frame_time_ns_) {
++    frame.set_capture_time_ms(0);
++  } else {
++    frame.set_capture_time_ms((timestamp_ns - last_frame_time_ns_) /
++                              base::Time::kNanosecondsPerMillisecond);
++  }
++  last_frame_time_ns_ = timestamp_ns;
++
++  // TODO(crbug.com/352187279): Create `DesktopCapturerId` for Android.
++  frame.set_capturer_id(webrtc::DesktopCapturerId::kUnknown);
++
++  // There is no way to get an ICC profile on Android.
++  frame.set_icc_profile({});
+ }
+ 
+ void DesktopCapturerAndroid::ProcessRgbaFrame(int64_t timestamp_ns,
+@@ -172,41 +473,7 @@
+   next_frame_ =
+       std::make_unique<webrtc::BasicDesktopFrame>(size, webrtc::FOURCC_ABGR);
+ 
+-  // We don't have access to this information to Android, but this is only
+-  // used for mouse cursor stuff, which we don't support currently.
+-  next_frame_->set_top_left(webrtc::DesktopVector());
+-
+-  // We don't have damage information on Android, so damage the whole frame.
+-  next_frame_->mutable_updated_region()->SetRect(
+-      webrtc::DesktopRect::MakeSize(next_frame_->size()));
+-
+-  // TODO(crbug.com/352187279): Set DPI based on display.
+-  next_frame_->set_dpi(webrtc::DesktopVector());
+-
+-  // TODO(crbug.com/352187279): The cursor is captured for screen capture but
+-  // not for window capture. Currently there is no way to determine if we are
+-  // doing screen or window capture on Android. If we can determine this and set
+-  // it conditionally here we also need a way to get the cursor position by
+-  // implementing `MouseCursorMonitor`.
+-  next_frame_->set_may_contain_cursor(true);
+-
+-  // Calculate the time delta from the previous frame's timestamp. It does not
+-  // seem guaranteed that the timestamp we get from Android is always monotonic,
+-  // and there's no guarantee about how it is not monotonic (e.g. unsigned
+-  // wrapping), so don't provide a timestamp in this case.
+-  if (last_frame_time_ns_ == 0 || timestamp_ns <= last_frame_time_ns_) {
+-    next_frame_->set_capture_time_ms(0);
+-  } else {
+-    next_frame_->set_capture_time_ms((timestamp_ns - last_frame_time_ns_) /
+-                                     base::Time::kNanosecondsPerMillisecond);
+-  }
+-  last_frame_time_ns_ = timestamp_ns;
+-
+-  // TODO(crbug.com/352187279): Create `DesktopCapturerId` for Android.
+-  next_frame_->set_capturer_id(webrtc::DesktopCapturerId::kUnknown);
+-
+-  // There is no way to get an ICC profile on Android.
+-  next_frame_->set_icc_profile({});
++  SetFrameMetadata(*next_frame_, timestamp_ns);
+ 
+   JNIEnv* env = base::android::AttachCurrentThread();
+   const auto span = base::android::JavaByteBufferToSpan(env, plane.buf);

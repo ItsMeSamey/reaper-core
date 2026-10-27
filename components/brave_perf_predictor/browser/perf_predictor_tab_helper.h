@@ -6,11 +6,15 @@
 #ifndef BRAVE_COMPONENTS_BRAVE_PERF_PREDICTOR_BROWSER_PERF_PREDICTOR_TAB_HELPER_H_
 #define BRAVE_COMPONENTS_BRAVE_PERF_PREDICTOR_BROWSER_PERF_PREDICTOR_TAB_HELPER_H_
 
+#include "build/build_config.h"
+
 #include <memory>
 #include <string>
 
 #include "brave/components/brave_perf_predictor/browser/bandwidth_savings_predictor.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_perf_predictor/browser/p3a_bandwidth_savings_tracker.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "content/public/browser/web_contents_observer.h"
 #include "content/public/browser/web_contents_user_data.h"
 
@@ -90,7 +94,9 @@ class PerfPredictorTabHelper
 
   int64_t navigation_id_ = -1;
   std::unique_ptr<BandwidthSavingsPredictor> bandwidth_predictor_;
+#if !BUILDFLAG(IS_ANDROID)
   std::unique_ptr<P3ABandwidthSavingsTracker> bandwidth_tracker_;
+#endif  // !BUILDFLAG(IS_ANDROID)
 
   WEB_CONTENTS_USER_DATA_KEY_DECL();
 };

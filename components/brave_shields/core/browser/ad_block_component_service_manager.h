@@ -6,6 +6,8 @@
 #ifndef BRAVE_COMPONENTS_BRAVE_SHIELDS_CORE_BROWSER_AD_BLOCK_COMPONENT_SERVICE_MANAGER_H_
 #define BRAVE_COMPONENTS_BRAVE_SHIELDS_CORE_BROWSER_AD_BLOCK_COMPONENT_SERVICE_MANAGER_H_
 
+#include "build/build_config.h"
+
 #include <map>
 #include <memory>
 #include <string>
@@ -20,7 +22,9 @@
 #include "brave/components/brave_shields/core/browser/ad_block_filter_list_catalog_provider.h"
 #include "brave/components/brave_shields/core/browser/ad_block_filters_provider.h"
 #include "brave/components/brave_shields/core/browser/ad_block_filters_provider_manager.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_shields/core/browser/ad_block_list_p3a.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_shields/core/browser/filter_list_catalog_entry.h"
 #include "brave/components/brave_shields/core/common/adblock/rs/src/lib.rs.h"
 #include "components/prefs/pref_service.h"
@@ -29,6 +33,8 @@ class AdBlockServiceTest;
 class PrefChangeRegistrar;
 
 namespace brave_shields {
+
+class AdBlockListP3A;
 
 class ComponentProvidersGate;
 
@@ -80,7 +86,9 @@ class AdBlockComponentServiceManager
   void LoadComponentFiltersProviders();
   void UpdateFilterListPrefs(const std::string& uuid, bool enabled);
 
+#if !BUILDFLAG(IS_ANDROID)
   void RecordP3ACookieListEnabled();
+#endif  // !BUILDFLAG(IS_ANDROID)
 
   const std::map<std::string, std::unique_ptr<AdBlockComponentFiltersProvider>>&
   component_filters_providers() {
@@ -112,7 +120,9 @@ class AdBlockComponentServiceManager
 
   std::unique_ptr<PrefChangeRegistrar> local_state_change_registrar_;
 
+#if !BUILDFLAG(IS_ANDROID)
   raw_ptr<AdBlockListP3A> list_p3a_;
+#endif  // !BUILDFLAG(IS_ANDROID)
 
   base::RepeatingTimer update_check_timer_;
 

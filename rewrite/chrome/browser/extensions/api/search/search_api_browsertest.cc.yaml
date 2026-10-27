@@ -1,0 +1,47 @@
+substitutions:
+- description: Use the real Android model, local search provider and window list in regression tests.
+  regex:
+    pattern: '#include "extensions/common/extension_builder.h"'
+    replace: '#include "extensions/common/extension_builder.h"
+
+
+      #if BUILDFLAG(IS_ANDROID)
+
+      #include <algorithm>
+
+      #include <memory>
+
+
+      #include "chrome/browser/tab_list/tab_list_interface.h"
+
+      #include "chrome/browser/ui/android/tab_model/tab_model.h"
+
+      #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+
+      #include "chrome/browser/ui/browser_window/public/browser_window_interface_iterator.h"
+
+      #include "components/search_engines/template_url.h"
+
+      #include "components/search_engines/template_url_data.h"
+
+      #include "content/public/browser/web_contents.h"
+
+      #include "content/public/test/browser_test_utils.h"
+
+      #include "net/test/embedded_test_server/embedded_test_server.h"
+
+      #endif'
+- description: Prepare an empty regular Android window and a loopback search provider.
+  regex:
+    pattern: '  extensions::SearchQueryFunction* function() { return function_.get(); }'
+    replace: "#if BUILDFLAG(IS_ANDROID)\n  void CloseAndroidWindowTabs() {\n    auto* tab_model = static_cast<TabModel*>(GetTabListInterface());\n    ASSERT_TRUE(tab_model);\n    ASSERT_FALSE(tab_model->IsOffTheRecord());\n    tab_model->ForceCloseAllTabs();\n    ASSERT_EQ(0, tab_model->GetTabCount());\n    ASSERT_EQ(nullptr, tab_model->GetActiveWebContents());\n    ASSERT_TRUE(GetBrowserWindowInterface());\n    ASSERT_EQ(tab_model, TabListInterface::From(GetBrowserWindowInterface()));\n  }\n\n  void SetLocalSearchProvider() {\n    ASSERT_TRUE(embedded_test_server()->Start());\n    TemplateURLData data;\n    data.SetShortName(u\"Loopback search\");\n    data.SetKeyword(u\"loopback.test\");\n    data.SetURL(embedded_test_server()->GetURL(\"/title1.html\").spec() +\n                \"?q={searchTerms}\");\n    auto* service = TemplateURLServiceFactory::GetForProfile(profile());\n    service->SetUserSelectedDefaultSearchProvider(\n        service->Add(std::make_unique<TemplateURL>(data)));\n\
+      \  }\n#endif\n\n  extensions::SearchQueryFunction* function() { return function_.get(); }"
+- description: Verify current searches error while explicit destinations can still be created.
+  regex:
+    pattern: '}  // namespace extensions'
+    replace: "#if BUILDFLAG(IS_ANDROID)\nIN_PROC_BROWSER_TEST_F(SearchApiBrowserTest, EmptyAndroidWindowCurrentTab) {\n  ASSERT_NO_FATAL_FAILURE(CloseAndroidWindowTabs());\n  // No sender WebContents simulates a service-worker call.\n  scoped_refptr<const Extension> extension = CreateSearchExtension();\n  for (const char* input : {R\"([{\"text\":\"test\"}])\",\n                            R\"([{\"text\":\"test\",\"disposition\":\"CURRENT_TAB\"}])\"}) {\n    auto function = CreateSearchFunction(extension);\n    EXPECT_EQ(\"No active browser.\", api_test_utils::RunFunctionAndReturnError(\n                                        function.get(), input, profile()));\n  }\n}\n\nIN_PROC_BROWSER_TEST_F(SearchApiBrowserTest, EmptyAndroidWindowNewTab) {\n  ASSERT_NO_FATAL_FAILURE(SetLocalSearchProvider());\n  ASSERT_NO_FATAL_FAILURE(CloseAndroidWindowTabs());\n  auto* window = GetBrowserWindowInterface();\n  size_t window_count = GetAllBrowserWindowInterfaces().size();\n  ASSERT_TRUE(api_test_utils::RunFunction(\n\
+      \      function(), R\"([{\"text\":\"test\",\"disposition\":\"NEW_TAB\"}])\", profile()));\n  EXPECT_EQ(window_count, GetAllBrowserWindowInterfaces().size());\n  auto* model = static_cast<TabModel*>(TabListInterface::From(window));\n  ASSERT_EQ(1, model->GetTabCount());\n  auto* contents = model->GetActiveWebContents();\n  ASSERT_TRUE(contents);\n  ASSERT_TRUE(content::WaitForLoadStop(contents));\n  EXPECT_EQ(embedded_test_server()->GetURL(\"/title1.html?q=test\"),\n            contents->GetLastCommittedURL());\n}\n\nIN_PROC_BROWSER_TEST_F(SearchApiBrowserTest, EmptyAndroidWindowNewWindow) {\n  ASSERT_NO_FATAL_FAILURE(SetLocalSearchProvider());\n  ASSERT_NO_FATAL_FAILURE(CloseAndroidWindowTabs());\n  auto* original = GetBrowserWindowInterface();\n  auto original_windows = GetAllBrowserWindowInterfaces();\n  ASSERT_TRUE(api_test_utils::RunFunction(\n      function(), R\"([{\"text\":\"test\",\"disposition\":\"NEW_WINDOW\"}])\", profile()));\n  auto windows = GetAllBrowserWindowInterfaces();\n\
+      \  ASSERT_EQ(original_windows.size() + 1, windows.size());\n  EXPECT_EQ(0, TabListInterface::From(original)->GetTabCount());\n  for (auto* window : windows) {\n    if (std::ranges::contains(original_windows, window)) continue;\n    EXPECT_EQ(profile(), window->GetProfile());\n    auto* model = static_cast<TabModel*>(TabListInterface::From(window));\n    ASSERT_EQ(1, model->GetTabCount());\n    auto* contents = model->GetActiveWebContents();\n    ASSERT_TRUE(contents);\n    ASSERT_TRUE(content::WaitForLoadStop(contents));\n    EXPECT_EQ(embedded_test_server()->GetURL(\"/title1.html?q=test\"),\n              contents->GetLastCommittedURL());\n  }\n}\n\nIN_PROC_BROWSER_TEST_F(SearchApiBrowserTest,\n                       IncognitoDoesNotFallBackToOtherProfile) {\n  // Keep both a regular window and a different OTR window available.\n  ASSERT_TRUE(PlatformOpenURLOffTheRecord(profile(), GURL(\"about:blank\")));\n  Profile* isolated_otr = profile()->GetOffTheRecordProfile(\n      Profile::OTRProfileID::CreateUniqueForTesting(),\
+      \ /*create_if_needed=*/true);\n  scoped_refptr<const Extension> extension = CreateSearchExtension();\n  for (const char* input : {R\"([{\"text\":\"test\"}])\",\n                            R\"([{\"text\":\"test\",\"disposition\":\"NEW_TAB\"}])\",\n                            R\"([{\"text\":\"test\",\"disposition\":\"NEW_WINDOW\"}])\"}) {\n    auto function = CreateSearchFunction(extension);\n    EXPECT_EQ(\"No active browser.\", api_test_utils::RunFunctionAndReturnError(\n                                        function.get(), input, isolated_otr,\n                                        api_test_utils::FunctionMode::kIncognito));\n  }\n}\n\nIN_PROC_BROWSER_TEST_F(SearchApiBrowserTest, RegularCallerIncognitoOptIn) {\n  ASSERT_NO_FATAL_FAILURE(SetLocalSearchProvider());\n  auto* regular_model = GetTabListInterface();\n  int regular_count = regular_model->GetTabCount();\n  content::WebContents* otr_contents =\n      PlatformOpenURLOffTheRecord(profile(), GURL(\"about:blank\"));\n  ASSERT_TRUE(otr_contents);\n\
+      \  BrowserWindowInterface* last_active = nullptr;\n  ForEachCurrentBrowserWindowInterfaceOrderedByActivation(\n      [&](BrowserWindowInterface* window) {\n        last_active = window;\n        return false;\n      });\n  ASSERT_TRUE(last_active);\n  ASSERT_EQ(otr_contents->GetBrowserContext(), last_active->GetProfile());\n  auto* otr_model = TabListInterface::From(last_active);\n  int otr_count = otr_model->GetTabCount();\n\n  scoped_refptr<const Extension> extension = CreateSearchExtension();\n  auto allowed = CreateSearchFunction(extension);\n  ASSERT_TRUE(api_test_utils::RunFunction(\n      allowed.get(), R\"([{\"text\":\"test\",\"disposition\":\"NEW_TAB\"}])\", profile(),\n      api_test_utils::FunctionMode::kIncognito));\n  EXPECT_EQ(otr_count + 1, otr_model->GetTabCount());\n  EXPECT_EQ(regular_count, regular_model->GetTabCount());\n\n  auto regular_only = CreateSearchFunction(extension);\n  ASSERT_TRUE(api_test_utils::RunFunction(\n      regular_only.get(), R\"([{\"text\"\
+      :\"test\",\"disposition\":\"NEW_TAB\"}])\", profile()));\n  EXPECT_EQ(otr_count + 1, otr_model->GetTabCount());\n  EXPECT_EQ(regular_count + 1, regular_model->GetTabCount());\n}\n#endif  // BUILDFLAG(IS_ANDROID)\n\n}  // namespace extensions"

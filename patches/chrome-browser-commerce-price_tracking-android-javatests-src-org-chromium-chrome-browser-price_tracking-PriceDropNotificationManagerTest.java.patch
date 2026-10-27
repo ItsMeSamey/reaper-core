@@ -1,0 +1,106 @@
+diff --git a/chrome/browser/commerce/price_tracking/android/javatests/src/org/chromium/chrome/browser/price_tracking/PriceDropNotificationManagerTest.java b/chrome/browser/commerce/price_tracking/android/javatests/src/org/chromium/chrome/browser/price_tracking/PriceDropNotificationManagerTest.java
+--- a/chrome/browser/commerce/price_tracking/android/javatests/src/org/chromium/chrome/browser/price_tracking/PriceDropNotificationManagerTest.java
++++ b/chrome/browser/commerce/price_tracking/android/javatests/src/org/chromium/chrome/browser/price_tracking/PriceDropNotificationManagerTest.java
+@@ -10,9 +10,6 @@
+ import static org.junit.Assert.assertNotNull;
+ import static org.junit.Assert.assertNull;
+ import static org.junit.Assert.assertTrue;
+-import static org.mockito.ArgumentMatchers.any;
+-import static org.mockito.ArgumentMatchers.anyLong;
+-import static org.mockito.Mockito.doReturn;
+ import static org.mockito.Mockito.spy;
+ import static org.mockito.Mockito.times;
+ import static org.mockito.Mockito.verify;
+@@ -42,6 +39,7 @@
+ import org.mockito.junit.MockitoJUnit;
+ import org.mockito.junit.MockitoRule;
+
++import org.chromium.base.Callback;
+ import org.chromium.base.ContextUtils;
+ import org.chromium.base.IntentUtils;
+ import org.chromium.base.ThreadUtils;
+@@ -54,7 +52,6 @@
+ import org.chromium.chrome.browser.bookmarks.BookmarkModel;
+ import org.chromium.chrome.browser.browserservices.intents.WebappConstants;
+ import org.chromium.chrome.browser.commerce.ShoppingServiceFactory;
+-import org.chromium.chrome.browser.commerce.ShoppingServiceFactoryJni;
+ import org.chromium.chrome.browser.flags.ChromeFeatureList;
+ import org.chromium.chrome.browser.flags.ChromeSwitches;
+ import org.chromium.chrome.browser.notifications.NotificationUmaTracker.SystemNotificationType;
+@@ -68,8 +65,6 @@
+ import org.chromium.components.browser_ui.notifications.NotificationManagerProxy;
+ import org.chromium.components.browser_ui.notifications.NotificationManagerProxyImpl;
+ import org.chromium.components.browser_ui.notifications.NotificationProxyUtils;
+-import org.chromium.components.commerce.core.CommerceFeatureUtils;
+-import org.chromium.components.commerce.core.CommerceFeatureUtilsJni;
+ import org.chromium.components.commerce.core.CommerceSubscription;
+ import org.chromium.components.commerce.core.IdentifierType;
+ import org.chromium.components.commerce.core.ManagementType;
+@@ -101,19 +96,14 @@
+     @Rule public MockitoRule mMockitoRule = MockitoJUnit.rule();
+
+     @Mock private ShoppingService mMockShoppingService;
+-    @Mock private CommerceFeatureUtils.Natives mCommerceFeatureUtilsJniMock;
+-    @Mock private ShoppingServiceFactory.Natives mShoppingServiceFactoryJniMock;
+     @Mock private Profile mMockProfile;
+     @Captor private ArgumentCaptor<CommerceSubscription> mSubscriptionCaptor;
+
+     @Before
+     public void setUp() {
+         NativeLibraryTestUtils.loadNativeLibraryAndInitBrowserProcess();
+-        CommerceFeatureUtilsJni.setInstanceForTesting(mCommerceFeatureUtilsJniMock);
+-        doReturn(true).when(mCommerceFeatureUtilsJniMock).isShoppingListEligible(anyLong());
+-
+-        ShoppingServiceFactoryJni.setInstanceForTesting(mShoppingServiceFactoryJniMock);
+-        doReturn(mMockShoppingService).when(mShoppingServiceFactoryJniMock).getForProfile(any());
++
++        ShoppingServiceFactory.setShoppingServiceForTesting(mMockShoppingService);
+
+         mMockNotificationManager = spy(NotificationManagerProxyImpl.getInstance());
+         BaseNotificationManagerProxyFactory.setInstanceForTesting(mMockNotificationManager);
+@@ -157,7 +147,6 @@
+     @MediumTest
+     public void testCanPostNotification_FeatureDisabled() {
+         NotificationProxyUtils.setNotificationEnabledForTest(true);
+-        doReturn(false).when(mCommerceFeatureUtilsJniMock).isShoppingListEligible(anyLong());
+         verifyCanPostNotification(false);
+     }
+
+@@ -172,7 +161,7 @@
+
+     @Test
+     @MediumTest
+-    public void testCanPostNotificaton() {
++    public void testCanPostNotification_ChannelDoesNotOverrideUnavailableShopping() {
+         PriceTrackingFeatures.setIsSignedInAndSyncEnabledForTesting(true);
+         NotificationProxyUtils.setNotificationEnabledForTest(true);
+         assertTrue(mPriceDropNotificationManager.areAppNotificationsEnabled());
+@@ -198,7 +187,7 @@
+         CriteriaHelper.pollInstrumentationThread(callbackComplete::get);
+         assertNotNull(channelRef.get());
+         assertEquals(NotificationManager.IMPORTANCE_DEFAULT, channelRef.get().getImportance());
+-        verifyCanPostNotification(true);
++        verifyCanPostNotification(false);
+     }
+
+     @Test
+@@ -287,15 +276,18 @@
+     @MediumTest
+     public void testOnNotificationActionClicked_TurnOffAlert() {
+         String offerId = "offer_id";
++        ArgumentCaptor<Callback<Boolean>> callbackCaptor = MockitoHelper.callbackCaptor();
+
+         mPriceDropNotificationManager.onNotificationActionClicked(
+                 ACTION_ID_TURN_OFF_ALERT, TEST_URL, offerId, null, false);
+         verify(mMockShoppingService, times(1))
+-                .unsubscribe(mSubscriptionCaptor.capture(), MockitoHelper.anyCallback());
++                .unsubscribe(mSubscriptionCaptor.capture(), callbackCaptor.capture());
+         assertEquals(IdentifierType.OFFER_ID, mSubscriptionCaptor.getValue().idType);
+         assertEquals(offerId, mSubscriptionCaptor.getValue().id);
+         assertEquals(ManagementType.CHROME_MANAGED, mSubscriptionCaptor.getValue().managementType);
+         assertEquals(null, mSubscriptionCaptor.getValue().userSeenOffer);
++
++        callbackCaptor.getValue().onResult(false);
+     }
+
+     @Test

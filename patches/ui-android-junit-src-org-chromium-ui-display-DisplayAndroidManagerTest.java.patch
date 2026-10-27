@@ -1,0 +1,217 @@
+diff --git a/ui/android/junit/src/org/chromium/ui/display/DisplayAndroidManagerTest.java b/ui/android/junit/src/org/chromium/ui/display/DisplayAndroidManagerTest.java
+index 8861887ce99aac202132d0f321ad7749423d65d5..d2b4ee54c352481c48701764c5656581ba3dc9ad 100644
+--- a/ui/android/junit/src/org/chromium/ui/display/DisplayAndroidManagerTest.java
++++ b/ui/android/junit/src/org/chromium/ui/display/DisplayAndroidManagerTest.java
+@@ -4,7 +4,19 @@
+ package org.chromium.ui.display;
+ 
+ import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertNotNull;
++import static org.junit.Assert.assertNull;
++import static org.junit.Assert.assertSame;
++import static org.mockito.ArgumentMatchers.any;
++import static org.mockito.ArgumentMatchers.anyBoolean;
++import static org.mockito.ArgumentMatchers.anyFloat;
++import static org.mockito.ArgumentMatchers.anyInt;
++import static org.mockito.ArgumentMatchers.eq;
++import static org.mockito.Mockito.atLeastOnce;
++import static org.mockito.Mockito.clearInvocations;
+ import static org.mockito.Mockito.doReturn;
++import static org.mockito.Mockito.verify;
++import static org.mockito.Mockito.verifyNoInteractions;
+ 
+ import android.content.Context;
+ import android.content.res.Configuration;
+@@ -13,6 +25,7 @@ import android.graphics.Rect;
+ import android.graphics.RectF;
+ import android.hardware.display.DisplayManager;
+ import android.os.Build;
++import android.os.Looper;
+ import android.util.DisplayMetrics;
+ import android.util.SparseArray;
+ import android.view.Display;
+@@ -31,6 +44,8 @@ import org.robolectric.annotation.Config;
+ import org.robolectric.shadows.ShadowDisplay;
+ import org.robolectric.shadows.ShadowDisplayManager;
+ import org.robolectric.shadows.ShadowLooper;
++import org.robolectric.util.ReflectionHelpers;
++import org.robolectric.util.ReflectionHelpers.ClassParameter;
+ 
+ import org.chromium.base.AconfigFlaggedApiDelegate;
+ import org.chromium.base.ContextUtils;
+@@ -50,6 +65,7 @@ public class DisplayAndroidManagerTest {
+     @Rule public MockitoRule mMockitoRule = MockitoJUnit.rule();
+ 
+     @Mock private AconfigFlaggedApiDelegate mAconfigFlaggedApiDelegate;
++    @Mock private DisplayAndroidManager.Natives mNativeMock;
+ 
+     private final DisplayManager mDisplayManager =
+             (DisplayManager)
+@@ -58,6 +74,7 @@ public class DisplayAndroidManagerTest {
+ 
+     @Before
+     public void setup() {
++        DisplayAndroidManagerJni.setInstanceForTesting(mNativeMock);
+         // DisplayManager has a default display with the Display.DEFAULT_DISPLAY id.
+         final ShadowDisplay defaultDisplay =
+                 Shadows.shadowOf(mDisplayManager.getDisplay(Display.DEFAULT_DISPLAY));
+@@ -115,6 +132,159 @@ public class DisplayAndroidManagerTest {
+                 displayAndroidManager.mIdMap);
+     }
+ 
++    @Test
++    @DisableFeatures({UiAndroidFeatures.ANDROID_USE_DISPLAY_TOPOLOGY})
++    public void testCompleteRegistrationIncludesExistingDisplayAndIsIdempotent() {
++        int externalId = ShadowDisplayManager.addDisplay("");
++        DisplayAndroidManager manager = DisplayAndroidManager.getInstance();
++        assertNull(manager.mIdMap.get(externalId));
++        attachNativeManager(manager);
++
++        DisplayAndroidManager.ensureAllDisplaysRegistered();
++
++        DisplayAndroid external = manager.mIdMap.get(externalId);
++        assertNotNull(external);
++        assertEquals(2, manager.mIdMap.size());
++        verifyNativeDisplayUpdate(externalId);
++        clearInvocations(mNativeMock);
++
++        DisplayAndroidManager.ensureAllDisplaysRegistered();
++
++        assertSame(external, manager.mIdMap.get(externalId));
++        assertEquals(2, manager.mIdMap.size());
++        verifyNoInteractions(mNativeMock);
++    }
++
++    @Test
++    @DisableFeatures({UiAndroidFeatures.ANDROID_USE_DISPLAY_TOPOLOGY})
++    public void testCompleteRegistrationTracksAttachmentAndRemoval() {
++        DisplayAndroidManager manager = DisplayAndroidManager.getInstance();
++        DisplayAndroidManager.ensureAllDisplaysRegistered();
++        attachNativeManager(manager);
++
++        int externalId = ShadowDisplayManager.addDisplay("");
++        Shadows.shadowOf(Looper.getMainLooper()).idle();
++
++        assertNotNull(manager.mIdMap.get(externalId));
++        verifyNativeDisplayUpdate(externalId);
++        clearInvocations(mNativeMock);
++
++        ShadowDisplayManager.removeDisplay(externalId);
++        Shadows.shadowOf(Looper.getMainLooper()).idle();
++
++        assertNull(manager.mIdMap.get(externalId));
++        assertEquals(1, manager.mIdMap.size());
++        verify(mNativeMock).removeDisplay(1L, externalId);
++        clearInvocations(mNativeMock);
++
++        // A late platform change for the removed ID must not revive its object.
++        manager.new DisplayListenerBackend().onDisplayChanged(externalId);
++        assertNull(manager.mIdMap.get(externalId));
++        verifyNoInteractions(mNativeMock);
++    }
++
++    @Test
++    @DisableFeatures({UiAndroidFeatures.ANDROID_USE_DISPLAY_TOPOLOGY})
++    public void testCompleteRegistrationUpdatesMetricsOfUnusedDisplay() {
++        int externalId = addDisplay(1280, 720, DisplayMetrics.DENSITY_MEDIUM, "external");
++        DisplayAndroidManager manager = DisplayAndroidManager.getInstance();
++        DisplayAndroidManager.ensureAllDisplaysRegistered();
++        attachNativeManager(manager);
++        DisplayAndroid external = manager.mIdMap.get(externalId);
++        assertNotNull(external);
++        assertEquals(1.0f, external.getDipScale(), 0.0f);
++
++        Context displayContext = external.getWindowContext();
++        assertNotNull(displayContext);
++        Resources resources = displayContext.getResources();
++        Configuration configuration = new Configuration(resources.getConfiguration());
++        configuration.densityDpi = DisplayMetrics.DENSITY_XHIGH;
++        resources.updateConfiguration(configuration, resources.getDisplayMetrics());
++        ShadowDisplayManager.changeDisplay(externalId, "+");
++        Shadows.shadowOf(Looper.getMainLooper()).idle();
++
++        assertSame(external, manager.mIdMap.get(externalId));
++        assertEquals(2.0f, external.getDipScale(), 0.0f);
++        verifyNativeDisplayUpdate(externalId);
++    }
++
++    @Test
++    @DisableFeatures({UiAndroidFeatures.ANDROID_USE_DISPLAY_TOPOLOGY})
++    public void testCompleteRegistrationIgnoresUnavailableDisplay() {
++        DisplayAndroidManager manager = DisplayAndroidManager.getInstance();
++        DisplayAndroidManager.ensureAllDisplaysRegistered();
++        attachNativeManager(manager);
++        int absentId = Integer.MAX_VALUE;
++
++        manager.new DisplayListenerBackend().onDisplayAdded(absentId);
++        manager.new DisplayListenerBackend().onDisplayChanged(absentId);
++        manager.new DisplayListenerBackend().onDisplayRemoved(absentId);
++
++        assertEquals(1, manager.mIdMap.size());
++        verifyNoInteractions(mNativeMock);
++    }
++
++    @Test
++    @DisableFeatures({UiAndroidFeatures.ANDROID_USE_DISPLAY_TOPOLOGY})
++    public void testCompleteRegistrationBeforeNativeInitialization() {
++        int externalId = ShadowDisplayManager.addDisplay("");
++        DisplayAndroidManager manager = DisplayAndroidManager.getInstance();
++
++        DisplayAndroidManager.ensureAllDisplaysRegistered();
++
++        assertNotNull(manager.mIdMap.get(externalId));
++        verifyNoInteractions(mNativeMock);
++        // The real native-initialization path publishes the already complete map.
++        ReflectionHelpers.callInstanceMethod(
++                manager, "setNativePointer", ClassParameter.from(long.class, 1L));
++        verifyNativeDisplayUpdate(externalId);
++    }
++
++    @Test
++    public void testCompleteRegistrationPreservesTopologyOwnership() {
++        int externalId = ShadowDisplayManager.addDisplay("");
++        DisplayAndroidManager manager = DisplayAndroidManager.getInstance();
++        attachNativeManager(manager);
++
++        DisplayAndroidManager.ensureAllDisplaysRegistered();
++        manager.new DisplayListenerBackend().onDisplayAdded(externalId);
++
++        assertNull(manager.mIdMap.get(externalId));
++        verifyNoInteractions(mNativeMock);
++        mBounds.put(externalId, new RectF(1920, 0, 2720, 600));
++        updateDisplayTopology(manager);
++        assertNotNull(manager.mIdMap.get(externalId));
++        verifyNativeDisplayUpdate(externalId);
++    }
++
++    private void attachNativeManager(DisplayAndroidManager manager) {
++        ReflectionHelpers.callInstanceMethod(
++                manager, "setNativePointer", ClassParameter.from(long.class, 1L));
++        clearInvocations(mNativeMock);
++    }
++
++    private void verifyNativeDisplayUpdate(int displayId) {
++        verify(mNativeMock, atLeastOnce())
++                .updateDisplay(
++                        eq(1L),
++                        eq(displayId),
++                        any(),
++                        any(),
++                        any(),
++                        anyInt(),
++                        anyInt(),
++                        anyFloat(),
++                        anyFloat(),
++                        anyFloat(),
++                        anyInt(),
++                        anyInt(),
++                        anyInt(),
++                        anyBoolean(),
++                        anyBoolean(),
++                        anyFloat(),
++                        anyBoolean());
++    }
++
+     @Test
+     public void testDisplayTopology() {
+         final int firstExternalDisplayId =

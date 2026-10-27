@@ -30,7 +30,8 @@ import org.chromium.brave_shields.mojom.SubscriptionInfo;
 import org.chromium.chrome.R;
 import org.chromium.chrome.browser.settings.BottomInsetViewProvider;
 import org.chromium.chrome.browser.settings.BravePreferenceFragment;
-import org.chromium.chrome.browser.settings.BraveSettingsActivity;
+import org.chromium.chrome.browser.settings.BraveSettingsIntentUtil;
+import org.chromium.chrome.browser.settings.SettingsIntentUtil;
 import org.chromium.components.browser_ui.settings.FragmentSettingsNavigation;
 import org.chromium.components.browser_ui.settings.SettingsNavigation;
 import org.chromium.mojo_base.mojom.Value;
@@ -47,7 +48,7 @@ public class ContentFilteringFragment extends BravePreferenceFragment
 
     private ContentFilteringAdapter mAdapter;
     private FilterListAndroidHandler mFilterListAndroidHandler;
-    private ArrayList<SubscriptionInfo> mSubscriptionFilterLists;
+    private ArrayList<SubscriptionInfo> mSubscriptionFilterLists = new ArrayList<>();
     private Value mFilterLists[];
     private MenuItem mEditItem;
     private MenuItem mDoneItem;
@@ -91,7 +92,6 @@ public class ContentFilteringFragment extends BravePreferenceFragment
         mAddCustomFilterResultLauncher =
                 registerForActivityResult(
                         new ActivityResultContracts.StartActivityForResult(),
-                        ((BraveSettingsActivity) requireActivity()).getActivityResultRegistry(),
                         result -> {
                             if (result.getResultCode() == Activity.RESULT_OK) {
                                 getSubscriptionFilters();
@@ -112,11 +112,13 @@ public class ContentFilteringFragment extends BravePreferenceFragment
     }
 
     private void getSubscriptionFilters() {
-        if (mFilterListAndroidHandler != null) {
+        ContentFilteringAdapter adapter = mAdapter;
+        if (mFilterListAndroidHandler != null && adapter != null) {
             mFilterListAndroidHandler.getSubscriptions(
                     subscriptions -> {
+                        if (mAdapter != adapter) return;
                         mSubscriptionFilterLists = new ArrayList<>(Arrays.asList(subscriptions));
-                        mAdapter.setSubscriptionFilterLists(mSubscriptionFilterLists);
+                        adapter.setSubscriptionFilterLists(mSubscriptionFilterLists);
                         mIsGetSubscriptionsLoaded = true;
                         if (mIsMenuLoaded) {
                             checkForEmptySubscriptionFilters(true);
@@ -126,11 +128,14 @@ public class ContentFilteringFragment extends BravePreferenceFragment
     }
 
     private void getFilterLists() {
-        if (mFilterListAndroidHandler != null) {
-            mFilterListAndroidHandler.getFilterLists(filterLists -> {
-                mFilterLists = filterLists.storage;
-                mAdapter.setFilterLists(mFilterLists);
-            });
+        ContentFilteringAdapter adapter = mAdapter;
+        if (mFilterListAndroidHandler != null && adapter != null) {
+            mFilterListAndroidHandler.getFilterLists(
+                    filterLists -> {
+                        if (mAdapter != adapter) return;
+                        mFilterLists = filterLists.storage;
+                        adapter.setFilterLists(mFilterLists);
+                    });
         }
     }
 
@@ -143,18 +148,29 @@ public class ContentFilteringFragment extends BravePreferenceFragment
         }
     }
 
+    /** Keep the add-list result in its own activity when settings are embedded in a tab. */
+    static Intent createAddCustomFilterIntent(Activity activity) {
+        Intent intent =
+                BraveSettingsIntentUtil.createIntent(
+                        activity,
+                        AddCustomFilterListsFragment.class.getName(),
+                        /* fragmentArgs= */ null,
+                        /* addToBackStack= */ false,
+                        /* tag= */ null,
+                        /* useSettingsInTab= */ false);
+        // AddCustomFilterListsFragment returns a result and finishes its activity. It must not
+        // reuse the browser or the existing single-activity settings host.
+        intent.removeFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        intent.putExtra(SettingsIntentUtil.EXTRA_SHOW_FRAGMENT_STANDALONE, true);
+        return intent;
+    }
+
     @Override
     public void onAddSubscriptionFilter() {
         if (mSubscriptionFilterLists.size() > 0) {
             isEditSelected(false);
         }
-        Intent intent =
-                mSettingsLauncher.createSettingsIntent(
-                        getActivity(),
-                        AddCustomFilterListsFragment.class,
-                        /* fragmentArgs= */ null,
-                        /* addToBackStack= */ true);
-        mAddCustomFilterResultLauncher.launch(intent);
+        mAddCustomFilterResultLauncher.launch(createAddCustomFilterIntent(requireActivity()));
     }
 
     @Override
@@ -163,8 +179,7 @@ public class ContentFilteringFragment extends BravePreferenceFragment
             SubscriptionInfo customFilter = mSubscriptionFilterLists.get(position);
             mFilterListAndroidHandler.deleteSubscription(customFilter.subscriptionUrl);
             mSubscriptionFilterLists.remove(position);
-            mAdapter.notifyItemRemoved(position + 1);
-            mAdapter.notifyItemRangeChanged(position + 1, mAdapter.getItemCount());
+            mAdapter.setSubscriptionFilterLists(mSubscriptionFilterLists);
             checkForEmptySubscriptionFilters(false);
         }
     }
@@ -240,9 +255,11 @@ public class ContentFilteringFragment extends BravePreferenceFragment
             isEditSelected(false);
             return true;
         } else if (item.getItemId() == R.id.update_filter_list_id) {
-            if (mFilterListAndroidHandler != null) {
+            ContentFilteringAdapter adapter = mAdapter;
+            if (mFilterListAndroidHandler != null && adapter != null) {
                 mFilterListAndroidHandler.updateFilterLists(
                         isSuccess -> {
+                            if (mAdapter != adapter) return;
                             if (isSuccess) {
                                 setData();
                             }
@@ -263,6 +280,28 @@ public class ContentFilteringFragment extends BravePreferenceFragment
         mEditItem.setVisible(!isEditable);
         mUpdateFilterListItem.setVisible(!isEditable);
         mAdapter.setEditable(isEditable);
+    }
+
+    @Override
+    public void onDestroyView() {
+        // Retire callbacks before closing the proxy or detaching the old view.
+        mAdapter = null;
+        if (mFilterListAndroidHandler != null) {
+            mFilterListAndroidHandler.close();
+            mFilterListAndroidHandler = null;
+        }
+        if (mRecyclerView != null) {
+            mRecyclerView.setAdapter(null);
+            mRecyclerView = null;
+        }
+        mEditItem = null;
+        mDoneItem = null;
+        mUpdateFilterListItem = null;
+        mIsMenuLoaded = false;
+        mIsGetSubscriptionsLoaded = false;
+        mSubscriptionFilterLists = new ArrayList<>();
+        mFilterLists = null;
+        super.onDestroyView();
     }
 
     @Override

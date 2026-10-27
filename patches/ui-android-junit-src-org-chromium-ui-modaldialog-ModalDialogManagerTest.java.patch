@@ -1,0 +1,114 @@
+diff --git a/ui/android/junit/src/org/chromium/ui/modaldialog/ModalDialogManagerTest.java b/ui/android/junit/src/org/chromium/ui/modaldialog/ModalDialogManagerTest.java
+--- a/ui/android/junit/src/org/chromium/ui/modaldialog/ModalDialogManagerTest.java
++++ b/ui/android/junit/src/org/chromium/ui/modaldialog/ModalDialogManagerTest.java
+@@ -31,6 +31,7 @@
+ import org.mockito.Spy;
+ import org.mockito.junit.MockitoJUnit;
+ import org.mockito.junit.MockitoRule;
++import org.robolectric.util.ReflectionHelpers;
+ 
+ import org.chromium.base.Callback;
+ import org.chromium.base.test.BaseRobolectricTestRunner;
+@@ -459,6 +460,102 @@
+         // TAB based dialog.
+         assertNull(mModalDialogManager.getPendingDialogsForTest(ModalDialogType.APP));
+         assertEquals(3, mModalDialogManager.getPendingDialogsForTest(ModalDialogType.TAB).size());
++    }
++
++    /** A dismissal observer can run after the presenter has already cleared its model. */
++    @Test
++    @Feature({"ModalDialogManagerObserver"})
++    public void testSuspendCurrentDialog_NullModelDuringDismissalIsNotQueued() {
++        PropertyModel model = mDialogModels.get(0);
++        int[] dismissalCallbacks = {0};
++        mModalDialogManager.addObserver(
++                new ModalDialogManagerObserver() {
++                    @Override
++                    public void onDialogDismissed(PropertyModel dismissedModel) {
++                        assertEquals(model, dismissedModel);
++                        dismissalCallbacks[0]++;
++                        // Exercise the genuine teardown window, without introducing a second
++                        // dialog into the still-running outer dismissDialog call.
++                        assertTrue(mModalDialogManager.isShowing());
++                        assertNull(mModalDialogManager.getCurrentDialogForTest());
++                        ReflectionHelpers.callInstanceMethod(
++                                mModalDialogManager, "suspendCurrentDialog");
++                        assertFalse(mModalDialogManager.isShowing());
++                        assertNull(
++                                mModalDialogManager.getPendingDialogsForTest(ModalDialogType.APP));
++                        assertNull(
++                                mModalDialogManager.getPendingDialogsForTest(ModalDialogType.TAB));
++                        verify(mObserver, times(0)).onDialogQueued(any(), anyInt());
++                    }
++                });
++
++        mModalDialogManager.showDialog(model, ModalDialogType.APP);
++        mModalDialogManager.dismissDialog(model, DialogDismissalCause.UNKNOWN);
++
++        assertEquals(1, dismissalCallbacks[0]);
++        assertFalse(mModalDialogManager.isShowing());
++        assertNull(mModalDialogManager.getCurrentPresenterForTest());
++        assertNull(mModalDialogManager.getCurrentDialogForTest());
++        assertNull(mModalDialogManager.getPendingDialogsForTest(ModalDialogType.APP));
++        assertNull(mModalDialogManager.getPendingDialogsForTest(ModalDialogType.TAB));
++        verify(mObserver, times(0)).onDialogQueued(any(), anyInt());
++        verify(mObserver, times(1)).onDialogDismissed(model);
++        verify(mObserver, times(1)).onLastDialogDismissed();
++        verify(mAppModalPresenter, times(1)).removeDialogView(model);
++        verify(mAppModalPresenter, times(0)).removeDialogView(null);
++        assertOnDismissCalled(model, 1);
++    }
++
++    /** Reentrant observers cannot change the type reported for an already queued dialog. */
++    @Test
++    @Feature({"ModalDialogManagerObserver"})
++    public void testSuspendCurrentDialog_ReentrantObserverPreservesQueuedType() {
++        PropertyModel appModel = mDialogModels.get(0);
++        PropertyModel tabModel = mDialogModels.get(1);
++        int[] queuedCallbacks = {0};
++        mModalDialogManager.addObserver(
++                new ModalDialogManagerObserver() {
++                    @Override
++                    public void onDialogQueued(PropertyModel queuedModel, int dialogType) {
++                        assertEquals(appModel, queuedModel);
++                        assertEquals(ModalDialogType.APP, dialogType);
++                        queuedCallbacks[0]++;
++                        assertTrue(mModalDialogManager.isSuspended(ModalDialogType.APP));
++
++                        // Change the manager's current type, then finish the nested dialog so
++                        // suspendType can safely continue with no active presenter.
++                        mModalDialogManager.showDialog(tabModel, ModalDialogType.TAB);
++                        assertEquals(tabModel, mModalDialogManager.getCurrentDialogForTest());
++                        mModalDialogManager.dismissDialog(tabModel, DialogDismissalCause.UNKNOWN);
++                        assertEquals(ModalDialogType.TAB, mModalDialogManager.getCurrentType());
++                        assertFalse(mModalDialogManager.isShowing());
++                    }
++                });
++        ModalDialogManagerObserver laterObserver = Mockito.mock(ModalDialogManagerObserver.class);
++        mModalDialogManager.addObserver(laterObserver);
++
++        mModalDialogManager.showDialog(appModel, ModalDialogType.APP);
++        int token = mModalDialogManager.suspendType(ModalDialogType.APP);
++
++        assertEquals(1, queuedCallbacks[0]);
++        verify(laterObserver, times(1)).onDialogQueued(appModel, ModalDialogType.APP);
++        verify(laterObserver, times(1)).onDialogQueued(any(), anyInt());
++        assertFalse(mModalDialogManager.isShowing());
++        assertEquals(ModalDialogType.TAB, mModalDialogManager.getCurrentType());
++        assertEquals(1, mModalDialogManager.getPendingDialogsForTest(ModalDialogType.APP).size());
++        assertEquals(
++                appModel, mModalDialogManager.getPendingDialogsForTest(ModalDialogType.APP).get(0));
++        assertNull(mModalDialogManager.getPendingDialogsForTest(ModalDialogType.TAB));
++        assertOnDismissCalled(tabModel, 1);
++        assertOnDismissCalled(appModel, 0);
++
++        mModalDialogManager.resumeType(ModalDialogType.APP, token);
++
++        assertEquals(appModel, mModalDialogManager.getCurrentDialogForTest());
++        assertEquals(ModalDialogType.APP, mModalDialogManager.getCurrentType());
++        assertNull(mModalDialogManager.getPendingDialogsForTest(ModalDialogType.APP));
++        assertEquals(1, queuedCallbacks[0]);
++        verify(laterObserver, times(1)).onDialogQueued(any(), anyInt());
+     }
+ 
+     /** Tests resuming dialogs of a certain type. */

@@ -1,0 +1,158 @@
+diff --git a/extensions/browser/api/power/power_api_unittest.cc b/extensions/browser/api/power/power_api_unittest.cc
+--- a/extensions/browser/api/power/power_api_unittest.cc
++++ b/extensions/browser/api/power/power_api_unittest.cc
+@@ -10,6 +10,8 @@
+ #include "base/containers/circular_deque.h"
+ #include "base/functional/bind.h"
+ #include "base/memory/raw_ptr.h"
++#include "base/memory/raw_ref.h"
++#include "extensions/browser/api/extensions_api_client.h"
+ #include "base/memory/scoped_refptr.h"
+ #include "extensions/browser/api_test_utils.h"
+ #include "extensions/browser/api_unittest.h"
+@@ -293,4 +295,145 @@
+   EXPECT_EQ(NONE, manager_->PopFirstRequest());
+ }
+ 
++#if BUILDFLAG(IS_ANDROID)
++namespace {
++
++struct AndroidPowerState {
++  bool system = false;
++  bool display = false;
++  bool reject = false;
++  bool last_transactional = false;
++  bool last_require_foreground = false;
++  int created = 0;
++  int cancelled = 0;
++  int destroyed = 0;
++};
++
++class FakeAndroidPowerDelegate : public AndroidPowerDelegate {
++ public:
++  explicit FakeAndroidPowerDelegate(AndroidPowerState& state) : state_(state) {
++    ++state_->created;
++  }
++  ~FakeAndroidPowerDelegate() override { ++state_->destroyed; }
++
++  std::optional<std::string> Apply(bool system,
++                                   bool display,
++                                   bool require_foreground_display,
++                                   bool transactional) override {
++    state_->last_transactional = transactional;
++    state_->last_require_foreground = require_foreground_display;
++    if (!transactional) {
++      state_->system &= system;
++      state_->display &= display;
++    }
++    if (state_->reject) {
++      return "Android rejected the requested power lease.";
++    }
++    state_->system = system;
++    state_->display = display;
++    return std::nullopt;
++  }
++
++  void Cancel() override {
++    ++state_->cancelled;
++    state_->system = false;
++    state_->display = false;
++  }
++
++ private:
++  const raw_ref<AndroidPowerState> state_;
++};
++
++class PowerTestAPIClient : public ExtensionsAPIClient {
++ public:
++  explicit PowerTestAPIClient(AndroidPowerState& state) : state_(state) {}
++
++  std::unique_ptr<AndroidPowerDelegate> CreateAndroidPowerDelegate(
++      content::BrowserContext* context) const override {
++    return std::make_unique<FakeAndroidPowerDelegate>(*state_);
++  }
++
++ private:
++  const raw_ref<AndroidPowerState> state_;
++};
++
++}  // namespace
++
++class AndroidPowerAPITest : public ApiUnitTest {
++ public:
++  void SetUp() override {
++    ApiUnitTest::SetUp();
++    ASSERT_EQ(nullptr, ExtensionsAPIClient::Get());
++    client_ = std::make_unique<PowerTestAPIClient>(state_);
++  }
++
++  void TearDown() override {
++    ApiUnitTest::TearDown();
++    // Keyed-service shutdown cancels leases and destroys the lifecycle owner
++    // before its browser context and this fake embedder disappear.
++    EXPECT_FALSE(state_.system);
++    EXPECT_FALSE(state_.display);
++    EXPECT_EQ(state_.created, state_.destroyed);
++    client_.reset();
++  }
++
++ protected:
++  AndroidPowerState state_;
++  std::unique_ptr<PowerTestAPIClient> client_;
++};
++
++TEST_F(AndroidPowerAPITest, SeparateAggregatesAndTransactionalReplacement) {
++  auto* service = PowerAPI::Get(browser_context());
++  EXPECT_EQ(service, PowerAPI::Get(incognito_context()));
++  auto other = ExtensionBuilder("other").Build();
++  EXPECT_FALSE(service->AddRequest(extension()->id(), api::power::Level::kSystem));
++  EXPECT_FALSE(service->AddRequest(other->id(), api::power::Level::kDisplay));
++  EXPECT_TRUE(state_.system);
++  EXPECT_TRUE(state_.display);
++  EXPECT_TRUE(state_.last_transactional);
++  EXPECT_TRUE(state_.last_require_foreground);
++
++  state_.reject = true;
++  EXPECT_TRUE(service->AddRequest(extension()->id(), api::power::Level::kDisplay));
++  EXPECT_EQ(api::power::Level::kSystem,
++            service->extension_levels().at(extension()->id()));
++  EXPECT_TRUE(state_.system);
++  EXPECT_TRUE(state_.display);
++
++  state_.reject = false;
++  service->RemoveRequest(other->id());
++  EXPECT_TRUE(state_.system);
++  EXPECT_FALSE(state_.display);
++  EXPECT_FALSE(state_.last_transactional);
++  EXPECT_FALSE(state_.last_require_foreground);
++}
++
++TEST_F(AndroidPowerAPITest, UnloadRevokesEvenWhenRemainingAcquisitionFails) {
++  auto* service = PowerAPI::Get(browser_context());
++  auto other = ExtensionBuilder("other").Build();
++  EXPECT_FALSE(service->AddRequest(extension()->id(), api::power::Level::kSystem));
++  EXPECT_FALSE(service->AddRequest(other->id(), api::power::Level::kDisplay));
++  state_.reject = true;
++  service->OnExtensionUnloaded(browser_context(), extension(),
++                           UnloadedExtensionReason::UNINSTALL);
++  EXPECT_FALSE(service->extension_levels().contains(extension()->id()));
++  EXPECT_FALSE(state_.system);
++  EXPECT_TRUE(state_.display);
++  EXPECT_FALSE(state_.last_transactional);
++  service->RemoveRequest(other->id());
++  EXPECT_FALSE(state_.display);
++  EXPECT_GT(state_.cancelled, 0);
++}
++
++TEST_F(AndroidPowerAPITest, ApiReturnsBackendErrorWithoutPersistingRequest) {
++  state_.reject = true;
++  EXPECT_EQ(
++      "Android rejected the requested power lease.",
++      RunFunctionAndReturnError(
++          base::MakeRefCounted<PowerRequestKeepAwakeFunction>(), kDisplayArgs));
++  EXPECT_TRUE(PowerAPI::Get(browser_context())->extension_levels().empty());
++  EXPECT_FALSE(state_.system);
++  EXPECT_FALSE(state_.display);
++}
++#endif  // BUILDFLAG(IS_ANDROID)
+ }  // namespace extensions

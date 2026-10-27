@@ -76,16 +76,24 @@ public class CameraSourcePreview extends ViewGroup {
     }
 
     public void stop() {
+        mStartRequested = false;
         if (mCameraSource != null) {
             mCameraSource.stop();
         }
     }
 
     public void release() {
-        if (mCameraSource != null) {
-            mCameraSource.release();
-            mCameraSource = null;
+        CameraSource source = mCameraSource;
+        clearCameraSource();
+        if (source != null) {
+            source.release();
         }
+    }
+
+    /** Retires a source owned and released by the camera manager. */
+    void clearCameraSource() {
+        mStartRequested = false;
+        mCameraSource = null;
     }
 
     /** Sets a listener to be notified of window focus changes. */

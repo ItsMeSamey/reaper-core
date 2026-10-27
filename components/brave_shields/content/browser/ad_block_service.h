@@ -6,6 +6,8 @@
 #ifndef BRAVE_COMPONENTS_BRAVE_SHIELDS_CONTENT_BROWSER_AD_BLOCK_SERVICE_H_
 #define BRAVE_COMPONENTS_BRAVE_SHIELDS_CONTENT_BROWSER_AD_BLOCK_SERVICE_H_
 
+#include "build/build_config.h"
+
 #include <stdint.h>
 
 #include <memory>
@@ -31,7 +33,9 @@
 #include "brave/components/brave_shields/core/browser/ad_block_dat_cache_manager.h"
 #include "brave/components/brave_shields/core/browser/ad_block_filters_provider.h"
 #include "brave/components/brave_shields/core/browser/ad_block_filters_provider_manager.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_shields/core/browser/ad_block_list_p3a.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_shields/core/browser/ad_block_resource_provider.h"
 #include "brave/components/brave_shields/core/common/adblock/rs/src/lib.rs.h"
 #include "components/prefs/pref_registry_simple.h"
@@ -244,7 +248,9 @@ class AdBlockService {
 
   scoped_refptr<base::SequencedTaskRunner> task_runner_;
 
+#if !BUILDFLAG(IS_ANDROID)
   AdBlockListP3A list_p3a_;
+#endif  // !BUILDFLAG(IS_ANDROID)
 
   // The AdBlockEngineWrapper should be deleted last to ensure that any code
   // that posts to the task runner will run before the deletion.

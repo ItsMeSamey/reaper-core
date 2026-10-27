@@ -62,6 +62,7 @@ public class QRCodeCameraManager
     private @Nullable CameraSourcePreview mCameraSourcePreview;
     private @Nullable DisplayManager mDisplayManager;
     private int mLastRotation = INITIAL_ROTATION;
+    private volatile boolean mReleased;
     private final Callback mCallback;
     private final HostProvider mHostProvider;
 
@@ -75,7 +76,7 @@ public class QRCodeCameraManager
 
                 @Override
                 public void onDisplayChanged(int displayId) {
-                    if (!mHostProvider.isHostValid()) {
+                    if (mReleased || !mHostProvider.isHostValid()) {
                         return;
                     }
                     Activity activity = mHostProvider.getHostActivity();
@@ -112,6 +113,9 @@ public class QRCodeCameraManager
      * @param cameraSourcePreview The preview view for camera output.
      */
     public void init(CameraSourcePreview cameraSourcePreview) {
+        if (mReleased) {
+            return;
+        }
         mCameraSourcePreview = cameraSourcePreview;
         mCameraSourcePreview.setWindowFocusListener(this);
 
@@ -141,6 +145,10 @@ public class QRCodeCameraManager
      */
     @SuppressLint("InlinedApi")
     public void createCameraSource(boolean autoFocus, boolean useFlash) {
+        if (mReleased) {
+            return;
+        }
+        releaseCameraSource();
         Activity activity = mHostProvider.getHostActivity();
         if (activity == null) {
             return;
@@ -224,8 +232,7 @@ public class QRCodeCameraManager
             // which satisfies the request. This runs on the window focus and rotation paths too,
             // where an escaping exception brings the browser down.
             Log.e(TAG, "Unable to start camera source.", e);
-            mCameraSource.release();
-            mCameraSource = null;
+            releaseCameraSource();
             mCameraSourcePreview.mCameraExist = false;
             return false;
         }
@@ -253,15 +260,32 @@ public class QRCodeCameraManager
         }
     }
 
-    /** Releases all camera resources. Should be called in onDestroy. */
+    /** Releases all camera resources when the host view is destroyed. */
     public void release() {
+        if (mReleased) {
+            return;
+        }
+        mReleased = true;
         if (mDisplayManager != null) {
             mDisplayManager.unregisterDisplayListener(mDisplayListener);
+            mDisplayManager = null;
         }
         if (mCameraSourcePreview != null) {
-            mCameraSourcePreview.release();
+            mCameraSourcePreview.setWindowFocusListener(null);
         }
+        releaseCameraSource();
+        mCameraSourcePreview = null;
+    }
+
+    private void releaseCameraSource() {
+        if (mCameraSourcePreview != null) {
+            mCameraSourcePreview.clearCameraSource();
+        }
+        CameraSource source = mCameraSource;
         mCameraSource = null;
+        if (source != null) {
+            source.release();
+        }
     }
 
     /**
@@ -306,9 +330,7 @@ public class QRCodeCameraManager
             return;
         }
 
-        mCameraSourcePreview.stop();
-        mCameraSource.release();
-        mCameraSource = null;
+        releaseCameraSource();
 
         createCameraSource(true, false);
         try {
@@ -320,7 +342,7 @@ public class QRCodeCameraManager
 
     @Override
     public void onDetectedQrCode(Barcode barcode) {
-        if (mCallback != null) {
+        if (!mReleased) {
             mCallback.onDetectedQrCode(barcode);
         }
     }

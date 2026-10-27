@@ -16,8 +16,6 @@ import androidx.annotation.Nullable;
 import org.chromium.chrome.R;
 import org.chromium.chrome.browser.profiles.Profile;
 
-import java.util.Map;
-
 public class BraveHelpAndFeedbackLauncherImpl implements HelpAndFeedbackLauncher {
     private static final String FALLBACK_SUPPORT_URL = "https://community.brave.app/";
     private static final String SAFE_BROWSING_URL =
@@ -54,12 +52,6 @@ public class BraveHelpAndFeedbackLauncherImpl implements HelpAndFeedbackLauncher
     public void showFeedback(
             final Activity activity, @Nullable String url, @Nullable final String categoryTag) {
         launchFallbackSupportUri(activity);
-    }
-
-    @Override
-    public void showFeedback(final Activity activity, @Nullable String url,
-            @Nullable final String categoryTag, @Nullable final Map<String, String> feedContext) {
-        showFeedback(activity, url, categoryTag);
     }
 
     private static void launchFallbackSupportUri(Context context) {

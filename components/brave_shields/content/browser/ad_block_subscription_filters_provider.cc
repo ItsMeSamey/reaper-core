@@ -8,6 +8,8 @@
 #include <string>
 #include <utility>
 
+#include "build/build_config.h"
+
 #include "base/logging.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/task/single_thread_task_runner.h"
@@ -24,10 +26,14 @@ namespace {
 void AddDATBufferToFilterSet(
     base::OnceCallback<void(const adblock::FilterListMetadata&)> on_metadata,
     DATFileDataBuffer buffer,
+#if !BUILDFLAG(IS_ANDROID)
     const perfetto::Flow& flow,
+#endif
     rust::Box<adblock::FilterSet>* filter_set) {
+#if !BUILDFLAG(IS_ANDROID)
   TRACE_EVENT("brave.adblock",
               "AddDATBufferToFilterSet_SubscriptionFiltersProvider", flow);
+#endif
   auto result = (*filter_set)->add_filter_list(buffer);
   if (result.result_kind == adblock::ResultKind::Success) {
     std::move(on_metadata).Run(result.value.metadata);
@@ -54,14 +60,20 @@ AdBlockSubscriptionFiltersProvider::~AdBlockSubscriptionFiltersProvider() =
 void AdBlockSubscriptionFiltersProvider::LoadFilterSet(
     base::OnceCallback<
         void(base::OnceCallback<void(rust::Box<adblock::FilterSet>*)>)> cb) {
+#if !BUILDFLAG(IS_ANDROID)
   const auto flow = perfetto::Flow::FromPointer(this);
   TRACE_EVENT("brave.adblock",
               "AdBlockSubscriptionFiltersProvider::LoadFilterSet", flow);
+#endif
   base::ThreadPool::PostTaskAndReplyWithResult(
       FROM_HERE, {base::MayBlock()},
       base::BindOnce(&brave_component_updater::ReadDATFileData, list_file_),
       base::BindOnce(&AdBlockSubscriptionFiltersProvider::OnDATFileDataReady,
+#if BUILDFLAG(IS_ANDROID)
+                     weak_factory_.GetWeakPtr(), std::move(cb)));
+#else
                      weak_factory_.GetWeakPtr(), std::move(cb), flow));
+#endif
 }
 
 std::string AdBlockSubscriptionFiltersProvider::GetNameForDebugging() {
@@ -71,10 +83,14 @@ std::string AdBlockSubscriptionFiltersProvider::GetNameForDebugging() {
 void AdBlockSubscriptionFiltersProvider::OnDATFileDataReady(
     base::OnceCallback<
         void(base::OnceCallback<void(rust::Box<adblock::FilterSet>*)>)> cb,
+#if !BUILDFLAG(IS_ANDROID)
     const perfetto::Flow& flow,
+#endif
     const DATFileDataBuffer& dat_buf) {
+#if !BUILDFLAG(IS_ANDROID)
   TRACE_EVENT("brave.adblock",
               "AdBlockSubscriptionFiltersProvider::OnDATFileDataReady", flow);
+#endif
   std::move(cb).Run(base::BindOnce(
       &AddDATBufferToFilterSet,
       base::BindOnce(
@@ -87,7 +103,11 @@ void AdBlockSubscriptionFiltersProvider::OnDATFileDataReady(
           },
           base::SingleThreadTaskRunner::GetCurrentDefault(),
           on_metadata_retrieved_),
+#if BUILDFLAG(IS_ANDROID)
+      dat_buf));
+#else
       dat_buf, flow));
+#endif
 }
 
 void AdBlockSubscriptionFiltersProvider::OnListAvailable() {

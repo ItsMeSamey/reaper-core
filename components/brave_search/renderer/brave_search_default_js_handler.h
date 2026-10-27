@@ -11,6 +11,7 @@
 
 #include "base/memory/raw_ptr.h"
 #include "brave/components/brave_search/common/brave_search_default.mojom.h"
+#include "build/build_config.h"
 #include "content/public/renderer/render_frame.h"
 #include "content/public/renderer/render_frame_observer.h"
 #include "mojo/public/cpp/bindings/remote.h"
@@ -53,7 +54,9 @@ class BraveSearchDefaultJSHandler {
       const bool response);
 
   raw_ptr<content::RenderFrame> render_frame_ = nullptr;
+#if !BUILDFLAG(IS_ANDROID)
   const bool can_always_set_default_ = false;
+#endif  // !BUILDFLAG(IS_ANDROID)
   mojo::Remote<brave_search::mojom::BraveSearchDefault> brave_search_default_;
 };
 

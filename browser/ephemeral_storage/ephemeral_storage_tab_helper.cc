@@ -33,57 +33,6 @@ using content::WebContents;
 namespace ephemeral_storage {
 
 
-#if BUILDFLAG(IS_ANDROID)
-namespace {
-
-// Returns the TabModel that was used, or nullptr if none found.
-TabModel* AddTabModelObserver(WebContents* web_contents,
-                              EphemeralStorageTabHelper* tab_helper) {
-  if (!web_contents) {
-    return nullptr;
-  }
-
-  auto* current_profile =
-      Profile::FromBrowserContext(web_contents->GetBrowserContext());
-  if (!current_profile) {
-    return nullptr;
-  }
-
-  for (TabModel* tab_model : TabModelList::models()) {
-    if (tab_model->GetProfile() != current_profile) {
-      continue;
-    }
-    const size_t tab_count = tab_model->GetTabCount();
-    for (size_t index = 0; index < tab_count; index++) {
-      auto* tab = tab_model->GetTabAt(index);
-      if (!tab) {
-        continue;
-      }
-      tab_model->AddObserver(tab_helper);
-      return tab_model;
-    }
-  }
-
-  return nullptr;
-}
-
-void RemoveTabModelObserver(TabModel* tab_model,
-                            EphemeralStorageTabHelper* tab_helper) {
-  if (!tab_model) {
-    return;
-  }
-  // Verify TabModel is still valid (not destroyed) before using it.
-  // This protects against dangling pointers during browser shutdown.
-  for (TabModel* model : TabModelList::models()) {
-    if (model == tab_model) {
-      tab_model->RemoveObserver(tab_helper);
-      return;
-    }
-  }
-}
-
-}  // namespace
-#endif
 
 // EphemeralStorageTabHelper helps to manage the lifetime of ephemeral storage.
 // For more information about the design of ephemeral storage please see the
@@ -97,7 +46,11 @@ EphemeralStorageTabHelper::EphemeralStorageTabHelper(WebContents* web_contents)
       cookie_settings_(CookieSettingsFactory::GetForProfile(
           Profile::FromBrowserContext(web_contents->GetBrowserContext()))) {
 #if BUILDFLAG(IS_ANDROID)
-  registered_tab_model_ = AddTabModelObserver(web_contents, this);
+  TabModelList::AddObserver(this);
+  observing_tab_model_list_ = true;
+  for (TabModel* tab_model : TabModelList::models()) {
+    OnTabModelAdded(tab_model);
+  }
 #endif
   // The URL might not be empty if this is a restored WebContents, for instance.
   // In that case we want to make sure it has valid ephemeral storage.
@@ -110,9 +63,7 @@ EphemeralStorageTabHelper::EphemeralStorageTabHelper(WebContents* web_contents)
 
 EphemeralStorageTabHelper::~EphemeralStorageTabHelper() {
 #if BUILDFLAG(IS_ANDROID)
-  // Always remove observer in destructor using the stored TabModel pointer.
-  // We can't rely on web_contents() here as it may already be destroyed.
-  RemoveTabModelObserver(registered_tab_model_, this);
+  StopObservingTabModels();
 #endif
 }
 
@@ -243,6 +194,39 @@ void EphemeralStorageTabHelper::UpdateShieldsState(const GURL& url) {
 }
 
 #if BUILDFLAG(IS_ANDROID)
+void EphemeralStorageTabHelper::OnTabModelAdded(TabModel* tab_model) {
+  // Helpers may be attached before model insertion, and tabs may move between
+  // windows. Observe every model for this exact profile and filter close events
+  // by WebContents identity in WillCloseTab().
+  auto* contents = web_contents();
+  if (!contents) {
+    return;
+  }
+  if (tab_model->GetProfile() ==
+          Profile::FromBrowserContext(contents->GetBrowserContext()) &&
+      !tab_model_observations_.IsObservingSource(tab_model)) {
+    tab_model_observations_.AddObservation(tab_model);
+  }
+}
+
+void EphemeralStorageTabHelper::OnTabModelRemoved(TabModel* tab_model) {
+  if (tab_model_observations_.IsObservingSource(tab_model)) {
+    tab_model_observations_.RemoveObservation(tab_model);
+  }
+}
+
+void EphemeralStorageTabHelper::OnTabModelDestroyed(TabModel& tab_model) {
+  OnTabModelRemoved(&tab_model);
+}
+
+void EphemeralStorageTabHelper::StopObservingTabModels() {
+  if (observing_tab_model_list_) {
+    TabModelList::RemoveObserver(this);
+    observing_tab_model_list_ = false;
+  }
+  tab_model_observations_.RemoveAllObservations();
+}
+
 void EphemeralStorageTabHelper::WillCloseTab(TabAndroid* tab) {
   if (!tab || tab->web_contents() != web_contents()) {
     return;
@@ -252,8 +236,7 @@ void EphemeralStorageTabHelper::WillCloseTab(TabAndroid* tab) {
   provisional_tld_ephemeral_lifetimes_.clear();
   tld_ephemeral_lifetime_.reset();
   weak_factory_.InvalidateWeakPtrs();
-  RemoveTabModelObserver(registered_tab_model_, this);
-  registered_tab_model_ = nullptr;
+  StopObservingTabModels();
 }
 #endif
 

@@ -1,0 +1,185 @@
+diff --git a/chrome/browser/metrics/chrome_metrics_services_manager_client_unittest.cc b/chrome/browser/metrics/chrome_metrics_services_manager_client_unittest.cc
+--- a/chrome/browser/metrics/chrome_metrics_services_manager_client_unittest.cc
++++ b/chrome/browser/metrics/chrome_metrics_services_manager_client_unittest.cc
+@@ -3,6 +3,17 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/metrics/chrome_metrics_services_manager_client.h"
++
++#include <memory>
++#include "base/scoped_observation.h"
++#include "base/test/scoped_command_line.h"
++#include "base/time/time.h"
++#include "components/metrics/metrics_service_accessor.h"
++#include "components/metrics_services_manager/metrics_services_manager.h"
++#include "components/variations/pref_names.h"
++#include "components/variations/service/variations_service.h"
++#include "components/variations/synthetic_trial_registry.h"
++#include "content/public/test/browser_task_environment.h"
+ 
+ #include "base/base_switches.h"
+ #include "base/command_line.h"
+@@ -59,18 +70,29 @@
+   // Set the pref to true.
+   local_state()->SetBoolean(metrics::prefs::kMetricsReportingEnabled, true);
+ 
++#if BUILDFLAG(IS_ANDROID)
++  // Obsolete consent prefs cannot activate an omitted reporter.
++  EXPECT_FALSE(provider.IsConsentGiven());
++  EXPECT_FALSE(provider.IsReportingEnabled());
++#else
+   // Both consent and reporting should be true.
+   EXPECT_TRUE(provider.IsConsentGiven());
+   EXPECT_TRUE(provider.IsReportingEnabled());
++#endif
+ 
+   // Set --force-fieldtrials= command-line flag, which should disable reporting
+   // but not consent.
+   base::CommandLine::ForCurrentProcess()->AppendSwitchASCII(
+       switches::kForceFieldTrials, "Foo/Bar");
+ 
++#if BUILDFLAG(IS_ANDROID)
++  EXPECT_FALSE(provider.IsConsentGiven());
++  EXPECT_FALSE(provider.IsReportingEnabled());
++#else
+   // Consent should be true but reporting should be false.
+   EXPECT_TRUE(provider.IsConsentGiven());
+   EXPECT_FALSE(provider.IsReportingEnabled());
++#endif
+ }
+ 
+ TEST_F(ChromeMetricsServicesManagerClientTest, PopulateStartupVisibility) {
+@@ -180,3 +202,133 @@
+ #endif  // BUILDFLAG(IS_ANDROID)
+ }
+ #endif  // BUILDFLAG(IS_WIN) || BUILDFLAG(IS_ANDROID)
++
++#if BUILDFLAG(IS_ANDROID)
++namespace {
++class LocalTrialAccessor : public metrics::MetricsServiceAccessor {
++ public:
++  using MetricsServiceAccessor::RegisterSyntheticFieldTrialForRegistry;
++};
++
++class LocalTrialObserver : public variations::SyntheticTrialObserver {
++ public:
++  void OnSyntheticTrialsChanged(
++      const std::vector<variations::SyntheticTrialGroup>& updated,
++      const std::vector<variations::SyntheticTrialGroup>& removed,
++      const std::vector<variations::SyntheticTrialGroup>& groups) override {
++    ++notifications;
++    for (const auto& group : groups) {
++      if (group.trial_name() == "ReaperLocalStartupContract") {
++        observed_group = group.group_name();
++      }
++    }
++  }
++  int notifications = 0;
++  std::string observed_group;
++};
++}  // namespace
++
++TEST_F(ChromeMetricsServicesManagerClientTest,
++       AndroidRemoteServicesStayAbsentDuringStartupCallbacks) {
++  content::BrowserTaskEnvironment task_environment;
++  local_state()->SetBoolean(metrics::prefs::kMetricsReportingEnabled, true);
++  metrics_services_manager::MetricsServicesManager manager(
++      std::make_unique<ChromeMetricsServicesManagerClient>(local_state()));
++  manager.UpdateUploadPermissions(true);
++  manager.GetOnDidStartLoadingCb().Run();
++  manager.GetOnDidStopLoadingCb().Run();
++  manager.GetOnRendererUnresponsiveCb().Run();
++  EXPECT_EQ(nullptr, manager.GetMetricsService());
++  EXPECT_EQ(nullptr, manager.GetUkmService());
++  EXPECT_EQ(nullptr, manager.GetDwaService());
++  EXPECT_EQ(nullptr, manager.GetPumaService());
++  EXPECT_EQ(nullptr, manager.GetStructuredMetricsService());
++  for (auto type :
++       {metrics::MetricsLogUploader::UMA, metrics::MetricsLogUploader::UKM,
++        metrics::MetricsLogUploader::DWA,
++        metrics::MetricsLogUploader::PRIVATE_METRICS,
++        metrics::MetricsLogUploader::STRUCTURED_METRICS}) {
++    EXPECT_EQ(nullptr, manager.GetReportingService(type));
++  }
++  EXPECT_FALSE(manager.IsMetricsReportingEnabled());
++  EXPECT_FALSE(manager.IsMetricsConsentGiven());
++  EXPECT_FALSE(manager.IsUkmAllowedForAllProfiles());
++  EXPECT_FALSE(manager.IsDwaAllowedForAllProfiles());
++}
++
++TEST_F(ChromeMetricsServicesManagerClientTest,
++       AndroidLocalBeaconPreservesPriorShutdownForOomDecisions) {
++  content::BrowserTaskEnvironment task_environment;
++  metrics_services_manager::MetricsServicesManager manager(
++      std::make_unique<ChromeMetricsServicesManagerClient>(local_state()));
++  const bool previous_shutdown_clean = manager.WasLastShutdownClean();
++  manager.LogHasSessionShutdownCleanly(false);
++  EXPECT_FALSE(
++      local_state()->GetBoolean(metrics::prefs::kStabilityExitedCleanly));
++  EXPECT_EQ(previous_shutdown_clean, manager.WasLastShutdownClean());
++  manager.LogHasSessionShutdownCleanly(true);
++  EXPECT_TRUE(
++      local_state()->GetBoolean(metrics::prefs::kStabilityExitedCleanly));
++  EXPECT_EQ(previous_shutdown_clean, manager.WasLastShutdownClean());
++  EXPECT_EQ(nullptr, manager.GetMetricsService());
++}
++
++TEST_F(ChromeMetricsServicesManagerClientTest,
++       AndroidSyntheticRegistryPublishesLocalTrials) {
++  content::BrowserTaskEnvironment task_environment;
++  metrics_services_manager::MetricsServicesManager manager(
++      std::make_unique<ChromeMetricsServicesManagerClient>(local_state()));
++  auto* registry = manager.GetSyntheticTrialRegistry();
++  ASSERT_NE(nullptr, registry);
++  LocalTrialObserver observer;
++  base::ScopedObservation<variations::SyntheticTrialRegistry,
++                          variations::SyntheticTrialObserver>
++      observation(&observer);
++  observation.Observe(registry);
++  EXPECT_TRUE(LocalTrialAccessor::RegisterSyntheticFieldTrialForRegistry(
++      registry, "ReaperLocalStartupContract", "LocalOnly",
++      variations::SyntheticTrialAnnotationMode::kCurrentLog));
++  EXPECT_EQ(1, observer.notifications);
++  EXPECT_EQ("LocalOnly", observer.observed_group);
++  EXPECT_FALSE(registry->GetCurrentSyntheticFieldTrialsForTest().empty());
++  EXPECT_EQ(nullptr, manager.GetMetricsService());
++}
++
++TEST_F(ChromeMetricsServicesManagerClientTest,
++       AndroidSeedFetchStaysAbsentWithOverridesAndCachedState) {
++  content::BrowserTaskEnvironment task_environment;
++  base::test::ScopedCommandLine command_line;
++  command_line.GetProcessCommandLine()->AppendSwitchASCII(
++      "variations-server-url", "https://example.invalid/seed");
++  command_line.GetProcessCommandLine()->AppendSwitchASCII(
++      "variations-seed-fetch-interval", "1");
++  metrics_services_manager::MetricsServicesManager manager(
++      std::make_unique<ChromeMetricsServicesManagerClient>(local_state()));
++  auto* service = manager.GetVariationsService();
++  ASSERT_NE(nullptr, service);
++  const std::string original_country =
++      local_state()->GetString(variations::prefs::kVariationsCountry);
++  const base::Time original_fetch_time =
++      local_state()->GetTime(variations::prefs::kVariationsLastFetchTime);
++  const base::Time cached_fetch_time = base::Time::Now() - base::Hours(1);
++  local_state()->SetString(variations::prefs::kVariationsCountry, "nz");
++  local_state()->SetTime(variations::prefs::kVariationsLastFetchTime,
++                         cached_fetch_time);
++  auto* cached_store = service->GetSeedStoreForTesting();
++  variations::VariationsService::EnableFetchForTesting();
++  service->PerformPreMainMessageLoopStartup();
++  service->OnAppEnterForeground();
++  service->StartRepeatedVariationsSeedFetchForTesting();
++  task_environment.RunUntilIdle();
++  EXPECT_EQ(0, service->request_count());
++  EXPECT_EQ(nullptr, service->GetResourceRequestAllowedNotifierForTesting());
++  EXPECT_TRUE(service->IsSeedFetchingPaused());
++  EXPECT_EQ(cached_store, service->GetSeedStoreForTesting());
++  EXPECT_EQ("nz", service->GetLatestCountry());
++  EXPECT_EQ(cached_fetch_time, service->GetLatestSeedFetchTime());
++  local_state()->SetString(variations::prefs::kVariationsCountry,
++                           original_country);
++  local_state()->SetTime(variations::prefs::kVariationsLastFetchTime,
++                         original_fetch_time);
++}
++#endif  // BUILDFLAG(IS_ANDROID)

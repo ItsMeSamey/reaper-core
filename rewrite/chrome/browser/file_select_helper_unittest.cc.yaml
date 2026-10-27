@@ -1,0 +1,143 @@
+# Android split pane request ownership and dialog placement.
+substitutions:
+- description: use real native Android model and document lifetime in picker regressions
+  regex:
+    re_pattern: \#include\ "ui/shell_dialogs/selected_file_info\.h"
+    replace: '#include "ui/shell_dialogs/selected_file_info.h"
+
+      #if BUILDFLAG(IS_ANDROID)
+
+      #include "base/test/scoped_feature_list.h"
+
+      #include "chrome/browser/android/tab_android.h"
+
+      #include "chrome/browser/ui/android/tab_model/tab_model_test_helper.h"
+
+      #include "chrome/browser/permissions/chrome_permissions_client.h"
+
+      #include "content/public/common/content_features.h"
+
+      #include "content/public/test/navigation_simulator.h"
+
+      #endif'
+- description: cover Android picker passive pane model document and external activity lifetime
+  regex:
+    re_pattern: TEST_F\(FileSelectHelperTest,\ IsAcceptTypeValid\)\ \{
+    replace: "#if BUILDFLAG(IS_ANDROID)\nnamespace {\nclass AndroidPickerListener : public content::FileSelectListener {\n public:\n  void FileSelected(std::vector<blink::mojom::FileChooserFileInfoPtr> files,\n                    const base::FilePath& base_dir,\n                    blink::mojom::FileChooserParams::Mode mode) override {\n    ++selected;\n    if (on_selected) {\n      std::move(on_selected).Run();\n    }\n  }\n  void FileSelectionCanceled() override { ++canceled; }\n\n  int selected = 0;\n  int canceled = 0;\n  base::OnceClosure on_selected;\n\n private:\n  ~AndroidPickerListener() override = default;\n};\n}  // namespace\n\nclass AndroidFileSelectHelperTest : public ChromeRenderViewHostTestHarness {\n public:\n  AndroidFileSelectHelperTest() {\n    // Exercise navigation that replaces a document while retaining its RFH.\n    feature_list_.InitAndDisableFeature(content::features::kRenderDocument);\n  }\n\n protected:\n  void SetUp() override {\n    ChromeRenderViewHostTestHarness::SetUp();\n    model_ = std::make_unique<OwningTestTabModel>(profile());\n    model_->SetIsActiveModel(true);\n    tab_ = model_->AddTabFromWebContents(CreateTestWebContents(), 0, true);\n    content::NavigationSimulator::NavigateAndCommitFromBrowser(\n        tab_->GetContents(), GURL(\"https://picker.test/first\"));\n    listener_ = base::MakeRefCounted<AndroidPickerListener>();\n    helper_ = new FileSelectHelper(profile());\n    helper_->web_contents_ = tab_->GetContents();\n    helper_->render_frame_host_ = tab_->GetContents()->GetPrimaryMainFrame();\n    helper_->requesting_document_ =\n        helper_->render_frame_host_->GetWeakDocumentPtr();\n    helper_->android_file_picker_request_ = true;\n    helper_->listener_ = listener_;\n    helper_->self_ptr_ = helper_;\n    helper_->InitLifecycleObserver(tab_->GetContents());\n  }\n\n  void TearDown() override {\n    helper_->RunFileChooserEnd();\n    // Destroy real observed contents while the helper is retained locally.\n    model_.reset();\n    tab_ = nullptr;\n    helper_.reset();\n    ChromeRenderViewHostTestHarness::TearDown();\n  }\n\n  void Hide(bool picker_started) {\n    helper_->android_file_picker_started_ = picker_started;\n    // The model's native callback precedes the Java visibility flag change.\n    tab_->SendWillBecomeHiddenUpdate(nullptr);\n    tab_->GetContents()->WasHidden();\n  }\n\n  void DeliverResult() { helper_->NotifyListenerAndEnd({}); }\n  bool OwnerValid() const { return helper_->IsAndroidPickerOwnerValid(); }\n  void CompletePreparation() {\n    helper_->GetSanitizedFilenameOnUIThread(FileChooserParams::New());\n  }\n  void RetainTemporaryFile(const base::FilePath& path) {\n    helper_->temporary_files_.push_back(path);\n  }\n\n  base::test::ScopedFeatureList feature_list_;\n  std::unique_ptr<OwningTestTabModel> model_;\n  raw_ptr<TabAndroid> tab_ = nullptr;\n  scoped_refptr<FileSelectHelper> helper_;\n  scoped_refptr<AndroidPickerListener> listener_;\n};\n\nTEST_F(AndroidFileSelectHelperTest, PermissionModelObserverUsesPreAndPostCommitState) {\n  auto* client = ChromePermissionsClient::GetInstance();\n  ASSERT_TRUE(client->IsAndroidTabModelActive(tab_));\n  std::vector<std::pair<bool, bool>> transitions;\n  auto observation = client->ObserveAndroidTabModel(\n      tab_, base::BindLambdaForTesting([&](bool active) {\n        transitions.emplace_back(active, model_->IsActiveModel());\n      }));\n  model_->SetIsActiveModel(false);\n  EXPECT_FALSE(client->IsAndroidTabModelActive(tab_));\n  model_->SetIsActiveModel(true);\n  EXPECT_THAT(transitions,\n              testing::ElementsAre(std::pair(false, true), std::pair(true, true)));\n  observation.RunAndReset();\n  model_->SetIsActiveModel(false);\n  EXPECT_EQ(2u, transitions.size());\n}\n\nTEST_F(AndroidFileSelectHelperTest, PassiveVisiblePaneCannotReceiveResult) {\n  ASSERT_TRUE(OwnerValid());\n  model_->AddTabFromWebContents(CreateTestWebContents(), 1, true);\n  tab_->GetContents()->WasShown();  // Both split panes remain visible.\n  DeliverResult();\n  EXPECT_EQ(1, listener_->canceled);\n  EXPECT_EQ(0, listener_->selected);\n}\n\nTEST_F(AndroidFileSelectHelperTest, InactiveModelCannotReceiveResult) {\n  ASSERT_TRUE(OwnerValid());\n  model_->SetIsActiveModel(false);\n  ASSERT_EQ(tab_.get(), model_->GetActiveTab());\n  DeliverResult();\n  EXPECT_EQ(1, listener_->canceled);\n  EXPECT_EQ(0, listener_->selected);\n}\n\nTEST_F(AndroidFileSelectHelperTest, ModelSwitchRoundTripDoesNotRevivePicker) {\n  ASSERT_TRUE(OwnerValid());\n  model_->SetIsActiveModel(false);\n  EXPECT_EQ(1, listener_->canceled);\n  model_->SetIsActiveModel(true);\n  DeliverResult();\n  EXPECT_EQ(1, listener_->canceled);\n  EXPECT_EQ(0, listener_->selected);\n}\n\nTEST_F(AndroidFileSelectHelperTest, HiddenPreparationCancelsBeforeAsyncReply) {\n  ASSERT_TRUE(OwnerValid());\n  Hide(false);\n  EXPECT_EQ(1, listener_->canceled);\n  CompletePreparation();\n  EXPECT_EQ(1, listener_->canceled);\n  EXPECT_EQ(0, listener_->selected);\n}\n\nTEST_F(AndroidFileSelectHelperTest, OsPickerHideAllowsOriginalOwnerResult) {\n  ASSERT_TRUE(OwnerValid());\n  Hide(true);\n  EXPECT_EQ(0, listener_->canceled);\n  ASSERT_TRUE(OwnerValid());\n  DeliverResult();\n  EXPECT_EQ(0, listener_->canceled);\n  EXPECT_EQ(1, listener_->selected);\n}\n\nTEST_F(AndroidFileSelectHelperTest, SameRfhNavigationRejectsOldDocumentResult) {\n  auto* frame = tab_->GetContents()->GetPrimaryMainFrame();\n  ASSERT_TRUE(OwnerValid());\n  content::NavigationSimulator::NavigateAndCommitFromBrowser(\n      tab_->GetContents(), GURL(\"https://picker.test/replacement\"));\n  ASSERT_EQ(frame, tab_->GetContents()->GetPrimaryMainFrame());\n  DeliverResult();\n  EXPECT_EQ(1, listener_->canceled);\n  EXPECT_EQ(0, listener_->selected);\n}\n\nTEST_F(AndroidFileSelectHelperTest, MetadataCancellationCompletesExactlyOnce) {\n  base::ScopedTempDir temporary;\n  ASSERT_TRUE(temporary.CreateUniqueTempDir());\n  base::FilePath path = temporary.GetPath().AppendASCII(\"stripped.jpg\");\n  ASSERT_TRUE(base::WriteFile(path, \"image\"));\n  RetainTemporaryFile(path);\n  tab_->SendWillDeactivateUpdate(nullptr);\n  EXPECT_EQ(1, listener_->canceled);\n  DeliverResult();  // The image metadata worker returns after cancellation.\n  EXPECT_EQ(1, listener_->canceled);\n  EXPECT_EQ(0, listener_->selected);\n  model_.reset();\n  tab_ = nullptr;\n  task_environment()->RunUntilIdle();\n  EXPECT_FALSE(base::PathExists(path));\n}\n\nTEST_F(AndroidFileSelectHelperTest, SuccessfulListenerCanDeactivateReentrantly) {\n  listener_->on_selected = base::BindLambdaForTesting(\n      [&] { tab_->SendWillDeactivateUpdate(nullptr); });\n  DeliverResult();\n  EXPECT_EQ(1, listener_->selected);\n  EXPECT_EQ(0, listener_->canceled);\n}\n#endif  // BUILDFLAG(IS_ANDROID)\n\nTEST_F(FileSelectHelperTest, IsAcceptTypeValid) {"
+- description: Format modified Android split dialog code
+  regex:
+    re_pattern: '\#include\ "ui/shell_dialogs/selected_file_info\.h"\
+
+      \#if\ BUILDFLAG\(IS_ANDROID\)\
+
+      \#include\ "base/test/scoped_feature_list\.h"\
+
+      \#include\ "chrome/browser/android/tab_android\.h"\
+
+      \#include\ "chrome/browser/ui/android/tab_model/tab_model_test_helper\.h"\
+
+      \#include\ "chrome/browser/permissions/chrome_permissions_client\.h"\
+
+      \#include\ "content/public/common/content_features\.h"\
+
+      \#include\ "content/public/test/navigation_simulator\.h"\
+
+      \#endif\
+
+      \
+
+      '
+    replace: '#include "ui/shell_dialogs/selected_file_info.h"
+
+      #if BUILDFLAG(IS_ANDROID)
+
+      #include "base/test/scoped_feature_list.h"
+
+      #include "chrome/browser/android/tab_android.h"
+
+      #include "chrome/browser/permissions/chrome_permissions_client.h"
+
+      #include "chrome/browser/ui/android/tab_model/tab_model_test_helper.h"
+
+      #include "content/public/common/content_features.h"
+
+      #include "content/public/test/navigation_simulator.h"
+
+      #endif
+
+
+      '
+- description: Format modified Android split dialog code
+  regex:
+    re_pattern: '\ \ scoped_refptr<FileSelectHelper>\ helper_;\
+
+      \ \ scoped_refptr<AndroidPickerListener>\ listener_;\
+
+      \};\
+
+      \
+
+      TEST_F\(AndroidFileSelectHelperTest,\ PermissionModelObserverUsesPreAndPostCommitState\)\ \{\
+
+      \ \ auto\*\ client\ =\ ChromePermissionsClient::GetInstance\(\);\
+
+      \ \ ASSERT_TRUE\(client\->IsAndroidTabModelActive\(tab_\)\);\
+
+      \ \ std::vector<std::pair<bool,\ bool>>\ transitions;\
+
+      \ \ auto\ observation\ =\ client\->ObserveAndroidTabModel\(\
+
+      '
+    replace: "  scoped_refptr<FileSelectHelper> helper_;\n  scoped_refptr<AndroidPickerListener> listener_;\n};\n\nTEST_F(AndroidFileSelectHelperTest,\n       PermissionModelObserverUsesPreAndPostCommitState) {\n  auto* client = ChromePermissionsClient::GetInstance();\n  ASSERT_TRUE(client->IsAndroidTabModelActive(tab_));\n  std::vector<std::pair<bool, bool>> transitions;\n  auto observation = client->ObserveAndroidTabModel(\n"
+- description: Format modified Android split dialog code
+  regex:
+    re_pattern: '\ \ \ \ \ \ \}\)\);\
+
+      \ \ model_\->SetIsActiveModel\(false\);\
+
+      \ \ EXPECT_FALSE\(client\->IsAndroidTabModelActive\(tab_\)\);\
+
+      \ \ model_\->SetIsActiveModel\(true\);\
+
+      \ \ EXPECT_THAT\(transitions,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ testing::ElementsAre\(std::pair\(false,\ true\),\ std::pair\(true,\ true\)\)\);\
+
+      \ \ observation\.RunAndReset\(\);\
+
+      \ \ model_\->SetIsActiveModel\(false\);\
+
+      \ \ EXPECT_EQ\(2u,\ transitions\.size\(\)\);\
+
+      \}\
+
+      '
+    replace: "      }));\n  model_->SetIsActiveModel(false);\n  EXPECT_FALSE(client->IsAndroidTabModelActive(tab_));\n  model_->SetIsActiveModel(true);\n  EXPECT_THAT(transitions, testing::ElementsAre(std::pair(false, true),\n                                                std::pair(true, true)));\n  observation.RunAndReset();\n  model_->SetIsActiveModel(false);\n  EXPECT_EQ(2u, transitions.size());\n}\n"
+- description: Format modified Android split dialog code
+  regex:
+    re_pattern: '\ \ task_environment\(\)\->RunUntilIdle\(\);\
+
+      \ \ EXPECT_FALSE\(base::PathExists\(path\)\);\
+
+      \}\
+
+      \
+
+      TEST_F\(AndroidFileSelectHelperTest,\ SuccessfulListenerCanDeactivateReentrantly\)\ \{\
+
+      \ \ listener_\->on_selected\ =\ base::BindLambdaForTesting\(\
+
+      \ \ \ \ \ \ \[\&\]\ \{\ tab_\->SendWillDeactivateUpdate\(nullptr\);\ \}\);\
+
+      \ \ DeliverResult\(\);\
+
+      \ \ EXPECT_EQ\(1,\ listener_\->selected\);\
+
+      '
+    replace: "  task_environment()->RunUntilIdle();\n  EXPECT_FALSE(base::PathExists(path));\n}\n\nTEST_F(AndroidFileSelectHelperTest,\n       SuccessfulListenerCanDeactivateReentrantly) {\n  listener_->on_selected = base::BindLambdaForTesting(\n      [&] { tab_->SendWillDeactivateUpdate(nullptr); });\n  DeliverResult();\n  EXPECT_EQ(1, listener_->selected);\n"
+
+- description: correct Android picker fixture global RenderDocument feature namespace
+  regex:
+    re_pattern: "\\ \\ \\ \\ feature_list_\\.InitAndDisableFeature\\(content::features::kRenderDocument\\);\\\n"
+    replace: "    feature_list_.InitAndDisableFeature(::features::kRenderDocument);\n"
+  count: 1

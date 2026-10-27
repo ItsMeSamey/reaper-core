@@ -1,0 +1,131 @@
+diff --git a/pdf/pdfium/pdfium_engine_exports_unittest.cc b/pdf/pdfium/pdfium_engine_exports_unittest.cc
+--- a/pdf/pdfium/pdfium_engine_exports_unittest.cc
++++ b/pdf/pdfium/pdfium_engine_exports_unittest.cc
+@@ -2,6 +2,8 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
++#include <array>
++#include <limits>
+ #include <optional>
+ #include <utility>
+ 
+@@ -11,6 +13,7 @@
+ #include "base/functional/callback.h"
+ #include "base/path_service.h"
+ #include "base/test/mock_callback.h"
++#include "build/build_config.h"
+ #include "build/chromeos_buildflags.h"
+ #include "pdf/pdf.h"
+ #include "pdf/pdf_watermark_overlayer.h"
+@@ -52,6 +55,23 @@
+   ~ScopedLibraryInitializer() { ShutdownSDK(); }
+ };
+ 
++#if BUILDFLAG(IS_ANDROID)
++// A black marker occupies the middle 80% of each physical page dimension.
++// Pixel samples well away from its boundary do not depend on antialiasing.
++bool AddPrinterGeometryMarker(FPDF_PAGE page) {
++  const float width = FPDF_GetPageWidthF(page);
++  const float height = FPDF_GetPageHeightF(page);
++  ScopedFPDFPageObject marker(FPDFPageObj_CreateNewRect(
++      width * 0.1f, height * 0.1f, width * 0.8f, height * 0.8f));
++  if (!marker || !FPDFPageObj_SetFillColor(marker.get(), 0, 0, 0, 255) ||
++      !FPDFPath_SetDrawMode(marker.get(), FPDF_FILLMODE_WINDING, false)) {
++    return false;
++  }
++  FPDFPage_InsertObject(page, marker.release());
++  return FPDFPage_GenerateContent(page);
++}
++#endif  // BUILDFLAG(IS_ANDROID)
++
+ #if BUILDFLAG(IS_CHROMEOS) && BUILDFLAG(ENABLE_SCREEN_AI_SERVICE)
+ 
+ // Returns all characters in the page.
+@@ -121,6 +141,86 @@
+ };
+ 
+ }  // namespace
++
++#if BUILDFLAG(IS_ANDROID)
++TEST_F(PDFiumEngineExportsTest, PrinterDeviceBoundsPreservePhysicalGeometry) {
++  ScopedLibraryInitializer initializer;
++  const std::array<gfx::Size, 3> resolutions = {
++      gfx::Size(150, 300), gfx::Size(300, 150), gfx::Size(150, 150)};
++  for (const bool landscape : {false, true}) {
++    ScopedFPDFDocument document(FPDF_CreateNewDocument());
++    ASSERT_TRUE(document);
++    const int width_inches = landscape ? 2 : 1;
++    const int height_inches = landscape ? 1 : 2;
++    ScopedFPDFPage page(
++        FPDFPage_New(document.get(), 0, width_inches * 72, height_inches * 72));
++    ASSERT_TRUE(page);
++    ASSERT_TRUE(AddPrinterGeometryMarker(page.get()));
++    for (const auto& dpi : resolutions) {
++      SCOPED_TRACE(dpi.ToString());
++      SCOPED_TRACE(landscape);
++      const int width = width_inches * dpi.width();
++      const int height = height_inches * dpi.height();
++      const gfx::Rect bounds(width, height);
++      PDFiumEngineExports::RenderingSettings settings(
++          dpi, bounds, /*fit_to_bounds=*/true, /*stretch_to_bounds=*/false,
++          /*keep_aspect_ratio=*/true, /*center_in_bounds=*/true,
++          /*autorotate=*/true, /*use_color=*/true,
++          /*render_for_printing=*/true);
++      settings.bounds_are_device_units = true;
++      std::vector<uint32_t> pixels(width * height, 0);
++      ASSERT_TRUE(RenderPageToBitmap(page.get(), settings, pixels.data()));
++      const auto sample = [&](int x_percent, int y_percent) {
++        return pixels[(height * y_percent / 100) * width +
++                      width * x_percent / 100];
++      };
++      for (const int y : {15, 50, 85}) {
++        for (const int x : {15, 50, 85})
++          EXPECT_EQ(0xff000000u, sample(x, y));
++      }
++      EXPECT_EQ(0xffffffffu, sample(5, 50));
++      EXPECT_EQ(0xffffffffu, sample(95, 50));
++      EXPECT_EQ(0xffffffffu, sample(50, 5));
++      EXPECT_EQ(0xffffffffu, sample(50, 95));
++      if (dpi.width() == dpi.height()) {
++        // Opting in must preserve the established square-DPI output exactly.
++        settings.bounds_are_device_units = false;
++        std::vector<uint32_t> legacy_pixels(width * height, 0);
++        ASSERT_TRUE(
++            RenderPageToBitmap(page.get(), settings, legacy_pixels.data()));
++        EXPECT_EQ(legacy_pixels, pixels);
++      }
++    }
++  }
++}
++
++TEST_F(PDFiumEngineExportsTest,
++       PrinterDeviceBoundsRejectOverflowBeforeDrawing) {
++  ScopedLibraryInitializer initializer;
++  ScopedFPDFDocument document(FPDF_CreateNewDocument());
++  ASSERT_TRUE(document);
++  ScopedFPDFPage page(FPDFPage_New(document.get(), 0, 72, 144));
++  ASSERT_TRUE(page);
++  ASSERT_TRUE(AddPrinterGeometryMarker(page.get()));
++  const int maximum = std::numeric_limits<int>::max();
++  const std::array<gfx::Size, 2> resolutions = {
++      gfx::Size(maximum, 1), gfx::Size(maximum / 4, maximum / 4)};
++  for (const auto& dpi : resolutions) {
++    SCOPED_TRACE(dpi.ToString());
++    PDFiumEngineExports::RenderingSettings settings(
++        dpi, gfx::Rect(8, 8), /*fit_to_bounds=*/true,
++        /*stretch_to_bounds=*/false, /*keep_aspect_ratio=*/true,
++        /*center_in_bounds=*/true, /*autorotate=*/true, /*use_color=*/true,
++        /*render_for_printing=*/true);
++    settings.bounds_are_device_units = true;
++    std::array<uint32_t, 64> pixels;
++    pixels.fill(0x12345678u);
++    const auto untouched = pixels;
++    EXPECT_FALSE(RenderPageToBitmap(page.get(), settings, pixels.data()));
++    EXPECT_EQ(untouched, pixels);
++  }
++}
++#endif  // BUILDFLAG(IS_ANDROID)
+ 
+ TEST_F(PDFiumEngineExportsTest, GetPDFDocInfo) {
+   base::FilePath pdf_path =

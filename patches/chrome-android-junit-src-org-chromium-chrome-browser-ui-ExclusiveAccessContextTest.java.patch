@@ -1,0 +1,132 @@
+diff --git a/chrome/android/junit/src/org/chromium/chrome/browser/ui/ExclusiveAccessContextTest.java b/chrome/android/junit/src/org/chromium/chrome/browser/ui/ExclusiveAccessContextTest.java
+index 9b1afd98a0bdb49fc1dda19cc774bbc2040db417..b0d8d8d1419136ca89f991d27f5257dd8766ec4c 100644
+--- a/chrome/android/junit/src/org/chromium/chrome/browser/ui/ExclusiveAccessContextTest.java
++++ b/chrome/android/junit/src/org/chromium/chrome/browser/ui/ExclusiveAccessContextTest.java
+@@ -41,6 +41,10 @@
+     @Before
+     public void setUp() {
+         ExclusiveAccessContextJni.setInstanceForTesting(mExclusiveAccessContextJni);
++        when(mFullscreenManager.getBrowserFullscreenExtensionInfoSupplier())
++                .thenReturn(
++                        org.chromium.base.supplier.ObservableSuppliers.createNonNull(
++                                new FullscreenManager.BrowserFullscreenExtensionInfo("", "")));
+     }
+ 
+     @After
+@@ -74,4 +78,116 @@
+ 
+         assertSame(mSnackbarManager, context.getSnackbarManager());
+     }
++
++    @Test
++    @SmallTest
++    public void browserFullscreenIsVisibleToNativeContextWithoutFakingDomState() {
++        var ui = org.chromium.base.supplier.ObservableSuppliers.createNonNull(true);
++        when(mFullscreenManager.getFullscreenUiModeSupplier()).thenReturn(ui);
++        var context =
++                ExclusiveAccessContext.create(
++                        123L, mWindowAndroid, mFullscreenManager, new ActivityTabProvider());
++        org.junit.Assert.assertTrue(context.isFullscreen());
++        verify(mFullscreenManager, org.mockito.Mockito.never()).getPersistentFullscreenMode();
++        ui.set(false);
++        org.junit.Assert.assertFalse(context.isFullscreen());
++        context.destroy();
++    }
++
++    @Test
++    @SmallTest
++    public void aggregateTransitionsNotifyActualManagerAfterInitializationAndDetachNormally() {
++        var dom = org.chromium.base.supplier.ObservableSuppliers.createNonNull(false);
++        var ui = org.chromium.base.supplier.ObservableSuppliers.createNonNull(true);
++        when(mFullscreenManager.getPersistentFullscreenModeSupplier()).thenReturn(dom);
++        when(mFullscreenManager.getFullscreenUiModeSupplier()).thenReturn(ui);
++        var nativeManager = org.mockito.Mockito.mock(ExclusiveAccessManager.Natives.class);
++        ExclusiveAccessManagerJni.setInstanceForTesting(nativeManager);
++        var manager = new ExclusiveAccessManager(mFullscreenManager, null);
++        var modelSelector =
++                org.mockito.Mockito.mock(
++                        org.chromium.chrome.browser.tabmodel.TabModelSelector.class);
++        when(modelSelector.getModels()).thenReturn(java.util.List.of());
++        when(nativeManager.init(
++                        org.mockito.ArgumentMatchers.any(),
++                        org.mockito.ArgumentMatchers.any(),
++                        org.mockito.ArgumentMatchers.any(),
++                        org.mockito.ArgumentMatchers.any()))
++                .thenReturn(321L);
++        manager.initialize(modelSelector, mWindowAndroid, new ActivityTabProvider());
++        verify(nativeManager).onWindowFullscreenStateChanged(321L);
++        org.junit.Assert.assertFalse(manager.getExclusiveAccessStateSupplier().get());
++        ui.set(false);
++        verify(nativeManager, org.mockito.Mockito.times(2)).onWindowFullscreenStateChanged(321L);
++        manager.destroy();
++        ui.set(true);
++        verify(nativeManager, org.mockito.Mockito.times(2)).onWindowFullscreenStateChanged(321L);
++        verify(nativeManager).destroy(321L);
++    }
++
++    @Test
++    @SmallTest
++    public void trustedOriginIsForwardedBeforeInitialAggregateNoticeAndClearedOnExit() {
++        String extensionUrl = "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/";
++        String displayName = "Approved Extension";
++        var origin =
++                org.chromium.base.supplier.ObservableSuppliers.createNonNull(
++                        new FullscreenManager.BrowserFullscreenExtensionInfo(
++                                extensionUrl, displayName));
++        var dom = org.chromium.base.supplier.ObservableSuppliers.createNonNull(false);
++        var ui = org.chromium.base.supplier.ObservableSuppliers.createNonNull(true);
++        when(mFullscreenManager.getBrowserFullscreenExtensionInfoSupplier()).thenReturn(origin);
++        when(mFullscreenManager.getPersistentFullscreenModeSupplier()).thenReturn(dom);
++        when(mFullscreenManager.getFullscreenUiModeSupplier()).thenReturn(ui);
++        var nativeManager = org.mockito.Mockito.mock(ExclusiveAccessManager.Natives.class);
++        ExclusiveAccessManagerJni.setInstanceForTesting(nativeManager);
++        var selector =
++                org.mockito.Mockito.mock(
++                        org.chromium.chrome.browser.tabmodel.TabModelSelector.class);
++        when(selector.getModels()).thenReturn(java.util.List.of());
++        when(nativeManager.init(
++                        org.mockito.ArgumentMatchers.any(),
++                        org.mockito.ArgumentMatchers.any(),
++                        org.mockito.ArgumentMatchers.any(),
++                        org.mockito.ArgumentMatchers.any()))
++                .thenReturn(321L);
++        var manager = new ExclusiveAccessManager(mFullscreenManager, null);
++        try {
++            manager.initialize(selector, mWindowAndroid, new ActivityTabProvider());
++            var order = org.mockito.Mockito.inOrder(nativeManager);
++            order.verify(nativeManager)
++                    .init(
++                            org.mockito.ArgumentMatchers.any(),
++                            org.mockito.ArgumentMatchers.any(),
++                            org.mockito.ArgumentMatchers.any(),
++                            org.mockito.ArgumentMatchers.any());
++            order.verify(nativeManager).setFullscreenExtensionUrl(321L, extensionUrl, displayName);
++            order.verify(nativeManager).onWindowFullscreenStateChanged(321L);
++            ui.set(false);
++            origin.set(new FullscreenManager.BrowserFullscreenExtensionInfo("", ""));
++            order.verify(nativeManager).onWindowFullscreenStateChanged(321L);
++            order.verify(nativeManager).setFullscreenExtensionUrl(321L, "", "");
++            org.junit.Assert.assertFalse(manager.getExclusiveAccessStateSupplier().get());
++        } finally {
++            manager.destroy();
++        }
++        origin.set(new FullscreenManager.BrowserFullscreenExtensionInfo(extensionUrl, displayName));
++        verify(nativeManager, org.mockito.Mockito.times(1))
++                .setFullscreenExtensionUrl(321L, extensionUrl, displayName);
++    }
++
++    @Test
++    @SmallTest
++    public void nativeWindowExitClearsBrowserRequestWithoutAnActiveTab() {
++        var context =
++                ExclusiveAccessContext.create(
++                        123L, mWindowAndroid, mFullscreenManager, new ActivityTabProvider());
++        try {
++            context.exitFullscreenModeForTab();
++            verify(mFullscreenManager).setBrowserFullscreenMode(false);
++            verify(mFullscreenManager).exitPersistentFullscreenMode();
++        } finally {
++            context.destroy();
++        }
++    }
+ }

@@ -1,0 +1,54 @@
+diff --git a/build/android/pylib/local/device/local_device_test_run_test.py b/build/android/pylib/local/device/local_device_test_run_test.py
+--- a/build/android/pylib/local/device/local_device_test_run_test.py
++++ b/build/android/pylib/local/device/local_device_test_run_test.py
+@@ -63,6 +63,50 @@
+ 
+ 
+ class LocalDeviceTestRunTest(unittest.TestCase):
++    def _RunScopedRecoveryCase(self, disabled, outcomes):
++        module = local_device_test_run
++        run = object.__new__(module.LocalDeviceTestRun)
++        run._env = mock.Mock(disable_device_recovery=disabled)
++        run._installed_packages = []
++        run._RunTest = mock.Mock(side_effect=outcomes)
++        collection = module.test_collection.TestCollection(['Owned.test'])
++        results = base_test_result.TestRunResults()
++        exit_now = mock.Mock()
++        exit_now.isSet.return_value = False
++        self._scoped_operation = run._RunTest
++        self._scoped_collection = collection
++        self._scoped_results = results
++        with mock.patch.object(collection, 'add', wraps=collection.add) as requeue:
++            self._scoped_requeue = requeue
++            with mock.patch.object(module.exception_recorder, 'register'), mock.patch.object(
++                    module, 'SetAppCompatibilityFlagsIfNecessary'):
++                module.LocalDeviceTestRun._RunTestsOnDevice.__wrapped__(
++                    run, mock.Mock(), collection, results, exit_now)
++
++    def testNoDeviceRecoveryDoesNotReplayGenericDeviceError(self):
++        error = local_device_test_run.base_error.BaseError('uncertain operation')
++        with self.assertRaises(local_device_test_run.base_error.BaseError) as raised:
++            self._RunScopedRecoveryCase(True, [error])
++        self.assertIs(error, raised.exception)
++        self.assertEqual(1, self._scoped_operation.call_count)
++        self._scoped_requeue.assert_not_called()
++        self.assertEqual(0, len(self._scoped_collection))
++
++    def testDefaultGenericDeviceErrorStillRequeues(self):
++        passed = base_test_result.BaseTestResult('Owned.test', base_test_result.ResultType.PASS)
++        self._RunScopedRecoveryCase(False, [
++            local_device_test_run.base_error.BaseError('device error'), (passed, None)])
++        self.assertEqual(2, self._scoped_operation.call_count)
++        self._scoped_requeue.assert_called_once_with('Owned.test')
++        self.assertEqual({passed}, self._scoped_results.GetAll())
++
++    def testNoDeviceRecoveryStillRecordsOrdinaryTestFailure(self):
++        failed = base_test_result.BaseTestResult('Owned.test', base_test_result.ResultType.FAIL)
++        self._RunScopedRecoveryCase(True, [(failed, None)])
++        self.assertEqual(1, self._scoped_operation.call_count)
++        self._scoped_requeue.assert_not_called()
++        self.assertEqual({failed}, self._scoped_results.GetAll())
++
+     def testSortTests(self):
+         test_run = TestLocalDeviceTestRun()
+         # Note that the expected result purely depends on the implementation of

@@ -18,8 +18,6 @@ public class BravePureJavaExceptionReporter extends ChromePureJavaExceptionRepor
 
     @Override
     protected void uploadMinidump(File minidump) {
-        // Set `uploadNow` to false to run the job via JobScheduler instead of immediate upload as
-        // we may get here while in background which causes issues with upload.
-        LogcatExtractionRunnable.uploadMinidump(minidump, false);
+        // The inherited reporter already preserved the local dump and sanitized logcat.
     }
 }

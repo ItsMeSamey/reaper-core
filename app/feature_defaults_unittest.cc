@@ -6,12 +6,17 @@
 #include "base/debug/debugging_buildflags.h"
 #include "base/feature_list.h"
 #include "base/features.h"
+#include "build/build_config.h"
 #include "chrome/browser/browser_features.h"
 #include "chrome/browser/devtools/features.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "chrome/browser/history_embeddings/history_embeddings_utils.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "chrome/browser/policy/policy_util.h"
 #include "chrome/browser/preloading/preloading_features.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "chrome/browser/ttc/features.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "chrome/browser/ui/omnibox/omnibox_next_features.h"
 #include "chrome/browser/ui/tabs/features.h"
 #include "chrome/browser/ui/ui_features.h"
@@ -20,21 +25,29 @@
 #include "components/autofill/core/common/autofill_debug_features.h"
 #include "components/autofill/core/common/autofill_features.h"
 #include "components/autofill/core/common/autofill_payments_features.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "components/browser_actuator/internal/features.h"
 #include "components/browser_actuator/public/features.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "components/commerce/core/commerce_feature_list.h"
 #include "components/compose/core/browser/compose_features.h"
 #include "components/content_settings/core/common/features.h"
 #include "components/contextual_tasks/public/features.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "components/critical_actions/core/browser/features.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "components/feature_engagement/public/feature_constants.h"
 #include "components/heap_profiling/in_process/heap_profiler_parameters.h"
 #include "components/history/core/browser/features.h"
 #include "components/history_clusters/core/features.h"
 #include "components/history_clusters/core/on_device_clustering_features.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "components/history_embeddings/core/history_embeddings_features.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "components/lens/lens_features.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "components/manta/features.h"
+#endif
 #include "components/metrics/metrics_features.h"
 #include "components/metrics/private_metrics/private_metrics_features.h"
 #include "components/metrics/structured/structured_metrics_features.h"
@@ -46,21 +59,31 @@
 #include "components/one_time_tokens/core/common/one_time_token_features.h"
 #include "components/optimization_guide/core/optimization_guide_features.h"
 #include "components/page_info/core/features.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "components/passage_embeddings/core/passage_embeddings_features.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "components/password_manager/core/browser/features/password_features.h"
 #include "components/performance_manager/public/features.h"
 #include "components/permissions/features.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "components/personal_context/core/personal_context_features.h"
+#endif
 #include "components/privacy_sandbox/privacy_sandbox_features.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "components/private_ai/features.h"
+#endif
+#if !BUILDFLAG(IS_ANDROID)
 #include "components/private_insights/private_insights_features.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "components/safe_browsing/core/common/features.h"
 #include "components/search/ntp_features.h"
 #include "components/segmentation_platform/public/features.h"
 #include "components/shared_highlighting/core/common/shared_highlighting_features.h"
 #include "components/signin/public/base/signin_buildflags.h"
 #include "components/signin/public/base/signin_switches.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "components/site_token_provider/features.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "components/skills/features.h"
 #include "components/subresource_filter/core/common/common_features.h"
 #include "components/sync/base/features.h"
@@ -153,8 +176,10 @@ TEST(FeatureDefaultsTest, DisabledFeatures) {
       &blink::features::kBackgroundResourceFetch,
       &blink::features::kFencedFrames,
       &blink::features::kPreloadingEagerViewportHeuristics,
+#if !BUILDFLAG(IS_ANDROID)
       &browser_actuator::kBrowserActuator,
       &browser_actuator::kBrowserActuatorProtoStreamTransport,
+#endif  // !BUILDFLAG(IS_ANDROID)
 #if BUILDFLAG(IS_ANDROID)
       &chrome::android::kAndroidPageInfoAsAppMenuItem,
 #endif
@@ -171,12 +196,14 @@ TEST(FeatureDefaultsTest, DisabledFeatures) {
       &compose::features::kEnableCompose,
       &contextual_tasks::kContextualTasks,
       &contextual_tasks::kContextualTasksCookiePrefetch,
+#if !BUILDFLAG(IS_ANDROID)
       &critical_actions::features::kCriticalActionHistory,
+#endif  // !BUILDFLAG(IS_ANDROID)
 #if !BUILDFLAG(IS_ANDROID)
       &enterprise_data_protection::kEnableForceDownloadToCloud,
       &extensions_features::kApiGlicPrivate,
 #endif
-#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE) && !BUILDFLAG(IS_ANDROID)
       &extensions_features::kApiDesktopAndroidNativeMessaging,
 #endif
 #if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_APPLE) || BUILDFLAG(IS_LINUX)
@@ -251,9 +278,11 @@ TEST(FeatureDefaultsTest, DisabledFeatures) {
       &history_clusters::internal::kJourneys,
       &history_clusters::internal::kJourneysImages,
       &history_clusters::internal::kOmniboxHistoryClusterProvider,
+#if !BUILDFLAG(IS_ANDROID)
       &history_embeddings::kHistoryEmbeddings,
       &history_embeddings::kHistoryEmbeddingsAnswers,
       &history_embeddings::kLaunchedHistoryEmbeddings,
+#endif  // !BUILDFLAG(IS_ANDROID)
       &lens::features::kLensOverlay,
       &lens::features::kLensOverlayOmniboxEntryPoint,
       &lens::features::kLensStandalone,
@@ -289,17 +318,25 @@ TEST(FeatureDefaultsTest, DisabledFeatures) {
       &optimization_guide::features::kOptimizationGuideFetchingForSRP,
       &optimization_guide::features::kOptimizationGuideModelExecution,
       &optimization_guide::features::kOptimizationHints,
+#if !BUILDFLAG(IS_ANDROID)
       &passage_embeddings::kPassageEmbedder,
+#endif  // !BUILDFLAG(IS_ANDROID)
       &permissions::features::kCpssUseTfliteSignatureRunner,
+#if !BUILDFLAG(IS_ANDROID)
       &permissions::features::kPermissionsPromptSurvey,
+#endif  // !BUILDFLAG(IS_ANDROID)
       &permissions::features::kPermissionPredictionsV2,
       &permissions::features::kShowRelatedWebsiteSetsPermissionGrants,
+#if !BUILDFLAG(IS_ANDROID)
       &personal_context::features::kPersonalContext,
+#endif
       &privacy_sandbox::kEnforcePrivacySandboxAttestations,
 #if !BUILDFLAG(IS_ANDROID)
       &private_ai::kPrivateAi,
 #endif  // !BUILDFLAG(IS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
       &private_insights::kPrivateInsightsFeature,
+#endif  // !BUILDFLAG(IS_ANDROID)
       &safe_browsing::kAntivirusTelemetryForDownloads,
       &safe_browsing::kClientSideDetectionClipboardCopyApi,
       &safe_browsing::kGooglePlayProtectInApkTelemetry,
@@ -310,14 +347,18 @@ TEST(FeatureDefaultsTest, DisabledFeatures) {
       &segmentation_platform::features::kSegmentationPlatformDeviceTier,
       &segmentation_platform::features::kSegmentationPlatformFeature,
       &segmentation_platform::features::kSegmentationPlatformTimeDelaySampling,
+#if !BUILDFLAG(IS_ANDROID)
       &site_token_provider::features::kSiteTokenProviderEnabled,
+#endif  // !BUILDFLAG(IS_ANDROID)
       &subresource_filter::kAdTagging,
 #if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
       &switches::kFirstRunDesktopRefresh,
 #endif
       &switches::kSyncEnableBookmarksInTransportMode,
       &syncer::kSyncAutofillValuableMetadata,
+#if !BUILDFLAG(IS_ANDROID)
       &ttc::kTtc,
+#endif  // !BUILDFLAG(IS_ANDROID)
       &webapps::features::kWebAppsEnableMLModelForPromotion,
   };
 
@@ -328,6 +369,9 @@ TEST(FeatureDefaultsTest, DisabledFeatures) {
 
 TEST(FeatureDefaultsTest, EnabledFeatures) {
   const base::Feature* enabled_features[] = {
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE) && BUILDFLAG(IS_ANDROID)
+      &extensions_features::kApiDesktopAndroidNativeMessaging,
+#endif
       &omnibox::kAblateSearchProviderWarmup,
       &blink::features::kMixedContentAutoupgrade,
       &blink::features::kReducedReferrerGranularity,

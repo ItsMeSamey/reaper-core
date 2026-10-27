@@ -1,0 +1,64 @@
+diff --git a/chrome/android/java/src/org/chromium/chrome/browser/init/AsyncInitializationActivity.java b/chrome/android/java/src/org/chromium/chrome/browser/init/AsyncInitializationActivity.java
+index 7812d152b150c74cf706fbe5646e8425a946f90e..1b717d0fdda7c13556b5bc97a845261aab2caa81 100644
+--- a/chrome/android/java/src/org/chromium/chrome/browser/init/AsyncInitializationActivity.java
++++ b/chrome/android/java/src/org/chromium/chrome/browser/init/AsyncInitializationActivity.java
+@@ -50,6 +50,8 @@
+ import org.chromium.chrome.browser.profiles.Profile;
+ import org.chromium.chrome.browser.profiles.ProfileProvider;
+ import org.chromium.chrome.browser.tabmodel.SupportedProfileType;
++import org.chromium.chrome.browser.ui.browser_window.ChromeAndroidTaskTracker;
++import org.chromium.chrome.browser.ui.browser_window.ChromeAndroidTaskTrackerFactory;
+ import org.chromium.chrome.browser.util.BrowserUiUtils;
+ import org.chromium.components.browser_ui.share.ShareHelper;
+ import org.chromium.components.browser_ui.util.FirstDrawDetector;
+@@ -147,6 +149,11 @@
+     @CallSuper
+     @Override
+     protected void onDestroy() {
++        Integer pendingId = ChromeAndroidTaskTracker.getPendingTaskIdFromIntent(getIntent());
++        if (pendingId != null) {
++            ChromeAndroidTaskTrackerFactory.getInstance()
++                    .unregisterPendingTaskActivity(pendingId, this);
++        }
+         mDestroyed = true;
+ 
+         // Dispatch onDestroy() for objects created for the activity.
+@@ -406,10 +413,24 @@
+     /**
+      * @return true if will proceed with Activity creation, false if will abort.
+      */
++    private boolean admitPendingBrowserWindowRequest() {
++        Integer pendingId = ChromeAndroidTaskTracker.getPendingTaskIdFromIntent(getIntent());
++        return pendingId == null
++                || ChromeAndroidTaskTrackerFactory.getInstance()
++                        .registerPendingTaskActivity(pendingId, this);
++    }
++
+     private boolean onCreateInternal(@Nullable Bundle savedInstanceState) {
+         initializeStartupMetrics();
+         if (!ChromeFeatureList.sClearIntentWhenRecreated.isEnabled()) {
+             setIntent(IntentHandler.rewriteFromHistoryIntent(getIntent(), null));
++        }
++
++        // Validate and own an internal request before subclass launch dispatch,
++        // WindowAndroid creation or ProfileProvider construction.
++        if (!admitPendingBrowserWindowRequest()) {
++            abortLaunch(LaunchIntentDispatcher.Action.FINISH_ACTIVITY);
++            return false;
+         }
+ 
+         @LaunchIntentDispatcher.Action
+@@ -707,6 +728,13 @@
+ 
+     @Override
+     public final void onCreateWithNative() {
++        // A Profile can retire while the native library is loading. The tracker
++        // also finishes any previously admitted Activity during cancellation;
++        // existing asynchronous startup delegates then observe isFinishing().
++        if (!admitPendingBrowserWindowRequest()) {
++            finish();
++            return;
++        }
+         mLifecycleDispatcher.onCreateWithNative();
+         ChromeBrowserInitializer.getInstance().handlePostNativeStartup(true, this);
+     }

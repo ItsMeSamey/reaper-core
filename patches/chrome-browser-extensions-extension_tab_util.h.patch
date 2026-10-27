@@ -1,0 +1,99 @@
+diff --git a/chrome/browser/extensions/extension_tab_util.h b/chrome/browser/extensions/extension_tab_util.h
+index 386c18a618a128684526ecac08b127c35cfcf43a..e95c5856588ad1cd5900d983455ca7e14b149553 100644
+--- a/chrome/browser/extensions/extension_tab_util.h
++++ b/chrome/browser/extensions/extension_tab_util.h
+@@ -13,6 +13,7 @@
+ #include "base/functional/callback.h"
+ #include "base/types/expected.h"
+ #include "base/values.h"
++#include "build/build_config.h"
+ #include "chrome/browser/extensions/window_controller.h"
+ #include "chrome/common/extensions/api/tab_groups.h"
+ #include "chrome/common/extensions/api/tabs.h"
+@@ -41,6 +42,10 @@ class TabGroupId;
+ class TabGroupVisualData;
+ }  // namespace tab_groups
+ 
++namespace tabs {
++class TabInterface;
++}
++
+ namespace extensions {
+ class ChromeExtensionFunctionDetails;
+ class Extension;
+@@ -79,6 +84,14 @@ class ExtensionTabUtil {
+ 
+   static constexpr char kTabsKey[] = "tabs";
+ 
++#if BUILDFLAG(IS_ANDROID)
++  // Read the actual Android performance-manager state. A tab without a live
++  // graph has the default readable states, but mutations fail explicitly.
++  static bool IsTabAutoDiscardable(content::WebContents* contents);
++  static bool IsTabFrozen(content::WebContents* contents);
++  static bool SetTabAutoDiscardable(content::WebContents* contents, bool value);
++#endif
++
+   enum ScrubTabBehaviorType {
+     kScrubTabFully,
+     kDontScrubTab,
+@@ -91,6 +104,8 @@ class ExtensionTabUtil {
+ 
+   static int GetWindowId(BrowserWindowInterface* browser);
+   static int GetTabId(const content::WebContents* web_contents);
++  static int GetTabId(const tabs::TabInterface& tab);
++  static int GetWindowIdOfTab(const tabs::TabInterface& tab);
+   static int GetWindowIdOfTab(const content::WebContents* web_contents);
+ 
+   static WindowController* GetControllerFromWindowID(
+@@ -126,6 +141,19 @@ class ExtensionTabUtil {
+                                         const Extension* extension,
+                                         TabListInterface* tab_list,
+                                         int tab_index);
++  // Serializes a native tab without materializing lazy Android contents.
++  // Eager tabs use the existing contents serializer.
++  static api::tabs::Tab CreateTabObject(
++      tabs::TabInterface& tab,
++      ScrubTabBehavior scrub_tab_behavior,
++      const Extension* extension,
++      TabListInterface* tab_list = nullptr,
++      int tab_index = -1);
++  static ScrubTabBehavior GetScrubTabBehavior(
++      const Extension* extension,
++      mojom::ContextType context,
++      const tabs::TabInterface& tab);
++
+   // Creates a base::DictValue representing the window for the given
+   // `browser`, and scrubs any privacy-sensitive data that `extension` does not
+   // have access to. `populate_tab_behavior` determines whether tabs will be
+@@ -180,7 +208,10 @@ class ExtensionTabUtil {
+                          bool include_incognito,
+                          WindowController** window,
+                          content::WebContents** contents,
+-                         int* tab_index);
++                         int* tab_index,
++                         tabs::TabInterface** tab = nullptr);
++  // Asking only for native tab/window/index never loads a lazy tab. Existing
++  // contents callers materialize the one addressed tab if necessary.
+   static bool GetTabById(int tab_id,
+                          content::BrowserContext* browser_context,
+                          bool include_incognito,
+@@ -256,11 +287,14 @@ class ExtensionTabUtil {
+ 
+   // Navigates to a URL, triggered by a given `source_contents`. Navigation may
+   // be asynchronous and `done_callback` is invoked when the navigate has been
+-  // fully initiated.
+-  static void NavigateToURL(WindowOpenDisposition disposition,
+-                            content::WebContents* source_contents,
+-                            const GURL& url,
+-                            base::OnceClosure done_callback);
++  // fully initiated. If source_contents is null, fallback_browser supplies the
++  // caller-authorized window/profile for navigation (including an empty window).
++  static void NavigateToURL(
++      WindowOpenDisposition disposition,
++      content::WebContents* source_contents,
++      const GURL& url,
++      base::OnceClosure done_callback,
++      BrowserWindowInterface* fallback_browser = nullptr);
+ 
+   // Returns true if navigating to `url` could kill a page or the browser
+   // itself, whether by simulating a crash, browser quit, thread hang, or

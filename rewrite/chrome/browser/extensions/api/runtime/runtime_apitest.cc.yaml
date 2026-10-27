@@ -1,0 +1,185 @@
+substitutions:
+- description: Owned Android window/auth/options/fullscreen and fixture routing final integration (1)
+  regex:
+    re_pattern: '\#include\ "chrome/browser/profiles/profile_observer\.h"\
+
+      \#include\ "chrome/browser/profiles/profile_test_util\.h"\
+
+      \#include\ "chrome/test/base/profile_destruction_waiter\.h"\
+
+      \#include\ "extensions/common/extension_builder\.h"\
+
+      \#endif\
+
+      \
+
+      static_assert\(BUILDFLAG\(ENABLE_EXTENSIONS_CORE\)\);\
+
+      \
+
+      '
+    replace: '#include "chrome/browser/profiles/profile_observer.h"
+
+      #include "chrome/browser/profiles/profile_test_util.h"
+
+      #include "chrome/test/base/profile_destruction_waiter.h"
+
+      #include "extensions/common/extension_builder.h"
+
+      #endif
+
+
+      #if BUILDFLAG(IS_ANDROID)
+
+      #include <set>
+
+      #include <vector>
+
+
+      #include "base/android/jni_android.h"
+
+      #include "base/android/jni_array.h"
+
+      #include "base/functional/bind.h"
+
+      #include "base/test/run_until.h"
+
+      #include "chrome/browser/extensions/browser_extension_window_controller.h"
+
+      #include "chrome/browser/extensions/browser_window_util.h"
+
+      #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+
+      #include "chrome/browser/ui/browser_window/public/browser_window_interface_iterator.h"
+
+      #include "content/public/browser/navigation_controller.h"
+
+      #include "content/public/browser/navigation_entry.h"
+
+      #include "ui/base/base_window.h"
+
+      #endif
+
+
+      // Must follow JNI conversion declarations.
+
+      #if BUILDFLAG(IS_ANDROID)
+
+      #include "chrome/browser/ui/browser_window/internal/jni/BrowserWindowCreatorBridge_jni.h"
+
+      #endif
+
+
+      static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
+
+
+      '
+- description: Owned Android window/auth/options/fullscreen and fixture routing final integration (2)
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ service_worker_test_utils::GetListenerRegistrationPhaseState\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \*profile\(\),\ extension\->id\(\)\)\);\
+
+      \}\
+
+      \
+
+      \}\ \ //\ namespace\ extensions\
+
+      '
+    replace: "            service_worker_test_utils::GetListenerRegistrationPhaseState(\n                *profile(), extension->id()));\n\
+      }\n\n#if BUILDFLAG(IS_ANDROID)\n// Exercise the public delegate through the real Android creator while the\n// extension's\
+      \ normal registrar changes its enabled instance. Holding the\n// Activity launch keeps the asynchronous request genuinely\
+      \ pending.\nclass RuntimeOptionsPendingAndroidBrowserTest : public ExtensionApiTest {\n public:\n  void SetUpOnMainThread()\
+      \ override {\n    ExtensionApiTest::SetUpOnMainThread();\n    for (auto* window : GetAllBrowserWindowInterfaces()) {\n\
+      \      initial_windows_.push_back(window->GetWeakPtr());\n      initial_window_ids_.insert(window->GetSessionID().id());\n\
+      \    }\n    initial_contents_ = GetActiveWebContents()->GetWeakPtr();\n    initial_url_ = initial_contents_->GetLastCommittedURL();\n\
+      \    ASSERT_TRUE(HeldPendingTaskIds().empty());\n  }\n\n  void TearDownOnMainThread() override {\n    // This fixture\
+      \ starts with no held request and starts exactly one request.\n    // Release its hold on assertion failure as well\
+      \ as on the success path.\n    if (paused_) {\n      Java_BrowserWindowCreatorBridge_clearActivityCreationPauseForTesting(\n\
+      \          base::android::AttachCurrentThread());\n      paused_ = false;\n    }\n    base::RunLoop().RunUntilIdle();\n\
+      \    delegate_.reset();\n    std::vector<base::WeakPtr<BrowserWindowInterface>> owned_windows;\n    for (auto* window\
+      \ : GetAllBrowserWindowInterfaces()) {\n      if (request_profile_ && window->GetProfile() == request_profile_.get()\
+      \ &&\n          window->GetType() == BrowserWindowInterface::TYPE_NORMAL &&\n          !initial_window_ids_.contains(window->GetSessionID().id()))\
+      \ {\n        owned_windows.push_back(window->GetWeakPtr());\n      }\n    }\n    for (const auto& window : owned_windows)\
+      \ {\n      if (window && !window->IsDeleteScheduled()) {\n        window->GetWindow()->Close();\n        EXPECT_TRUE(base::test::RunUntil([&window]\
+      \ { return !window; }));\n      }\n    }\n    ExtensionApiTest::TearDownOnMainThread();\n  }\n\n protected:\n  struct\
+      \ Completion {\n    int calls = 0;\n    bool result = false;\n  };\n\n  std::vector<int> HeldPendingTaskIds() {\n  \
+      \  JNIEnv* env = base::android::AttachCurrentThread();\n    std::vector<int> ids;\n    base::android::JavaIntArrayToIntVector(\n\
+      \        env,\n        Java_BrowserWindowCreatorBridge_getHeldPendingTaskIdsForTesting(env),\n        &ids);\n    return\
+      \ ids;\n  }\n\n  void WriteOptionsExtension(const char* version, const char* options_page) {\n    test_dir_.WriteManifest(base::StringPrintf(\n\
+      \        R\"({\n          \"name\": \"Pending options\",\n          \"version\": \"%s\",\n          \"manifest_version\"\
+      : 3,\n          \"incognito\": \"split\",\n          \"options_ui\": {\"page\": \"%s\", \"open_in_tab\": true}\n   \
+      \     })\",\n        version, options_page));\n    test_dir_.WriteFile(base::FilePath::FromASCII(options_page).value(),\n\
+      \                        \"<html><title>Options</title></html>\");\n  }\n\n  void StartHeldOptionsRequest() {\n    WriteOptionsExtension(\"\
+      1\", \"original.html\");\n    original_extension_ =\n        LoadExtension(test_dir_.UnpackedPath(), {.allow_in_incognito\
+      \ = true});\n    ASSERT_TRUE(original_extension_);\n    request_profile_ = profile()->GetPrimaryOTRProfile(true)->GetWeakPtr();\n\
+      \    ASSERT_TRUE(request_profile_);\n    // Creating the native OTR profile does not create an incognito UI owner.\n\
+      \    ASSERT_FALSE(browser_window_util::GetLastActiveNormalBrowserWithProfile(\n        *request_profile_, /*include_incognito_or_parent=*/false));\n\
+      \    original_options_url_ =\n        original_extension_->GetResourceURL(\"original.html\");\n    replacement_options_url_\
+      \ =\n        original_extension_->GetResourceURL(\"replacement.html\");\n    ASSERT_EQ(original_extension_.get(),\n\
+      \              ExtensionRegistry::Get(request_profile_.get())\n                  ->enabled_extensions()\n          \
+      \        .GetByID(original_extension_->id()));\n\n    Java_BrowserWindowCreatorBridge_pauseActivityCreationForTesting(\n\
+      \        base::android::AttachCurrentThread());\n    paused_ = true;\n    delegate_ =\n        std::make_unique<ChromeRuntimeAPIDelegate>(request_profile_.get());\n\
+      \    delegate_->OpenOptionsPage(\n        original_extension_.get(), request_profile_.get(),\n        base::BindOnce(\n\
+      \            [](std::shared_ptr<Completion> completion, bool result) {\n              ++completion->calls;\n       \
+      \       completion->result = result;\n            },\n            completion_));\n    const auto held = HeldPendingTaskIds();\n\
+      \    ASSERT_EQ(1u, held.size());\n    held_request_id_ = held.front();\n    EXPECT_EQ(0, completion_->calls);\n  }\n\
+      \n  void ResumeAndCheck(bool expect_success) {\n    ASSERT_GE(held_request_id_, 0);\n    EXPECT_EQ(0, completion_->calls);\n\
+      \    Java_BrowserWindowCreatorBridge_resumePendingTaskActivityCreationForTesting(\n        base::android::AttachCurrentThread(),\
+      \ held_request_id_);\n    ASSERT_TRUE(\n        base::test::RunUntil([this] { return completion_->calls != 0; }));\n\
+      \    base::RunLoop().RunUntilIdle();\n    EXPECT_EQ(1, completion_->calls);\n    EXPECT_EQ(expect_success, completion_->result);\n\
+      \    EXPECT_TRUE(HeldPendingTaskIds().empty());\n\n    // A failed creation callback must not make the stale-instance\
+      \ test pass.\n    // Prove the real normal window, controller, and profile-specific tab list\n    // were created before\
+      \ checking that no stale options navigation occurred.\n    std::vector<BrowserWindowInterface*> created_windows;\n \
+      \   for (auto* window : GetAllBrowserWindowInterfaces()) {\n      if (request_profile_ && window->GetProfile() == request_profile_.get()\
+      \ &&\n          window->GetType() == BrowserWindowInterface::TYPE_NORMAL &&\n          !initial_window_ids_.contains(window->GetSessionID().id()))\
+      \ {\n        created_windows.push_back(window);\n      }\n    }\n    ASSERT_EQ(1u, created_windows.size());\n    auto*\
+      \ window = created_windows.front();\n    ASSERT_FALSE(window->IsDeleteScheduled());\n    ASSERT_TRUE(BrowserExtensionWindowController::From(window));\n\
+      \    auto* tabs = TabListInterface::From(window);\n    ASSERT_TRUE(tabs);\n    int original_options_tabs = 0;\n    for\
+      \ (auto* tab : tabs->GetAllTabs()) {\n      auto* contents = tab->GetContents();\n      if (!contents) {\n        continue;\n\
+      \      }\n      const auto* pending = contents->GetController().GetPendingEntry();\n      if (contents->GetLastCommittedURL()\
+      \ == original_options_url_ ||\n          (pending && pending->GetURL() == original_options_url_)) {\n        ++original_options_tabs;\n\
+      \      }\n      EXPECT_NE(replacement_options_url_, contents->GetLastCommittedURL());\n      if (pending) {\n      \
+      \  EXPECT_NE(replacement_options_url_, pending->GetURL());\n      }\n    }\n    EXPECT_EQ(expect_success ? 1 : 0, original_options_tabs);\n\
+      \    for (const auto& initial_window : initial_windows_) {\n      ASSERT_TRUE(initial_window);\n      EXPECT_TRUE(\n\
+      \          initial_window_ids_.contains(initial_window->GetSessionID().id()));\n      EXPECT_FALSE(initial_window->IsDeleteScheduled());\n\
+      \    }\n    ASSERT_TRUE(initial_contents_);\n    EXPECT_EQ(initial_url_, initial_contents_->GetLastCommittedURL());\n\
+      \  }\n\n  scoped_refptr<const Extension> original_extension_;\n  GURL original_options_url_;\n  GURL replacement_options_url_;\n\
+      \n private:\n  TestExtensionDir test_dir_;\n  std::unique_ptr<ChromeRuntimeAPIDelegate> delegate_;\n  std::shared_ptr<Completion>\
+      \ completion_ = std::make_shared<Completion>();\n  base::WeakPtr<Profile> request_profile_;\n  std::vector<base::WeakPtr<BrowserWindowInterface>>\
+      \ initial_windows_;\n  std::set<int> initial_window_ids_;\n  base::WeakPtr<content::WebContents> initial_contents_;\n\
+      \  GURL initial_url_;\n  int held_request_id_ = -1;\n  bool paused_ = false;\n};\n\nIN_PROC_BROWSER_TEST_F(RuntimeOptionsPendingAndroidBrowserTest,\n\
+      \                       PendingOptionsDisabledExtensionFailsOnce) {\n  ASSERT_NO_FATAL_FAILURE(StartHeldOptionsRequest());\n\
+      \  DisableExtension(original_extension_->id());\n  ASSERT_TRUE(ExtensionRegistry::Get(profile())->disabled_extensions().Contains(\n\
+      \      original_extension_->id()));\n  ASSERT_NO_FATAL_FAILURE(ResumeAndCheck(false));\n}\n\nIN_PROC_BROWSER_TEST_F(RuntimeOptionsPendingAndroidBrowserTest,\n\
+      \                       PendingOptionsUninstalledExtensionFailsOnce) {\n  ASSERT_NO_FATAL_FAILURE(StartHeldOptionsRequest());\n\
+      \  UninstallExtension(original_extension_->id());\n  ASSERT_FALSE(ExtensionRegistry::Get(profile())->GetInstalledExtension(\n\
+      \      original_extension_->id()));\n  ASSERT_NO_FATAL_FAILURE(ResumeAndCheck(false));\n}\n\nIN_PROC_BROWSER_TEST_F(RuntimeOptionsPendingAndroidBrowserTest,\n\
+      \                       PendingOptionsSameIdReplacementFailsOnce) {\n  ASSERT_NO_FATAL_FAILURE(StartHeldOptionsRequest());\n\
+      \  const auto original_id = original_extension_->id();\n  UnloadExtension(original_id);\n  WriteOptionsExtension(\"\
+      2\", \"replacement.html\");\n  scoped_refptr<const Extension> replacement =\n      LoadExtension(test_dir_.UnpackedPath(),\
+      \ {.allow_in_incognito = true});\n  ASSERT_TRUE(replacement);\n  ASSERT_EQ(original_id, replacement->id());\n  ASSERT_NE(original_extension_.get(),\
+      \ replacement.get());\n  ASSERT_EQ(replacement.get(),\n            ExtensionRegistry::Get(profile())->enabled_extensions().GetByID(\n\
+      \                original_id));\n  ASSERT_NO_FATAL_FAILURE(ResumeAndCheck(false));\n}\n\nIN_PROC_BROWSER_TEST_F(RuntimeOptionsPendingAndroidBrowserTest,\n\
+      \                       PendingOptionsUnchangedExtensionOpensOnce) {\n  ASSERT_NO_FATAL_FAILURE(StartHeldOptionsRequest());\n\
+      \  ASSERT_EQ(original_extension_.get(),\n            ExtensionRegistry::Get(profile())->enabled_extensions().GetByID(\n\
+      \                original_extension_->id()));\n  ASSERT_NO_FATAL_FAILURE(ResumeAndCheck(true));\n}\n#endif  // BUILDFLAG(IS_ANDROID)\n\
+      }  // namespace extensions\n"
+
+# Match retained compiler test helpers to current public APIs; preserve ordinary cases/assertions.
+- description: "Compiler API: Use existing public test/API contract 0"
+  regex:
+    re_pattern: "\\#include\\ \"content/public/browser/navigation_entry\\.h\"\\\n"
+    replace: "#include \"content/public/browser/navigation_entry.h\"\n#include \"extensions/browser/api/runtime/runtime_api_delegate.h\"\n"
+  count: 1
+- description: "Compiler API: Use existing public test/API contract 1"
+  regex:
+    re_pattern: "\\ \\ std::unique_ptr<ChromeRuntimeAPIDelegate>\\ delegate_;\\\n"
+    replace: "  std::unique_ptr<RuntimeAPIDelegate> delegate_;\n"
+  count: 1
+- description: "Compiler API: Use existing public test/API contract 2"
+  regex:
+    re_pattern: "\\ \\ scoped_refptr<const\\ Extension>\\ replacement\\ =\\\n\\ \\ \\ \\ \\ \\ LoadExtension\\(test_dir_\\.UnpackedPath\\(\\),\\ \\{\\.allow_in_incognito\\ =\\ true\\}\\);\\\n"
+    replace: "  scoped_refptr<const Extension> replacement =\n      LoadExtension(original_extension_->path(), {.allow_in_incognito = true});\n"
+  count: 1

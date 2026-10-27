@@ -4,6 +4,7 @@
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "base/android/apk_info.h"
+#include "base/android/jni_android.h"
 #include "base/android/jni_string.h"
 #include "brave/components/version_info/version_info.h"
 #include "chrome/android/chrome_jni_headers/AboutSettingsBridge_jni.h"
@@ -24,8 +25,13 @@ static std::string JNI_AboutSettingsBridge_GetApplicationVersion() {
 
   std::string application(base::android::apk_info::host_package_label());
   application.append(" ");
+  const std::string installed_version =
+      Java_AboutSettingsBridge_getInstalledApplicationVersion(
+          base::android::AttachCurrentThread());
   application.append(
-      version_info::GetBraveVersionWithoutChromiumMajorVersion());
+      installed_version.empty()
+          ? version_info::GetBraveVersionWithoutChromiumMajorVersion()
+          : installed_version);
   application.append(", Chromium ");
   application.append(version_info::GetBraveChromiumVersionNumber());
 

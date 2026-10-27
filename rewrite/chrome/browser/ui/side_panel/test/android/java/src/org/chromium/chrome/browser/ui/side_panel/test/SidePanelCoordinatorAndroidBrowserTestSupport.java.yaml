@@ -1,0 +1,25 @@
+# Chromium Android side-panel close ordering and deterministic regression.
+substitutions:
+  - description: 'Complete deferred side-panel close ordering regression: 1'
+    regex:
+      pattern: import org.chromium.components.thinwebview.ThinWebViewFactory;
+      replace: 'import org.chromium.components.thinwebview.ThinWebViewFactory;
+
+        import org.chromium.components.thinwebview.internal.ThinWebViewImpl;'
+  - description: 'Complete deferred side-panel close ordering regression: 2'
+    regex:
+      pattern: import org.chromium.ui.base.WindowAndroid;
+      replace: 'import org.chromium.ui.base.WindowAndroid;
+
+
+        import java.util.ArrayList;
+
+        import java.util.List;'
+  - description: 'Complete deferred side-panel close ordering regression: 3'
+    regex:
+      pattern: '    private SidePanelCoordinatorAndroidBrowserTestSupport() {}'
+      replace: "    private static boolean sHoldFrameCallbacks;\n    private static final List<Runnable> sHeldFrameCallbacks = new ArrayList<>();\n\n    private SidePanelCoordinatorAndroidBrowserTestSupport() {}\n\n    @CalledByNative\n    private static void holdFrameCallbacks() {\n        assert !sHoldFrameCallbacks;\n        assert sHeldFrameCallbacks.isEmpty();\n        sHoldFrameCallbacks = true;\n    }\n\n    @CalledByNative\n    private static int releaseFrameCallbacks() {\n        sHoldFrameCallbacks = false;\n        List<Runnable> callbacks = new ArrayList<>(sHeldFrameCallbacks);\n        sHeldFrameCallbacks.clear();\n        for (Runnable callback : callbacks) callback.run();\n        return callbacks.size();\n    }"
+  - description: 'Complete deferred side-panel close ordering regression: 4'
+    regex:
+      pattern: "        ThinWebView thinWebView =\n                ThinWebViewFactory.create(\n                        context,\n                        new ThinWebViewConstraints(),\n                        intentRequestTracker,\n                        /* enablePermissionRequests= */ false);"
+      replace: "        ThinWebView thinWebView;\n        if (sHoldFrameCallbacks) {\n            // Keep the real view and compositor; hold only the notification so\n            // closing before the first frame is deterministic on every device.\n            thinWebView =\n                    new ThinWebViewImpl(\n                            context,\n                            new ThinWebViewConstraints(),\n                            intentRequestTracker,\n                            /* enablePermissionRequests= */ false) {\n                        @Override\n                        public void runOnNextFrame(Runnable runnable) {\n                            if (sHoldFrameCallbacks) {\n                                sHeldFrameCallbacks.add(runnable);\n                            } else {\n                                super.runOnNextFrame(runnable);\n                            }\n                        }\n                    };\n        } else {\n            thinWebView =\n                    ThinWebViewFactory.create(\n                            context,\n                            new ThinWebViewConstraints(),\n                            intentRequestTracker,\n                            /* enablePermissionRequests= */ false);\n        }"

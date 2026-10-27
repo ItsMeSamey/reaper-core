@@ -657,6 +657,14 @@ export class Config {
           // Workaround siso unable to handle -j if REAPI is not configured.
           if (key === 'j') {
             this.sisoJobsLimit = parseInt(value)
+            // Local Android builds must also bound a Ninja fallback. Pinned
+            // autoninja converts -j to -local_jobs when it selects Siso.
+            if (
+              this.targetOS === 'android'
+              && (this.offline || !this.useRemoteExec)
+            ) {
+              opts.push('-j', value)
+            }
             return
           }
           opts.push(`-${key}`)

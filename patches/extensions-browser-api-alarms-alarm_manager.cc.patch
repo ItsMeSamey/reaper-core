@@ -1,0 +1,203 @@
+diff --git a/extensions/browser/api/alarms/alarm_manager.cc b/extensions/browser/api/alarms/alarm_manager.cc
+index 6631895169663b34955ed8eac33db8276ee0a51f..ee3d9da461bc23d74bb9429f1478d4750636bfc6 100644
+--- a/extensions/browser/api/alarms/alarm_manager.cc
++++ b/extensions/browser/api/alarms/alarm_manager.cc
+@@ -29,6 +29,10 @@
+ #include "extensions/browser/state_store.h"
+ #include "extensions/common/api/alarms.h"
+ #include "extensions/common/extension_id.h"
++#if BUILDFLAG(IS_ANDROID)
++
++#include <cmath>
++#endif
+ 
+ namespace extensions {
+ 
+@@ -157,6 +161,19 @@
+                               std::move(callback)));
+ }
+ 
++#if BUILDFLAG(IS_ANDROID)
++void AlarmManager::AddAlarmWithQuota(
++    const ExtensionId& extension_id,
++    Alarm alarm,
++    AddAlarmWithQuotaCallback callback) {
++  RunWhenReady(
++      extension_id,
++      base::BindOnce(&AlarmManager::AddAlarmWithQuotaWhenReady,
++                     weak_ptr_factory_.GetWeakPtr(), std::move(alarm),
++                     std::move(callback)));
++}
++#endif
++
+ void AlarmManager::GetAlarm(const ExtensionId& extension_id,
+                             const std::string& name,
+                             GetAlarmCallback callback) {
+@@ -196,6 +213,22 @@
+   WriteToStorage(extension_id);
+   std::move(callback).Run();
+ }
++
++#if BUILDFLAG(IS_ANDROID)
++void AlarmManager::AddAlarmWithQuotaWhenReady(
++    Alarm alarm,
++    AddAlarmWithQuotaCallback callback,
++    const ExtensionId& extension_id) {
++  if (GetCountForExtension(extension_id) >= kMaxAlarmsPerExtension &&
++      GetAlarmIterator(extension_id, alarm.js_alarm->name).first ==
++          alarms_.end()) {
++    std::move(callback).Run(false);
++    return;
++  }
++  AddAlarmWhenReady(std::move(alarm),
++                    base::BindOnce(std::move(callback), true), extension_id);
++}
++#endif
+ 
+ void AlarmManager::GetAlarmWhenReady(const std::string& name,
+                                      GetAlarmCallback callback,
+@@ -317,11 +350,23 @@
+     double period_in_js_time = *alarm.js_alarm->period_in_minutes *
+                                base::Time::kMicrosecondsPerMinute /
+                                base::Time::kMicrosecondsPerMillisecond;
++#if BUILDFLAG(IS_ANDROID)
++    // Keep the requested period in the public/persisted alarm, but use the
++    // same positive minimum interval for rescheduling as for polling.
++    period_in_js_time = std::max(
++        alarm.minimum_granularity.InMillisecondsF(), period_in_js_time);
++    // Preserve the original phase without narrowing a missed-period count.
++    const double transpired_periods = std::max(
++        0.0, std::floor((clock_->Now().InMillisecondsFSinceUnixEpoch() -
++                         alarm.js_alarm->scheduled_time) /
++                        period_in_js_time));
++#else
+     // Find out how many periods have transpired since the alarm last went off
+     // (it's possible that we missed some).
+     int transpired_periods = (clock_->Now().InMillisecondsFSinceUnixEpoch() -
+                               alarm.js_alarm->scheduled_time) /
+                              period_in_js_time;
++#endif
+     // Schedule the alarm for the next period that is in-line with the original
+     // scheduling.
+     alarm.js_alarm->scheduled_time +=
+@@ -362,9 +407,32 @@
+                              std::move(alarms));
+ }
+ 
++#if BUILDFLAG(IS_ANDROID)
++void AlarmManager::ReadFromStorageForActivation(
++    const ExtensionId& extension_id,
++    base::TimeDelta min_delay,
++    base::UnguessableToken generation,
++    std::optional<base::Value> value) {
++  auto it = ready_actions_.find(extension_id);
++  if (it == ready_actions_.end() || it->second.generation != generation) {
++    return;
++  }
++  ReadFromStorage(extension_id, min_delay, std::move(value));
++}
++#endif
++
+ void AlarmManager::ReadFromStorage(const ExtensionId& extension_id,
+                                    base::TimeDelta min_delay,
+                                    std::optional<base::Value> value) {
++#if BUILDFLAG(IS_ANDROID)
++  base::UnguessableToken generation;
++  {
++    auto pending = ready_actions_.find(extension_id);
++    if (pending != ready_actions_.end()) {
++      generation = pending->second.generation;
++    }
++  }
++#endif
+   if (value && value->is_list()) {
+     AlarmList alarm_states = AlarmsFromValue(min_delay, value->GetList());
+     for (auto& alarm : alarm_states) {
+@@ -374,12 +442,37 @@
+     }
+   }
+ 
++#if BUILDFLAG(IS_ANDROID)
++  // A ready action may unload/reload the extension or destroy this manager.
++  // Never retain a queue reference across its callback, or run an old action
++  // against a new activation of the same extension ID.
++  const base::WeakPtr<AlarmManager> weak_this = weak_ptr_factory_.GetWeakPtr();
++  while (weak_this) {
++    ReadyAction action;
++    {
++      auto it = weak_this->ready_actions_.find(extension_id);
++      if (it == weak_this->ready_actions_.end() ||
++          it->second.generation != generation) {
++        return;
++      }
++      ReadyQueue& actions = it->second.actions;
++      if (actions.empty()) {
++        weak_this->ready_actions_.erase(it);
++        return;
++      }
++      action = std::move(actions.front());
++      actions.pop();
++    }
++    std::move(action).Run(extension_id);
++  }
++#else
+   ReadyQueue& extension_ready_queue = ready_actions_[extension_id];
+   while (!extension_ready_queue.empty()) {
+     std::move(extension_ready_queue.front()).Run(extension_id);
+     extension_ready_queue.pop();
+   }
+   ready_actions_.erase(extension_id);
++#endif
+ }
+ 
+ void AlarmManager::SetNextPollTime(const base::Time& time) {
+@@ -473,7 +566,11 @@
+   if (it == ready_actions_.end()) {
+     std::move(action).Run(extension_id);
+   } else {
++#if BUILDFLAG(IS_ANDROID)
++    it->second.actions.push(std::move(action));
++#else
+     it->second.push(std::move(action));
++#endif
+   }
+ }
+ 
+@@ -482,19 +579,37 @@
+   StateStore* storage = ExtensionSystem::Get(browser_context_)->state_store();
+   if (storage) {
+     bool is_unpacked = Manifest::IsUnpackedLocation(extension->location());
++#if BUILDFLAG(IS_ANDROID)
++    auto it =
++        ready_actions_.insert_or_assign(extension->id(), ReadyState()).first;
++#else
+     ready_actions_.insert(ReadyMap::value_type(extension->id(), ReadyQueue()));
++#endif
+     base::TimeDelta min_delay = alarms_api_constants::GetMinimumDelay(
+         is_unpacked, extension->manifest_version());
++#if BUILDFLAG(IS_ANDROID)
++    storage->GetExtensionValue(
++        extension->id(), kRegisteredAlarms,
++        base::BindOnce(&AlarmManager::ReadFromStorageForActivation,
++                       weak_ptr_factory_.GetWeakPtr(), extension->id(),
++                       min_delay, it->second.generation));
++#else
+     storage->GetExtensionValue(extension->id(), kRegisteredAlarms,
+                                base::BindOnce(&AlarmManager::ReadFromStorage,
+                                               weak_ptr_factory_.GetWeakPtr(),
+                                               extension->id(), min_delay));
++#endif
+   }
+ }
+ 
+ void AlarmManager::OnExtensionUnloaded(content::BrowserContext* browser_context,
+                                        const Extension* extension,
+                                        UnloadedExtensionReason reason) {
++#if BUILDFLAG(IS_ANDROID)
++  // Retire the activation before releasing callbacks. Their bound extension
++  // functions are allowed to be destroyed without responding after unload.
++  auto cancelled_restore = ready_actions_.extract(extension->id());
++#endif
+   last_poll_times_.erase(extension->id());
+   RemoveAllAlarmsInternal(extension->id());
+ }

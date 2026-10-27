@@ -1,0 +1,107 @@
+diff --git a/chrome/android/javatests/src/org/chromium/chrome/browser/devtools/DevToolsActivityTest.java b/chrome/android/javatests/src/org/chromium/chrome/browser/devtools/DevToolsActivityTest.java
+--- a/chrome/android/javatests/src/org/chromium/chrome/browser/devtools/DevToolsActivityTest.java
++++ b/chrome/android/javatests/src/org/chromium/chrome/browser/devtools/DevToolsActivityTest.java
+@@ -4,6 +4,8 @@
+ 
+ package org.chromium.chrome.browser.devtools;
+ 
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertSame;
+ import static org.junit.Assert.assertTrue;
+ 
+ import static org.chromium.base.ThreadUtils.runOnUiThreadBlocking;
+@@ -20,9 +22,11 @@
+ 
+ import org.chromium.base.test.util.Batch;
+ import org.chromium.base.test.util.CriteriaHelper;
++import org.chromium.base.test.util.Features.DisableFeatures;
+ import org.chromium.base.test.util.Features.EnableFeatures;
+ import org.chromium.chrome.browser.profiles.Profile;
+ import org.chromium.chrome.browser.tab.Tab;
++import org.chromium.chrome.browser.tab.TabLaunchType;
+ import org.chromium.chrome.browser.tabmodel.TabClosureParams;
+ import org.chromium.chrome.browser.tabmodel.TabModel;
+ import org.chromium.chrome.test.ChromeJUnit4ClassRunner;
+@@ -30,6 +34,7 @@
+ import org.chromium.chrome.test.transit.FreshCtaTransitTestRule;
+ import org.chromium.chrome.test.util.ActivityTestUtils;
+ import org.chromium.content_public.browser.ContentFeatureList;
++import org.chromium.content_public.browser.LoadUrlParams;
+ import org.chromium.content_public.browser.WebContents;
+ 
+ /** This class tests the functionality of the {@link DevToolsActivity}. */
+@@ -53,6 +58,40 @@
+     public void testOpenDevTools() {
+         TabModel tabModel = mTestRule.getActivity().getCurrentTabModel();
+         Tab inspectedTab = tabModel.getCurrentTabSupplier().get();
++        checkDevToolsProfileAndClose(tabModel, inspectedTab);
++    }
++
++    @Test
++    @MediumTest
++    public void testOpenIncognitoDevToolsRetainsExactProfile() {
++        Tab inspectedTab =
++                runOnUiThreadBlocking(
++                        () ->
++                                mTestRule
++                                        .getActivity()
++                                        .getTabCreator(true)
++                                        .createNewTab(
++                                                new LoadUrlParams("about:blank"),
++                                                TabLaunchType.FROM_CHROME_UI,
++                                                null));
++        assertTrue(inspectedTab.getProfile().isOffTheRecord());
++        checkDevToolsProfileAndClose(
++                mTestRule.getActivity().getTabModelSelector().getModel(true), inspectedTab);
++    }
++
++    @Test
++    @MediumTest
++    @DisableFeatures(ContentFeatureList.ANDROID_DEV_TOOLS_FRONTEND)
++    public void testFrontendDisableStillBlocksUserEntry() {
++        Tab tab = mTestRule.getActivity().getCurrentTabModel().getCurrentTabSupplier().get();
++        assertFalse(
++                runOnUiThreadBlocking(
++                        () ->
++                                DevToolsWindowAndroid.isDevToolsAllowedFor(
++                                        tab.getProfile(), tab.getWebContents())));
++    }
++
++    private void checkDevToolsProfileAndClose(TabModel tabModel, Tab inspectedTab) {
+         Profile profile = inspectedTab.getProfile();
+         WebContents inspectedContents = inspectedTab.getWebContents();
+         assertTrue(
+@@ -72,6 +111,33 @@
+                                                 DevToolsWindowAndroid.openDevTools(
+                                                         inspectedContents)));
+ 
++        CriteriaHelper.pollUiThread(
++                () -> {
++                    Tab frontend = activity.getCurrentTabModel().getCurrentTabSupplier().get();
++                    return frontend != null && "devtools".equals(frontend.getUrl().getScheme());
++                },
++                "DevTools frontend was not attached.");
++        runOnUiThreadBlocking(
++                () -> {
++                    assertSame(profile, activity.getCurrentTabModel().getProfile());
++                    assertSame(
++                            profile,
++                            activity.getCurrentTabModel()
++                                    .getCurrentTabSupplier()
++                                    .get()
++                                    .getProfile());
++                    assertSame(
++                            profile.getOriginalProfile(),
++                            activity.getProfileProviderSupplier().get().getOriginalProfile());
++                    if (profile.isOffTheRecord()) {
++                        assertSame(
++                                profile,
++                                activity.getProfileProviderSupplier()
++                                        .get()
++                                        .getOffTheRecordProfile());
++                    }
++                });
++
+         // DevToolsActivity gets closed when the inspected tab closes.
+         runOnUiThreadBlocking(
+                 () -> {

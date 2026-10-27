@@ -1,0 +1,122 @@
+diff --git a/chrome/android/java/src/org/chromium/chrome/browser/media/MediaCapturePickerManagerBridge.java b/chrome/android/java/src/org/chromium/chrome/browser/media/MediaCapturePickerManagerBridge.java
+--- a/chrome/android/java/src/org/chromium/chrome/browser/media/MediaCapturePickerManagerBridge.java
++++ b/chrome/android/java/src/org/chromium/chrome/browser/media/MediaCapturePickerManagerBridge.java
+@@ -12,6 +12,10 @@
+ import org.chromium.blink.mojom.PreferredDisplaySurface;
+ import org.chromium.blink.mojom.WindowAudioPreference;
+ import org.chromium.build.annotations.NullMarked;
++import org.chromium.build.annotations.Nullable;
++import org.chromium.content_public.browser.media.capture.ScreenCapture;
++import org.chromium.content_public.browser.RenderFrameHost;
++import org.chromium.ui.base.WindowAndroid;
+ import org.chromium.content_public.browser.WebContents;
+ 
+ /** Glue for the media capture picker dialog UI code and communication with the native backend. */
+@@ -20,6 +24,8 @@
+     private static final String TAG = "MediaCapture";
+ 
+     private long mNativeMediaCapturePickerManagerBridge;
++    private @Nullable Runnable mDismissPicker;
++    private int mCaptureId;
+ 
+     /**
+      * Constructor, taking a pointer to the native instance.
+@@ -51,6 +57,8 @@
+     @CalledByNative
+     public void showDialog(
+             @JniType("content::WebContents*") WebContents webContents,
++            @Nullable WindowAndroid parentWindow,
++            @JniType("content::RenderFrameHost*") RenderFrameHost requestFrame,
+             @JniType("std::u16string") String appName,
+             @JniType("std::u16string") String targetName,
+             boolean requestAudio,
+@@ -60,7 +68,9 @@
+             boolean captureThisTab,
+             boolean excludeSelfBrowserSurface,
+             boolean excludeMonitorTypeSurfaces,
+-            @AllowedScreenCaptureLevel int allowedCaptureLevel) {
++            @AllowedScreenCaptureLevel int allowedCaptureLevel,
++            int allowedSourceTypes,
++            int captureId) {
+         Log.d(TAG, "PickerManagerBridge show dialog");
+         MediaCapturePickerManager.Params params =
+                 new MediaCapturePickerManager.Params(
+@@ -75,20 +85,31 @@
+                         excludeSelfBrowserSurface,
+                         excludeMonitorTypeSurfaces,
+                         allowedCaptureLevel);
+-        MediaCapturePickerManager.showDialog(params, /* delegate= */ this);
++        params.allowedSourceTypes = allowedSourceTypes;
++        params.captureId = captureId;
++        params.parentWindow = parentWindow;
++        params.requestFrame = requestFrame;
++        mCaptureId = captureId;
++        Runnable dismiss = MediaCapturePickerManager.showDialog(params, /* delegate= */ this);
++        if (mNativeMediaCapturePickerManagerBridge == 0) dismiss.run();
++        else mDismissPicker = dismiss;
+     }
+ 
+     @CalledByNative
+-    private void destroy() {
++    private void destroy(boolean keepCapture) {
++        if (mNativeMediaCapturePickerManagerBridge == 0) return;
+         mNativeMediaCapturePickerManagerBridge = 0;
++        if (mDismissPicker != null) {
++            mDismissPicker.run();
++            mDismissPicker = null;
++        }
++        if (!keepCapture) ScreenCapture.cancelPick(mCaptureId);
+     }
+ 
+     @Override
+     public void onPickTab(WebContents webContents, boolean audioShare) {
+         Log.d(TAG, "PickerManagerBridge on pick tab");
+-        // We know `mNativeMediaCapturePickerManagerBridge` is non-zero because
+-        // `destroy` will only be called after the dialog is dismissed.
+-        assert mNativeMediaCapturePickerManagerBridge != 0;
++        if (mNativeMediaCapturePickerManagerBridge == 0) return;
+         MediaCapturePickerManagerBridgeJni.get()
+                 .onPickTab(mNativeMediaCapturePickerManagerBridge, webContents, audioShare);
+     }
+@@ -96,9 +117,7 @@
+     @Override
+     public void onPickWindow() {
+         Log.d(TAG, "PickerManagerBridge on pick window");
+-        // We know `mNativeMediaCapturePickerManagerBridge` is non-zero because
+-        // `destroy` will only be called after the dialog is dismissed.
+-        assert mNativeMediaCapturePickerManagerBridge != 0;
++        if (mNativeMediaCapturePickerManagerBridge == 0) return;
+         MediaCapturePickerManagerBridgeJni.get()
+                 .onPickWindow(mNativeMediaCapturePickerManagerBridge);
+     }
+@@ -106,9 +125,7 @@
+     @Override
+     public void onPickScreen() {
+         Log.d(TAG, "PickerManagerBridge on pick screen");
+-        // We know `mNativeMediaCapturePickerManagerBridge` is non-zero because
+-        // `destroy` will only be called after the dialog is dismissed.
+-        assert mNativeMediaCapturePickerManagerBridge != 0;
++        if (mNativeMediaCapturePickerManagerBridge == 0) return;
+         MediaCapturePickerManagerBridgeJni.get()
+                 .onPickScreen(mNativeMediaCapturePickerManagerBridge);
+     }
+@@ -116,17 +133,13 @@
+     @Override
+     public void onCancel() {
+         Log.d(TAG, "PickerManagerBridge on cancel");
+-        // We know `mNativeMediaCapturePickerManagerBridge` is non-zero because
+-        // `destroy` will only be called after the dialog is dismissed.
+-        assert mNativeMediaCapturePickerManagerBridge != 0;
++        if (mNativeMediaCapturePickerManagerBridge == 0) return;
+         MediaCapturePickerManagerBridgeJni.get().onCancel(mNativeMediaCapturePickerManagerBridge);
+     }
+ 
+     @Override
+     public boolean shouldFilterWebContents(WebContents webContents) {
+-        // We know `mNativeMediaCapturePickerManagerBridge` is non-zero because
+-        // `destroy` will only be called after the dialog is dismissed.
+-        assert mNativeMediaCapturePickerManagerBridge != 0;
++        if (mNativeMediaCapturePickerManagerBridge == 0) return true;
+         return MediaCapturePickerManagerBridgeJni.get()
+                 .shouldFilterWebContents(mNativeMediaCapturePickerManagerBridge, webContents);
+     }

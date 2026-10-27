@@ -1,0 +1,85 @@
+diff --git a/chrome/browser/ui/side_panel/test/android/java/src/org/chromium/chrome/browser/ui/side_panel/test/SidePanelCoordinatorAndroidBrowserTestSupport.java b/chrome/browser/ui/side_panel/test/android/java/src/org/chromium/chrome/browser/ui/side_panel/test/SidePanelCoordinatorAndroidBrowserTestSupport.java
+--- a/chrome/browser/ui/side_panel/test/android/java/src/org/chromium/chrome/browser/ui/side_panel/test/SidePanelCoordinatorAndroidBrowserTestSupport.java
++++ b/chrome/browser/ui/side_panel/test/android/java/src/org/chromium/chrome/browser/ui/side_panel/test/SidePanelCoordinatorAndroidBrowserTestSupport.java
+@@ -25,10 +25,14 @@
+ import org.chromium.components.thinwebview.ThinWebViewAttachParams;
+ import org.chromium.components.thinwebview.ThinWebViewConstraints;
+ import org.chromium.components.thinwebview.ThinWebViewFactory;
++import org.chromium.components.thinwebview.internal.ThinWebViewImpl;
+ import org.chromium.content_public.browser.LoadUrlParams;
+ import org.chromium.content_public.browser.WebContents;
+ import org.chromium.ui.base.ViewAndroidDelegate;
+ import org.chromium.ui.base.WindowAndroid;
++
++import java.util.ArrayList;
++import java.util.List;
+ 
+ /** Supports {@code side_panel_coordinator_android_browsertest.cc}. */
+ @NullMarked
+@@ -36,7 +40,26 @@
+     private static final String TEST_URL =
+             "data:text/html,<html><body><h1>Test Web Page In Side Panel</h1></body></html>";
+ 
++    private static boolean sHoldFrameCallbacks;
++    private static final List<Runnable> sHeldFrameCallbacks = new ArrayList<>();
++
+     private SidePanelCoordinatorAndroidBrowserTestSupport() {}
++
++    @CalledByNative
++    private static void holdFrameCallbacks() {
++        assert !sHoldFrameCallbacks;
++        assert sHeldFrameCallbacks.isEmpty();
++        sHoldFrameCallbacks = true;
++    }
++
++    @CalledByNative
++    private static int releaseFrameCallbacks() {
++        sHoldFrameCallbacks = false;
++        List<Runnable> callbacks = new ArrayList<>(sHeldFrameCallbacks);
++        sHeldFrameCallbacks.clear();
++        for (Runnable callback : callbacks) callback.run();
++        return callbacks.size();
++    }
+ 
+     @CalledByNative
+     private static View createTestView(
+@@ -77,12 +100,33 @@
+         var intentRequestTracker = windowAndroid.getIntentRequestTracker();
+         assert intentRequestTracker != null;
+ 
+-        ThinWebView thinWebView =
+-                ThinWebViewFactory.create(
+-                        context,
+-                        new ThinWebViewConstraints(),
+-                        intentRequestTracker,
+-                        /* enablePermissionRequests= */ false);
++        ThinWebView thinWebView;
++        if (sHoldFrameCallbacks) {
++            // Keep the real view and compositor; hold only the notification so
++            // closing before the first frame is deterministic on every device.
++            thinWebView =
++                    new ThinWebViewImpl(
++                            context,
++                            new ThinWebViewConstraints(),
++                            intentRequestTracker,
++                            /* enablePermissionRequests= */ false) {
++                        @Override
++                        public void runOnNextFrame(Runnable runnable) {
++                            if (sHoldFrameCallbacks) {
++                                sHeldFrameCallbacks.add(runnable);
++                            } else {
++                                super.runOnNextFrame(runnable);
++                            }
++                        }
++                    };
++        } else {
++            thinWebView =
++                    ThinWebViewFactory.create(
++                            context,
++                            new ThinWebViewConstraints(),
++                            intentRequestTracker,
++                            /* enablePermissionRequests= */ false);
++        }
+         thinWebView.attachWebContents(
+                 webContents,
+                 contentView,

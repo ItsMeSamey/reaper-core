@@ -1,0 +1,126 @@
+diff --git a/extensions/browser/updater/update_service_unittest.cc b/extensions/browser/updater/update_service_unittest.cc
+--- a/extensions/browser/updater/update_service_unittest.cc
++++ b/extensions/browser/updater/update_service_unittest.cc
+@@ -26,6 +26,7 @@
+ #include "base/test/scoped_feature_list.h"
+ #include "base/time/time.h"
+ #include "base/values.h"
++#include "build/build_config.h"
+ #include "components/crx_file/id_util.h"
+ #include "components/update_client/crx_update_item.h"
+ #include "components/update_client/update_client.h"
+@@ -41,7 +42,9 @@
+ #include "extensions/browser/test_extensions_browser_client.h"
+ #include "extensions/browser/updater/extension_downloader.h"
+ #include "extensions/browser/updater/extension_update_data.h"
++#if !BUILDFLAG(IS_ANDROID)
+ #include "extensions/browser/updater/uninstall_ping_sender.h"
++#endif  // !BUILDFLAG(IS_ANDROID)
+ #include "extensions/common/extension_builder.h"
+ #include "extensions/common/extension_features.h"
+ #include "extensions/common/extension_id.h"
+@@ -65,6 +68,7 @@
+     return &data_;
+   }
+
++#if !BUILDFLAG(IS_ANDROID)
+   // Used for tests that uninstall pings get requested properly.
+   struct UninstallPing {
+     std::string id;
+@@ -77,6 +81,7 @@
+   };
+   std::vector<UninstallPing>& uninstall_pings() { return uninstall_pings_; }
+
++#endif  // !BUILDFLAG(IS_ANDROID)
+   struct UpdateRequest {
+     std::vector<std::string> extension_ids;
+     CrxStateChangeCallback state_change_callback;
+@@ -136,12 +141,14 @@
+
+   bool Cancel(const std::string& id) override { return false; }
+
++#if !BUILDFLAG(IS_ANDROID)
+   void SendPing(const update_client::CrxComponent& crx_component,
+                 PingParams ping_params,
+                 update_client::Callback callback) override {
+     uninstall_pings_.emplace_back(crx_component.app_id, crx_component.version,
+                                   ping_params.extra_code1);
+   }
++#endif  // !BUILDFLAG(IS_ANDROID)
+
+   void CleanupStaleDownloads(base::Time older_than,
+                              base::OnceClosure callback) override {}
+@@ -222,7 +229,9 @@
+   }
+
+   std::vector<std::optional<update_client::CrxComponent>> data_;
++#if !BUILDFLAG(IS_ANDROID)
+   std::vector<UninstallPing> uninstall_pings_;
++#endif  // !BUILDFLAG(IS_ANDROID)
+   std::vector<raw_ptr<Observer, VectorExperimental>> observers_;
+
+   base::RepeatingClosure delay_update_;
+@@ -261,6 +270,7 @@
+
+ namespace {
+
++#if !BUILDFLAG(IS_ANDROID)
+ // A global variable for controlling whether uninstalls should cause uninstall
+ // pings to be sent.
+ UninstallPingSender::FilterResult g_should_ping =
+@@ -272,6 +282,7 @@
+   return g_should_ping;
+ }
+
++#endif  // !BUILDFLAG(IS_ANDROID)
+ // A fake ExtensionSystem that lets us intercept calls to install new
+ // versions of an extension.
+ class FakeExtensionSystem : public MockExtensionSystem {
+@@ -533,6 +544,39 @@
+                         /* provide_update_found_callback */ false);
+ }
+
++#if BUILDFLAG(IS_ANDROID)
++TEST_F(UpdateServiceTest, ShutdownCancelsPendingStateCallbacks) {
++  const auto extension =
++      ExtensionBuilder("Pending update")
++          .SetVersion("1.0")
++          .SetID(crx_file::id_util::GenerateId("pending-update"))
++          .Build();
++  ASSERT_TRUE(
++      ExtensionRegistry::Get(browser_context())->AddEnabled(extension));
++
++  ExtensionUpdateCheckParams params;
++  params.update_info[extension->id()] = ExtensionUpdateData();
++  bool found_update = false;
++  bool completed = false;
++  StartUpdateCheck(true, params, found_update, completed);
++  ASSERT_EQ(1, update_client()->num_update_requests());
++  const auto& state_callback =
++      update_client()->update_request(0).state_change_callback;
++  ASSERT_FALSE(state_callback.is_null());
++  ASSERT_FALSE(state_callback.IsCancelled());
++
++  update_service()->Shutdown();
++
++  // Inspect cancellation without invoking any retired callback.
++  EXPECT_TRUE(state_callback.IsCancelled());
++  EXPECT_FALSE(found_update);
++  EXPECT_FALSE(completed);
++  update_service()->Shutdown();
++  EXPECT_TRUE(state_callback.IsCancelled());
++}
++#endif
++
++#if !BUILDFLAG(IS_ANDROID)
+ TEST_F(UpdateServiceTest, UninstallPings) {
+   UninstallPingSender sender(ExtensionRegistry::Get(browser_context()),
+                              base::BindRepeating(&ShouldPing));
+@@ -590,6 +634,7 @@
+     pings.clear();
+   }
+ }
++#endif  // !BUILDFLAG(IS_ANDROID)
+
+ TEST_F(UpdateServiceTest, CheckOmahaMalwareAttributes) {
+   ExtensionId extension_id = crx_file::id_util::GenerateId("id");

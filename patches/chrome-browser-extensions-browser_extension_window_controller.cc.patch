@@ -1,0 +1,143 @@
+diff --git a/chrome/browser/extensions/browser_extension_window_controller.cc b/chrome/browser/extensions/browser_extension_window_controller.cc
+index b48c0452f31bf4e0456aa27af252a58ec10264f8..f2d3b1ed9afd51750f393cb5e88fb97f178aaaf5 100644
+--- a/chrome/browser/extensions/browser_extension_window_controller.cc
++++ b/chrome/browser/extensions/browser_extension_window_controller.cc
+@@ -35,7 +35,11 @@
+ // TODO(http://crbug.com/453008083): Stop including
+ // "android/chrome_feature_list.h".
+ #if BUILDFLAG(IS_ANDROID)
++#include "base/functional/bind.h"
++#include "base/memory/scoped_refptr.h"
+ #include "chrome/browser/flags/android/chrome_feature_list.h"
++#include "chrome/browser/ui/browser_window/public/profile_browser_collection.h"
++#include "extensions/browser/extension_registry.h"
+ #endif
+ 
+ #if !BUILDFLAG(IS_ANDROID)
+@@ -144,7 +148,10 @@
+     bool is_fullscreen,
+     const GURL& extension_url) const {
+ #if BUILDFLAG(IS_ANDROID)
+-  NOTIMPLEMENTED();
++  if (window()->IsFullscreen() != is_fullscreen) {
++    SetAndroidBrowserWindowFullscreen(browser_.get(), is_fullscreen,
++                                      extension_url.spec());
++  }
+ #else
+   if (window()->IsFullscreen() != is_fullscreen) {
+     ExclusiveAccessManager::From(&browser_.get())
+@@ -255,26 +262,12 @@
+     content::WebContents* web_contents = tab_list_->GetTab(i)->GetContents();
+ 
+ #if BUILDFLAG(IS_ANDROID)
+-    // TODO(http://crbug.com/453008083): Remove feature flags
+-    // kLoadAllTabsAtStartup, and kWebContentsDiscard when both of them are
+-    // enabled by default.
+-    //
+-    // On Android, it was possible for tabs to have null WebContents, so we
+-    // implemented a temporary workaround that ignored such tabs to avoid
+-    // crashes. The workaround introduced a bug: tabs with null WebContents were
+-    // visible on the tab strip, but they couldn't be seen by extensions.
+-    //
+-    // When feature flags kLoadAllTabsAtStartup, and kWebContentsDiscard are
+-    // enabled, all tabs will create a WebContents without a renderer during
+-    // initialization, which will properly fix the issue above. As of Feb 2026,
+-    // the kLoadAllTabsAtStartup is not enabled by default on non-desktop
+-    // Android. WebContentsDiscard is enabled by default on all Android, but the
+-    // flag still remains available on other platforms.
+-    bool is_non_null_web_contents_guaranteed =
+-        base::FeatureList::IsEnabled(chrome::android::kLoadAllTabsAtStartup) &&
+-        base::FeatureList::IsEnabled(features::kWebContentsDiscard);
+-
+-    if (!is_non_null_web_contents_guaranteed && web_contents == nullptr) {
++    if (!web_contents) {
++      auto& tab = *tab_list_->GetTab(i);
++      auto scrub = ExtensionTabUtil::GetScrubTabBehavior(extension, context, tab);
++      tab_list.Append(ExtensionTabUtil::CreateTabObject(
++                          tab, scrub, extension, &tab_list_.get(), i)
++                          .ToValue());
+       continue;
+     }
+ #else
+@@ -299,14 +292,79 @@
+   DCHECK(OptionsPageInfo::HasOptionsPage(extension));
+ 
+ #if BUILDFLAG(IS_ANDROID)
+-  // On Android, we just open the options page in a new tab.
++  BrowserWindowInterface* browser_to_use = GetBrowserWindowInterface();
++  const bool redirect_to_regular =
++      profile()->IsOffTheRecord() && !IncognitoInfo::IsSplitMode(extension);
++  if (redirect_to_regular) {
++    // Spanning extensions cannot load a top-level options page in Incognito.
++    // Prefer the regular model in this activity before another regular window.
++    Profile* original_profile = profile()->GetOriginalProfile();
++    if (original_profile->ShutdownStarted()) {
++      return false;
++    }
++    auto* collection = ProfileBrowserCollection::GetForProfile(original_profile);
++    browser_to_use = collection ? collection->FindBrowserWithWindow(
++                                      browser_->GetWindow()->GetNativeWindow())
++                                : nullptr;
++    if (browser_to_use &&
++        (browser_to_use->GetType() != BrowserWindowInterface::TYPE_NORMAL ||
++         browser_to_use->IsDeleteScheduled())) {
++      browser_to_use = nullptr;
++    }
++    if (!browser_to_use && collection) {
++      browser_to_use = collection->FindTabbedBrowser();
++    }
++    if (!browser_to_use) {
++      if (GetBrowserWindowCreationStatusForProfile(*original_profile) !=
++          BrowserWindowInterface::CreationStatus::kOk) {
++        return false;
++      }
++      // The caller and its Incognito window may disappear while the activity
++      // is created. Retain only the request data and a weak original profile.
++      CreateBrowserWindow(
++          BrowserWindowCreateParams(*original_profile,
++                                    /*from_user_gesture=*/true),
++          base::BindOnce(
++              [](base::WeakPtr<Profile> original_profile,
++                 scoped_refptr<const Extension> extension, GURL url,
++                 bool open_in_tab, BrowserWindowInterface* created_browser) {
++                if (!original_profile || original_profile->ShutdownStarted() ||
++                    !created_browser || created_browser->IsDeleteScheduled() ||
++                    created_browser->GetProfile() != original_profile.get()) {
++                  return;
++                }
++                // A disabled, uninstalled, or replaced extension no longer
++                // owns this pending options request.
++                auto* registry = ExtensionRegistry::Get(original_profile.get());
++                if (registry->enabled_extensions().GetByID(extension->id()) !=
++                    extension.get()) {
++                  return;
++                }
++                auto* controller =
++                    BrowserExtensionWindowController::From(created_browser);
++                if (controller) {
++                  controller->OpenOptionsPage(extension.get(), url, open_in_tab);
++                }
++              },
++              original_profile->GetWeakPtr(), base::WrapRefCounted(extension),
++              url, open_in_tab));
++      return true;
++    }
++  }
++
+   content::OpenURLParams params =
+       content::OpenURLParams::CreateBrowserInitiated(
+           url,
+           open_in_tab ? WindowOpenDisposition::NEW_FOREGROUND_TAB
+                       : WindowOpenDisposition::CURRENT_TAB,
+           ui::PAGE_TRANSITION_LINK);
+-  browser_->OpenURL(params, /*navigation_handle_callback=*/{});
++  auto weak_browser = browser_to_use->GetWeakPtr();
++  browser_to_use->OpenURL(params, /*navigation_handle_callback=*/{});
++  // Opening in another regular task must also bring its options tab forward.
++  // Navigation can synchronously destroy windows through tab observers.
++  if (redirect_to_regular && weak_browser && !weak_browser->IsDeleteScheduled()) {
++    weak_browser->GetWindow()->Activate();
++  }
+ #else
+   // Force the options page to open in non-OTR window if the extension is not
+   // running in split mode, because it won't be able to save settings from OTR.

@@ -1,0 +1,51 @@
+diff --git a/chrome/android/javatests/src/org/chromium/chrome/browser/tabmodel/ChromeTabCreatorTest.java b/chrome/android/javatests/src/org/chromium/chrome/browser/tabmodel/ChromeTabCreatorTest.java
+--- a/chrome/android/javatests/src/org/chromium/chrome/browser/tabmodel/ChromeTabCreatorTest.java
++++ b/chrome/android/javatests/src/org/chromium/chrome/browser/tabmodel/ChromeTabCreatorTest.java
+@@ -87,6 +87,47 @@
+         AsyncTabParamsManagerSingleton.getInstance().remove(Tab.INVALID_TAB_ID);
+     }
+ 
++    @Test
++    @MediumTest
++    @Feature({"Browser"})
++    @DisableIf.Device(DeviceFormFactor.DESKTOP)
++    public void testContainerUiBackClosesUsingNormalSelectionWithoutCopyingHistory() {
++        Tab source = mPage.loadedTabElement.value();
++        String url = mTestServer.getURL(TEST_PATH);
++        Tab created = ThreadUtils.runOnUiThreadBlocking(() -> {
++            ChromeTabbedActivity activity = mActivityTestRule.getActivity();
++            ChromeTabCreator creator = (ChromeTabCreator) activity.getCurrentTabCreator();
++            Tab unrelated = creator.createNewTab(
++                    new LoadUrlParams(url), TabLaunchType.FROM_LONGPRESS_BACKGROUND, null);
++            assertNotNull(unrelated);
++            assertEquals(source, activity.getActivityTab());
++            return creator.createNewTabInContainer(new LoadUrlParams(url), "", source);
++        });
++        assertNotNull(created);
++        ChromeTabUtils.waitForTabPageLoaded(created, url);
++        AtomicReference<Tab> expectedNext = new AtomicReference<>();
++        ThreadUtils.runOnUiThreadBlocking(() -> {
++            ChromeTabbedActivity activity = mActivityTestRule.getActivity();
++            TabModel model = activity.getCurrentTabModel();
++            assertTrue(Math.abs(model.indexOf(created) - model.indexOf(source)) > 1);
++            assertEquals(source.getId(), created.getParentId());
++            assertEquals("", created.getContainerId());
++            assertNotEquals(source.getWebContents(), created.getWebContents());
++            assertFalse(created.canGoBack());
++            assertTrue(activity.backShouldCloseTab(created));
++            expectedNext.set(model.getNextTabIfClosed(created.getId(), false));
++            assertNotNull(expectedNext.get());
++            assertNotEquals(created, expectedNext.get());
++            activity.getOnBackPressedDispatcher().onBackPressed();
++        });
++        CriteriaHelper.pollUiThread(() ->
++                mActivityTestRule.getActivity().getActivityTab() == expectedNext.get()
++                        && mActivityTestRule.getActivity().getCurrentTabModel()
++                                .getTabById(created.getId()) == null
++                        && mActivityTestRule.getActivity().hasWindowFocus());
++        ThreadUtils.runOnUiThreadBlocking(() -> assertFalse(source.isClosing()));
++    }
++
+     /** Verify that tabs opened in background on regular devices are loaded eagerly. */
+     @Test
+     @MediumTest

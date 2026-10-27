@@ -9,6 +9,9 @@
 // keeps the on-device AI embedder from being created when the toggle is off.
 // Applied at service creation, so a toggle change takes effect on restart.
 
+#include "build/build_config.h"
+
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/local_ai/buildflags/buildflags.h"
 #include "chrome/browser/history_embeddings/history_embeddings_utils.h"
 #include "chrome/browser/profiles/profile.h"
@@ -37,6 +40,7 @@ bool IsHistoryEmbeddingsFeatureEnabled(content::BrowserContext* context) {
 #define IsHistoryEmbeddingsFeatureEnabled() \
   IsHistoryEmbeddingsFeatureEnabled(context)
 
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include <chrome/browser/passage_embeddings/passage_embedder_model_observer_factory.cc>
 
 #undef IsHistoryEmbeddingsFeatureEnabled

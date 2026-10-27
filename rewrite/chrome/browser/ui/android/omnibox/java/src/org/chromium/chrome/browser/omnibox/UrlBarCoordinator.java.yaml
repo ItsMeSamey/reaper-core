@@ -1,0 +1,583 @@
+substitutions:
+- description: 'Reaper Android: remove optional AI hooks and preserve ordinary input behavior.'
+  regex:
+    re_pattern: '\.UrlBarDelegate;\
+
+      import\ org\.chromium\.chrome\.browser\.ui\.theme\.BrandedColorScheme;\
+
+      import\ org\.chromium\.components\.omnibox\.OmniboxFeatures;\
+
+      import\ org\.chromium\.components\.omnibox\.TextSelection;\
+
+      import\ org\.chromium\.ui\.KeyboardVisibilityDelegate;\
+
+      import\ org\.chromium\.ui\.modelutil\.PropertyModel;\
+
+      import\ org\.chromium\.ui\.modelutil\.PropertyModelChangeProcessor;\
+
+      import\ org\.chromium\.ui\.widget\.ViewRectProvider;\
+
+      \
+
+      import\ java\.lang\.annotation\.ElementType;\
+
+      import\ java\.lang\.annotation\.Retention;\
+
+      import\ java\.lang\.annotation\.RetentionPolicy;\
+
+      import\ java\.lang\.annotation\.Target;\
+
+      \
+
+      /\*\*\ Coordinates\ the\ interactions\ with\ the\ UrlBar\ text\ component\.\ \*/\
+
+      @NullMarked\
+
+      public\ class\ UrlBarCoordinator\
+
+      \ \ \ \ \ \ \ \ implements\ UrlBarEditingTextStateProvider,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ UrlFocusChangeListener,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ KeyboardVisibilityDelegate\.KeyboardVisibilityListener\ \{\
+
+      \
+
+      \ \ \ \ @IntDef\(\{\
+
+      \ \ \ \ \ \ \ \ KeyboardState\.HIDDEN,\
+
+      \ \ \ \ \ \ \ \ KeyboardState\.HIDING,\
+
+      \ \ \ \ \ \ \ \ KeyboardState\.SHOWING,\
+
+      \ \ \ \ \ \ \ \ KeyboardState\.SHOWN\
+
+      \ \ \ \ \}\)\
+
+      \ \ \ \ @Retention\(RetentionPolicy\.SOURCE\)\
+
+      \ \ \ \ @Target\(ElementType\.TYPE_USE\)\
+
+      \ \ \ \ @interface\ KeyboardState\ \{\
+
+      \ \ \ \ \ \ \ \ int\ HIDDEN\ =\ 0;\
+
+      \ \ \ \ \ \ \ \ int\ HIDING\ =\ 1;\
+
+      \ \ \ \ \ \ \ \ int\ SHOWING\ =\ 2;\
+
+      \ \ \ \ \ \ \ \ int\ SHOWN\ =\ 3;\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ private\ static\ final\ int\ KEYBOARD_HIDE_DELAY_MS\ =\ 150;\
+
+      \ \ \ \ private\ static\ final\ int\ KEYBOARD_DEBOUNCE_DELAY_MS\ =\ 150;\
+
+      \
+
+      \ \ \ \ private\ final\ UrlBar\ mUrlBar;\
+
+      \ \ \ \ private\ final\ UrlBarMediator\ mMediator;\
+
+      \ \ \ \ private\ final\ PropertyModel\ mModel;\
+
+      \ \ \ \ private\ final\ KeyboardVisibilityDelegate\ mKeyboardVisibilityDelegate;\
+
+      \ \ \ \ private\ final\ Callback<UrlBarFocusChangeInfo>\ mFocusChangeCallback;\
+
+      \ \ \ \ private\ final\ Callback<Boolean>\ mTextWrappedCallback;\
+
+      \ \ \ \ private\ final\ ObserverList<Callback<Boolean>>\ mTextWrapListeners\ =\ new\ ObserverList<>\(\);\
+
+      \ \ \ \ private\ final\ Runnable\ mKeyboardTransitionRunnable\ =\ this::resolveKeyboardTransition;\
+
+      \ \ \ \ private\ @Nullable\ Runnable\ mKeyboardHideTask;\
+
+      \ \ \ \ private\ @KeyboardState\ int\ mKeyboardState\ =\ KeyboardState\.HIDDEN;\
+
+      \ \ \ \ private\ boolean\ mHasFocus;\
+
+      \ \ \ \ private\ boolean\ mTextIsWrapped;\
+
+      \
+
+      \ \ \ \ /\*\*\
+
+      \ \ \ \ \ \*\ Constructs\ a\ coordinator\ for\ the\ given\ UrlBar\ view\.\
+
+      \ \ \ \ \ \*\
+
+      \ \ \ \ \ \*\ @param\ context\ The\ current\ Android''s\ context\.\
+
+      \ \ \ \ \ \*\ @param\ urlBar\ The\ \{@link\ UrlBar\}\ view\ this\ coordinator\ encapsulates\.\
+
+      \ \ \ \ \ \*\ @param\ actionModeCallback\ Callback\ to\ handle\ changes\ in\ contextual\ action\
+      Modes\.\
+
+      \ \ \ \ \ \*\ @param\ focusChangeCallback\ The\ callback\ that\ will\ be\ notified\ when\ focus\
+      changes\ on\ the\
+
+      \ \ \ \ \ \*\ \ \ \ \ UrlBar\.\
+
+      \ \ \ \ \ \*\ @param\ delegate\ The\ primary\ delegate\ for\ the\ UrlBar\ view\.\
+
+      \ \ \ \ \ \*\ @param\ keyboardVisibilityDelegate\ Delegate\ that\ allows\ querying\ and\ changing\
+      the\ keyboard''s\
+
+      \ \ \ \ \ \*\ \ \ \ \ visibility\.\
+
+      \ \ \ \ \ \*\ @param\ isIncognitoBranded\ Whether\ incognito\ mode\ is\ initially\ enabled\.\ This\
+      can\ later\ be\
+
+      \ \ \ \ \ \*\ \ \ \ \ changed\ using\ \{@link\ \#setIncognitoColorsEnabled\(boolean\)\}\.\
+
+      \ \ \ \ \ \*\ @param\ onLongClickListener\ The\ listener\ for\ long\ clicks\.\
+
+      \ \ \ \ \ \*\ @param\ textChangeListener\ The\ listener\ for\ text\ changes\.\ Invoked\ every\ time\
+      omnibox\ content\
+
+      \ \ \ \ \ \*\ \ \ \ \ changes\ and\ used\ for\ autocomplete\.\
+
+      \ \ \ \ \ \*\ @param\ richTextChangeListener\ The\ listener\ for\ rich\ text\ changes\.\ Invoked\
+      on\ each\ keypress\.\
+
+      \ \ \ \ \ \*\ \ \ \ \ Used\ for\ site\-search\ triggering\.\
+
+      \ \ \ \ \ \*\ @param\ keyDownListener\ The\ listener\ for\ key\ down\ events\.\
+
+      \ \ \ \ \ \*/\
+
+      \ \ \ \ public\ UrlBarCoordinator\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ Context\ context,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ UrlBar\ urlBar,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ ActionMode\.@Nullable\ Callback\ actionModeCallback,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ Callback<UrlBarFocusChangeInfo>\ focusChangeCallback,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ UrlBarDelegate\ delegate,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ KeyboardVisibilityDelegate\ keyboardVisibilityDelegate,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ boolean\ isIncognitoBranded,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ @Nullable\ OnLongClickListener\ onLongClickListener,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ @Nullable\ Callback<String>\ textChangeListener,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ @Nullable\ Callback<UrlBarTextChangeInfo>\ richTextChangeListener,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ @Nullable\ OnKeyListener\ keyDownListener\)\ \{\
+
+      \ \ \ \ \ \ \ \ mUrlBar\ =\ urlBar;\
+
+      \ \ \ \ \ \ \ \ mKeyboardVisibilityDelegate\ =\ keyboardVisibilityDelegate;\
+
+      \ \ \ \ \ \ \ \ mFocusChangeCallback\ =\ focusChangeCallback;\
+
+      \ \ \ \ \ \ \ \ mTextWrappedCallback\ =\ this::onTextWrappingChanged;\
+
+      \
+
+      \ \ \ \ \ \ \ \ mModel\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ new\ PropertyModel\.Builder\(UrlBarProperties\.ALL_KEYS\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \.with\(UrlBarProperties\.ACTION_MODE_CALLBACK,\
+      actionModeCallback\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \.with\(UrlBarProperties\.DELEGATE,\ delegate\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \.with\(UrlBarProperties\.INCOGNITO_COLORS_ENABLED,\
+      isIncognitoBranded\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \.with\(UrlBarProperties\.KEY_DOWN_LISTENER,\ keyDownListener\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \.with\(UrlBarProperties\.LONG_CLICK_LISTENER,\
+      onLongClickListener\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \.with\(UrlBarProperties\.TEXT_WRAPPED_CALLBACK,\
+      mTextWrappedCallback\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \.with\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ UrlBarProperties\.FOCUS_CHANGE_CALLBACK,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ this::onUrlFocusChangeInternal\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \.build\(\);\
+
+      \ \ \ \ \ \ \ \ PropertyModelChangeProcessor\.create\(mModel,\ urlBar,\ UrlBarViewBinder::bind\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ mMediator\ =\ new\ UrlBarMediator\(context,\ mModel,\ textChangeListener,\ richTextChangeListener\);\
+
+      \ \ \ \ \ \ \ \ mKeyboardState\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mKeyboardVisibilityDelegate\.isKeyboardShowing\(urlBar\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \?\ KeyboardState\.SHOWN\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ :\ KeyboardState\.HIDDEN;\
+
+      \ \ \ \ \ \ \ \ mKeyboardVisibilityDelegate\.addKeyboardVisibilityListener\(this\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ public\ void\ destroy\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ mMediator\.destroy\(\);\
+
+      \ \ \ \ \ \ \ \ mKeyboardVisibilityDelegate\.removeKeyboardVisibilityListener\(this\);\
+
+      \ \ \ \ \ \ \ \ if\ \(mKeyboardHideTask\ !=\ null\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mUrlBar\.removeCallbacks\(mKeyboardHideTask\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mKeyboardHideTask\ =\ null;\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ mUrlBar\.removeCallbacks\(mKeyboardTransitionRunnable\);\
+
+      \ \ \ \ \ \ \ \ mKeyboardState\ =\ KeyboardState\.HIDDEN;\
+
+      \ \ \ \ \ \ \ \ mUrlBar\.destroy\(\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ /\*\*\ Signals\ that\ the\ Omnibox\ input\ session\ has\ begun\.\ \*/\
+
+      \ \ \ \ public\ void\ beginInput\(FuseboxSessionState\ sessionState\)\ \{\
+
+      \ \ \ \ \ \ \ \ mMediator\.beginInput\(sessionState\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ /\*\*\ Signals\ that\ the\ Omnibox\ input\ session\ has\ ended\.\ \*/\
+
+      \ \ \ \ public\ void\ endInput\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ mMediator\.endInput\(\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ /\*\*\ Returns\ whether\ the\ url\ bar\ currently\ contains\ more\ than\ a\ single\ line\
+      of\ text\.\ \*/\
+
+      \ \ \ \ public\ boolean\ isTextWrapped\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ return\ mTextIsWrapped;\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ /\*\*\
+
+      \ \ \ \ \ \*\ Adds\ a\ listener\ for\ text\ wrapping\ changes\.\
+
+      \ \ \ \ \ \*\
+
+      \ \ \ \ \ \*\ @param\ listener\ The\ listener\ to\ be\ added\.\
+
+      \ \ \ \ \ \*/\
+
+      \ \ \ \ public\ void\ addTextWrappingChangeListener\(Callback<Boolean>\ listener\)\ \{\
+
+      \ \ \ \ \ \ \ \ mTextWrapListeners\.addObserver\(listener\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ /\*\*\
+
+      \ \ \ \ \ \*\ Removes\ a\ listener\ for\ text\ wrapping\ changes\.\
+
+      \ \ \ \ \ \*\
+
+      \ \ \ \ \ \*\ @param\ listener\ The\ listener\ to\ be\ removed\.\
+
+      \ \ \ \ \ \*/\
+
+      \ \ \ \ public\ void\ removeTextWrappingChangeListener\(Callback<Boolean>\ listener\)\ \{\
+
+      \ \ \ \ \ \ \ \ mTextWrapListeners\.removeObserver\(listener\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ private\ void\ onTextWrappingChanged\(boolean\ isWrapped\)\ \{\
+
+      \ \ \ \ \ \ \ \ mTextIsWrapped\ =\ isWrapped;\
+
+      \ \ \ \ \ \ \ \ for\ \(Callback<Boolean>\ listener\ :\ mTextWrapListeners\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ listener\.onResult\(isWrapped\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ /\*\*\
+
+      \ \ \ \ \ \*\ @see\ UrlBarMediator\#setUrlBarData\(UrlBarData,\ int,\ TextSelection\)\
+
+      \ \ \ \ \ \*/\
+
+      \ \ \ \ public\ boolean\ setUrlBarData\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ UrlBarData\ data,\ @ScrollType\ int\ scrollType,\ TextSelection\ selection\)\
+      \{\
+
+      \ \ \ \ \ \ \ \ return\ mMediator\.setUrlBarData\(data,\ scrollType,\ selection\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ /\*\*\ Returns\ the\ UrlBarData\ representing\ the\ current\ contents\ of\ the\ UrlBar\.\
+      \*/\
+
+      \ \ \ \ public\ UrlBarData\ getUrlBarData\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ return\ mMediator\.getUrlBarData\(\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ /\*\*\
+
+      \ \ \ \ \ \*\ @see\ UrlBarMediator\#setAutocompleteText\(String,\ String,\ String\)\
+
+      \ \ \ \ \ \*/\
+
+      \ \ \ \ public\ void\ setAutocompleteText\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ String\ userText,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ @Nullable\ String\ autocompleteText,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ @Nullable\ String\ additionalText,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ @Nullable\ String\ siteSearchLabel\)\ \{\
+
+      \ \ \ \ \ \ \ \ mMediator\.setAutocompleteText\(userText,\ autocompleteText,\ additionalText,\ siteSearchLabel\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ /\*\*\
+
+      \ \ \ \ \ \*\ @see\ UrlBarMediator\#setBrandedColorScheme\(int\)\
+
+      \ \ \ \ \ \*/\
+
+      \ \ \ \ public\ void\ setBrandedColorScheme\(@BrandedColorScheme\ int\ brandedColorScheme\)\ \{\
+
+      \ \ \ \ \ \ \ \ mMediator\.setBrandedColorScheme\(brandedColorScheme\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ /\*\*\
+
+      \ \ \ \ \ \*\ @see\ UrlBarMediator\#setIncognitoColorsEnabled\(boolean\)\
+
+      \ \ \ \ \ \*/\
+
+      \ \ \ \ public\ void\ setIncognitoColorsEnabled\(boolean\ incognitoColorsEnabled\)\ \{\
+
+      \ \ \ \ \ \ \ \ mMediator\.setIncognitoColorsEnabled\(incognitoColorsEnabled\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ /\*\*\
+
+      \ \ \ \ \ \*\ @see\ UrlBarMediator\#setAllowFocus\(boolean\)\
+
+      \ \ \ \ \ \*/\
+
+      \ \ \ \ public\ void\ setAllowFocus\(boolean\ allowFocus\)\ \{\
+
+      \ \ \ \ \ \ \ \ mMediator\.setAllowFocus\(allowFocus\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ /\*\*\
+
+      \ \ \ \ \ \*\ @see\ UrlBarMediator\#setUrlDirectionListener\(Callback<Integer>\)\
+
+      \ \ \ \ \ \*/\
+
+      \ \ \ \ public\ void\ setUrlDirectionListener\(Callback<Integer>\ listener\)\ \{\
+
+      \ \ \ \ \ \ \ \ mMediator\.setUrlDirectionListener\(listener\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ /\*\*\ Sets\ whether\ this\ \{@link\ UrlBar\}\ should\ enable\ bounds\ ellipsis\.\ \*/\
+
+      \ \ \ \ public\ void\ setBoundsEllipsisEnabled\(boolean\ enabled\)\ \{\
+
+      \ \ \ \ \ \ \ \ mUrlBar\.setBoundsEllipsisEnabled\(enabled\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ /\*\*\ Sets\ the\ accessibility\ warning\ text\.\ \*/\
+
+      \ \ \ \ public\ void\ setAccessibilityWarning\(@Nullable\ String\ warning\)\ \{\
+
+      \ \ \ \ \ \ \ \ mMediator\.setAccessibilityWarning\(warning\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ /\*\*\ Set\ the\ state\ of\ "Always\ Show\ AI\ Mode"\ option\.\ \*/\
+
+      \ \ \ \ public\ void\ setShowAiMode\(boolean\ showAiMode\)\ \{\
+
+      \ \ \ \ \ \ \ \ mModel\.set\(UrlBarProperties\.AI_MODE_PREF_ENABLED,\ showAiMode\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ /\*\*\ Set\ the\ callback\ when\ "Always\ Show\ AI\ Mode"\ is\ toggled\.\ \*/\
+
+      \ \ \ \ public\ void\ setShowAiModeCallback\(@Nullable\ Callback<Boolean>\ callback\)\ \{\
+
+      \ \ \ \ \ \ \ \ mModel\.set\(UrlBarProperties\.AI_MODE_PREF_TOGGLE_CALLBACK,\ callback\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ /\*\*\
+
+      \ \ \ \ \ \*\ Clears\ text\ selection,\ which\ also\ has\ the\ side\ effect\ of\ dismissing\ the\
+      Android\ selection\
+
+      \ \ \ \ \ '
+    replace: ".UrlBarDelegate;\nimport org.chromium.chrome.browser.ui.theme.BrandedColorScheme;\nimport\
+      \ org.chromium.components.omnibox.AutocompleteInput;\nimport org.chromium.components.omnibox.OmniboxFeatures;\n\
+      import org.chromium.components.omnibox.TextSelection;\nimport org.chromium.ui.KeyboardVisibilityDelegate;\n\
+      import org.chromium.ui.modelutil.PropertyModel;\nimport org.chromium.ui.modelutil.PropertyModelChangeProcessor;\n\
+      import org.chromium.ui.widget.ViewRectProvider;\n\nimport java.lang.annotation.ElementType;\nimport\
+      \ java.lang.annotation.Retention;\nimport java.lang.annotation.RetentionPolicy;\nimport java.lang.annotation.Target;\n\
+      \n/** Coordinates the interactions with the UrlBar text component. */\n@NullMarked\npublic class\
+      \ UrlBarCoordinator\n        implements UrlBarEditingTextStateProvider,\n                UrlFocusChangeListener,\n\
+      \                KeyboardVisibilityDelegate.KeyboardVisibilityListener {\n\n    @IntDef({\n    \
+      \    KeyboardState.HIDDEN,\n        KeyboardState.HIDING,\n        KeyboardState.SHOWING,\n    \
+      \    KeyboardState.SHOWN\n    })\n    @Retention(RetentionPolicy.SOURCE)\n    @Target(ElementType.TYPE_USE)\n\
+      \    @interface KeyboardState {\n        int HIDDEN = 0;\n        int HIDING = 1;\n        int SHOWING\
+      \ = 2;\n        int SHOWN = 3;\n    }\n\n    private static final int KEYBOARD_HIDE_DELAY_MS = 150;\n\
+      \    private static final int KEYBOARD_DEBOUNCE_DELAY_MS = 150;\n\n    private final UrlBar mUrlBar;\n\
+      \    private final UrlBarMediator mMediator;\n    private final PropertyModel mModel;\n    private\
+      \ final KeyboardVisibilityDelegate mKeyboardVisibilityDelegate;\n    private final Callback<UrlBarFocusChangeInfo>\
+      \ mFocusChangeCallback;\n    private final Callback<Boolean> mTextWrappedCallback;\n    private\
+      \ final ObserverList<Callback<Boolean>> mTextWrapListeners = new ObserverList<>();\n    private\
+      \ final Runnable mKeyboardTransitionRunnable = this::resolveKeyboardTransition;\n    private @Nullable\
+      \ Runnable mKeyboardHideTask;\n    private @KeyboardState int mKeyboardState = KeyboardState.HIDDEN;\n\
+      \    private boolean mHasFocus;\n    private boolean mTextIsWrapped;\n\n    /**\n     * Constructs\
+      \ a coordinator for the given UrlBar view.\n     *\n     * @param context The current Android's\
+      \ context.\n     * @param urlBar The {@link UrlBar} view this coordinator encapsulates.\n     *\
+      \ @param actionModeCallback Callback to handle changes in contextual action Modes.\n     * @param\
+      \ focusChangeCallback The callback that will be notified when focus changes on the\n     *     UrlBar.\n\
+      \     * @param delegate The primary delegate for the UrlBar view.\n     * @param keyboardVisibilityDelegate\
+      \ Delegate that allows querying and changing the keyboard's\n     *     visibility.\n     * @param\
+      \ isIncognitoBranded Whether incognito mode is initially enabled. This can later be\n     *    \
+      \ changed using {@link #setIncognitoColorsEnabled(boolean)}.\n     * @param onLongClickListener\
+      \ The listener for long clicks.\n     * @param textChangeListener The listener for text changes.\
+      \ Invoked every time omnibox content\n     *     changes and used for autocomplete.\n     * @param\
+      \ richTextChangeListener The listener for rich text changes. Invoked on each keypress.\n     * \
+      \    Used for site-search triggering.\n     * @param keyDownListener The listener for key down events.\n\
+      \     */\n    public UrlBarCoordinator(\n            Context context,\n            UrlBar urlBar,\n\
+      \            ActionMode.@Nullable Callback actionModeCallback,\n            Callback<UrlBarFocusChangeInfo>\
+      \ focusChangeCallback,\n            UrlBarDelegate delegate,\n            KeyboardVisibilityDelegate\
+      \ keyboardVisibilityDelegate,\n            boolean isIncognitoBranded,\n            @Nullable OnLongClickListener\
+      \ onLongClickListener,\n            @Nullable Callback<String> textChangeListener,\n           \
+      \ @Nullable Callback<UrlBarTextChangeInfo> richTextChangeListener,\n            @Nullable OnKeyListener\
+      \ keyDownListener) {\n        mUrlBar = urlBar;\n        mKeyboardVisibilityDelegate = keyboardVisibilityDelegate;\n\
+      \        mFocusChangeCallback = focusChangeCallback;\n        mTextWrappedCallback = this::onTextWrappingChanged;\n\
+      \n        mModel =\n                new PropertyModel.Builder(UrlBarProperties.ALL_KEYS)\n     \
+      \                   .with(UrlBarProperties.ACTION_MODE_CALLBACK, actionModeCallback)\n         \
+      \               .with(UrlBarProperties.DELEGATE, delegate)\n                        .with(UrlBarProperties.INCOGNITO_COLORS_ENABLED,\
+      \ isIncognitoBranded)\n                        .with(UrlBarProperties.KEY_DOWN_LISTENER, keyDownListener)\n\
+      \                        .with(UrlBarProperties.LONG_CLICK_LISTENER, onLongClickListener)\n    \
+      \                    .with(UrlBarProperties.TEXT_WRAPPED_CALLBACK, mTextWrappedCallback)\n     \
+      \                   .with(\n                                UrlBarProperties.FOCUS_CHANGE_CALLBACK,\n\
+      \                                this::onUrlFocusChangeInternal)\n                        .build();\n\
+      \        PropertyModelChangeProcessor.create(mModel, urlBar, UrlBarViewBinder::bind);\n\n      \
+      \  mMediator = new UrlBarMediator(context, mModel, textChangeListener, richTextChangeListener);\n\
+      \        mKeyboardState =\n                mKeyboardVisibilityDelegate.isKeyboardShowing(urlBar)\n\
+      \                        ? KeyboardState.SHOWN\n                        : KeyboardState.HIDDEN;\n\
+      \        mKeyboardVisibilityDelegate.addKeyboardVisibilityListener(this);\n    }\n\n    public void\
+      \ destroy() {\n        mMediator.destroy();\n        mKeyboardVisibilityDelegate.removeKeyboardVisibilityListener(this);\n\
+      \        if (mKeyboardHideTask != null) {\n            mUrlBar.removeCallbacks(mKeyboardHideTask);\n\
+      \            mKeyboardHideTask = null;\n        }\n        mUrlBar.removeCallbacks(mKeyboardTransitionRunnable);\n\
+      \        mKeyboardState = KeyboardState.HIDDEN;\n        mUrlBar.destroy();\n    }\n\n    /** Signals\
+      \ that the Omnibox input session has begun. */\n    public void beginInput(AutocompleteInput input)\
+      \ {\n        mMediator.beginInput(input);\n    }\n\n    /** Signals that the Omnibox input session\
+      \ has ended. */\n    public void endInput() {\n        mMediator.endInput();\n    }\n\n    /** Returns\
+      \ whether the url bar currently contains more than a single line of text. */\n    public boolean\
+      \ isTextWrapped() {\n        return mTextIsWrapped;\n    }\n\n    /**\n     * Adds a listener for\
+      \ text wrapping changes.\n     *\n     * @param listener The listener to be added.\n     */\n  \
+      \  public void addTextWrappingChangeListener(Callback<Boolean> listener) {\n        mTextWrapListeners.addObserver(listener);\n\
+      \    }\n\n    /**\n     * Removes a listener for text wrapping changes.\n     *\n     * @param listener\
+      \ The listener to be removed.\n     */\n    public void removeTextWrappingChangeListener(Callback<Boolean>\
+      \ listener) {\n        mTextWrapListeners.removeObserver(listener);\n    }\n\n    private void onTextWrappingChanged(boolean\
+      \ isWrapped) {\n        mTextIsWrapped = isWrapped;\n        for (Callback<Boolean> listener : mTextWrapListeners)\
+      \ {\n            listener.onResult(isWrapped);\n        }\n    }\n\n    /**\n     * @see UrlBarMediator#setUrlBarData(UrlBarData,\
+      \ int, TextSelection)\n     */\n    public boolean setUrlBarData(\n            UrlBarData data,\
+      \ @ScrollType int scrollType, TextSelection selection) {\n        return mMediator.setUrlBarData(data,\
+      \ scrollType, selection);\n    }\n\n    /** Returns the UrlBarData representing the current contents\
+      \ of the UrlBar. */\n    public UrlBarData getUrlBarData() {\n        return mMediator.getUrlBarData();\n\
+      \    }\n\n    /**\n     * @see UrlBarMediator#setAutocompleteText(String, String, String)\n    \
+      \ */\n    public void setAutocompleteText(\n            String userText,\n            @Nullable\
+      \ String autocompleteText,\n            @Nullable String additionalText,\n            @Nullable\
+      \ String siteSearchLabel) {\n        mMediator.setAutocompleteText(userText, autocompleteText, additionalText,\
+      \ siteSearchLabel);\n    }\n\n    /**\n     * @see UrlBarMediator#setBrandedColorScheme(int)\n \
+      \    */\n    public void setBrandedColorScheme(@BrandedColorScheme int brandedColorScheme) {\n \
+      \       mMediator.setBrandedColorScheme(brandedColorScheme);\n    }\n\n    /**\n     * @see UrlBarMediator#setIncognitoColorsEnabled(boolean)\n\
+      \     */\n    public void setIncognitoColorsEnabled(boolean incognitoColorsEnabled) {\n        mMediator.setIncognitoColorsEnabled(incognitoColorsEnabled);\n\
+      \    }\n\n    /**\n     * @see UrlBarMediator#setAllowFocus(boolean)\n     */\n    public void setAllowFocus(boolean\
+      \ allowFocus) {\n        mMediator.setAllowFocus(allowFocus);\n    }\n\n    /**\n     * @see UrlBarMediator#setUrlDirectionListener(Callback<Integer>)\n\
+      \     */\n    public void setUrlDirectionListener(Callback<Integer> listener) {\n        mMediator.setUrlDirectionListener(listener);\n\
+      \    }\n\n    /** Sets whether this {@link UrlBar} should enable bounds ellipsis. */\n    public\
+      \ void setBoundsEllipsisEnabled(boolean enabled) {\n        mUrlBar.setBoundsEllipsisEnabled(enabled);\n\
+      \    }\n\n    /** Sets the accessibility warning text. */\n    public void setAccessibilityWarning(@Nullable\
+      \ String warning) {\n        mMediator.setAccessibilityWarning(warning);\n    }\n\n    /**\n   \
+      \  * Clears text selection, which also has the side effect of dismissing the Android selection\n\
+      \     "

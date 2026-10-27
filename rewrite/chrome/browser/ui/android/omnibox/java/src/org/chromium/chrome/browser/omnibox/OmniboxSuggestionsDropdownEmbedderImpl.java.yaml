@@ -1,0 +1,860 @@
+substitutions:
+- description: 'Reaper Android: remove optional AI hooks and preserve ordinary input behavior.'
+  regex:
+    re_pattern: 'gs\.ChromeFeatureList;\
+
+      import\ org\.chromium\.chrome\.browser\.layouts\.LayoutType;\
+
+      import\ org\.chromium\.chrome\.browser\.omnibox\.fusebox\.FuseboxCoordinator\.FuseboxLayoutMode;\
+
+      import\ org\.chromium\.chrome\.browser\.omnibox\.fusebox\.FuseboxCoordinator\.FuseboxState;\
+
+      import\ org\.chromium\.chrome\.browser\.omnibox\.styles\.OmniboxResourceProvider;\
+
+      import\ org\.chromium\.chrome\.browser\.omnibox\.suggestions\.OmniboxSuggestionsDropdownEmbedder;\
+
+      import\ org\.chromium\.chrome\.browser\.ui\.edge_to_edge\.TopInsetProvider;\
+
+      import\ org\.chromium\.ui\.base\.DeviceFormFactor;\
+
+      import\ org\.chromium\.ui\.base\.ViewUtils;\
+
+      import\ org\.chromium\.ui\.base\.WindowAndroid;\
+
+      \
+
+      import\ java\.util\.function\.BooleanSupplier;\
+
+      import\ java\.util\.function\.Supplier;\
+
+      \
+
+      /\*\*\
+
+      \ \*\ Implementation\ of\ \{@link\ OmniboxSuggestionsDropdownEmbedder\}\ that\ positions\ it\ using\
+      an\ "anchor"\
+
+      \ \*\ and\ "horizontal\ alignment"\ view\.\
+
+      \ \*/\
+
+      @NullMarked\
+
+      class\ OmniboxSuggestionsDropdownEmbedderImpl\
+
+      \ \ \ \ \ \ \ \ implements\ OmniboxSuggestionsDropdownEmbedder,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ OnLayoutChangeListener,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ OnGlobalLayoutListener,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ ComponentCallbacks\ \{\
+
+      \ \ \ \ private\ final\ SettableNonNullObservableSupplier<OmniboxAlignment>\ mOmniboxAlignmentSupplier\
+      =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ ObservableSuppliers\.createNonNull\(OmniboxAlignment\.UNSPECIFIED\);\
+
+      \ \ \ \ private\ final\ OmniboxResourceProvider\ mResourceProvider;\
+
+      \ \ \ \ private\ final\ WindowAndroid\ mWindowAndroid;\
+
+      \ \ \ \ private\ final\ View\ mAnchorView;\
+
+      \ \ \ \ private\ final\ View\ mAlignmentView;\
+
+      \ \ \ \ private\ final\ Supplier<Integer>\ mAlignmentViewTargetWidthSupplier;\
+
+      \ \ \ \ private\ final\ Supplier<Integer>\ mAlignmentViewLeftOffsetSupplier;\
+
+      \ \ \ \ private\ final\ boolean\ mForcePhoneStyleOmnibox;\
+
+      \ \ \ \ private\ final\ Supplier<@ControlsPosition\ Integer>\ mControlsPositionSupplier;\
+
+      \ \ \ \ private\ final\ Supplier<Integer>\ mKeyboardHeightSupplier;\
+
+      \ \ \ \ private\ final\ Supplier<Integer>\ mBottomWindowPaddingSupplier;\
+
+      \ \ \ \ private\ final\ Context\ mContext;\
+
+      \ \ \ \ private\ final\ TopInsetProvider\ mTopInsetProvider;\
+
+      \ \ \ \ private\ final\ TopInsetProvider\.Observer\ mTopInsetProviderObserver;\
+
+      \ \ \ \ //\ Reusable\ int\ array\ to\ pass\ to\ positioning\ methods\ that\ operate\ on\ a\ two\
+      element\ int\ array\.\
+
+      \ \ \ \ //\ Keeping\ it\ as\ a\ member\ lets\ us\ avoid\ allocating\ a\ temp\ array\ every\ time\.\
+
+      \ \ \ \ private\ final\ int\[\]\ mPositionArray\ =\ new\ int\[2\];\
+
+      \ \ \ \ private\ int\ mVerticalOffsetInWindow;\
+
+      \ \ \ \ private\ int\ mHorizontalOffsetInWindow;\
+
+      \ \ \ \ private\ int\ mWindowWidthDp;\
+
+      \ \ \ \ private\ int\ mWindowHeightDp;\
+
+      \ \ \ \ private\ int\ mTopPaddingForEdgeToEdge;\
+
+      \ \ \ \ private\ @Nullable\ WindowInsetsCompat\ mWindowInsetsCompat;\
+
+      \ \ \ \ private\ final\ @Nullable\ View\ mBaseChromeLayout;\
+
+      \ \ \ \ private\ final\ Supplier<@FuseboxState\ Integer>\ mFuseboxStateSupplier;\
+
+      \ \ \ \ private\ final\ Supplier<@FuseboxLayoutMode\ Integer>\ mFuseboxLayoutModeSupplier;\
+
+      \ \ \ \ private\ final\ BooleanSupplier\ mIsFullWidthExpansionAllowedSupplier;\
+
+      \
+
+      \ \ \ \ /\*\*\
+
+      \ \ \ \ \ \*\ @param\ resourceProvider\ Resource\ cache\ for\ fast\ resource\ lookup\.\
+
+      \ \ \ \ \ \*\ @param\ windowAndroid\ Window\ object\ in\ which\ the\ dropdown\ will\ be\ displayed\.\
+
+      \ \ \ \ \ \*\ @param\ anchorView\ View\ to\ which\ the\ dropdown\ should\ be\ "anchored"\ i\.e\.\
+      vertically\ positioned\
+
+      \ \ \ \ \ \*\ \ \ \ \ next\ to\ and\ matching\ the\ width\ of\.\ This\ must\ be\ a\ descendant\
+      of\ the\ top\-level\ content\
+
+      \ \ \ \ \ \*\ \ \ \ \ \(android\.R\.id\.content\)\ view\.\
+
+      \ \ \ \ \ \*\ @param\ alignmentView\ View\ to\ which:\ 1\.\ The\ dropdown\ should\ be\ horizontally\
+      aligned\ to\ when\
+
+      \ \ \ \ \ \*\ \ \ \ \ its\ width\ is\ smaller\ than\ the\ anchor\ view\.\ 2\.\ The\ dropdown\ should\
+      vertically\ align\ to\
+
+      \ \ \ \ \ \*\ \ \ \ \ during\ animations\.\ This\ must\ be\ a\ descendant\ of\ the\ anchor\ view\.\
+
+      \ \ \ \ \ \*\ @param\ alignmentViewTargetWidthSupplier\ Supplier\ of\ the\ target\ width\ for\ the\
+      alignment\ view,\
+
+      \ \ \ \ \ \*\ \ \ \ \ allowing\ popover\ mode\ to\ publish\ target\ width\ without\ mutating\ layout\
+      parameters\ on\ the\
+
+      \ \ \ \ \ \*\ \ \ \ \ alignment\ view\ directly\ \(which\ would\ cause\ double\ margin\ counting\
+      on\ focus\)\.\
+
+      \ \ \ \ \ \*\ @param\ alignmentViewLeftOffsetSupplier\ Supplier\ of\ the\ left\ offset\ for\ the\
+      alignment\ view,\
+
+      \ \ \ \ \ \*\ \ \ \ \ allowing\ popover\ mode\ to\ publish\ horizontal\ shifts\.\
+
+      \ \ \ \ \ \*\ @param\ forcePhoneStyleOmnibox\ Whether\ to\ force\ phone\ layout\ styling\ for\ suggestions\.\
+
+      \ \ \ \ \ \*\ @param\ baseChromeLayout\ The\ base\ view\ hosting\ Chrome\ that\ certain\ views\
+      \(e\.g\.\ the\ omnibox\
+
+      \ \ \ \ \ \*\ \ \ \ \ suggestion\ list\)\ will\ position\ themselves\ relative\ to\.\ If\ null,\
+      the\ content\ view\ will\ be\
+
+      \ \ \ \ \ \*\ \ \ \ \ used\.\
+
+      \ \ \ \ \ \*\ @param\ controlsPositionSupplier\ Supplier\ for\ the\ current\ controls\ position\.\
+
+      \ \ \ \ \ \*\ @param\ keyboardHeightSupplier\ Supplies\ the\ current\ height\ of\ the\ keyboard\.\
+
+      \ \ \ \ \ \*\ @param\ bottomWindowPaddingSupplier\ Supplier\ of\ the\ height\ of\ the\ bottom\-most\
+      region\ of\ the\
+
+      \ \ \ \ \ \*\ \ \ \ \ window\ that\ should\ be\ considered\ part\ of\ the\ window''s\ height\.\
+      This\ region\ is\ suitable\ for\
+
+      \ \ \ \ \ \*\ \ \ \ \ rendering\ content,\ particularly\ to\ achieve\ a\ full\-bleed\ visual\ effect,\
+      though\ it\ should\
+
+      \ \ \ \ \ \*\ \ \ \ \ also\ be\ incorporated\ as\ bottom\ padding\ to\ ensure\ that\ such\ content\
+      can\ be\ fully\ scrolled\
+
+      \ \ \ \ \ \*\ \ \ \ \ out\ of\ this\ region\ to\ be\ fully\ visible\ and\ interactable\.\ This\
+      is\ used\ to\ ensure\ the\
+
+      \ \ \ \ \ \*\ \ \ \ \ suggestions\ list\ draws\ edge\ to\ edge\ when\ appropriate\.\ This\ should\
+      only\ be\ used\ when\ the\
+
+      \ \ \ \ \ \*\ \ \ \ \ soft\ keyboard\ is\ not\ visible\.\
+
+      \ \ \ \ \ \*\ @param\ fuseboxStateSupplier\ Supplier\ of\ the\ current\ FuseboxState\.\
+
+      \ \ \ \ \ \*\ @param\ fuseboxLayoutModeSupplier\ Supplier\ of\ the\ current\ FuseboxLayoutMode\.\
+
+      \ \ \ \ \ \*\ @param\ topInsetProvider\ Provider\ for\ edge\-to\-edge\ top\ inset\ changes\.\
+
+      \ \ \ \ \ \*\ @param\ isFullWidthExpansionAllowedSupplier\ Supplier\ returning\ true\ if\ full\-width\
+      expansion\ is\
+
+      \ \ \ \ \ \*\ \ \ \ \ permitted\ for\ narrow\ windows\.\
+
+      \ \ \ \ \ \*/\
+
+      \ \ \ \ OmniboxSuggestionsDropdownEmbedderImpl\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ OmniboxResourceProvider\ resourceProvider,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ WindowAndroid\ windowAndroid,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ View\ anchorView,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ View\ alignmentView,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ Supplier<Integer>\ alignmentViewTargetWidthSupplier,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ Supplier<Integer>\ alignmentViewLeftOffsetSupplier,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ boolean\ forcePhoneStyleOmnibox,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ @Nullable\ View\ baseChromeLayout,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ Supplier<@ControlsPosition\ Integer>\ controlsPositionSupplier,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ Supplier<Integer>\ keyboardHeightSupplier,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ Supplier<Integer>\ bottomWindowPaddingSupplier,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ Supplier<@FuseboxState\ Integer>\ fuseboxStateSupplier,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ Supplier<@FuseboxLayoutMode\ Integer>\ fuseboxLayoutModeSupplier,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ TopInsetProvider\ topInsetProvider,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ BooleanSupplier\ isFullWidthExpansionAllowedSupplier\)\ \{\
+
+      \ \ \ \ \ \ \ \ mResourceProvider\ =\ resourceProvider;\
+
+      \ \ \ \ \ \ \ \ mWindowAndroid\ =\ windowAndroid;\
+
+      \ \ \ \ \ \ \ \ mAnchorView\ =\ anchorView;\
+
+      \ \ \ \ \ \ \ \ mAlignmentView\ =\ alignmentView;\
+
+      \ \ \ \ \ \ \ \ mAlignmentViewTargetWidthSupplier\ =\ alignmentViewTargetWidthSupplier;\
+
+      \ \ \ \ \ \ \ \ mAlignmentViewLeftOffsetSupplier\ =\ alignmentViewLeftOffsetSupplier;\
+
+      \ \ \ \ \ \ \ \ mForcePhoneStyleOmnibox\ =\ forcePhoneStyleOmnibox;\
+
+      \ \ \ \ \ \ \ \ mControlsPositionSupplier\ =\ controlsPositionSupplier;\
+
+      \ \ \ \ \ \ \ \ mKeyboardHeightSupplier\ =\ keyboardHeightSupplier;\
+
+      \ \ \ \ \ \ \ \ mBottomWindowPaddingSupplier\ =\ bottomWindowPaddingSupplier;\
+
+      \ \ \ \ \ \ \ \ mContext\ =\ mAnchorView\.getContext\(\);\
+
+      \ \ \ \ \ \ \ \ mContext\.registerComponentCallbacks\(this\);\
+
+      \ \ \ \ \ \ \ \ Configuration\ configuration\ =\ mContext\.getResources\(\)\.getConfiguration\(\);\
+
+      \ \ \ \ \ \ \ \ mWindowWidthDp\ =\ configuration\.smallestScreenWidthDp;\
+
+      \ \ \ \ \ \ \ \ mWindowHeightDp\ =\ configuration\.screenHeightDp;\
+
+      \ \ \ \ \ \ \ \ mBaseChromeLayout\ =\ baseChromeLayout;\
+
+      \ \ \ \ \ \ \ \ mFuseboxStateSupplier\ =\ fuseboxStateSupplier;\
+
+      \ \ \ \ \ \ \ \ mFuseboxLayoutModeSupplier\ =\ fuseboxLayoutModeSupplier;\
+
+      \ \ \ \ \ \ \ \ mTopInsetProvider\ =\ topInsetProvider;\
+
+      \ \ \ \ \ \ \ \ mIsFullWidthExpansionAllowedSupplier\ =\ isFullWidthExpansionAllowedSupplier;\
+
+      \ \ \ \ \ \ \ \ recalculateOmniboxAlignment\(\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ //\ Set\ up\ observer\ to\ handle\ edge\-to\-edge\ changes\.\
+
+      \ \ \ \ \ \ \ \ mTopInsetProviderObserver\ =\ this::onToEdgeChange;\
+
+      \ \ \ \ \ \ \ \ mTopInsetProvider\.addObserver\(mTopInsetProviderObserver\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ @Override\
+
+      \ \ \ \ public\ OmniboxAlignment\ addAlignmentObserver\(Callback<OmniboxAlignment>\ obs\)\ \{\
+
+      \ \ \ \ \ \ \ \ return\ assertNonNull\(mOmniboxAlignmentSupplier\.addSyncObserverAndPostIfNonNull\(obs\)\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ @Override\
+
+      \ \ \ \ public\ void\ removeAlignmentObserver\(Callback<OmniboxAlignment>\ obs\)\ \{\
+
+      \ \ \ \ \ \ \ \ mOmniboxAlignmentSupplier\.removeObserver\(obs\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ @Override\
+
+      \ \ \ \ public\ OmniboxAlignment\ getCurrentAlignment\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ return\ assertNonNull\(mOmniboxAlignmentSupplier\.get\(\)\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ @Override\
+
+      \ \ \ \ public\ boolean\ isWideWindow\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ if\ \(mForcePhoneStyleOmnibox\)\ return\ false;\
+
+      \ \ \ \ \ \ \ \ return\ mWindowWidthDp\ >=\ DeviceFormFactor\.MINIMUM_TABLET_WIDTH_DP\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \&\&\ DeviceFormFactor\.isWindowOnTablet\(mWindowAndroid\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ @Override\
+
+      \ \ \ \ public\ boolean\ isPhoneStyleWindow\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ if\ \(mForcePhoneStyleOmnibox\)\ return\ true;\
+
+      \ \ \ \ \ \ \ \ return\ !isWideWindow\(\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \&\&\ mFuseboxLayoutModeSupplier\.get\(\)\ !=\ FuseboxLayoutMode\.SUGGESTIONS_POPOVER;\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ @Override\
+
+      \ \ \ \ public\ void\ onAttachedToWindow\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ mAnchorView\.addOnLayoutChangeListener\(this\);\
+
+      \ \ \ \ \ \ \ \ mAlignmentView\.addOnLayoutChangeListener\(this\);\
+
+      \ \ \ \ \ \ \ \ mAnchorView\.getViewTreeObserver\(\)\.addOnGlobalLayoutListener\(this\);\
+
+      \ \ \ \ \ \ \ \ onConfigurationChanged\(mContext\.getResources\(\)\.getConfiguration\(\)\);\
+
+      \ \ \ \ \ \ \ \ recalculateOmniboxAlignment\(\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ @Override\
+
+      \ \ \ \ public\ void\ onDetachedFromWindow\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ mAnchorView\.removeOnLayoutChangeListener\(this\);\
+
+      \ \ \ \ \ \ \ \ mAlignmentView\.removeOnLayoutChangeListener\(this\);\
+
+      \ \ \ \ \ \ \ \ mAnchorView\.getViewTreeObserver\(\)\.removeOnGlobalLayoutListener\(this\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ //\ View\.OnLayoutChangeListener\
+
+      \ \ \ \ @Override\
+
+      \ \ \ \ public\ void\ onLayoutChange\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ View\ v,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ int\ left,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ int\ top,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ int\ right,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ int\ bottom,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ int\ oldLeft,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ int\ oldTop,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ int\ oldRight,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ int\ oldBottom\)\ \{\
+
+      \ \ \ \ \ \ \ \ recalculateOmniboxAlignment\(\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ //\ OnGlobalLayoutListener\
+
+      \ \ \ \ @Override\
+
+      \ \ \ \ public\ void\ onGlobalLayout\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ if\ \(verticalOffsetInWindowChanged\(mAnchorView\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \|\|\ insetsHaveChanged\(mAnchorView\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \|\|\ horizontalOffsetInWindowChanged\(mAlignmentView\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ recalculateOmniboxAlignment\(\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ //\ ComponentCallbacks\
+
+      \ \ \ \ @Override\
+
+      \ \ \ \ public\ void\ onConfigurationChanged\(Configuration\ newConfig\)\ \{\
+
+      \ \ \ \ \ \ \ \ int\ windowWidth\ =\ newConfig\.screenWidthDp;\
+
+      \ \ \ \ \ \ \ \ int\ windowHeight\ =\ newConfig\.screenHeightDp;\
+
+      \ \ \ \ \ \ \ \ if\ \(windowWidth\ ==\ mWindowWidthDp\ \&\&\ mWindowHeightDp\ ==\ windowHeight\)\
+      return;\
+
+      \ \ \ \ \ \ \ \ mWindowWidthDp\ =\ windowWidth;\
+
+      \ \ \ \ \ \ \ \ mWindowHeightDp\ =\ windowHeight;\
+
+      \
+
+      \ \ \ \ \ \ \ \ recalculateOmniboxAlignment\(\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ @Override\
+
+      \ \ \ \ public\ void\ onLowMemory\(\)\ \{\}\
+
+      \
+
+      \ \ \ \ @Override\
+
+      \ \ \ \ public\ float\ getVerticalTranslationForAnimation\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ //\ With\ TOOLBAR_PHONE_ANIMATION_REFACTOR,\ the\ alignment\ view''s\ translation\
+      may\ be\ handled\ by\
+
+      \ \ \ \ \ \ \ \ //\ the\ animation\ matrix\ instead\ of\ directly\ through\ the\ view''s\ translationY\.\
+
+      \ \ \ \ \ \ \ \ Matrix\ matrix\ =\ mAlignmentView\.getAnimationMatrix\(\);\
+
+      \ \ \ \ \ \ \ \ if\ \(matrix\ !=\ null\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ float\[\]\ values\ =\ new\ float\[9\];\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ matrix\.getValues\(values\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ return\ values\[Matrix\.MTRANS_Y\];\
+
+      \ \ \ \ \ \ \ \ \}\ else\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ return\ mAlignmentView\.getTranslationY\(\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ /\*\*\
+
+      \ \ \ \ \ \*\ Recalculates\ the\ desired\ alignment\ of\ the\ omnibox\ and\ sends\ the\ updated\
+      alignment\ data\ to\ any\
+
+      \ \ \ \ \ \*\ observers\.\ Currently\ will\ send\ an\ update\ message\ unconditionally\.\ This\
+      method\ is\ called\
+
+      \ \ \ \ \ \*\ during\ layout\ and\ should\ avoid\ memory\ allocations\ other\ than\ the\ necessary\
+      new\
+
+      \ \ \ \ \ \*\ OmniboxAlignment\(\)\.\ The\ method\ aligns\ the\ omnibox\ dropdown\ as\ follows:\
+
+      \ \ \ \ \ \*\
+
+      \ \ \ \ \ \*\ <p>Case\ 1:\ Omnibox\ without\ fusebox\ on\ tablet\ window\.\
+
+      \ \ \ \ \ \*\
+
+      \ \ \ \ \ \*\ <pre>\
+
+      \ \ \ \ \ \*\ \ \|\ anchor\ \ \[\ \ alignment\ \ \]\ \ \ \ \ \ \ \|\
+
+      \ \ \ \ \ \*\ \ \ \ \ \ \ \ \ \ \ \ \|\ \ dropdown\ \ \ \|\
+
+      \ \ \ \ \ \*\ </pre>\
+
+      \ \ \ \ \ \*\
+
+      \ \ \ \ \ \*\ <p>Case\ 2:\ Omnibox\ with\ Fusebox\ on\ tablet\ window\.\
+
+      \ \ \ \ \ \*\
+
+      \ \ \ \ \ \*\ <pre>\
+
+      \ \ \ \ \ \*\ \ \|\ anchor\ \ \ \ \[alignment\]\ \ \ \ \ \ \ \ \ \|\
+
+      \ \ \ \ \ \*\ \ \|\ \ \ \ \ \ \ \ \ \ \ \[alignment\]\ \ \ \ \ \ \ \ \ \|\
+
+      \ \ \ \ \ \*\ \ \|\ \ \ \ \ \ \ \ \ \ \ \ dropdown\ \ \ \ \ \ \ \ \ \ \ \|\
+
+      \ \ \ \ \ \*\ </pre>\
+
+      \ \ \ \ \ \*\
+
+      \ \ \ \ \ \*\ <p>Case\ 3:\ Phone\ window\.\ Full\ width\ and\ no\ padding\.\
+
+      \ \ \ \ \ \*\
+
+      \ \ \ \ \ \*\ <pre>\
+
+      \ \ \ \ \ \*\ \ \|\ anchor\ \ \ \ \ \[alignment\]\ \ \ \ \ \ \ \ \|\
+
+      \ \ \ \ \ \*\ \ \|\ \ \ \ \ \ \ \ \ \ \ dropdown\ \ \ \ \ \ \ \ \ \ \ \ \|\
+
+      \ \ \ \ \ \*\ </pre>\
+
+      \ \ \ \ \ \*/\
+
+      \ \ \ \ void\ recalculateOmniboxAlignment\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ View\ contentView\ =\ mBaseChromeLayout;\
+
+      \ \ \ \ \ \ \ \ //\ TODO\(b:397495817\):\ delete\ the\ section\ below\ once\ no\ longer\ needed\.\
+
+      \ \ \ \ \ \ \ \ assert\ contentView\ !=\ null\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ :\ "b:397495817:\ please\ share\ backtrace\ and\ repro\ steps\ on\
+      the\ bug!";\
+
+      \ \ \ \ \ \ \ \ if\ \(contentView\ ==\ null\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ contentView\ =\ mAnchorView\.getRootView\(\)\.findViewById\(android\.R\.id\.content\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ int\ top;\
+
+      \ \ \ \ \ \ \ \ int\ left;\
+
+      \ \ \ \ \ \ \ \ int\ width;\
+
+      \ \ \ \ \ \ \ \ int\ paddingLeft\ =\ 0;\
+
+      \ \ \ \ \ \ \ \ int\ paddingRight\ =\ 0;\
+
+      \
+
+      \ \ \ \ \ \ \ \ @ControlsPosition\ int\ controlsPosition\ =\ mControlsPositionSupplier\.get\(\);\
+
+      \ \ \ \ \ \ \ \ if\ \(controlsPosition\ ==\ ControlsPosition\.BOTTOM\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ top\ =\ 0;\
+
+      \ \ \ \ \ \ \ \ \}\ else\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ ViewUtils\.getRelativeLayoutPosition\(contentView,\ mAnchorView,\ mPositionArray\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ top\ =\ mPositionArray\[1\]\ \+\ mAnchorView\.getMeasuredHeight\(\)\ \-\
+      contentView\.getPaddingTop\(\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ if\ \(isPhoneStyleWindow\(\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ //\ Case\ 1:\ Phones\ or\ phone\-sized\ windows\ on\ tablets\.\ Full\ bleed\
+      width\ with\ no\ padding\ or\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ //\ positioning\ adjustments\.\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ left\ =\ 0;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ width\ =\ mAnchorView\.getMeasuredWidth\(\);\
+
+      \ \ \ \ \ \ \ \ \}\ else\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ int\ sideSpacing;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(mFuseboxLayoutModeSupplier\.get\(\)\ ==\ FuseboxLayoutMode\.SUGGESTIONS_POPOVER\)\
+      \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ //\ Case\ 2:\ Popover\ layout\.\ The\ suggestions\ list\ starts\
+      directly\ at\ the\ top\ of\ the\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ //\ anchor\ view\ \(or\ shifted\ by\ the\ popover\ inset\ if\ expanded/compact\)\.\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ ViewUtils\.getRelativeLayoutPosition\(contentView,\ mAnchorView,\
+      mPositionArray\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ top\ =\ mPositionArray\[1\]\ \-\ contentView\.getPaddingTop\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ sideSpacing\ =\ 0;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\ else\ if\ \(mFuseboxStateSupplier\.get\(\)\ ==\ FuseboxState\.DISABLED\)\
+      \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ //\ Case\ 3:\ No\ fusebox\ on\ tablet\.\ Width\ equal\ to\ alignment\
+      view\ and\ left\ equivalent\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ //\ to\ left\ of\ alignment\ view\.\ Top\ minus\ a\ small\ overlap\.\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ if\ \(!ChromeFeatureList\.sToolbarProgressBarRefactor\.isEnabled\(\)\)\
+      \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ top\ \-=\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mContext\.getResources\(\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \.getDimensionPixelSize\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ R\.dimen\.omnibox_suggestion_list_toolbar_overlap\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ sideSpacing\ =\ mResourceProvider\.getDropdownSideSpacing\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\ else\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ //\ Case\ 4:\ Fusebox\ on\ tablet\.\ The\ width\ of\ the\ dropdown\
+      should\ match\ the\ alignment\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ //\ view''s\ width\ exactly\ \(0\ side\ spacing\),\ and\ its\ top\
+      should\ be\ exactly\ below\ the\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ //\ \ bottom\ of\ the\ alignment\ view\.\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ ViewUtils\.getRelativeLayoutPosition\(contentView,\ mAlignmentView,\
+      mPositionArray\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ top\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mPositionArray\[1\]\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \+\ mAlignmentView\.getMeasuredHeight\(\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \-\ contentView\.getPaddingTop\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ sideSpacing\ =\ 0;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ \ \ \ \ //\ Tablet\ positioning\ logic\ common\ between\ fusebox\ and\ non\-fusebox\
+      cases\.\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ ViewUtils\.getRelativeLayoutPosition\(mAnchorView,\ mAlignmentView,\ mPositionArray\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ int\ targetWidth\ =\ mAlignmentViewTargetWidthSupplier\.get\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ width\ =\ targetWidth\ \+\ 2\ \*\ sideSpacing;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ int\ leftOffset\ =\ mAlignmentViewLeftOffsetSupplier\.get\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(mAnchorView\.getLayoutDirection\(\)\ ==\ View\.LAYOUT_DIRECTION_RTL\)\
+      \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ //\ The\ view\ will\ be\ shifted\ to\ the\ left,\ so\ the\ adjustment\
+      needs\ to\ be\ negative\.\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ left\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \-\(mAnchorView\.getMeasuredWidth\(\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \-\ width\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \-\ mPositionArray\[0\]\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \+\ sideSpacing\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \-\ leftOffset\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\ else\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ left\ =\ mPositionArray\[0\]\ \-\ sideSpacing\ \+\ leftOffset;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ //\ Ensures\ full\-width\ dropdown\ on\ narrow\ windows\ with\ popover\
+      suggestions\.\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(mFuseboxLayoutModeSupplier\.get\(\)\ ==\ FuseboxLayoutMode\.SUGGESTIONS_POPOVER\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \&\&\ !isWideWindow\(\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \&\&\ mIsFullWidthExpansionAllowedSupplier\.getAsBoolean\(\)\)\
+      \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ left\ =\ mAnchorView\.getLeft\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ width\ =\ mAnchorView\.getWidth\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ int\ keyboardHeight\ =\ mKeyboardHeightSupplier\.get\(\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ int\ windowHeight;\
+
+      \ \ \ \ \ \ '
+    replace: "gs.ChromeFeatureList;\nimport org.chromium.chrome.browser.layouts.LayoutType;\nimport org.chromium.chrome.browser.omnibox.styles.OmniboxResourceProvider;\n\
+      import org.chromium.chrome.browser.omnibox.suggestions.OmniboxSuggestionsDropdownEmbedder;\nimport\
+      \ org.chromium.chrome.browser.ui.edge_to_edge.TopInsetProvider;\nimport org.chromium.ui.base.DeviceFormFactor;\n\
+      import org.chromium.ui.base.ViewUtils;\nimport org.chromium.ui.base.WindowAndroid;\n\nimport java.util.function.Supplier;\n\
+      \n/**\n * Implementation of {@link OmniboxSuggestionsDropdownEmbedder} that positions it using an\
+      \ \"anchor\"\n * and \"horizontal alignment\" view.\n */\n@NullMarked\nclass OmniboxSuggestionsDropdownEmbedderImpl\n\
+      \        implements OmniboxSuggestionsDropdownEmbedder,\n                OnLayoutChangeListener,\n\
+      \                OnGlobalLayoutListener,\n                ComponentCallbacks {\n    private final\
+      \ SettableNonNullObservableSupplier<OmniboxAlignment> mOmniboxAlignmentSupplier =\n            ObservableSuppliers.createNonNull(OmniboxAlignment.UNSPECIFIED);\n\
+      \    private final OmniboxResourceProvider mResourceProvider;\n    private final WindowAndroid mWindowAndroid;\n\
+      \    private final View mAnchorView;\n    private final View mAlignmentView;\n    private final\
+      \ Supplier<Integer> mAlignmentViewTargetWidthSupplier;\n    private final Supplier<Integer> mAlignmentViewLeftOffsetSupplier;\n\
+      \    private final boolean mForcePhoneStyleOmnibox;\n    private final Supplier<@ControlsPosition\
+      \ Integer> mControlsPositionSupplier;\n    private final Supplier<Integer> mKeyboardHeightSupplier;\n\
+      \    private final Supplier<Integer> mBottomWindowPaddingSupplier;\n    private final Context mContext;\n\
+      \    private final TopInsetProvider mTopInsetProvider;\n    private final TopInsetProvider.Observer\
+      \ mTopInsetProviderObserver;\n    // Reusable int array to pass to positioning methods that operate\
+      \ on a two element int array.\n    // Keeping it as a member lets us avoid allocating a temp array\
+      \ every time.\n    private final int[] mPositionArray = new int[2];\n    private int mVerticalOffsetInWindow;\n\
+      \    private int mHorizontalOffsetInWindow;\n    private int mWindowWidthDp;\n    private int mWindowHeightDp;\n\
+      \    private int mTopPaddingForEdgeToEdge;\n    private @Nullable WindowInsetsCompat mWindowInsetsCompat;\n\
+      \    private final @Nullable View mBaseChromeLayout;\n\n    /**\n     * @param resourceProvider\
+      \ Resource cache for fast resource lookup.\n     * @param windowAndroid Window object in which the\
+      \ dropdown will be displayed.\n     * @param anchorView View to which the dropdown should be \"\
+      anchored\" i.e. vertically positioned\n     *     next to and matching the width of. This must be\
+      \ a descendant of the top-level content\n     *     (android.R.id.content) view.\n     * @param\
+      \ alignmentView View to which: 1. The dropdown should be horizontally aligned to when\n     *  \
+      \   its width is smaller than the anchor view. 2. The dropdown should vertically align to\n    \
+      \ *     during animations. This must be a descendant of the anchor view.\n     * @param alignmentViewTargetWidthSupplier\
+      \ Supplier of the target width for the alignment view,\n     *     allowing target width to update\
+      \ without mutating layout parameters on the alignment view\n     *     directly (which would cause\
+      \ double margin counting on focus).\n     * @param alignmentViewLeftOffsetSupplier Supplier of the\
+      \ left offset for the alignment view,\n     *     allowing alignment to publish horizontal shifts.\n\
+      \     * @param forcePhoneStyleOmnibox Whether to force phone layout styling for suggestions.\n \
+      \    * @param baseChromeLayout The base view hosting Chrome that certain views (e.g. the omnibox\n\
+      \     *     suggestion list) will position themselves relative to. If null, the content view will\
+      \ be\n     *     used.\n     * @param controlsPositionSupplier Supplier for the current controls\
+      \ position.\n     * @param keyboardHeightSupplier Supplies the current height of the keyboard.\n\
+      \     * @param bottomWindowPaddingSupplier Supplier of the height of the bottom-most region of the\n\
+      \     *     window that should be considered part of the window's height. This region is suitable\
+      \ for\n     *     rendering content, particularly to achieve a full-bleed visual effect, though\
+      \ it should\n     *     also be incorporated as bottom padding to ensure that such content can be\
+      \ fully scrolled\n     *     out of this region to be fully visible and interactable. This is used\
+      \ to ensure the\n     *     suggestions list draws edge to edge when appropriate. This should only\
+      \ be used when the\n     *     soft keyboard is not visible.\n     * @param topInsetProvider Provider\
+      \ for edge-to-edge top inset changes.\n     */\n    OmniboxSuggestionsDropdownEmbedderImpl(\n  \
+      \          OmniboxResourceProvider resourceProvider,\n            WindowAndroid windowAndroid,\n\
+      \            View anchorView,\n            View alignmentView,\n            Supplier<Integer> alignmentViewTargetWidthSupplier,\n\
+      \            Supplier<Integer> alignmentViewLeftOffsetSupplier,\n            boolean forcePhoneStyleOmnibox,\n\
+      \            @Nullable View baseChromeLayout,\n            Supplier<@ControlsPosition Integer> controlsPositionSupplier,\n\
+      \            Supplier<Integer> keyboardHeightSupplier,\n            Supplier<Integer> bottomWindowPaddingSupplier,\n\
+      \            TopInsetProvider topInsetProvider) {\n        mResourceProvider = resourceProvider;\n\
+      \        mWindowAndroid = windowAndroid;\n        mAnchorView = anchorView;\n        mAlignmentView\
+      \ = alignmentView;\n        mAlignmentViewTargetWidthSupplier = alignmentViewTargetWidthSupplier;\n\
+      \        mAlignmentViewLeftOffsetSupplier = alignmentViewLeftOffsetSupplier;\n        mForcePhoneStyleOmnibox\
+      \ = forcePhoneStyleOmnibox;\n        mControlsPositionSupplier = controlsPositionSupplier;\n   \
+      \     mKeyboardHeightSupplier = keyboardHeightSupplier;\n        mBottomWindowPaddingSupplier =\
+      \ bottomWindowPaddingSupplier;\n        mContext = mAnchorView.getContext();\n        mContext.registerComponentCallbacks(this);\n\
+      \        Configuration configuration = mContext.getResources().getConfiguration();\n        mWindowWidthDp\
+      \ = configuration.smallestScreenWidthDp;\n        mWindowHeightDp = configuration.screenHeightDp;\n\
+      \        mBaseChromeLayout = baseChromeLayout;\n        mTopInsetProvider = topInsetProvider;\n\
+      \        recalculateOmniboxAlignment();\n\n        // Set up observer to handle edge-to-edge changes.\n\
+      \        mTopInsetProviderObserver = this::onToEdgeChange;\n        mTopInsetProvider.addObserver(mTopInsetProviderObserver);\n\
+      \    }\n\n    @Override\n    public OmniboxAlignment addAlignmentObserver(Callback<OmniboxAlignment>\
+      \ obs) {\n        return assertNonNull(mOmniboxAlignmentSupplier.addSyncObserverAndPostIfNonNull(obs));\n\
+      \    }\n\n    @Override\n    public void removeAlignmentObserver(Callback<OmniboxAlignment> obs)\
+      \ {\n        mOmniboxAlignmentSupplier.removeObserver(obs);\n    }\n\n    @Override\n    public\
+      \ OmniboxAlignment getCurrentAlignment() {\n        return assertNonNull(mOmniboxAlignmentSupplier.get());\n\
+      \    }\n\n    @Override\n    public boolean isWideWindow() {\n        if (mForcePhoneStyleOmnibox)\
+      \ return false;\n        return mWindowWidthDp >= DeviceFormFactor.MINIMUM_TABLET_WIDTH_DP\n   \
+      \             && DeviceFormFactor.isWindowOnTablet(mWindowAndroid);\n    }\n\n    @Override\n  \
+      \  public boolean isPhoneStyleWindow() {\n        if (mForcePhoneStyleOmnibox) return true;\n  \
+      \      return !isWideWindow();\n    }\n\n    @Override\n    public void onAttachedToWindow() {\n\
+      \        mAnchorView.addOnLayoutChangeListener(this);\n        mAlignmentView.addOnLayoutChangeListener(this);\n\
+      \        mAnchorView.getViewTreeObserver().addOnGlobalLayoutListener(this);\n        onConfigurationChanged(mContext.getResources().getConfiguration());\n\
+      \        recalculateOmniboxAlignment();\n    }\n\n    @Override\n    public void onDetachedFromWindow()\
+      \ {\n        mAnchorView.removeOnLayoutChangeListener(this);\n        mAlignmentView.removeOnLayoutChangeListener(this);\n\
+      \        mAnchorView.getViewTreeObserver().removeOnGlobalLayoutListener(this);\n    }\n\n    //\
+      \ View.OnLayoutChangeListener\n    @Override\n    public void onLayoutChange(\n            View\
+      \ v,\n            int left,\n            int top,\n            int right,\n            int bottom,\n\
+      \            int oldLeft,\n            int oldTop,\n            int oldRight,\n            int oldBottom)\
+      \ {\n        recalculateOmniboxAlignment();\n    }\n\n    // OnGlobalLayoutListener\n    @Override\n\
+      \    public void onGlobalLayout() {\n        if (verticalOffsetInWindowChanged(mAnchorView)\n  \
+      \              || insetsHaveChanged(mAnchorView)\n                || horizontalOffsetInWindowChanged(mAlignmentView))\
+      \ {\n            recalculateOmniboxAlignment();\n        }\n    }\n\n    // ComponentCallbacks\n\
+      \    @Override\n    public void onConfigurationChanged(Configuration newConfig) {\n        int windowWidth\
+      \ = newConfig.screenWidthDp;\n        int windowHeight = newConfig.screenHeightDp;\n        if (windowWidth\
+      \ == mWindowWidthDp && mWindowHeightDp == windowHeight) return;\n        mWindowWidthDp = windowWidth;\n\
+      \        mWindowHeightDp = windowHeight;\n\n        recalculateOmniboxAlignment();\n    }\n\n  \
+      \  @Override\n    public void onLowMemory() {}\n\n    @Override\n    public float getVerticalTranslationForAnimation()\
+      \ {\n        // With TOOLBAR_PHONE_ANIMATION_REFACTOR, the alignment view's translation may be handled\
+      \ by\n        // the animation matrix instead of directly through the view's translationY.\n   \
+      \     Matrix matrix = mAlignmentView.getAnimationMatrix();\n        if (matrix != null) {\n    \
+      \        float[] values = new float[9];\n            matrix.getValues(values);\n            return\
+      \ values[Matrix.MTRANS_Y];\n        } else {\n            return mAlignmentView.getTranslationY();\n\
+      \        }\n    }\n\n    /**\n     * Recalculates the desired alignment of the omnibox and sends\
+      \ the updated alignment data to any\n     * observers. Currently will send an update message unconditionally.\
+      \ This method is called\n     * during layout and should avoid memory allocations other than the\
+      \ necessary new\n     * OmniboxAlignment(). The method aligns the omnibox dropdown as follows:\n\
+      \     *\n     * <p>Case 1: Omnibox on tablet window.\n     *\n     * <pre>\n     *  | anchor  [\
+      \  alignment  ]       |\n     *            |  dropdown   |\n     * </pre>\n     *\n     * <p>Case\
+      \ 2: Phone window. Full width and no padding.\n     *\n     * <pre>\n     *  | anchor     [alignment]\
+      \        |\n     *  |           dropdown            |\n     * </pre>\n     */\n    void recalculateOmniboxAlignment()\
+      \ {\n        View contentView = mBaseChromeLayout;\n        // TODO(b:397495817): delete the section\
+      \ below once no longer needed.\n        assert contentView != null\n                : \"b:397495817:\
+      \ please share backtrace and repro steps on the bug!\";\n        if (contentView == null) {\n  \
+      \          contentView = mAnchorView.getRootView().findViewById(android.R.id.content);\n       \
+      \ }\n\n        int top;\n        int left;\n        int width;\n        int paddingLeft = 0;\n \
+      \       int paddingRight = 0;\n\n        @ControlsPosition int controlsPosition = mControlsPositionSupplier.get();\n\
+      \        if (controlsPosition == ControlsPosition.BOTTOM) {\n            top = 0;\n        } else\
+      \ {\n            ViewUtils.getRelativeLayoutPosition(contentView, mAnchorView, mPositionArray);\n\
+      \            top = mPositionArray[1] + mAnchorView.getMeasuredHeight() - contentView.getPaddingTop();\n\
+      \        }\n\n        if (isPhoneStyleWindow()) {\n            // Case 1: Phones or phone-sized\
+      \ windows on tablets. Full bleed width with no padding or\n            // positioning adjustments.\n\
+      \            left = 0;\n            width = mAnchorView.getMeasuredWidth();\n        } else {\n\
+      \            // Tablet width and offset follow the ordinary alignment view.\n            if (!ChromeFeatureList.sToolbarProgressBarRefactor.isEnabled())\
+      \ {\n                top -=\n                        mContext.getResources()\n                 \
+      \               .getDimensionPixelSize(\n                                        R.dimen.omnibox_suggestion_list_toolbar_overlap);\n\
+      \            }\n            int sideSpacing = mResourceProvider.getDropdownSideSpacing();\n    \
+      \        ViewUtils.getRelativeLayoutPosition(mAnchorView, mAlignmentView, mPositionArray);\n   \
+      \         int targetWidth = mAlignmentViewTargetWidthSupplier.get();\n            width = targetWidth\
+      \ + 2 * sideSpacing;\n            int leftOffset = mAlignmentViewLeftOffsetSupplier.get();\n   \
+      \         if (mAnchorView.getLayoutDirection() == View.LAYOUT_DIRECTION_RTL) {\n               \
+      \ // The view will be shifted to the left, so the adjustment needs to be negative.\n           \
+      \     left =\n                        -(mAnchorView.getMeasuredWidth()\n                       \
+      \         - width\n                                - mPositionArray[0]\n                       \
+      \         + sideSpacing\n                                - leftOffset);\n            } else {\n\
+      \                left = mPositionArray[0] - sideSpacing + leftOffset;\n            }\n        }\n\
+      \n        int keyboardHeight = mKeyboardHeightSupplier.get();\n\n        int windowHeight;\n   \
+      \   "

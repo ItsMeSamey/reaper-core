@@ -24,7 +24,6 @@ public abstract class BraveCommandLineInitUtil {
     private static final String TAG = "BraveCommandLineInitUtil";
 
     // Duplicate constant to avoid pull dependency into base
-    private static final String PREF_QA_VLOG_REWARDS = "qa_vlog_rewards";
     private static final String PREF_QA_COMMAND_LINE = "qa_command_line";
     private static final String PREF_LINK_SUBSCRIPTION_ON_STAGING = "link_subscription_on_staging";
     private static final String TEST_VARIATIONS_SERVER_URL_FILE =
@@ -45,11 +44,6 @@ public abstract class BraveCommandLineInitUtil {
     static void appendBraveSwitchesAndArguments() {
         SharedPreferences sharedPreferences = ContextUtils.getAppSharedPreferences();
         String qaCommandLine = sharedPreferences.getString(PREF_QA_COMMAND_LINE, "");
-        if (sharedPreferences.getBoolean(PREF_QA_VLOG_REWARDS, false)) {
-            qaCommandLine += " --enable-logging=stderr";
-            qaCommandLine +=
-                    " --vmodule=*/brave_ads/*=6,*/brave_user_model/*=6,*/bat_ads/*=6,*/brave_rewards/*=6,*/brave_adaptive_captcha/*=6"; // presubmit: ignore-long-line
-        }
 
         // For testing we need custom variations server url prior to the first time run, so we try
         // to read it from the file.

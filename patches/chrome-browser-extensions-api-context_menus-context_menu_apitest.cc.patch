@@ -1,0 +1,828 @@
+diff --git a/chrome/browser/extensions/api/context_menus/context_menu_apitest.cc b/chrome/browser/extensions/api/context_menus/context_menu_apitest.cc
+--- a/chrome/browser/extensions/api/context_menus/context_menu_apitest.cc
++++ b/chrome/browser/extensions/api/context_menus/context_menu_apitest.cc
+@@ -4,7 +4,9 @@
+
+ #include <memory>
+ #include <optional>
++#include <string>
+ #include <utility>
++#include <vector>
+
+ #include "base/memory/raw_ptr.h"
+ #include "base/strings/utf_string_conversions.h"
+@@ -35,7 +37,34 @@
+ #include "ui/base/models/menu_model.h"
+
+ #if BUILDFLAG(IS_ANDROID)
++#include "base/check.h"
++#include "base/check_op.h"
++#include "base/functional/bind.h"
++#include "base/run_loop.h"
++#include "base/synchronization/waitable_event.h"
++#include "base/task/single_thread_task_runner.h"
++#include "base/test/bind.h"
++#include "base/test/test_future.h"
++#include "base/test/test_timeouts.h"
++#include "base/threading/thread_restrictions.h"
++#include "base/time/time.h"
++#include "chrome/browser/extensions/api/context_menus/context_menus_api.h"
+ #include "chrome/browser/extensions/extension_menu_model_android.h"
++#include "chrome/browser/profiles/profile_destroyer.h"
++#include "content/public/browser/weak_document_ptr.h"
++#include "content/public/common/content_features.h"
++#include "extensions/browser/event_router.h"
++#include "extensions/browser/browsertest_util.h"
++#include "extensions/browser/disable_reason.h"
++#include "extensions/browser/extension_file_task_runner.h"
++#include "extensions/browser/extension_function_dispatcher.h"
++#include "extensions/browser/extension_registrar.h"
++#include "extensions/browser/extension_system.h"
++#include "extensions/browser/state_store.h"
++#include "extensions/browser/test_event_router_observer.h"
++#include "extensions/browser/uninstall_reason.h"
++#include "extensions/browser/unloaded_extension_reason.h"
++#include "extensions/test/test_extension_dir.h"
+ #else
+ #include "chrome/browser/renderer_context_menu/render_view_context_menu.h"
+ #include "chrome/browser/renderer_context_menu/render_view_context_menu_test_util.h"
+@@ -785,4 +814,779 @@
+   VerifyMenuItem("child2", submodel, 1, ui::MenuModel::TYPE_COMMAND, false);
+ }
+
++#if BUILDFLAG(IS_ANDROID)
++// Keep the same live RFH across an ordinary document replacement so this test
++// distinguishes document ownership from frame liveness without deleting a frame.
++class ExtensionContextMenuDocumentAndroidTest
++    : public ExtensionContextMenuApiTest {
++ public:
++  ExtensionContextMenuDocumentAndroidTest() {
++    // Control both independent policies that can replace a same-site RFH.
++    navigation_features_.InitWithFeatures(
++        {}, {::features::kRenderDocument, ::features::kBackForwardCache});
++  }
++
++ protected:
++  TestExtensionDir extension_dir_;
++
++ private:
++  base::test::ScopedFeatureList navigation_features_;
++};
++
++IN_PROC_BROWSER_TEST_F(ExtensionContextMenuDocumentAndroidTest,
++                       RetainedMenuRejectsReplacedDocument) {
++  extension_dir_.WriteManifest(R"({
++    "name": "Context menu document", "version": "1", "manifest_version": 3,
++    "permissions": ["contextMenus"],
++    "background": {"service_worker": "worker.js"}
++  })");
++  extension_dir_.WriteFile(FILE_PATH_LITERAL("worker.js"), R"(
++    chrome.contextMenus.onClicked.addListener(() => {
++      chrome.test.sendMessage('document-clicked');
++    });
++    chrome.runtime.onInstalled.addListener(() => {
++      chrome.contextMenus.create({
++        id: 'document', title: 'Document action', contexts: ['page']
++      }, () => {
++        chrome.test.assertNoLastError();
++        chrome.test.sendMessage('document-menu-ready');
++      });
++    });
++  )");
++  ExtensionTestMessageListener ready("document-menu-ready");
++  const Extension* extension = LoadExtension(extension_dir_.UnpackedPath());
++  ASSERT_TRUE(extension);
++  ASSERT_TRUE(ready.WaitUntilSatisfied());
++  ASSERT_TRUE(embedded_test_server()->Start());
++  content::WebContents* contents = GetActiveWebContents();
++  ASSERT_TRUE(NavigateToURL(
++      contents, embedded_test_server()->GetURL("/title1.html")));
++  content::RenderFrameHost* source_frame = contents->GetPrimaryMainFrame();
++  ASSERT_TRUE(source_frame->IsActive());
++  ASSERT_TRUE(source_frame->IsRenderFrameLive());
++  const content::WeakDocumentPtr source_document =
++      source_frame->GetWeakDocumentPtr();
++  ASSERT_EQ(source_frame, source_document.AsRenderFrameHostIfValid());
++  content::ContextMenuParams params;
++  params.page_url = source_frame->GetLastCommittedURL();
++  ExtensionMenuModel retained_menu(*source_frame, params);
++  retained_menu.PopulateModel();
++  const auto& items = retained_menu.matcher_for_test().extension_item_map();
++  ASSERT_EQ(1u, items.size());
++  EXPECT_EQ(extension->id(), items.begin()->second.extension_key.extension_id);
++  EXPECT_EQ("document", items.begin()->second.string_uid);
++  const int command_id = items.begin()->first;
++  TestEventRouterObserver events(EventRouter::Get(profile()));
++  auto click_count = [&events]() {
++    size_t count = 0;
++    for (const auto& event : events.all_events()) {
++      if (event->event_name == "contextMenus.onClicked") {
++        ++count;
++      }
++    }
++    return count;
++  };
++  {
++    ExtensionTestMessageListener clicked("document-clicked");
++    retained_menu.ExecuteCommand(command_id, 0);
++    ASSERT_TRUE(clicked.WaitUntilSatisfied());
++  }
++  ASSERT_EQ(1u, click_count());
++  events.ClearEvents();
++
++  ASSERT_TRUE(NavigateToURL(
++      contents, embedded_test_server()->GetURL("/title2.html")));
++  // Do not dereference the old pointer if a future navigation policy swaps RFHs.
++  ASSERT_EQ(source_frame, contents->GetPrimaryMainFrame());
++  content::RenderFrameHost* current_frame = contents->GetPrimaryMainFrame();
++  ASSERT_TRUE(current_frame->IsActive());
++  ASSERT_TRUE(current_frame->IsRenderFrameLive());
++  EXPECT_FALSE(source_document.AsRenderFrameHostIfValid());
++  ASSERT_EQ(current_frame,
++            current_frame->GetWeakDocumentPtr().AsRenderFrameHostIfValid());
++  // The native router observes dispatch synchronously: no timeout is used as
++  // evidence that an expired document did not receive an action.
++  retained_menu.ExecuteCommand(command_id, 0);
++  EXPECT_EQ(0u, click_count());
++
++  params.page_url = current_frame->GetLastCommittedURL();
++  ExtensionMenuModel fresh_menu(*current_frame, params);
++  fresh_menu.PopulateModel();
++  const auto& fresh_items = fresh_menu.matcher_for_test().extension_item_map();
++  ASSERT_EQ(1u, fresh_items.size());
++  {
++    ExtensionTestMessageListener clicked("document-clicked");
++    fresh_menu.ExecuteCommand(fresh_items.begin()->first, 0);
++    ASSERT_TRUE(clicked.WaitUntilSatisfied());
++  }
++  EXPECT_EQ(1u, click_count());
++}
++
++namespace {
++
++struct MenuRestoreApiResult {
++  int responses = 0;
++  int successes = 0;
++  bool destroyed = false;
++  std::string error;
++};
++
++// Observe lifetime without replacing any actual API behavior.
++template <class Function>
++class ObservedMenuRestoreFunction : public Function {
++ public:
++  explicit ObservedMenuRestoreFunction(
++      std::shared_ptr<MenuRestoreApiResult> result)
++      : result_(std::move(result)) {}
++
++ protected:
++  ~ObservedMenuRestoreFunction() override { result_->destroyed = true; }
++
++ private:
++  std::shared_ptr<MenuRestoreApiResult> result_;
++};
++
++}  // namespace
++
++// An installed ordinary MV3 extension, its actual StateStore/registry, and
++// real API functions. Hold only UI delivery of real storage replies; never
++// call ReadFromStorage or a synthetic readiness predicate directly.
++class ExtensionContextMenuRestoreAndroidTest
++    : public ExtensionContextMenuApiTest,
++      public MenuManager::TestObserver {
++ public:
++  void SetUpOnMainThread() override {
++    ExtensionContextMenuApiTest::SetUpOnMainThread();
++    extension_dir_.WriteManifest(R"({
++      "name": "Menu restore ordering", "version": "1", "manifest_version": 3,
++      "permissions": ["contextMenus"], "incognito": "split",
++      "background": {"service_worker": "worker.js"}
++    })");
++    extension_dir_.WriteFile(
++        FILE_PATH_LITERAL("worker.js"),
++        "chrome.runtime.onInstalled.addListener(() => {});");
++    extension_ = LoadExtension(extension_dir_.UnpackedPath(),
++                               {.allow_in_incognito = true});
++    ASSERT_TRUE(extension_);
++    manager_ = MenuManager::Get(profile());
++    store_ = ExtensionSystem::Get(profile())->state_store();
++    ASSERT_TRUE(manager_);
++    ASSERT_TRUE(store_);
++    FlushStorage();
++    ASSERT_TRUE(store_->IsInitialized());
++    manager_->AddObserver(this);
++    observing_ = true;
++    dispatcher_ = std::make_unique<ExtensionFunctionDispatcher>(profile());
++  }
++
++  void TearDownOnMainThread() override {
++    if (extension_) {
++      DisableCurrent();
++    }
++    if (store_) {
++      FlushStorage();
++    }
++    if (observing_) {
++      manager_->RemoveObserver(this);
++    }
++    dispatcher_.reset();
++    extension_.reset();
++    manager_ = nullptr;
++    store_ = nullptr;
++    ExtensionContextMenuApiTest::TearDownOnMainThread();
++  }
++
++ protected:
++  void DidReadFromStorage(const std::string& extension_id) override {
++    if (extension_ && extension_id == extension_->id()) {
++      ++read_count_;
++    }
++  }
++
++  void DisableCurrent() {
++    ExtensionRegistrar::Get(profile())->DisableExtension(
++        extension_->id(), {disable_reason::DISABLE_USER_ACTION});
++  }
++
++  // A bounded marker completes earlier backend work without pumping UI.
++  void FinishBackendWithoutUi() {
++    auto marker = std::make_shared<base::WaitableEvent>();
++    CHECK(GetExtensionFileTaskRunner()->PostTask(
++        FROM_HERE, base::BindOnce(
++                       [](std::shared_ptr<base::WaitableEvent> marker) {
++                         marker->Signal();
++                       },
++                       marker)));
++    base::ScopedAllowBaseSyncPrimitivesForTesting allow_wait;
++    CHECK(marker->TimedWait(TestTimeouts::action_timeout()));
++  }
++
++  void FlushStorage() {
++    base::test::TestFuture<void> flushed;
++    store_->FlushForTesting(flushed.GetCallback());
++    CHECK(flushed.Wait());
++  }
++
++  MenuItem::Id Id(const std::string& id, bool incognito = false) {
++    MenuItem::Id result(incognito, MenuItem::ExtensionKey(extension_->id()));
++    result.string_uid = id;
++    return result;
++  }
++
++  MenuItem* Find(const std::string& id, bool incognito = false) {
++    return manager_->GetItemById(Id(id, incognito));
++  }
++
++  base::DictValue SavedItem(const std::string& id,
++                            const std::string& title,
++                            const std::string& parent = {}) {
++    MenuItem item(Id(id), title, false, true, true, MenuItem::NORMAL,
++                  MenuItem::ContextList(MenuItem::ALL));
++    auto value = item.ToValue();
++    if (!parent.empty()) {
++      value.Set("parent_uid", parent);
++    }
++    return value;
++  }
++
++  void SeedMenus() {
++    base::ListValue items;
++    items.Append(SavedItem("P", "stored parent"));
++    items.Append(SavedItem("C", "stored child", "P"));
++    items.Append(SavedItem("U", "untouched"));
++    SeedValue(base::Value(std::move(items)));
++  }
++
++  void SeedValue(base::Value value) {
++    DisableCurrent();
++    store_->SetExtensionValue(extension_->id(), "context_menus",
++                              std::move(value));
++    FinishBackendWithoutUi();
++    read_count_ = 0;
++  }
++
++  void BeginRestore() {
++    ExtensionRegistrar::Get(profile())->EnableExtension(extension_->id());
++    CHECK_EQ(extension_.get(),
++             ExtensionRegistry::Get(profile())->enabled_extensions().GetByID(
++                 extension_->id()));
++    FinishBackendWithoutUi();
++  }
++
++  static base::ListValue CreateArgs(const std::string& id,
++                                    const std::string& title,
++                                    const std::string& parent = {}) {
++    auto properties = base::DictValue().Set("id", id).Set("title", title);
++    if (!parent.empty()) {
++      properties.Set("parentId", parent);
++    }
++    return base::ListValue().Append(std::move(properties));
++  }
++
++  template <class Function>
++  std::shared_ptr<MenuRestoreApiResult> StartApi(
++      base::ListValue args,
++      base::OnceClosure on_response = {},
++      ExtensionFunctionDispatcher* dispatcher = nullptr) {
++    auto result = std::make_shared<MenuRestoreApiResult>();
++    auto function =
++        base::MakeRefCounted<ObservedMenuRestoreFunction<Function>>(result);
++    function->set_extension(extension_.get());
++    function->SetDispatcher(
++        (dispatcher ? dispatcher : dispatcher_.get())->AsWeakPtr());
++    function->SetArgs(std::move(args));
++    function->set_has_callback(true);
++    function->set_response_callback(base::BindOnce(
++        [](std::shared_ptr<MenuRestoreApiResult> result,
++           base::OnceClosure on_response,
++           ExtensionFunction::ResponseType response, base::ListValue values,
++           const std::string& error, mojom::ExtraResponseDataPtr extra) {
++          ++result->responses;
++          result->successes +=
++              response == ExtensionFunction::ResponseType::kSucceeded;
++          result->error = error;
++          if (on_response) {
++            std::move(on_response).Run();
++          }
++        },
++        result, std::move(on_response)));
++    function->RunWithValidation().Execute();
++    return result;
++  }
++
++  void ExpectCompleted(const std::shared_ptr<MenuRestoreApiResult>& result,
++                       bool success) {
++    EXPECT_EQ(1, result->responses);
++    EXPECT_EQ(success ? 1 : 0, result->successes);
++    EXPECT_TRUE(result->destroyed);
++  }
++
++  TestExtensionDir extension_dir_;
++  scoped_refptr<const Extension> extension_;
++  raw_ptr<MenuManager> manager_ = nullptr;
++  raw_ptr<StateStore> store_ = nullptr;
++  std::unique_ptr<ExtensionFunctionDispatcher> dispatcher_;
++  int read_count_ = 0;
++  bool observing_ = false;
++};
++
++IN_PROC_BROWSER_TEST_F(ExtensionContextMenuRestoreAndroidTest,
++                       RemoveAllThenCreateDoesNotResurrectSavedChildren) {
++  SeedMenus();
++  BeginRestore();
++  std::vector<int> responses;
++  auto removed = StartApi<ContextMenusRemoveAllFunction>(
++      {}, base::BindOnce([](std::vector<int>* order) { order->push_back(1); },
++                         &responses));
++  auto created = StartApi<ContextMenusCreateFunction>(
++      CreateArgs("P", "current parent"),
++      base::BindOnce([](std::vector<int>* order) { order->push_back(2); },
++                     &responses));
++  EXPECT_EQ(0, removed->responses);
++  EXPECT_EQ(0, created->responses);
++  EXPECT_FALSE(Find("P"));
++  FlushStorage();
++  ExpectCompleted(removed, true);
++  ExpectCompleted(created, true);
++  EXPECT_EQ((std::vector<int>{1, 2}), responses);
++  ASSERT_TRUE(Find("P"));
++  EXPECT_EQ("current parent", Find("P")->title());
++  EXPECT_TRUE(Find("P")->children().empty());
++  EXPECT_FALSE(Find("C"));
++  EXPECT_FALSE(Find("U"));
++  EXPECT_EQ(1, read_count_);
++}
++
++IN_PROC_BROWSER_TEST_F(ExtensionContextMenuRestoreAndroidTest,
++                       AdditiveCreateKeepsUntouchedTreeAndParentOrder) {
++  SeedMenus();
++  BeginRestore();
++  auto parent = StartApi<ContextMenusCreateFunction>(CreateArgs("N", "new"));
++  auto child =
++      StartApi<ContextMenusCreateFunction>(CreateArgs("NC", "new child", "N"));
++  EXPECT_EQ(0, parent->responses);
++  EXPECT_EQ(0, child->responses);
++  FlushStorage();
++  ExpectCompleted(parent, true);
++  ExpectCompleted(child, true);
++  ASSERT_TRUE(Find("P"));
++  EXPECT_EQ("stored parent", Find("P")->title());
++  ASSERT_TRUE(Find("C"));
++  ASSERT_TRUE(Find("C")->parent_id());
++  EXPECT_EQ(Id("P"), *Find("C")->parent_id());
++  EXPECT_TRUE(Find("U"));
++  ASSERT_TRUE(Find("NC"));
++  ASSERT_TRUE(Find("NC")->parent_id());
++  EXPECT_EQ(Id("N"), *Find("NC")->parent_id());
++}
++
++IN_PROC_BROWSER_TEST_F(ExtensionContextMenuRestoreAndroidTest,
++                       UpdateAndRemoveWaitForStoredItems) {
++  SeedMenus();
++  BeginRestore();
++  auto updated =
++      StartApi<ContextMenusUpdateFunction>(base::ListValue().Append("P").Append(
++          base::DictValue().Set("title", "updated")));
++  auto removed =
++      StartApi<ContextMenusRemoveFunction>(base::ListValue().Append("C"));
++  EXPECT_EQ(0, updated->responses);
++  EXPECT_EQ(0, removed->responses);
++  FlushStorage();
++  ExpectCompleted(updated, true);
++  ExpectCompleted(removed, true);
++  ASSERT_TRUE(Find("P"));
++  EXPECT_EQ("updated", Find("P")->title());
++  EXPECT_FALSE(Find("C"));
++  EXPECT_TRUE(Find("U"));
++}
++
++IN_PROC_BROWSER_TEST_F(ExtensionContextMenuRestoreAndroidTest,
++                       DuplicateCreateKeepsStoredParentAndChild) {
++  SeedMenus();
++  BeginRestore();
++  auto duplicate =
++      StartApi<ContextMenusCreateFunction>(CreateArgs("P", "replacement"));
++  EXPECT_EQ(0, duplicate->responses);
++  FlushStorage();
++  ExpectCompleted(duplicate, false);
++  EXPECT_FALSE(duplicate->error.empty());
++  ASSERT_TRUE(Find("P"));
++  EXPECT_EQ("stored parent", Find("P")->title());
++  EXPECT_TRUE(Find("C"));
++  EXPECT_TRUE(Find("U"));
++}
++
++IN_PROC_BROWSER_TEST_F(ExtensionContextMenuRestoreAndroidTest,
++                       SameObjectReenableRetiresOldReadAndWaitingMutation) {
++  SeedMenus();
++  BeginRestore();
++  auto old = StartApi<ContextMenusRemoveAllFunction>({});
++  EXPECT_EQ(0, old->responses);
++  DisableCurrent();
++  ExpectCompleted(old, false);
++  BeginRestore();
++  auto current =
++      StartApi<ContextMenusCreateFunction>(CreateArgs("N", "current"));
++  EXPECT_EQ(0, current->responses);
++  FlushStorage();
++  ExpectCompleted(current, true);
++  EXPECT_EQ(1, old->responses);
++  EXPECT_EQ(1, read_count_);
++  EXPECT_TRUE(Find("P"));
++  EXPECT_TRUE(Find("C"));
++  EXPECT_TRUE(Find("U"));
++  EXPECT_TRUE(Find("N"));
++}
++
++IN_PROC_BROWSER_TEST_F(ExtensionContextMenuRestoreAndroidTest,
++                       ReentrantUnloadFailsRemainingMutationExactlyOnce) {
++  SeedMenus();
++  BeginRestore();
++  auto first = StartApi<ContextMenusRemoveAllFunction>(
++      {}, base::BindLambdaForTesting([this] { DisableCurrent(); }));
++  auto second = StartApi<ContextMenusCreateFunction>(CreateArgs("N", "late"));
++  EXPECT_EQ(0, first->responses);
++  EXPECT_EQ(0, second->responses);
++  FlushStorage();
++  ExpectCompleted(first, true);
++  ExpectCompleted(second, false);
++  EXPECT_FALSE(Find("N"));
++  EXPECT_FALSE(Find("P"));
++}
++
++IN_PROC_BROWSER_TEST_F(ExtensionContextMenuRestoreAndroidTest,
++                       OtrShutdownCancelsOnlyOriginatingRequest) {
++  ASSERT_FALSE(profile()->HasPrimaryOTRProfile());
++  Profile* otr = profile()->GetPrimaryOTRProfile(/*create_if_needed=*/true);
++  ASSERT_TRUE(otr);
++  auto otr_dispatcher = std::make_unique<ExtensionFunctionDispatcher>(otr);
++  SeedMenus();
++  BeginRestore();
++  auto regular =
++      StartApi<ContextMenusCreateFunction>(CreateArgs("R", "regular"));
++  auto incognito = StartApi<ContextMenusCreateFunction>(
++      CreateArgs("I", "incognito"), {}, otr_dispatcher.get());
++  EXPECT_EQ(0, regular->responses);
++  EXPECT_EQ(0, incognito->responses);
++  // Destroying only the dispatcher does not notify ExtensionFunction shutdown.
++  otr_dispatcher.reset();
++  EXPECT_EQ(0, incognito->responses);
++  // Exercise the actual originating profile's keyed-service shutdown notifier.
++  ProfileDestroyer::DestroyOTRProfileImmediately(otr);
++  EXPECT_FALSE(profile()->HasPrimaryOTRProfile());
++  ExpectCompleted(incognito, false);
++  EXPECT_EQ(0, regular->responses);
++  FlushStorage();
++  ExpectCompleted(regular, true);
++  EXPECT_EQ(1, incognito->responses);
++  EXPECT_TRUE(Find("R"));
++  EXPECT_FALSE(Find("I", /*incognito=*/true));
++  EXPECT_TRUE(Find("U"));
++}
++
++IN_PROC_BROWSER_TEST_F(ExtensionContextMenuRestoreAndroidTest,
++                       ManagerShutdownReleasesPendingCallsAndRetiresRead) {
++  SeedMenus();
++  BeginRestore();
++  auto created = StartApi<ContextMenusCreateFunction>(CreateArgs("N", "late"));
++  auto removed = StartApi<ContextMenusRemoveAllFunction>({});
++  EXPECT_EQ(0, created->responses);
++  EXPECT_EQ(0, removed->responses);
++  manager_->Shutdown();
++  ExpectCompleted(created, false);
++  ExpectCompleted(removed, false);
++  manager_->Shutdown();
++  FlushStorage();
++  EXPECT_EQ(1, created->responses);
++  EXPECT_EQ(1, removed->responses);
++  EXPECT_EQ(0, read_count_);
++  EXPECT_FALSE(Find("P"));
++  EXPECT_FALSE(Find("N"));
++}
++
++IN_PROC_BROWSER_TEST_F(ExtensionContextMenuRestoreAndroidTest,
++                       InvalidStoredValueStillCompletesQueuedCreate) {
++  SeedValue(base::Value("not a menu list"));
++  BeginRestore();
++  auto created = StartApi<ContextMenusCreateFunction>(CreateArgs("N", "new"));
++  EXPECT_EQ(0, created->responses);
++  FlushStorage();
++  ExpectCompleted(created, true);
++  EXPECT_TRUE(Find("N"));
++  EXPECT_EQ(1, read_count_);
++}
++
++IN_PROC_BROWSER_TEST_F(ExtensionContextMenuRestoreAndroidTest,
++                       WorkerWakeKeepsMenusAndCreateReturnsImmediateId) {
++  SeedMenus();
++  BeginRestore();
++  FlushStorage();
++  ASSERT_TRUE(Find("P"));
++  ASSERT_TRUE(Find("C"));
++  const int completed_reads = read_count_;
++  ASSERT_EQ(
++      base::Value(true),
++      BackgroundScriptExecutor::ExecuteScript(
++          profile(), extension_->id(), "chrome.test.sendScriptResult(true);",
++          BackgroundScriptExecutor::ResultCapture::kSendScriptResult));
++  browsertest_util::StopServiceWorkerForExtensionGlobalScope(profile(),
++                                                             extension_->id());
++  EXPECT_EQ(base::Value(true),
++            BackgroundScriptExecutor::ExecuteScript(
++                profile(), extension_->id(), R"(
++        let returnedId;
++        let callbackRan = false;
++        returnedId = chrome.contextMenus.create({id: 'wake', title: 'wake'}, () => {
++          callbackRan = true;
++          chrome.test.sendScriptResult(
++              returnedId === 'wake' && !chrome.runtime.lastError);
++        });
++        if (returnedId !== 'wake' || callbackRan) {
++          chrome.test.sendScriptResult(false);
++        }
++      )",
++                BackgroundScriptExecutor::ResultCapture::kSendScriptResult));
++  EXPECT_EQ(completed_reads, read_count_);
++  EXPECT_TRUE(Find("P"));
++  EXPECT_TRUE(Find("C"));
++  EXPECT_TRUE(Find("U"));
++  EXPECT_TRUE(Find("wake"));
++}
++
++// Exercise acknowledged API mutations against the real one-second storage
++// timer. No UI task is pumped between a mutation and its immediate unload.
++class ExtensionContextMenuPendingWriteAndroidTest
++    : public ExtensionContextMenuRestoreAndroidTest {
++ public:
++  void TearDownOnMainThread() override {
++    // A failed assertion must not leave a callback referring to test locals.
++    on_write_.Reset();
++    ExtensionContextMenuRestoreAndroidTest::TearDownOnMainThread();
++  }
++
++ protected:
++  void WillWriteToStorage(const std::string& extension_id) override {
++    if (!extension_ || extension_id != extension_->id()) {
++      return;
++    }
++    ++write_count_;
++    if (on_write_) {
++      std::move(on_write_).Run();
++    }
++  }
++
++  void RestoreSeededMenus() {
++    SeedMenus();
++    BeginRestore();
++    FlushStorage();
++    CHECK(Find("P"));
++    CHECK(Find("C"));
++    CHECK(Find("U"));
++    CHECK_EQ(write_count_, 0);
++  }
++
++  void UpdateParent() {
++    auto result = StartApi<ContextMenusUpdateFunction>(
++        base::ListValue().Append("P").Append(
++            base::DictValue().Set("title", "updated parent")));
++    ASSERT_EQ(1, result->responses);
++    ASSERT_EQ(1, result->successes);
++    // Function destruction may be deferred; do not pump UI and fire the timer
++    // before the caller can exercise the immediate lifecycle transition.
++  }
++
++  std::optional<base::Value> ReadStoredMenus() {
++    base::test::TestFuture<std::optional<base::Value>> read;
++    store_->GetExtensionValue(extension_->id(), "context_menus",
++                              read.GetCallback());
++    CHECK(read.Wait());
++    return read.Take();
++  }
++
++  void ExpectStoredTree(const std::string& parent_title) {
++    auto value = ReadStoredMenus();
++    ASSERT_TRUE(value);
++    base::ListValue expected;
++    expected.Append(SavedItem("P", parent_title));
++    expected.Append(SavedItem("C", "stored child", "P"));
++    expected.Append(SavedItem("U", "untouched"));
++    // Compare the real serialized parent/child order, IDs, flags and titles,
++    // including the untouched subtree; an empty replacement cannot pass.
++    EXPECT_EQ(base::Value(std::move(expected)), *value);
++  }
++
++  void PumpPastWriteDelay() {
++    // The production coalescing delay is one second. A later UI task plus a
++    // real StateStore roundtrip catches a surviving obsolete timer, not just
++    // the synchronous state immediately after the lifecycle notification.
++    base::test::TestFuture<void> elapsed;
++    CHECK(base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
++        FROM_HERE, elapsed.GetCallback(), base::Seconds(2)));
++    CHECK(elapsed.Wait());
++    FlushStorage();
++  }
++
++  void UninstallCurrent() {
++    std::u16string error;
++    ASSERT_TRUE(ExtensionRegistrar::Get(profile())->UninstallExtension(
++        extension_->id(), UNINSTALL_REASON_FOR_TESTING, &error,
++        base::OnceClosure()));
++    EXPECT_TRUE(error.empty());
++  }
++
++  int write_count_ = 0;
++  base::OnceClosure on_write_;
++};
++
++IN_PROC_BROWSER_TEST_F(ExtensionContextMenuPendingWriteAndroidTest,
++                       DisableFlushPreservesChangedAndUntouchedItems) {
++  RestoreSeededMenus();
++  ASSERT_NO_FATAL_FAILURE(UpdateParent());
++  DisableCurrent();
++  EXPECT_EQ(1, write_count_);
++  EXPECT_FALSE(Find("P"));
++  ExpectStoredTree("updated parent");
++  PumpPastWriteDelay();
++  EXPECT_EQ(1, write_count_);
++  ExpectStoredTree("updated parent");
++}
++
++IN_PROC_BROWSER_TEST_F(ExtensionContextMenuPendingWriteAndroidTest,
++                       RemoveAllThenDisablePersistsEmpty) {
++  RestoreSeededMenus();
++  auto result = StartApi<ContextMenusRemoveAllFunction>({});
++  ASSERT_EQ(1, result->responses);
++  ASSERT_EQ(1, result->successes);
++  DisableCurrent();
++  EXPECT_EQ(1, write_count_);
++  auto value = ReadStoredMenus();
++  ASSERT_TRUE(value);
++  EXPECT_EQ(base::Value(base::ListValue()), *value);
++  BeginRestore();
++  FlushStorage();
++  EXPECT_FALSE(Find("P"));
++  EXPECT_FALSE(Find("C"));
++  EXPECT_FALSE(Find("U"));
++}
++
++IN_PROC_BROWSER_TEST_F(ExtensionContextMenuPendingWriteAndroidTest,
++                       SameObjectReenableReadsFlushedMutation) {
++  RestoreSeededMenus();
++  ASSERT_NO_FATAL_FAILURE(UpdateParent());
++  DisableCurrent();
++  // BeginRestore asserts the registrar reuses this exact Extension object.
++  // The storage Get must follow the disable flush, even before its UI reply.
++  BeginRestore();
++  FlushStorage();
++  ASSERT_TRUE(Find("P"));
++  EXPECT_EQ("updated parent", Find("P")->title());
++  ASSERT_TRUE(Find("C"));
++  ASSERT_TRUE(Find("C")->parent_id());
++  EXPECT_EQ(Id("P"), *Find("C")->parent_id());
++  EXPECT_TRUE(Find("U"));
++  EXPECT_EQ(1, write_count_);
++  ExpectStoredTree("updated parent");
++}
++
++IN_PROC_BROWSER_TEST_F(ExtensionContextMenuPendingWriteAndroidTest,
++                       TerminateFlushesOnlyPendingMutation) {
++  RestoreSeededMenus();
++  ASSERT_NO_FATAL_FAILURE(UpdateParent());
++  ExtensionRegistrar::Get(profile())->TerminateExtension(extension_->id());
++  EXPECT_EQ(1, write_count_);
++  EXPECT_FALSE(Find("P"));
++  ExpectStoredTree("updated parent");
++  PumpPastWriteDelay();
++  EXPECT_EQ(1, write_count_);
++  ExpectStoredTree("updated parent");
++}
++
++IN_PROC_BROWSER_TEST_F(ExtensionContextMenuPendingWriteAndroidTest,
++                       UpdateKeyRemovalCancelsPendingOldTree) {
++  RestoreSeededMenus();
++  ASSERT_NO_FATAL_FAILURE(UpdateParent());
++  // Exercise the real registry/StateStore and registrar lifecycle boundary in
++  // installer order. This test does not synthesize a new version or claim to
++  // cover the unrelated unpacking/installation pipeline.
++  ExtensionRegistry::Get(profile())->TriggerOnWillBeInstalled(
++      extension_.get(), /*is_update=*/true, extension_->name());
++  ExtensionRegistrar::Get(profile())->RemoveExtension(
++      extension_->id(), UnloadedExtensionReason::UPDATE);
++  PumpPastWriteDelay();
++  EXPECT_EQ(0, write_count_);
++  EXPECT_FALSE(ReadStoredMenus());
++}
++
++IN_PROC_BROWSER_TEST_F(ExtensionContextMenuPendingWriteAndroidTest,
++                       UninstallDoesNotRepopulateRemovedKey) {
++  RestoreSeededMenus();
++  ASSERT_NO_FATAL_FAILURE(UpdateParent());
++  ASSERT_NO_FATAL_FAILURE(UninstallCurrent());
++  PumpPastWriteDelay();
++  EXPECT_EQ(0, write_count_);
++  EXPECT_FALSE(ReadStoredMenus());
++}
++
++IN_PROC_BROWSER_TEST_F(ExtensionContextMenuPendingWriteAndroidTest,
++                       WriteObserverDisableReenableKeepsOwnedSnapshot) {
++  RestoreSeededMenus();
++  ASSERT_NO_FATAL_FAILURE(UpdateParent());
++  base::test::TestFuture<void> observed;
++  on_write_ =
++      base::BindLambdaForTesting([this, done = observed.GetCallback()]() mutable {
++        DisableCurrent();
++        BeginRestore();
++        std::move(done).Run();
++      });
++  ASSERT_TRUE(observed.Wait());
++  FlushStorage();
++  // The reentrant unload must neither recursively notify this observer nor
++  // let the obsolete outer write serialize freed MenuItem pointers.
++  EXPECT_EQ(1, write_count_);
++  ASSERT_TRUE(Find("P"));
++  EXPECT_EQ("updated parent", Find("P")->title());
++  EXPECT_TRUE(Find("C"));
++  EXPECT_TRUE(Find("U"));
++  ExpectStoredTree("updated parent");
++}
++
++IN_PROC_BROWSER_TEST_F(ExtensionContextMenuPendingWriteAndroidTest,
++                       DisableFlushObserverUninstallRetiresInFlightWrite) {
++  RestoreSeededMenus();
++  ASSERT_NO_FATAL_FAILURE(UpdateParent());
++  on_write_ = base::BindLambdaForTesting([this] {
++    // The outer disable already moved this extension out of the enabled
++    // set. Uninstall therefore need not emit a second unload callback.
++    EXPECT_TRUE(
++        ExtensionRegistry::Get(profile())->disabled_extensions().Contains(
++            extension_->id()));
++    UninstallCurrent();
++  });
++  DisableCurrent();
++  EXPECT_EQ(1, write_count_);
++  EXPECT_FALSE(ReadStoredMenus());
++  PumpPastWriteDelay();
++  EXPECT_EQ(1, write_count_);
++  EXPECT_FALSE(ReadStoredMenus());
++}
++
++IN_PROC_BROWSER_TEST_F(ExtensionContextMenuPendingWriteAndroidTest,
++                       DisableFlushObserverShutdownDoesNotSubmit) {
++  RestoreSeededMenus();
++  ASSERT_NO_FATAL_FAILURE(UpdateParent());
++  on_write_ = base::BindLambdaForTesting([this] {
++    // This is the real keyed-service shutdown boundary, not object
++    // deletion or destruction of the browser test's original Profile.
++    manager_->Shutdown();
++  });
++  DisableCurrent();
++  EXPECT_EQ(1, write_count_);
++  ExpectStoredTree("stored parent");
++  PumpPastWriteDelay();
++  EXPECT_EQ(1, write_count_);
++  ExpectStoredTree("stored parent");
++}
++
++#endif  // BUILDFLAG(IS_ANDROID)
++
+ }  // namespace extensions

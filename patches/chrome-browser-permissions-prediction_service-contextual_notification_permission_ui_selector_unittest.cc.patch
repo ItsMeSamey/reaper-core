@@ -1,0 +1,95 @@
+diff --git a/chrome/browser/permissions/prediction_service/contextual_notification_permission_ui_selector_unittest.cc b/chrome/browser/permissions/prediction_service/contextual_notification_permission_ui_selector_unittest.cc
+--- a/chrome/browser/permissions/prediction_service/contextual_notification_permission_ui_selector_unittest.cc
++++ b/chrome/browser/permissions/prediction_service/contextual_notification_permission_ui_selector_unittest.cc
+@@ -13,6 +13,10 @@
+ #include "base/test/metrics/histogram_tester.h"
+ #include "base/test/mock_callback.h"
+ #include "base/test/scoped_feature_list.h"
++#include "build/build_config.h"
++#if BUILDFLAG(IS_ANDROID)
++#include "base/functional/bind.h"
++#endif
+ #include "chrome/browser/permissions/crowd_deny.pb.h"
+ #include "chrome/browser/permissions/crowd_deny_fake_safe_browsing_database_manager.h"
+ #include "chrome/browser/permissions/crowd_deny_preload_data.h"
+@@ -225,6 +229,16 @@
+     EXPECT_EQ(expected_decision, actual_decison);
+   }
+
++#if BUILDFLAG(IS_ANDROID)
++  ContextualNotificationPermissionUiSelector& selector() {
++    return contextual_selector_;
++  }
++
++  content::WebContents* web_contents() { return web_contents_.get(); }
++
++  void RunUntilIdle() { task_environment_.RunUntilIdle(); }
++
++#endif
+  private:
+   content::BrowserTaskEnvironment task_environment_;
+   std::unique_ptr<TestingProfile> testing_profile_;
+@@ -669,3 +683,63 @@
+                                  expected_bucket, 1);
+   }
+ }
++#if BUILDFLAG(IS_ANDROID)
++TEST_F(ContextualNotificationPermissionUiSelectorTest,
++       CancelPendingPreloadLookupAndReuse) {
++  base::test::ScopedFeatureList feature_list;
++  feature_list.InitAndEnableFeature(features::kQuietNotificationPrompts);
++  LoadTestPreloadData();
++  CrowdDenyPreloadData::GetInstance()->set_is_ready_to_use_for_testing(false);
++
++  permissions::MockPermissionRequest request(
++      GURL(kTestOriginNoData), permissions::RequestType::kNotifications);
++  base::MockCallback<
++      ContextualNotificationPermissionUiSelector::DecisionMadeCallback>
++      cancelled_callback;
++  EXPECT_CALL(cancelled_callback, Run).Times(0);
++  selector().SelectUiToUse(web_contents(), &request, cancelled_callback.Get());
++  selector().Cancel();
++
++  // Finishing the component load must not complete the cancelled selection.
++  LoadTestPreloadData();
++  RunUntilIdle();
++
++  // Invalidation must allow a subsequent selection to use fresh weak pointers.
++  QueryAndExpectDecisionForUrl(GURL(kTestOriginNoData),
++                               Decision::UseNormalUiAndShowNoWarning());
++}
++
++TEST_F(ContextualNotificationPermissionUiSelectorTest,
++       CancelPendingSafeBrowsingReleasesCompletionAndReuse) {
++  using Config = QuietNotificationPermissionUiConfig;
++  base::test::ScopedFeatureList feature_list;
++  feature_list.InitWithFeaturesAndParameters(
++      {{features::kQuietNotificationPrompts,
++        {{Config::kEnableCrowdDenyTriggering, "true"},
++         {Config::kCrowdDenyHoldBackChance, "0.0"}}}},
++      {});
++  LoadTestPreloadData();
++  LoadTestSafeBrowsingBlocklist();
++
++  permissions::MockPermissionRequest request(
++      GURL(kTestOriginSpammy), permissions::RequestType::kNotifications);
++  auto completion_state = std::make_shared<int>(0);
++  std::weak_ptr<int> completion_lifetime = completion_state;
++  selector().SelectUiToUse(
++      web_contents(), &request,
++      base::BindOnce(
++          [](std::shared_ptr<int>, const Decision&) {
++            ADD_FAILURE() << "Cancelled selection completed";
++          },
++          std::move(completion_state)));
++  ASSERT_FALSE(completion_lifetime.expired());
++
++  selector().Cancel();
++  EXPECT_TRUE(completion_lifetime.expired());
++  selector().Cancel();
++  RunUntilIdle();
++
++  QueryAndExpectDecisionForUrl(GURL(kTestOriginNoData),
++                               Decision::UseNormalUiAndShowNoWarning());
++}
++#endif  // BUILDFLAG(IS_ANDROID)

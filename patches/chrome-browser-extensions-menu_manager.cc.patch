@@ -1,0 +1,373 @@
+diff --git a/chrome/browser/extensions/menu_manager.cc b/chrome/browser/extensions/menu_manager.cc
+--- a/chrome/browser/extensions/menu_manager.cc
++++ b/chrome/browser/extensions/menu_manager.cc
+@@ -43,6 +43,10 @@
+ #include "ui/gfx/favicon_size.h"
+ #include "ui/gfx/text_elider.h"
+ 
++#if BUILDFLAG(IS_ANDROID)
++#include "extensions/browser/unloaded_extension_reason.h"
++#endif
++
+ #if BUILDFLAG(ENABLE_GUEST_VIEW)
+ #include "chrome/common/extensions/api/chrome_web_view_internal.h"
+ #include "components/guest_view/browser/guest_view_base.h"
+@@ -399,7 +403,114 @@
+   extension_menu_icon_loader_ = std::make_unique<ExtensionMenuIconLoader>();
+ }
+ 
+-MenuManager::~MenuManager() = default;
++MenuManager::~MenuManager() {
++#if BUILDFLAG(IS_ANDROID)
++  Shutdown();
++#endif
++}
++
++#if BUILDFLAG(IS_ANDROID)
++void MenuManager::Shutdown() {
++  if (shutting_down_) {
++    return;
++  }
++  shutting_down_ = true;
++  weak_ptr_factory_.InvalidateWeakPtrs();
++  extension_registry_observation_.Reset();
++  observed_profiles_.RemoveAllObservations();
++  write_tasks_.clear();
++  pending_write_ids_.clear();
++  auto pending = std::move(initial_restores_);
++  // No access to this after invoking a request: its response can destroy us.
++  for (auto& [id, restore] : pending) {
++    FailRestoreRequests(std::move(restore.requests));
++  }
++}
++
++base::ScopedClosureRunner MenuManager::RunAfterInitialRestore(
++    const Extension& extension,
++    base::OnceCallback<void(bool)> callback) {
++  if (shutting_down_ || ExtensionRegistry::Get(browser_context_)
++                                ->enabled_extensions()
++                                .GetByID(extension.id()) != &extension) {
++    std::move(callback).Run(false);
++    return {};
++  }
++  auto it = initial_restores_.find(extension.id());
++  if (it == initial_restores_.end()) {
++    std::move(callback).Run(true);
++    return {};
++  }
++  const uint64_t request_id = ++next_restore_request_id_;
++  CHECK_NE(request_id, 0u);
++  auto cancellation = base::ScopedClosureRunner(base::BindOnce(
++      &MenuManager::CancelRestoreRequest, weak_ptr_factory_.GetWeakPtr(),
++      extension.id(), it->second.generation, request_id));
++  it->second.requests.push_back({request_id, std::move(callback)});
++  return cancellation;
++}
++
++void MenuManager::CancelRestoreRequest(const std::string& extension_id,
++                                       uint64_t generation,
++                                       uint64_t request_id) {
++  auto it = initial_restores_.find(extension_id);
++  if (it == initial_restores_.end() || it->second.generation != generation) {
++    return;
++  }
++  auto& requests = it->second.requests;
++  auto request =
++      std::ranges::find(requests, request_id, &PendingRestoreRequest::id);
++  if (request == requests.end()) {
++    return;
++  }
++  // Detach before releasing the retained ExtensionFunction. Its destruction
++  // must not observe an entry which is still being erased.
++  auto callback = std::move(request->callback);
++  requests.erase(request);
++}
++
++void MenuManager::FailRestoreRequests(
++    std::deque<PendingRestoreRequest> requests) {
++  for (auto& request : requests) {
++    std::move(request.callback).Run(false);
++  }
++}
++
++void MenuManager::OnInitialRestoreRead(const std::string& extension_id,
++                                       uint64_t generation,
++                                       std::optional<base::Value> value) {
++  auto it = initial_restores_.find(extension_id);
++  if (it == initial_restores_.end() || it->second.generation != generation) {
++    return;
++  }
++  if (ExtensionRegistry::Get(browser_context_)
++          ->enabled_extensions()
++          .GetByID(extension_id) != it->second.extension.get()) {
++    auto requests = std::move(it->second.requests);
++    initial_restores_.erase(it);
++    FailRestoreRequests(std::move(requests));
++    return;
++  }
++  auto weak_this = weak_ptr_factory_.GetWeakPtr();
++  ReadFromStorage(extension_id, std::move(value));
++  // Keep the record until all earlier requests finish, including requests
++  // appended by a reentrant API response or read-complete observer.
++  while (weak_this) {
++    auto current = weak_this->initial_restores_.find(extension_id);
++    if (current == weak_this->initial_restores_.end() ||
++        current->second.generation != generation) {
++      return;
++    }
++    if (current->second.requests.empty()) {
++      weak_this->initial_restores_.erase(current);
++      return;
++    }
++    auto callback = std::move(current->second.requests.front().callback);
++    current->second.requests.pop_front();
++    std::move(callback).Run(true);
++  }
++}
++#endif  // BUILDFLAG(IS_ANDROID)
+ 
+ // static
+ MenuManager* MenuManager::Get(content::BrowserContext* context) {
+@@ -905,12 +1016,91 @@
+ 
+   // Schedule a task to write to storage since there could be many calls in a
+   // short span of time. See crbug.com/40928526.
++#if BUILDFLAG(IS_ANDROID)
++  if (shutting_down_) {
++    return;
++  }
++  const uint64_t write_id = ++next_pending_write_id_;
++  CHECK_NE(write_id, 0u);
++  pending_write_ids_[extension_key] = write_id;
++  write_tasks_[extension_key].Start(
++      FROM_HERE, base::Seconds(kWriteDelayInSeconds),
++      base::BindOnce(&MenuManager::WriteToStorageInternal,
++                     weak_ptr_factory_.GetWeakPtr(), extension_key, write_id));
++#else
+   write_tasks_[extension_key].Start(
+       FROM_HERE, base::Seconds(kWriteDelayInSeconds),
+       base::BindOnce(&MenuManager::WriteToStorageInternal,
+                      weak_ptr_factory_.GetWeakPtr(), extension_key));
+-}
+-
++#endif
++}
++
++#if BUILDFLAG(IS_ANDROID)
++base::Value MenuManager::SerializeMenuItems(
++    const MenuItem::ExtensionKey& extension_key) const {
++  const MenuItem::OwnedList* top_items = MenuItems(extension_key);
++  MenuItem::List all_items;
++  if (top_items) {
++    for (const auto& item : *top_items) {
++      DCHECK(!item->id().extension_key.webview_instance_id);
++      item->GetFlattenedSubtree(&all_items);
++    }
++  }
++  return base::Value(base::ToValueList(all_items, &MenuItem::ToValue));
++}
++
++bool MenuManager::IsCurrentPendingWrite(
++    const MenuItem::ExtensionKey& extension_key,
++    uint64_t write_id) const {
++  const auto pending = pending_write_ids_.find(extension_key);
++  return !shutting_down_ && pending != pending_write_ids_.end() &&
++         pending->second == write_id;
++}
++
++void MenuManager::SubmitPendingWrite(
++    const MenuItem::ExtensionKey& extension_key,
++    uint64_t write_id,
++    base::Value value) {
++  if (!IsCurrentPendingWrite(extension_key, write_id)) {
++    return;
++  }
++  auto weak_this = weak_ptr_factory_.GetWeakPtr();
++  // A disable/termination flush can reenter an in-flight notification. Commit
++  // that owned snapshot without recursively notifying the same ObserverList.
++  if (!notifying_write_observers_) {
++    notifying_write_observers_ = true;
++    for (TestObserver& observer : observers_) {
++      observer.WillWriteToStorage(extension_key.extension_id);
++      if (!weak_this) {
++        return;
++      }
++      if (!IsCurrentPendingWrite(extension_key, write_id)) {
++        notifying_write_observers_ = false;
++        return;
++      }
++    }
++    notifying_write_observers_ = false;
++  }
++  // The value owns all item data: an observer may have removed the live tree.
++  // Retire this write before submission; do not access members after Set.
++  pending_write_ids_.erase(extension_key);
++  if (store_) {
++    store_->SetExtensionValue(extension_key.extension_id, kContextMenusKey,
++                              std::move(value));
++  }
++}
++
++void MenuManager::WriteToStorageInternal(
++    const MenuItem::ExtensionKey& extension_key,
++    uint64_t write_id) {
++  if (!IsCurrentPendingWrite(extension_key, write_id)) {
++    return;
++  }
++  write_tasks_.erase(extension_key);
++  SubmitPendingWrite(extension_key, write_id,
++                     SerializeMenuItems(extension_key));
++}
++#else
+ void MenuManager::WriteToStorageInternal(
+     const MenuItem::ExtensionKey& extension_key) {
+   write_tasks_.erase(extension_key);
+@@ -932,6 +1122,7 @@
+         base::Value(base::ToValueList(all_items, &MenuItem::ToValue)));
+   }
+ }
++#endif
+ 
+ void MenuManager::ReadFromStorage(const std::string& extension_id,
+                                   std::optional<base::Value> value) {
+@@ -963,28 +1154,127 @@
+     }
+   }
+ 
++#if BUILDFLAG(IS_ANDROID)
++  auto weak_this = weak_ptr_factory_.GetWeakPtr();
++  const auto restore = initial_restores_.find(extension_id);
++  const uint64_t generation =
++      restore == initial_restores_.end() ? 0 : restore->second.generation;
++  for (TestObserver& observer : observers_) {
++    observer.DidReadFromStorage(extension_id);
++    if (!weak_this) {
++      return;
++    }
++    const auto current = initial_restores_.find(extension_id);
++    if (generation && (current == initial_restores_.end() ||
++                       current->second.generation != generation)) {
++      return;
++    }
++  }
++#else
+   for (TestObserver& observer : observers_)
+     observer.DidReadFromStorage(extension_id);
++#endif
+ }
+ 
+ void MenuManager::OnExtensionLoaded(content::BrowserContext* browser_context,
+                                     const Extension* extension) {
++#if BUILDFLAG(IS_ANDROID)
++  const MenuItem::ExtensionKey extension_key(extension->id());
++  write_tasks_.erase(extension_key);
++  pending_write_ids_.erase(extension_key);
++#endif
+   if (store_ && BackgroundInfo::HasLazyContext(extension)) {
++#if BUILDFLAG(IS_ANDROID)
++    if (shutting_down_) {
++      return;
++    }
++    const uint64_t generation = ++next_restore_generation_;
++    CHECK_NE(generation, 0u);
++    auto retired = initial_restores_.extract(extension->id());
++    initial_restores_.emplace(
++        extension->id(),
++        InitialRestore{
++            generation, scoped_refptr<const Extension>(extension), {}});
++    store_->GetExtensionValue(extension->id(), kContextMenusKey,
++                              base::BindOnce(&MenuManager::OnInitialRestoreRead,
++                                             weak_ptr_factory_.GetWeakPtr(),
++                                             extension->id(), generation));
++    if (!retired.empty()) {
++      FailRestoreRequests(std::move(retired.mapped().requests));
++    }
++#else
+     store_->GetExtensionValue(
+         extension->id(), kContextMenusKey,
+         base::BindOnce(&MenuManager::ReadFromStorage,
+                        weak_ptr_factory_.GetWeakPtr(), extension->id()));
++#endif
+   }
+ }
+ 
+ void MenuManager::OnExtensionUnloaded(content::BrowserContext* browser_context,
+                                       const Extension* extension,
+                                       UnloadedExtensionReason reason) {
++#if BUILDFLAG(IS_ANDROID)
++  auto retired = initial_restores_.extract(extension->id());
++  const MenuItem::ExtensionKey extension_key(extension->id());
++  write_tasks_.erase(extension_key);
++  const bool had_pending_write = pending_write_ids_.erase(extension_key) != 0;
++  std::optional<base::Value> pending_value;
++  uint64_t write_id = 0;
++  // Disable (including reload) and renderer termination retain stored menus.
++  // UPDATE/UNINSTALL must not undo StateStore's registered-key removal. Other
++  // unloads, including PROFILE_SHUTDOWN, cancel without a new durability
++  // promise.
++  if (had_pending_write && !shutting_down_ && store_ &&
++      (reason == UnloadedExtensionReason::DISABLE ||
++       reason == UnloadedExtensionReason::TERMINATE)) {
++    pending_value = SerializeMenuItems(extension_key);
++    write_id = ++next_pending_write_id_;
++    CHECK_NE(write_id, 0u);
++    pending_write_ids_[extension_key] = write_id;
++  }
++  // Remove only the retiring tree before any observer can load a successor.
++  if (context_items_.contains(extension_key)) {
++    RemoveAllContextItems(extension_key);
++  }
++  if (pending_value) {
++    SubmitPendingWrite(extension_key, write_id, std::move(*pending_value));
++  }
++  // Only local data/static calls after submission: observers can destroy us.
++  if (!retired.empty()) {
++    FailRestoreRequests(std::move(retired.mapped().requests));
++  }
++#else
+   MenuItem::ExtensionKey extension_key(extension->id());
+   if (context_items_.contains(extension_key)) {
+     RemoveAllContextItems(extension_key);
+   }
+-}
++#endif
++}
++
++#if BUILDFLAG(IS_ANDROID)
++void MenuManager::OnExtensionWillBeInstalled(
++    content::BrowserContext* browser_context,
++    const Extension* extension,
++    bool is_update,
++    const std::string& old_name) {
++  // StateStore removes registered keys here, even if the old version is
++  // disabled and will receive no further unload/load notification.
++  const MenuItem::ExtensionKey extension_key(extension->id());
++  write_tasks_.erase(extension_key);
++  pending_write_ids_.erase(extension_key);
++}
++
++void MenuManager::OnExtensionUninstalled(
++    content::BrowserContext* browser_context,
++    const Extension* extension,
++    UninstallReason reason) {
++  // An uninstall reentered from a disable flush has no second unload event.
++  const MenuItem::ExtensionKey extension_key(extension->id());
++  write_tasks_.erase(extension_key);
++  pending_write_ids_.erase(extension_key);
++}
++#endif
+ 
+ void MenuManager::OnOffTheRecordProfileCreated(Profile* off_the_record) {
+   observed_profiles_.AddObservation(off_the_record);
+@@ -994,6 +1284,11 @@
+   observed_profiles_.RemoveObservation(profile);
+   if (profile->IsOffTheRecord())
+     RemoveAllIncognitoContextItems();
++#if BUILDFLAG(IS_ANDROID)
++  else {
++    Shutdown();
++  }
++#endif
+ }
+ 
+ gfx::Image MenuManager::GetIconForExtensionKey(

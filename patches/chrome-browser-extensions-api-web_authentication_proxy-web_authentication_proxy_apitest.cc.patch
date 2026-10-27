@@ -1,0 +1,172 @@
+diff --git a/chrome/browser/extensions/api/web_authentication_proxy/web_authentication_proxy_apitest.cc b/chrome/browser/extensions/api/web_authentication_proxy/web_authentication_proxy_apitest.cc
+--- a/chrome/browser/extensions/api/web_authentication_proxy/web_authentication_proxy_apitest.cc
++++ b/chrome/browser/extensions/api/web_authentication_proxy/web_authentication_proxy_apitest.cc
+@@ -18,12 +18,16 @@
+ #include "components/policy/core/common/mock_configuration_policy_provider.h"
+ #include "content/public/browser/web_contents.h"
+ #include "content/public/test/browser_test.h"
++#include "content/public/test/back_forward_cache_util.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/weak_document_ptr.h"
+ #include "content/public/test/browser_test_utils.h"
+ #include "extensions/browser/browsertest_util.h"
+ #include "extensions/browser/permissions_manager.h"
+ #include "extensions/common/extension.h"
+ #include "extensions/test/extension_test_message_listener.h"
+ #include "extensions/test/result_catcher.h"
++#include "extensions/test/test_extension_dir.h"
+ #include "net/dns/mock_host_resolver.h"
+ #include "net/test/embedded_test_server/embedded_test_server.h"
+ #include "testing/gmock/include/gmock/gmock.h"
+@@ -194,6 +198,133 @@
+       net::EmbeddedTestServer::TYPE_HTTPS};
+ };
+ 
++IN_PROC_BROWSER_TEST_F(WebAuthenticationProxyApiTest,
++                       ProxyCannotBypassRelyingPartyAndAppIdChecks) {
++  TestExtensionDir test_dir;
++  test_dir.WriteManifest(R"({"name":"Proxy validation","version":"1",
++    "manifest_version":3,"permissions":["webAuthenticationProxy"],
++    "background":{"service_worker":"worker.js"}})");
++  test_dir.WriteFile(FILE_PATH_LITERAL("worker.js"), R"(
++    chrome.webAuthenticationProxy.onCreateRequest.addListener(({requestId}) => {
++      chrome.webAuthenticationProxy.completeCreateRequest({requestId,
++        error:{name:'InvalidStateError',message:'Request reached the proxy'}});
++    });
++    chrome.webAuthenticationProxy.onGetRequest.addListener(({requestId}) => {
++      chrome.webAuthenticationProxy.completeGetRequest({requestId,
++        error:{name:'InvalidStateError',message:'Request reached the proxy'}});
++    });
++    chrome.webAuthenticationProxy.attach().then(() => chrome.test.sendMessage('ready'));
++  )");
++  ExtensionTestMessageListener ready("ready");
++  ASSERT_TRUE(LoadExtension(test_dir.UnpackedPath()));
++  ASSERT_TRUE(ready.WaitUntilSatisfied());
++  auto* contents = GetActiveWebContents();
++  ASSERT_TRUE(NavigateToURL(contents, https_test_server_.GetURL("a.test", "/page.html")));
++  // The extension would respond InvalidStateError if either request were forwarded.
++  EXPECT_EQ("SecurityError", content::EvalJs(contents, R"(
++    navigator.credentials.create({publicKey:{
++      rp:{id:'unrelated.test',name:'test'}, challenge:new Uint8Array([1]),
++      user:{id:new Uint8Array([1]),name:'test',displayName:'test'},
++      pubKeyCredParams:[{type:'public-key',alg:-7}]
++    }}).then(()=>'unexpected-success', error=>error.name);
++  )"));
++  EXPECT_EQ("SecurityError", content::EvalJs(contents, R"(
++    navigator.credentials.get({publicKey:{rpId:'a.test', challenge:new Uint8Array([1]),
++      extensions:{appid:'https://unrelated.test/appid'}
++    }}).then(()=>'unexpected-success', error=>error.name);
++  )"));
++}
++
++IN_PROC_BROWSER_TEST_F(WebAuthenticationProxyApiTest,
++                       NavigationCancelsProxyAndRejectsStaleCompletion) {
++  TestExtensionDir test_dir;
++  test_dir.WriteManifest(R"({"name":"Proxy navigation","version":"1",
++    "manifest_version":3,"permissions":["webAuthenticationProxy"],
++    "background":{"service_worker":"worker.js"}})");
++  test_dir.WriteFile(FILE_PATH_LITERAL("worker.js"), R"(
++    chrome.webAuthenticationProxy.onGetRequest.addListener(({requestId}) => {
++      chrome.test.sendMessage('request-started');
++    });
++    chrome.webAuthenticationProxy.onRequestCanceled.addListener(async requestId => {
++      try {
++        await chrome.webAuthenticationProxy.completeGetRequest({requestId,
++          error:{name:'NotAllowedError',message:'stale'}});
++        chrome.test.sendMessage('unexpected-stale-success');
++      } catch (error) {
++        chrome.test.assertEq('Invalid requestId', error.message);
++        chrome.test.sendMessage('request-cancelled-and-stale-rejected');
++      }
++    });
++    chrome.webAuthenticationProxy.attach().then(() => chrome.test.sendMessage('ready'));
++  )");
++  ExtensionTestMessageListener ready("ready");
++  ASSERT_TRUE(LoadExtension(test_dir.UnpackedPath()));
++  ASSERT_TRUE(ready.WaitUntilSatisfied());
++  auto* contents = GetActiveWebContents();
++  ASSERT_TRUE(NavigateToURL(contents, https_test_server_.GetURL("a.test", "/page.html")));
++  ExtensionTestMessageListener started("request-started");
++  ExtensionTestMessageListener cancelled("request-cancelled-and-stale-rejected");
++  ASSERT_TRUE(content::ExecJs(contents, R"(
++    void (window.pendingCredential = navigator.credentials.get({publicKey:{
++      rpId:'a.test',challenge:new Uint8Array([1])
++    }}).catch(error=>error.name));
++  )"));
++  ASSERT_TRUE(started.WaitUntilSatisfied());
++  ASSERT_TRUE(NavigateToURL(contents,
++      https_test_server_.GetURL("a.test", "/page.html?replacement-document")));
++  EXPECT_TRUE(cancelled.WaitUntilSatisfied());
++}
++
++class WebAuthenticationProxyBackForwardCacheTest
++    : public WebAuthenticationProxyApiTest {
++ public:
++  WebAuthenticationProxyBackForwardCacheTest() {
++    feature_list_.InitWithFeaturesAndParameters(
++        content::GetDefaultEnabledBackForwardCacheFeaturesForTesting(),
++        content::GetDefaultDisabledBackForwardCacheFeaturesForTesting());
++  }
++
++ private:
++  base::test::ScopedFeatureList feature_list_;
++};
++
++IN_PROC_BROWSER_TEST_F(WebAuthenticationProxyBackForwardCacheTest,
++                       RestoredDocumentKeepsProxyBinding) {
++  TestExtensionDir test_dir;
++  test_dir.WriteManifest(R"({"name":"Proxy BFCache","version":"1",
++    "manifest_version":3,"permissions":["webAuthenticationProxy"],
++    "background":{"service_worker":"worker.js"}})");
++  test_dir.WriteFile(FILE_PATH_LITERAL("worker.js"), R"(
++    chrome.webAuthenticationProxy.onIsUvpaaRequest.addListener(({requestId}) => {
++      chrome.webAuthenticationProxy.completeIsUvpaaRequest({requestId,isUvpaa:true});
++      chrome.test.sendMessage('proxied-uvpaa');
++    });
++    chrome.webAuthenticationProxy.attach().then(() => chrome.test.sendMessage('ready'));
++  )");
++  ExtensionTestMessageListener ready("ready");
++  ASSERT_TRUE(LoadExtension(test_dir.UnpackedPath()));
++  ASSERT_TRUE(ready.WaitUntilSatisfied());
++  auto* contents = GetActiveWebContents();
++  ASSERT_TRUE(NavigateToURL(contents, https_test_server_.GetURL("a.test", "/page.html")));
++  {
++    ExtensionTestMessageListener proxied("proxied-uvpaa");
++    EXPECT_EQ(true, content::EvalJs(contents,
++        "PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()"));
++    ASSERT_TRUE(proxied.WaitUntilSatisfied());
++  }
++  auto original_document = contents->GetPrimaryMainFrame()->GetWeakDocumentPtr();
++  ASSERT_TRUE(NavigateToURL(contents, https_test_server_.GetURL("b.test", "/page.html")));
++  ASSERT_TRUE(original_document.AsRenderFrameHostIfValid());
++  ASSERT_TRUE(original_document.AsRenderFrameHostIfValid()->IsInLifecycleState(
++      content::RenderFrameHost::LifecycleState::kInBackForwardCache));
++  ASSERT_TRUE(content::HistoryGoBack(contents));
++  ASSERT_EQ(original_document.AsRenderFrameHostIfValid(), contents->GetPrimaryMainFrame());
++  ExtensionTestMessageListener proxied_after_restore("proxied-uvpaa");
++  EXPECT_EQ(true, content::EvalJs(contents,
++      "PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()"));
++  EXPECT_TRUE(proxied_after_restore.WaitUntilSatisfied());
++}
++
+ IN_PROC_BROWSER_TEST_F(WebAuthenticationProxyApiTest, AttachDetach) {
+   SetJsTestName("attachDetach");
+   EXPECT_TRUE(RunExtensionTest("web_authentication_proxy/main"));
+@@ -231,12 +362,17 @@
+   ASSERT_TRUE(second_extension) << message_;
+   ASSERT_TRUE(attach_fail_listener.WaitUntilSatisfied());
+ 
++  auto first_attachment =
++      WebAuthenticationProxyService::GetIfProxyAttached(profile())->GetWeakPtr();
++  ASSERT_TRUE(first_attachment);
++
+   // Tell the first extension to detach. Then tell the second extension to
+   // attach.
+   ExtensionTestMessageListener detach_listener("detached",
+                                                ReplyBehavior::kWillReply);
+   attach_listener.Reply("");
+   ASSERT_TRUE(detach_listener.WaitUntilSatisfied());
++  EXPECT_FALSE(first_attachment);
+   attach_fail_listener.Reply("");
+   EXPECT_TRUE(catcher.GetNextResult());
+ 

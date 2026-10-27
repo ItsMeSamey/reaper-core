@@ -1,0 +1,148 @@
+diff --git a/chrome/android/java/src/org/chromium/chrome/browser/init/ProcessInitializationHandler.java b/chrome/android/java/src/org/chromium/chrome/browser/init/ProcessInitializationHandler.java
+--- a/chrome/android/java/src/org/chromium/chrome/browser/init/ProcessInitializationHandler.java
++++ b/chrome/android/java/src/org/chromium/chrome/browser/init/ProcessInitializationHandler.java
+@@ -49,7 +49,6 @@
+ import org.chromium.chrome.browser.DevToolsServer;
+ import org.chromium.chrome.browser.FileProviderHelper;
+ import org.chromium.chrome.browser.accessibility.settings.AccessibilitySettingsBridge;
+-import org.chromium.chrome.browser.actor.ActorForegroundServiceManager;
+ import org.chromium.chrome.browser.app.bluetooth.BluetoothNotificationService;
+ import org.chromium.chrome.browser.app.flags.ChromeCachedFlags;
+ import org.chromium.chrome.browser.app.usb.UsbNotificationService;
+@@ -59,15 +58,12 @@
+ import org.chromium.chrome.browser.bookmarkswidget.BookmarkWidgetProvider;
+ import org.chromium.chrome.browser.contacts_picker.ContactsPickerDelegateProvider;
+ import org.chromium.chrome.browser.content_capture.ContentCaptureHistoryDeletionObserver;
+-import org.chromium.chrome.browser.crash.CrashUploadCountStore;
+ import org.chromium.chrome.browser.crash.LogcatExtractionRunnable;
+-import org.chromium.chrome.browser.crash.MinidumpUploadServiceImpl;
+ import org.chromium.chrome.browser.download.DownloadManagerService;
+ import org.chromium.chrome.browser.download.OfflineContentAvailabilityStatusProvider;
+ import org.chromium.chrome.browser.feedback.FeedbackPolicyManager;
+ import org.chromium.chrome.browser.firstrun.TosDialogBehaviorSharedPrefInvalidator;
+ import org.chromium.chrome.browser.flags.ChromeFeatureList;
+-import org.chromium.chrome.browser.glic.GlicEnabling;
+ import org.chromium.chrome.browser.history.HistoryDeletionBridge;
+ import org.chromium.chrome.browser.homepage.HomepageManager;
+ import org.chromium.chrome.browser.incognito.IncognitoTabLauncher;
+@@ -92,7 +88,6 @@
+ import org.chromium.chrome.browser.preferences.ChromePreferenceKeys;
+ import org.chromium.chrome.browser.preferences.ChromeSharedPreferences;
+ import org.chromium.chrome.browser.prefs.LocalStatePrefs;
+-import org.chromium.chrome.browser.price_tracking.PriceTrackingFeatures;
+ import org.chromium.chrome.browser.privacy.settings.PrivacyPreferencesManagerImpl;
+ import org.chromium.chrome.browser.profiles.Profile;
+ import org.chromium.chrome.browser.profiles.ProfileKeyedMap;
+@@ -105,12 +100,10 @@
+ import org.chromium.chrome.browser.share.send_tab_to_self.OtherDevicesShortcutControllerFactory;
+ import org.chromium.chrome.browser.sync.SyncErrorNotifier;
+ import org.chromium.chrome.browser.tab.state.PersistedTabData;
+-import org.chromium.chrome.browser.tab.state.ShoppingPersistedTabData;
+ import org.chromium.chrome.browser.tabmodel.TabPersistentStoreImpl;
+ import org.chromium.chrome.browser.ui.cars.DrivingRestrictionsManager;
+ import org.chromium.chrome.browser.ui.color.ColorProviderBridgeImpl;
+ import org.chromium.chrome.browser.ui.enterprise_signals_disclaimer.EnterpriseSignalsDisclaimerAckSyncer;
+-import org.chromium.chrome.browser.ui.hats.SurveyClientFactory;
+ import org.chromium.chrome.browser.ui.searchactivityutils.SearchActivityPreferencesManager;
+ import org.chromium.chrome.browser.usb.UsbNotificationManager;
+ import org.chromium.chrome.browser.util.AfterStartupTaskUtils;
+@@ -127,7 +120,6 @@
+ import org.chromium.components.crash.browser.ChildProcessCrashObserver;
+ import org.chromium.components.embedder_support.util.UrlUtilities;
+ import org.chromium.components.minidump_uploader.CrashFileManager;
+-import org.chromium.components.optimization_guide.proto.HintsProto.OptimizationType;
+ import org.chromium.components.policy.CombinedPolicyProvider;
+ import org.chromium.components.policy.EnterpriseInfo;
+ import org.chromium.components.safe_browsing.SafeBrowsingApiBridge;
+@@ -475,16 +467,9 @@
+             DrivingRestrictionsManager.initialize();
+         }
+
+-        // Initialize UMA settings for survey component.
+-        SurveyClientFactory.initialize(PrivacyPreferencesManagerImpl.getInstance());
+-
+         AppHooks.get().registerPolicyProviders(CombinedPolicyProvider.get());
+         SpeechRecognition.initialize();
+         TrampolineActivityTracker.getInstance().onNativeInitialized();
+-
+-        if (GlicEnabling.isEnabledByFlags()) {
+-            ActorForegroundServiceManager.initialize();
+-        }
+     }
+
+     /**
+@@ -758,15 +743,7 @@
+                     OptimizationGuideBridge optimizationGuideBridge =
+                             OptimizationGuideBridgeFactory.getForProfile(profile);
+                     if (optimizationGuideBridge != null) {
+-                        // OptimizationTypes which we give a guarantee will be registered when we
+-                        // pass the onDeferredStartup() signal to OptimizationGuide.
+-                        optimizationGuideBridge.registerOptimizationTypes(
+-                                List.of(OptimizationType.PRICE_TRACKING));
+                         optimizationGuideBridge.onDeferredStartup();
+-                    }
+-                    // TODO(crbug.com/40236066) Move to PersistedTabData.onDeferredStartup
+-                    if (PriceTrackingFeatures.isPriceAnnotationsEligible(profile)) {
+-                        ShoppingPersistedTabData.onDeferredStartup();
+                     }
+                 });
+
+@@ -832,22 +809,8 @@
+                 WebappRegistry.getInstance().unregisterOldWebapps(System.currentTimeMillis());
+             }
+
+-            /**
+-             * Initializes the crash reporting system. More specifically, enables the crash
+-             * reporting system if it is user-permitted, and initiates uploading of any pending
+-             * crash reports. Also updates some UMA metrics and performs cleanup in the local crash
+-             * minidump storage directory.
+-             */
++            /** Preserves local crash diagnostics and cleans up stale reports. */
+             private void initCrashReporting() {
+-                // Crash reports can be uploaded as part of a background service even while the main
+-                // Chrome activity is not running, and hence regular metrics reporting is not
+-                // possible. Instead, metrics are temporarily written to prefs; export those prefs
+-                // to UMA metrics here.
+-                MinidumpUploadServiceImpl.storeBreakpadUploadStatsInUma(
+-                        CrashUploadCountStore.getInstance());
+-
+-                // Likewise, this is a good time to process and clean up any pending or stale crash
+-                // reports left behind by previous runs.
+                 CrashFileManager crashFileManager =
+                         new CrashFileManager(ContextUtils.getApplicationContext().getCacheDir());
+                 crashFileManager.cleanOutAllNonFreshMinidumpFiles();
+@@ -856,34 +819,8 @@
+                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                     crashFileManager.collectAndWriteAnrs();
+                 }
+-                // Next, identify any minidumps that lack logcat output, and are too old to add
+-                // logcat output to. Mark these as ready for upload. If there is a fresh minidump
+-                // that still needs logcat output to be attached, stash it for now.
+                 File minidumpMissingLogcat = processMinidumpsSansLogcat(crashFileManager);
+-
+-                // Now, upload all pending crash reports that are not still in need of logcat data.
+-                File[] minidumps =
+-                        crashFileManager.getMinidumpsReadyForUpload(
+-                                MinidumpUploadServiceImpl.MAX_TRIES_ALLOWED);
+-                if (minidumps.length > 0) {
+-                    Log.i(
+-                            TAG,
+-                            "Attempting to upload %d accumulated crash dumps.",
+-                            minidumps.length);
+-                    MinidumpUploadServiceImpl.scheduleUploadJob();
+-                }
+-
+-                // Finally, if there is a minidump that still needs logcat output to be attached, do
+-                // so now. Note: It's important to do this strictly after calling
+-                // |crashFileManager.getMinidumpsReadyForUpload()|. Otherwise, there is a race
+-                // between appending the logcat and getting the results from that call, as the
+-                // minidump will be renamed to be a valid file for upload upon logcat extraction
+-                // success.
+                 if (minidumpMissingLogcat != null) {
+-                    // Note: When using the JobScheduler API to schedule uploads, this call might
+-                    // result in a duplicate request to schedule minidump uploads -- if the call
+-                    // succeeds, and there were also other pending minidumps found above. This is
+-                    // fine; the job scheduler is robust to such duplicate calls.
+                     AsyncTask.THREAD_POOL_EXECUTOR.execute(
+                             new LogcatExtractionRunnable(minidumpMissingLogcat));
+                 }

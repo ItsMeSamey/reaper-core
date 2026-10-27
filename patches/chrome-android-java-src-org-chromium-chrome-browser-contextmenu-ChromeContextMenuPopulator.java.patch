@@ -1,8 +1,73 @@
 diff --git a/chrome/android/java/src/org/chromium/chrome/browser/contextmenu/ChromeContextMenuPopulator.java b/chrome/android/java/src/org/chromium/chrome/browser/contextmenu/ChromeContextMenuPopulator.java
-index e783bf65be65ee6a38d2f9609c3f1baa9c83a752..a94f1976a8453b69128cb85fe8d203615d402ce2 100644
+index e783bf65be65ee6a38d2f9609c3f1baa9c83a752..862a728cdbaff5acaccbd859f2a9f7075aff2847 100644
 --- a/chrome/android/java/src/org/chromium/chrome/browser/contextmenu/ChromeContextMenuPopulator.java
 +++ b/chrome/android/java/src/org/chromium/chrome/browser/contextmenu/ChromeContextMenuPopulator.java
-@@ -270,6 +270,7 @@ public class ChromeContextMenuPopulator implements ContextMenuPopulator {
+@@ -36,13 +36,13 @@
+ 
+ import org.chromium.base.ApiCompatibilityUtils;
+ import org.chromium.base.ContextUtils;
+-import org.chromium.base.DeviceInfo;
+ import org.chromium.base.LocaleUtils;
+ import org.chromium.base.Log;
+ import org.chromium.base.ResettersForTesting;
+ import org.chromium.base.metrics.RecordHistogram;
+ import org.chromium.base.metrics.RecordUserAction;
+ import org.chromium.base.shared_preferences.SharedPreferencesManager;
++import org.chromium.build.BuildConfig;
+ import org.chromium.build.annotations.NullMarked;
+ import org.chromium.build.annotations.Nullable;
+ import org.chromium.chrome.R;
+@@ -55,16 +55,7 @@
+ import org.chromium.chrome.browser.ephemeraltab.EphemeralTabCoordinator;
+ import org.chromium.chrome.browser.firstrun.FirstRunStatus;
+ import org.chromium.chrome.browser.flags.ChromeFeatureList;
+-import org.chromium.chrome.browser.glic.GlicEnabling;
+-import org.chromium.chrome.browser.glic.GlicKeyedService.GlicInvocationSource;
+-import org.chromium.chrome.browser.glic.GlicKeyedServiceHandler;
+ import org.chromium.chrome.browser.incognito.IncognitoUtils;
+-import org.chromium.chrome.browser.lens.LensController;
+-import org.chromium.chrome.browser.lens.LensEntryPoint;
+-import org.chromium.chrome.browser.lens.LensIdentityUtils;
+-import org.chromium.chrome.browser.lens.LensIntentParams;
+-import org.chromium.chrome.browser.lens.LensMetrics;
+-import org.chromium.chrome.browser.lens.LensSupportStatusHelper;
+ import org.chromium.chrome.browser.locale.LocaleManager;
+ import org.chromium.chrome.browser.multiwindow.MultiWindowUtils;
+ import org.chromium.chrome.browser.preferences.ChromePreferenceKeys;
+@@ -82,13 +73,8 @@
+ import org.chromium.chrome.browser.tab.Tab;
+ import org.chromium.chrome.browser.tab.TabContextMenuItemDelegate;
+ import org.chromium.chrome.browser.tab.TabUtils;
+-import org.chromium.chrome.browser.tab_bottom_sheet.TabBottomSheetUtils;
+ import org.chromium.chrome.browser.translate.TranslateBridge;
+ import org.chromium.chrome.browser.translate.TranslateUtils;
+-import org.chromium.chrome.browser.ui.lens.LensOverlayCoordinator;
+-import org.chromium.chrome.browser.ui.lens.LensOverlayInvocationSource;
+-import org.chromium.chrome.browser.ui.lens.LensOverlayTabHelper;
+-import org.chromium.chrome.browser.ui.side_panel.AndroidSidePanelEnabledFn;
+ import org.chromium.chrome.browser.ui.signin.ForcedSigninStatusProvider;
+ import org.chromium.components.browser_ui.share.ShareParams;
+ import org.chromium.components.browser_ui.widget.BrowserUiListMenuUtils;
+@@ -133,18 +119,11 @@
+             1512; // Random id to avoid possible collisions.
+     private static final int MAX_CUSTOM_MENU_ITEMS = 4;
+     private static final String TAG = "CCMenuPopulator";
+-    private static final String LENS_SUPPORT_STATUS_HISTOGRAM_NAME =
+-            "ContextMenu.LensSupportStatus";
+     private static final String UMA_CONTEXTUAL_CUSTOM_ACTION_TYPE_DISPLAYED =
+             "CustomTabs.ContextMenu.DisplayedContextualCustomActionType";
+     private static final String UMA_CONTEXTUAL_CUSTOM_ACTION_TYPE_SELECTED =
+             "CustomTabs.ContextMenu.SelectedContextualCustomActionType";
+     private static @Nullable Boolean sIsDefaultBrowserForTesting;
+-
+-    // Feature params on ClankGlicContextMenu gating each context-menu entry
+-    // point, so every entry shares the same feature (and experiment).
+-    @VisibleForTesting static final String PARAM_SHOW_ASK_GEMINI_ON_LINK = "show_on_link";
+-    @VisibleForTesting static final String PARAM_SHOW_ASK_GEMINI_ON_PAGE = "show_on_page";
+ 
+     private final Context mContext;
+     private final ContextMenuItemDelegate mItemDelegate;
+@@ -270,6 +249,7 @@
              Action.TRANSLATE,
              Action.CREATE_QR_CODE,
              Action.ASK_GEMINI,
@@ -10,7 +75,7 @@ index e783bf65be65ee6a38d2f9609c3f1baa9c83a752..a94f1976a8453b69128cb85fe8d20361
          })
          @Retention(RetentionPolicy.SOURCE)
          public @interface Action {
-@@ -333,7 +334,8 @@ public class ChromeContextMenuPopulator implements ContextMenuPopulator {
+@@ -333,7 +313,8 @@
              int TRANSLATE = 57;
              int CREATE_QR_CODE = 58;
              int ASK_GEMINI = 59;
@@ -20,7 +85,90 @@ index e783bf65be65ee6a38d2f9609c3f1baa9c83a752..a94f1976a8453b69128cb85fe8d20361
          }
  
          // LINT.ThenChange(/tools/metrics/histograms/enums.xml:ContextMenuOptionAndroid)
-@@ -727,6 +729,7 @@ public class ChromeContextMenuPopulator implements ContextMenuPopulator {
+@@ -504,43 +485,12 @@
+     boolean shouldShowDeveloperMenu() {
+         return DevToolsWindowAndroid.isDevToolsAllowedFor(
+                         getProfile(), mItemDelegate.getWebContents())
+-                && isTabletScreen();
++                && (BuildConfig.IS_DESKTOP_ANDROID || isTabletScreen());
+     }
+ 
+     @VisibleForTesting
+     boolean shouldShowViewPageSourceMenu() {
+         return DevToolsWindowAndroid.canViewSource(getProfile(), mItemDelegate.getWebContents());
+-    }
+-
+-    @VisibleForTesting
+-    boolean shouldShowAskGeminiForLink() {
+-        // Enable on desktop if side panel is enabled, and enable on mobile if
+-        // bottom sheet is enabled.
+-        return ChromeFeatureList.isEnabled(ChromeFeatureList.CLANK_GLIC_CONTEXT_MENU)
+-                && ChromeFeatureList.getFieldTrialParamByFeatureAsBoolean(
+-                        ChromeFeatureList.CLANK_GLIC_CONTEXT_MENU,
+-                        PARAM_SHOW_ASK_GEMINI_ON_LINK,
+-                        true)
+-                && (AndroidSidePanelEnabledFn.isEnabled()
+-                        || TabBottomSheetUtils.isTabBottomSheetEnabled())
+-                && !DeviceInfo.isAutomotive()
+-                && !mItemDelegate.isIncognito()
+-                && GlicEnabling.isEnabledForProfile(getProfile());
+-    }
+-
+-    @VisibleForTesting
+-    boolean shouldShowAskGeminiForPage() {
+-        // The empty-space (page) entry point is desktop Android only, where
+-        // Glic is presented in the side panel.
+-        return ChromeFeatureList.isEnabled(ChromeFeatureList.CLANK_GLIC_CONTEXT_MENU)
+-                && ChromeFeatureList.getFieldTrialParamByFeatureAsBoolean(
+-                        ChromeFeatureList.CLANK_GLIC_CONTEXT_MENU,
+-                        PARAM_SHOW_ASK_GEMINI_ON_PAGE,
+-                        false)
+-                && AndroidSidePanelEnabledFn.isEnabled()
+-                && !DeviceInfo.isAutomotive()
+-                && !mItemDelegate.isIncognito()
+-                && GlicEnabling.isEnabledForProfile(getProfile());
+     }
+ 
+     @Override
+@@ -573,12 +523,6 @@
+                 pageNavigationGroup.add(createListItem(Item.RELOAD));
+             }
+             groupedItems.add(pageNavigationGroup);
+-
+-            if (shouldShowAskGeminiForPage()) {
+-                ModelList geminiGroup = new ModelList();
+-                geminiGroup.add(createListItem(Item.ASK_GEMINI));
+-                groupedItems.add(geminiGroup);
+-            }
+ 
+             if (mMode != ContextMenuMode.THIN_WEB_VIEW) {
+                 ModelList pageGroup = new ModelList();
+@@ -596,16 +540,6 @@
+                                 mItemDelegate.isPrintSupported()));
+                 if (enableShareFromContextMenu()) {
+                     pageGroup.add(createShareListItem(Item.SHARE_PAGE, Item.DIRECT_SHARE_LINK));
+-                }
+-                if (shouldShowLensOverlay()) {
+-                    Tab tab = getTab();
+-                    boolean isEnabled = !LensOverlayTabHelper.isOverlayShowing(tab);
+-                    pageGroup.add(
+-                            createListItem(
+-                                    Item.SEARCH_TAB_WITH_GOOGLE_LENS,
+-                                    /* showInProductHelp= */ true,
+-                                    isEnabled));
+-                    maybeRecordUkmLensShown();
+                 }
+                 boolean isChromeOrNativePage =
+                         UrlUtilities.isChromeScheme(mParams.getPageUrl())
+@@ -720,13 +654,12 @@
+                         linkGroup.add(createListItem(Item.OPEN_IN_EPHEMERAL_TAB));
+                     }
+                 }
+-                if (shouldShowAskGeminiForLink()) {
+-                    linkGroup.add(createListItem(Item.ASK_GEMINI));
+-                }
++
+             }
              if (!MailTo.isMailTo(mParams.getLinkUrl().getSpec())
                      && !UrlUtilities.isTelScheme(mParams.getLinkUrl())) {
                  linkGroup.add(createListItem(Item.COPY_LINK_ADDRESS));
@@ -28,3 +176,160 @@ index e783bf65be65ee6a38d2f9609c3f1baa9c83a752..a94f1976a8453b69128cb85fe8d20361
                  if (!mParams.getLinkText().trim().isEmpty() && !mParams.isImage()) {
                      linkGroup.add(createListItem(Item.COPY_LINK_TEXT));
                  }
+@@ -846,33 +779,7 @@
+ 
+             if (mItemDelegate.supportsSearchByImage()) {
+                 if (checkSupportsGoogleSearchByImage(isSrcDownloadableScheme)) {
+-                    // Determine which image search menu item would be shown.
+-                    @Nullable
+-                    @LensMetrics.LensSupportStatus
+-                    Integer supportStatus =
+-                            LensSupportStatusHelper.getLensSupportStatus(
+-                                    getProfile(), mItemDelegate.isIncognito());
+-                    if (supportStatus != null) {
+-                        LensMetrics.recordLensSupportStatus(
+-                                LENS_SUPPORT_STATUS_HISTOGRAM_NAME, supportStatus);
+-                    }
+-
+-                    boolean shouldShowSearchImageWithLens =
+-                            (supportStatus != null
+-                                            && supportStatus
+-                                                    == LensMetrics.LensSupportStatus
+-                                                            .LENS_SEARCH_SUPPORTED)
+-                                    || shouldShowLensOverlay();
+-                    if (shouldShowSearchImageWithLens) {
+-                        imageGroup.add(createListItem(Item.SEARCH_IMAGE_WITH_GOOGLE_LENS));
+-                        maybeRecordUkmLensShown();
+-                    } else {
+-                        imageGroup.add(createListItem(Item.SEARCH_BY_IMAGE));
+-                    }
+-                } else {
+-                    LensMetrics.recordLensSupportStatus(
+-                            LENS_SUPPORT_STATUS_HISTOGRAM_NAME,
+-                            LensMetrics.LensSupportStatus.SEARCH_BY_IMAGE_UNAVAILABLE);
++                    imageGroup.add(createListItem(Item.SEARCH_BY_IMAGE));
+                 }
+             }
+ 
+@@ -1215,17 +1122,6 @@
+         } else if (itemId == R.id.contextmenu_print_page) {
+             recordContextMenuSelection(ContextMenuUma.Action.PRINT_PAGE);
+             mItemDelegate.startPrint();
+-        } else if (itemId == R.id.contextmenu_search_tab_with_google_lens) {
+-            // TODO(b/510385469): Add a new Action enum for Lens Overlay.
+-            recordContextMenuSelection(ContextMenuUma.Action.SEARCH_WITH_GOOGLE_LENS);
+-            Tab tab = getTab();
+-            if (tab != null) {
+-                LensOverlayCoordinator.getOrCreateForTab(tab)
+-                        .start(LensOverlayInvocationSource.CONTEXT_MENU);
+-            }
+-            SharedPreferencesManager prefManager = ChromeSharedPreferences.getInstance();
+-            prefManager.writeBoolean(
+-                    ChromePreferenceKeys.CONTEXT_MENU_SEARCH_TAB_WITH_GOOGLE_LENS_CLICKED, true);
+         } else if (itemId == R.id.contextmenu_send_tab_to_self) {
+             recordContextMenuSelection(ContextMenuUma.Action.SEND_TAB_TO_SELF);
+             Tab tab = getTab();
+@@ -1282,23 +1178,8 @@
+                                     .setRenderFrameHost(mNativeDelegate.getRenderFrameHost())
+                                     .build(),
+                             ShareOrigin.CONTEXT_MENU);
+-        } else if (itemId == R.id.contextmenu_search_image_with_google_lens) {
+-            recordContextMenuSelection(ContextMenuUma.Action.SEARCH_WITH_GOOGLE_LENS);
+-            // The Image Entry Point only triggers the Lens Overlay flow when the "WebUI"
+-            // implementation is explicitly enabled via flags. Otherwise, it falls back
+-            // to the AGSA Intent-based flow.
+-            if (shouldShowLensOverlay() && LensOverlayCoordinator.isWebUiImplementationEnabled()) {
+-                Tab tab = getTab();
+-                if (tab != null) {
+-                    LensOverlayCoordinator.getOrCreateForTab(tab)
+-                            .start(LensOverlayInvocationSource.CONTEXT_MENU);
+-                }
+-            } else {
+-                searchWithGoogleLens(LensEntryPoint.CONTEXT_MENU_SEARCH_MENU_ITEM);
+-            }
+-        } else if (itemId == R.id.contextmenu_search_by_image) {
+-            LensMetrics.recordAmbientSearchQuery(
+-                    LensMetrics.AmbientSearchEntryPoint.CONTEXT_MENU_SEARCH_IMAGE_WITH_WEB);
++        } else if (itemId == R.id.contextmenu_search_by_image
++                || itemId == R.id.contextmenu_search_image_with_google_lens) {
+             recordContextMenuSelection(ContextMenuUma.Action.SEARCH_BY_IMAGE);
+             mNativeDelegate.searchForImage();
+         } else if (itemId == R.id.contextmenu_share_image) {
+@@ -1460,13 +1341,6 @@
+             if (mItemDelegate instanceof TabContextMenuItemDelegate tabDelegate) {
+                 tabDelegate.onOpenInReadingMode();
+             }
+-        } else if (itemId == R.id.contextmenu_ask_gemini) {
+-            recordContextMenuSelection(ContextMenuUma.Action.ASK_GEMINI);
+-            Tab askGeminiTab = getTab();
+-            if (askGeminiTab != null) {
+-                GlicKeyedServiceHandler.invoke(
+-                        getProfile(), askGeminiTab, GlicInvocationSource.WEB_CONTENTS_CONTEXT_MENU);
+-            }
+         } else {
+             onTabBackedItemSelected(itemId);
+         }
+@@ -1634,40 +1508,6 @@
+         return TemplateUrlServiceFactory.getForProfile(getProfile());
+     }
+ 
+-    /**
+-     * Search for the image by intenting to the lens app with the image data attached.
+-     * @param lensEntryPoint The entry point that launches the Lens app.
+-     */
+-    protected void searchWithGoogleLens(@LensEntryPoint int lensEntryPoint) {
+-        mNativeDelegate.retrieveImageForShare(
+-                ContextMenuImageFormat.PNG,
+-                (Uri imageUri) -> {
+-                    LensIntentParams intentParams = getLensIntentParams(lensEntryPoint, imageUri);
+-                    LensController.getInstance().startLens(getWindow(), intentParams);
+-                });
+-    }
+-
+-    /**
+-     * Build the intent params for Lens Context Menu features.
+-     * @param lensEntryPoint The entry point that launches the Lens app.
+-     * @param imageUri The image url that the context menu was triggered on.
+-     * @return A LensIntentParams. Will be used to launch the Lens app.
+-     */
+-    @VisibleForTesting
+-    protected LensIntentParams getLensIntentParams(
+-            @LensEntryPoint int lensEntryPoint, Uri imageUri) {
+-        return new LensIntentParams.Builder(lensEntryPoint, isIncognito())
+-                .withImageUri(imageUri)
+-                .withImageTitleOrAltText(mParams.getTitleText())
+-                .withSrcUrl(mParams.getSrcUrl().getValidSpecOrEmpty())
+-                .withPageUrl(mParams.getPageUrl().getValidSpecOrEmpty())
+-                .withAccountName(LensIdentityUtils.getAccountName(getProfile()))
+-                // Unlocking orientation is mainly to help landscape mode (seen in Desktop
+-                // Android), but made unconditional here for simplicity and consistency.
+-                .withForceUnlockOrientation(true)
+-                .build();
+-    }
+-
+     @Override
+     public @Nullable ChipDelegate getChipDelegate() {
+         return null;
+@@ -1710,10 +1550,6 @@
+             return tabDelegate.getTab();
+         }
+         return null;
+-    }
+-
+-    private boolean shouldShowLensOverlay() {
+-        return LensOverlayTabHelper.shouldShowLensOverlay(getTab());
+     }
+ 
+     private ListItem createListItem(@Item int item) {
+@@ -1817,11 +1653,6 @@
+         return title;
+     }
+ 
+-    /** If not disabled record a UKM for opening the context menu with the lens item. */
+-    private void maybeRecordUkmLensShown() {
+-        maybeRecordBooleanUkm("ContextMenuAndroid.Shown", "SearchWithGoogleLens");
+-    }
+-
+     /**
+      * Record a boolean UKM if the lens feature is enabled.
+      *

@@ -1,0 +1,201 @@
+diff --git a/chrome/browser/tab/web_contents_state.cc b/chrome/browser/tab/web_contents_state.cc
+index 718cd4b1c9f1794db2b4c1ab3473632e50c465fe..eedda559d36be7029f94df75aff1e7ca002c532c 100644
+--- a/chrome/browser/tab/web_contents_state.cc
++++ b/chrome/browser/tab/web_contents_state.cc
+@@ -14,7 +14,10 @@
+ #include <utility>
+ #include <vector>
+ 
++#include "brave/browser/containers/android/containers_tab_lifecycle.h"
++#include "brave/browser/containers/android/containers_bridge.h"
+ #include "base/android/jni_android.h"
++#include "base/android/jni_array.h"
+ #include "base/android/jni_bytebuffer.h"
+ #include "base/android/jni_string.h"
+ #include "base/containers/span.h"
+@@ -305,7 +308,8 @@ std::unique_ptr<WebContents> WebContentsState::RestoreContentsFromByteBuffer(
+     base::span<const uint8_t> buffer,
+     int saved_state_version,
+     bool initially_hidden,
+-    bool no_renderer) {
++    bool no_renderer,
++    std::optional<std::string_view> container_id) {
+   bool is_off_the_record = browser_context->IsOffTheRecord();
+   int current_entry_index;
+   std::vector<sessions::SerializedNavigationEntry> navigations;
+@@ -321,6 +325,13 @@ std::unique_ptr<WebContents> WebContentsState::RestoreContentsFromByteBuffer(
+           navigations, browser_context);
+ 
+   WebContents::CreateParams params(browser_context);
++  auto restored_container = containers::android::ConfigureContainerRestore(
++      Profile::FromBrowserContext(browser_context), navigations,
++      current_entry_index, &params, container_id);
++  if (!restored_container ||
++      is_off_the_record != browser_context->IsOffTheRecord()) {
++    return nullptr;
++  }
+ 
+   params.initially_hidden = initially_hidden;
+   if (no_renderer) {
+@@ -337,13 +348,14 @@ std::unique_ptr<WebContents> WebContentsState::RestoreContentsFromByteBuffer(
+     BrowserContext* browser_context,
+     const WebContentsStateByteBuffer* byte_buffer,
+     bool initially_hidden,
+-    bool no_renderer) {
++    bool no_renderer,
++    std::optional<std::string_view> container_id) {
+   if (!byte_buffer) {
+     return nullptr;
+   }
+   return WebContentsState::RestoreContentsFromByteBuffer(
+       browser_context, byte_buffer->GetBuffer(), byte_buffer->state_version(),
+-      initially_hidden, no_renderer);
++      initially_hidden, no_renderer, container_id);
+ }
+ 
+ bool WebContentsState::ExtractNavigationEntries(
+@@ -402,7 +414,8 @@ bool WebContentsState::ExtractMetadata(base::span<const uint8_t> buffer,
+                                        int saved_state_version,
+                                        bool* is_off_the_record,
+                                        std::u16string* title,
+-                                       std::string* virtual_url) {
++                                       std::string* virtual_url,
++                                       bool skip_pending_entry) {
+   if (saved_state_version != 2) {
+     return false;
+   }
+@@ -420,8 +433,15 @@ bool WebContentsState::ExtractMetadata(base::span<const uint8_t> buffer,
+     return false;
+   }
+ 
+-  // Skip entries before the active one.
+-  for (int i = 0; i < header.current_entry_index; ++i) {
++  // A tracked pending append occupies the current entry. Repeated pending
++  // updates clobber that entry, so its predecessor remains the committed one.
++  const int selected_entry_index =
++      header.current_entry_index - (skip_pending_entry ? 1 : 0);
++  if (selected_entry_index < 0) {
++    return false;
++  }
++  // Skip entries before the selected one.
++  for (int i = 0; i < selected_entry_index; ++i) {
+     if (!iter.ReadData().has_value()) {
+       return false;
+     }
+@@ -545,6 +565,70 @@ ScopedJavaLocalRef<jobject> WebContentsState::AppendPendingNavigation(
+ 
+ // Static JNI methods.
+ 
++static ScopedJavaLocalRef<jobjectArray>
++JNI_WebContentsState_GetSerializedContainerIds(
++    JNIEnv* env, const JavaRef<jobject>& state, int saved_state_version) {
++  bool is_off_the_record = false;
++  int selected = 0;
++  std::vector<sessions::SerializedNavigationEntry> navigations;
++  auto bytes = base::android::JavaByteBufferToSpan(env, state);
++  if (!WebContentsState::ExtractNavigationEntries(
++          bytes, saved_state_version, &is_off_the_record, &selected,
++          &navigations) || is_off_the_record) {
++    return ScopedJavaLocalRef<jobjectArray>();
++  }
++  std::vector<std::string> ids;
++  for (const auto& navigation : navigations) {
++    const auto& key = navigation.storage_partition_key();
++    if (!key) continue;
++    if (key->first != "containers" || key->second.empty() ||
++        !containers::android::IsContainerIdWellFormed(key->second)) {
++      return ScopedJavaLocalRef<jobjectArray>();
++    }
++    if (!ids.empty() && ids.front() != key->second) {
++      return ScopedJavaLocalRef<jobjectArray>();
++    }
++    ids.push_back(key->second);
++  }
++  return base::android::ToJavaArrayOfStrings(env, ids);
++}
++
++static bool JNI_WebContentsState_HasContainerIdentityConflict(
++    JNIEnv* env, Profile* profile, const JavaRef<jobject>& state,
++    int saved_state_version, const std::string& container_id) {
++  bool is_off_the_record = profile->IsOffTheRecord();
++  int selected = 0;
++  std::vector<sessions::SerializedNavigationEntry> navigations;
++  auto bytes = base::android::JavaByteBufferToSpan(env, state);
++  if (!WebContentsState::ExtractNavigationEntries(
++          bytes, saved_state_version, &is_off_the_record, &selected, &navigations)) {
++    return false; // Ordinary corrupt data may use the separately persisted jar.
++  }
++  if (is_off_the_record != profile->IsOffTheRecord()) return true;
++  for (const auto& navigation : navigations) {
++    const auto& key = navigation.storage_partition_key();
++    if (key && (key->first != "containers" || key->second != container_id)) return true;
++  }
++  return false;
++}
++
++
++static content::WebContents*
++JNI_WebContentsState_RestoreContentsFromByteBufferForContainer(
++    JNIEnv* env,
++    Profile* profile,
++    const JavaRef<jobject>& state,
++    int saved_state_version,
++    bool initially_hidden,
++    bool no_renderer,
++    const std::string& container_id) {
++  auto bytes = base::android::JavaByteBufferToSpan(env, state);
++  return WebContentsState::RestoreContentsFromByteBuffer(
++             profile, bytes, saved_state_version, initially_hidden, no_renderer,
++             std::string_view(container_id))
++      .release();
++}
++
+ static content::WebContents* JNI_WebContentsState_RestoreContentsFromByteBuffer(
+     JNIEnv* env,
+     Profile* profile,
+@@ -615,10 +699,11 @@ static ScopedJavaLocalRef<jobject> JNI_WebContentsState_AppendPendingNavigation(
+       url, referrer_url, referrer_policy, initiator_origin);
+ }
+ 
+-static ScopedJavaLocalRef<jobject> JNI_WebContentsState_GetMetadata(
++static ScopedJavaLocalRef<jobject> GetMetadataFromByteBuffer(
+     JNIEnv* env,
+     const JavaRef<jobject>& state,
+-    jint saved_state_version) {
++    jint saved_state_version,
++    bool skip_pending_entry) {
+   base::span<const uint8_t> span =
+       base::android::JavaByteBufferToSpan(env, state);
+ 
+@@ -628,7 +713,7 @@ static ScopedJavaLocalRef<jobject> JNI_WebContentsState_GetMetadata(
+ 
+   if (!WebContentsState::ExtractMetadata(span, saved_state_version,
+                                          &is_off_the_record, &title,
+-                                         &virtual_url)) {
++                                         &virtual_url, skip_pending_entry)) {
+     return nullptr;
+   }
+ 
+@@ -636,6 +721,22 @@ static ScopedJavaLocalRef<jobject> JNI_WebContentsState_GetMetadata(
+                                               is_off_the_record);
+ }
+ 
++static ScopedJavaLocalRef<jobject> JNI_WebContentsState_GetMetadata(
++    JNIEnv* env,
++    const JavaRef<jobject>& state,
++    jint saved_state_version) {
++  return GetMetadataFromByteBuffer(env, state, saved_state_version,
++                                   /*skip_pending_entry=*/false);
++}
++
++static ScopedJavaLocalRef<jobject> JNI_WebContentsState_GetLastCommittedMetadata(
++    JNIEnv* env,
++    const JavaRef<jobject>& state,
++    jint saved_state_version) {
++  return GetMetadataFromByteBuffer(env, state, saved_state_version,
++                                   /*skip_pending_entry=*/true);
++}
++
+ static void JNI_WebContentsState_FreeStringPointer(JNIEnv* env,
+                                                    int64_t string_pointer) {
+   delete reinterpret_cast<std::string*>(string_pointer);

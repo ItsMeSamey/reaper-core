@@ -1,0 +1,74 @@
+diff --git a/chrome/browser/ui/side_panel/internal/android/side_panel_coordinator_android_browsertest.cc b/chrome/browser/ui/side_panel/internal/android/side_panel_coordinator_android_browsertest.cc
+--- a/chrome/browser/ui/side_panel/internal/android/side_panel_coordinator_android_browsertest.cc
++++ b/chrome/browser/ui/side_panel/internal/android/side_panel_coordinator_android_browsertest.cc
+@@ -6,6 +6,7 @@
+ 
+ #include <memory>
+ 
++#include "base/functional/callback_helpers.h"
+ #include "base/memory/raw_ptr.h"
+ #include "base/scoped_observation.h"
+ #include "base/test/run_until.h"
+@@ -3603,6 +3604,62 @@
+   EXPECT_EQ(tab_1_scoped_entry_key.id(), coordinator_->GetCurrentEntryId());
+ }
+ 
++IN_PROC_BROWSER_TEST_F(
++    SidePanelCoordinatorAndroidBrowserTest,
++    CloseBeforeReplacementFramePreservesBothEntriesHiddenNotifications) {
++  const SidePanelEntryKey old_key(SidePanelEntryId::kBookmarks);
++  const SidePanelEntryKey new_key(SidePanelEntryId::kAboutThisSite);
++  auto old_entry = CreateSidePanelEntry(old_key, browser_);
++  auto new_entry = CreateSidePanelEntry(new_key, browser_,
++                                       /*use_thin_web_view=*/true);
++  TestSidePanelEntryObserver old_observer(old_entry.get());
++  TestSidePanelEntryObserver new_observer(new_entry.get());
++  SidePanelRegistry::From(browser_)->Register(std::move(old_entry));
++  SidePanelRegistry::From(browser_)->Register(std::move(new_entry));
++
++  coordinator_->SidePanelUIBase::Show(old_key,
++                                     SidePanelOpenTrigger::kToolbarButton,
++                                     /*suppress_animations=*/true);
++  WaitUntilOpened(coordinator_);
++  coordinator_->ConfigDeferredViewReplacementForTesting(true);
++  Java_SidePanelCoordinatorAndroidBrowserTestSupport_holdFrameCallbacks(
++      AttachCurrentThread());
++  base::ScopedClosureRunner release_frames(base::BindOnce([]() {
++    Java_SidePanelCoordinatorAndroidBrowserTestSupport_releaseFrameCallbacks(
++        AttachCurrentThread());
++  }));
++
++  coordinator_->SidePanelUIBase::Show(new_key,
++                                     SidePanelOpenTrigger::kToolbarButton,
++                                     /*suppress_animations=*/true);
++  ASSERT_TRUE(coordinator_->HasPendingReplacedEntryForTesting());
++  EXPECT_EQ(0, old_observer.num_on_entry_hidden_received_);
++  EXPECT_EQ(0, new_observer.num_on_entry_hidden_received_);
++
++  // A user can close a just-replaced panel before its first compositor frame.
++  coordinator_->Close(SidePanelEntryHideReason::kSidePanelClosed,
++                       /*suppress_animations=*/true);
++  WaitUntilClosed(coordinator_);
++  EXPECT_FALSE(coordinator_->HasPendingReplacedEntryForTesting());
++  EXPECT_EQ(1, old_observer.num_on_entry_hidden_received_);
++  EXPECT_EQ(1, old_observer.num_on_entry_hidden_with_reason_received_);
++  EXPECT_EQ(SidePanelEntryHideReason::kReplaced,
++            old_observer.reason_for_last_entry_hidden_with_reason_);
++  EXPECT_EQ(1, new_observer.num_on_entry_hidden_received_);
++  EXPECT_EQ(1, new_observer.num_on_entry_hidden_with_reason_received_);
++  EXPECT_EQ(SidePanelEntryHideReason::kSidePanelClosed,
++            new_observer.reason_for_last_entry_hidden_with_reason_);
++
++  // The compositor callback is not cancellable: running it late must be inert.
++  EXPECT_EQ(1,
++            Java_SidePanelCoordinatorAndroidBrowserTestSupport_releaseFrameCallbacks(
++                AttachCurrentThread()));
++  release_frames.ReplaceClosure(base::NullCallback());
++  EXPECT_EQ(1, old_observer.num_on_entry_hidden_received_);
++  EXPECT_EQ(1, new_observer.num_on_entry_hidden_received_);
++  coordinator_->ConfigDeferredViewReplacementForTesting(false);
++}
++
+ IN_PROC_BROWSER_TEST_F(SidePanelCoordinatorAndroidBrowserTest,
+                        RapidTabSwitch_AutoOpenSidePanel) {
+   coordinator_->ConfigDeferredViewReplacementForTesting(true);

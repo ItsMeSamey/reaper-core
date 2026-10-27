@@ -37,8 +37,8 @@ public class ContentFilteringAdapter extends RecyclerView.Adapter<RecyclerView.V
     private static final int FOUR_ITEMS_SPACE = 4;
 
     private final BraveContentFilteringListener mBraveContentFileringListener;
-    private ArrayList<SubscriptionInfo> mSubscriptionFilterLists;
-    private Value mFilterLists[];
+    private ArrayList<SubscriptionInfo> mSubscriptionFilterLists = new ArrayList<>();
+    private Value mFilterLists[] = new Value[0];
     private final Context mContext;
     private boolean mIsEdit;
 
@@ -148,10 +148,12 @@ public class ContentFilteringAdapter extends RecyclerView.Adapter<RecyclerView.V
 
                 customFilterListViewHolder.mToggleSwitch.setOnClickListener(
                         view -> {
+                            int currentPosition =
+                                    getCurrentSubscriptionPosition(holder, customFilter);
+                            if (currentPosition == RecyclerView.NO_POSITION) return;
                             customFilter.enabled = !customFilter.enabled;
                             mBraveContentFileringListener.onSubscriptionFilterToggle(
-                                    holder.getAdapterPosition() - TWO_ITEMS_SPACE,
-                                    customFilter.enabled);
+                                    currentPosition, customFilter.enabled);
                         });
 
                 if (mIsEdit) {
@@ -165,8 +167,11 @@ public class ContentFilteringAdapter extends RecyclerView.Adapter<RecyclerView.V
                 customFilterListViewHolder.mDeleteImageView.setOnClickListener(
                         view -> {
                             if (mIsEdit) {
+                                int currentPosition =
+                                        getCurrentSubscriptionPosition(holder, customFilter);
+                                if (currentPosition == RecyclerView.NO_POSITION) return;
                                 mBraveContentFileringListener.onSubscriptionFilterDelete(
-                                        holder.getAdapterPosition() - TWO_ITEMS_SPACE);
+                                        currentPosition);
                             }
                         });
                 customFilterListViewHolder.mUrlText.setVisibility(View.VISIBLE);
@@ -198,11 +203,24 @@ public class ContentFilteringAdapter extends RecyclerView.Adapter<RecyclerView.V
 
                 filterListViewHolder.mToggleSwitch.setOnClickListener(
                         view -> {
-                            storage.get("enabled").setBoolValue(!isEnabled);
-                            mBraveContentFileringListener.onFilterToggle(uuid, !isEnabled);
+                            boolean enabled = filterListViewHolder.mToggleSwitch.isChecked();
+                            storage.get("enabled").setBoolValue(enabled);
+                            mBraveContentFileringListener.onFilterToggle(uuid, enabled);
                         });
             }
         }
+    }
+
+    private int getCurrentSubscriptionPosition(
+            RecyclerView.ViewHolder holder, SubscriptionInfo subscription) {
+        if (holder.getBindingAdapter() != this) return RecyclerView.NO_POSITION;
+        int position = holder.getBindingAdapterPosition() - TWO_ITEMS_SPACE;
+        if (position < 0
+                || position >= mSubscriptionFilterLists.size()
+                || mSubscriptionFilterLists.get(position) != subscription) {
+            return RecyclerView.NO_POSITION;
+        }
+        return position;
     }
 
     @Override
@@ -251,22 +269,38 @@ public class ContentFilteringAdapter extends RecyclerView.Adapter<RecyclerView.V
     }
 
     public void setSubscriptionFilterLists(ArrayList<SubscriptionInfo> customFilterLists) {
-        if (mSubscriptionFilterLists != null && mSubscriptionFilterLists.size() > 0) {
-            notifyItemRangeRemoved(TWO_ITEMS_SPACE, mSubscriptionFilterLists.size());
+        int previousCount = mSubscriptionFilterLists.size();
+        // The fragment mutates its list before resubmitting it; retain our own row snapshot.
+        mSubscriptionFilterLists = new ArrayList<>(customFilterLists);
+        int currentCount = mSubscriptionFilterLists.size();
+        if (currentCount > previousCount) {
+            notifyItemRangeInserted(
+                    TWO_ITEMS_SPACE + previousCount, currentCount - previousCount);
+        } else if (currentCount < previousCount) {
+            notifyItemRangeRemoved(
+                    TWO_ITEMS_SPACE + currentCount, previousCount - currentCount);
         }
-        mSubscriptionFilterLists = customFilterLists;
-        notifyItemRangeInserted(TWO_ITEMS_SPACE, mSubscriptionFilterLists.size());
+        int changedCount = Math.min(previousCount, currentCount);
+        if (changedCount > 0) {
+            notifyItemRangeChanged(TWO_ITEMS_SPACE, changedCount);
+        }
     }
 
     public void setFilterLists(Value filterLists[]) {
+        int previousCount = mFilterLists == null ? 0 : mFilterLists.length;
         mFilterLists = filterLists;
-        // mSubscriptionFilterLists could be null if setSubscriptionFilterLists
-        // hasn't been called yet. notifyItemRangeInserted is called inside
-        // setSubscriptionFilterLists, so we are good to skip it in that place
-        if (mSubscriptionFilterLists != null) {
+        int currentCount = mFilterLists == null ? 0 : mFilterLists.length;
+        int firstFilterPosition = mSubscriptionFilterLists.size() + FOUR_ITEMS_SPACE;
+        if (currentCount > previousCount) {
             notifyItemRangeInserted(
-                    mSubscriptionFilterLists.size() + THREE_ITEMS_SPACE,
-                    mFilterLists.length + ONE_ITEM_SPACE);
+                    firstFilterPosition + previousCount, currentCount - previousCount);
+        } else if (currentCount < previousCount) {
+            notifyItemRangeRemoved(
+                    firstFilterPosition + currentCount, previousCount - currentCount);
+        }
+        int changedCount = Math.min(previousCount, currentCount);
+        if (changedCount > 0) {
+            notifyItemRangeChanged(firstFilterPosition, changedCount);
         }
     }
 

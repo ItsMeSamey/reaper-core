@@ -1,0 +1,97 @@
+# Copyright (c) 2026 The Reaper Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+substitutions:
+- description: Cancel retired Android extension authentication requests (1).
+  regex:
+    re_pattern: '\ \ \}\
+
+      \
+
+      \ \ AddRef\(\);\ \ //\ Balanced\ in\ OnAuthFlowSuccess/Failure\.\
+
+      \
+
+      \ \ if\ \(delegate_\)\ \{\
+
+      \ \ \ \ delegate_\->GetOptionalWindowBounds\(\
+
+      '
+    replace: "  }\n\n  AddRef();  // Balanced in OnAuthFlowSuccess/Failure.\n#if BUILDFLAG(IS_ANDROID)\n  registry_observation_.Observe(ExtensionRegistry::Get(browser_context()));\n#endif\n\n  if (delegate_) {\n    delegate_->GetOptionalWindowBounds(\n"
+- description: Cancel retired Android extension authentication requests (2).
+  regex:
+    re_pattern: '\}\
+
+      \
+
+      void\ IdentityLaunchWebAuthFlowFunction::OnBrowserContextShutdown\(\)\ \{\
+
+      \ \ //\ auth_flow_\ internally\ observes\ profile\ destruction\.\ It\ may\ have\ already\
+
+      \ \ //\ notified\ us\ if\ the\ navigation\ got\ cancelled\ prematurely\ because\ of\ profile\
+
+      \ \ //\ destruction\.\ Do\ not\ attempt\ to\ respond\ again\ in\ this\ case\.\
+
+      '
+    replace: "}\n\nvoid IdentityLaunchWebAuthFlowFunction::OnBrowserContextShutdown() {\n#if BUILDFLAG(IS_ANDROID)\n  if (completion_started_) {\n    return;\n  }\n#endif\n  // auth_flow_ internally observes profile destruction. It may have already\n  // notified us if the navigation got cancelled prematurely because of profile\n  // destruction. Do not attempt to respond again in this case.\n"
+- description: Cancel retired Android extension authentication requests (3).
+  regex:
+    re_pattern: '\
+
+      void\ IdentityLaunchWebAuthFlowFunction::OnAuthFlowFailure\(\
+
+      \ \ \ \ WebAuthFlow::Failure\ failure\)\ \{\
+
+      \ \ Error\ error\ =\ WebAuthFlowFailureToError\(failure\);\
+
+      \
+
+      \ \ RecordHistogramFunctionResult\(error\);\
+
+      '
+    replace: "\nvoid IdentityLaunchWebAuthFlowFunction::OnAuthFlowFailure(\n    WebAuthFlow::Failure failure) {\n#if BUILDFLAG(IS_ANDROID)\n  if (completion_started_) {\n    return;\n  }\n#endif\n  Error error = WebAuthFlowFailureToError(failure);\n\n  RecordHistogramFunctionResult(error);\n"
+- description: Cancel retired Android extension authentication requests (4).
+  regex:
+    re_pattern: '\
+
+      void\ IdentityLaunchWebAuthFlowFunction::OnAuthFlowURLChange\(\
+
+      \ \ \ \ const\ GURL\&\ redirect_url\)\ \{\
+
+      \ \ if\ \(ShouldInterceptRedirect\(redirect_url,\ default_origin_,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ final_redirect_urls_\)\)\ \{\
+
+      \ \ \ \ RecordHistogramFunctionResult\(\
+
+      '
+    replace: "\nvoid IdentityLaunchWebAuthFlowFunction::OnAuthFlowURLChange(\n    const GURL& redirect_url) {\n#if BUILDFLAG(IS_ANDROID)\n  if (completion_started_) {\n    return;\n  }\n#endif\n  if (ShouldInterceptRedirect(redirect_url, default_origin_,\n                              final_redirect_urls_)) {\n    RecordHistogramFunctionResult(\n"
+- description: Cancel retired Android extension authentication requests (5).
+  regex:
+    re_pattern: '\
+
+      void\ IdentityLaunchWebAuthFlowFunction::CompleteAsyncRun\(\
+
+      \ \ \ \ ResponseValue\ response\)\ \{\
+
+      \ \ Respond\(std::move\(response\)\);\
+
+      \ \ if\ \(auth_flow_\)\ \{\
+
+      \ \ \ \ auth_flow_\.release\(\)\->DetachDelegateAndDelete\(\);\
+
+      \ \ \}\
+
+      \ \ Release\(\);\ \ //\ Balanced\ in\ Run\.\
+
+      \}\
+
+      \
+
+      WebAuthFlow\*\ IdentityLaunchWebAuthFlowFunction::GetWebAuthFlowForTesting\(\)\ \{\
+
+      \ \ return\ auth_flow_\.get\(\);\
+
+      '
+    replace: "\nvoid IdentityLaunchWebAuthFlowFunction::CompleteAsyncRun(\n    ResponseValue response) {\n#if BUILDFLAG(IS_ANDROID)\n  if (completion_started_) {\n    return;\n  }\n  completion_started_ = true;\n  registry_observation_.Reset();\n  if (auth_flow_) {\n    auth_flow_.release()->DetachDelegateAndDelete();\n  }\n  // Retire the old flow before replying. A test may retain this function, or a\n  // reply may start a new flow for the same extension ID.\n  auth_flow_tracker_.RunAndReset();\n  Respond(std::move(response));\n#else\n  Respond(std::move(response));\n  if (auth_flow_) {\n    auth_flow_.release()->DetachDelegateAndDelete();\n  }\n#endif\n  Release();  // Balanced in Run.\n}\n\n#if BUILDFLAG(IS_ANDROID)\nvoid IdentityLaunchWebAuthFlowFunction::OnExtensionUnloaded(\n    content::BrowserContext* browser_context,\n    const Extension* extension,\n    UnloadedExtensionReason reason) {\n  if (browser_context != this->browser_context() ||\n      extension != this->extension() || completion_started_) {\n    return;\n  }\n  OnAuthFlowFailure(WebAuthFlow::WINDOW_CLOSED);\n}\n\nvoid IdentityLaunchWebAuthFlowFunction::OnShutdown(\n    ExtensionRegistry* registry) {\n  registry_observation_.Reset();\n  OnBrowserContextShutdown();\n}\n#endif\n\nWebAuthFlow* IdentityLaunchWebAuthFlowFunction::GetWebAuthFlowForTesting() {\n  return auth_flow_.get();\n"

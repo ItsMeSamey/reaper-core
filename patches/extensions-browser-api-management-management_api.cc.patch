@@ -1,0 +1,76 @@
+diff --git a/extensions/browser/api/management/management_api.cc b/extensions/browser/api/management/management_api.cc
+--- a/extensions/browser/api/management/management_api.cc
++++ b/extensions/browser/api/management/management_api.cc
+@@ -540,6 +540,13 @@
+ }
+
+ void ManagementSetEnabledFunction::CheckPermissionsIncrease() {
++#if BUILDFLAG(IS_ANDROID)
++  if (!browser_context()) {
++    FinishEnable(Error(keys::kUserDidNotReEnableError));
++    return;
++  }
++#endif
++
+   // Extension could have been uninstalled externally while previous check was
+   // happening.
+   const Extension* extension =
+@@ -557,11 +564,23 @@
+       return;
+     }
+
++    content::WebContents* web_contents = GetSenderWebContents();
++#if BUILDFLAG(IS_ANDROID)
++    if (!web_contents) {
++      FinishEnable(Error(keys::kUserDidNotReEnableError));
++      return;
++    }
++#endif
++
+     const ManagementAPIDelegate* delegate = ManagementAPI::GetFactoryInstance()
+                                                 ->Get(browser_context())
+                                                 ->GetDelegate();
++#if BUILDFLAG(IS_ANDROID)
++    // Capture before creating the delegate, which may complete synchronously.
++    permissions_prompt_extension_ = extension;
++#endif
+     install_prompt_ = delegate->SetEnabledFunctionDelegate(
+-        GetSenderWebContents(), browser_context(), extension,
++        web_contents, browser_context(), extension,
+         base::BindOnce(
+             &ManagementSetEnabledFunction::OnPermissionsIncreaseChecked, this));
+     return;
+@@ -578,6 +597,16 @@
+     FinishEnable(Error(keys::kUserDidNotReEnableError));
+     return;
+   }
++
++#if BUILDFLAG(IS_ANDROID)
++  if (!browser_context() ||
++      (permissions_prompt_extension_ &&
++       ExtensionRegistry::Get(browser_context())->GetInstalledExtension(
++           extension_id_) != permissions_prompt_extension_.get())) {
++    FinishEnable(Error(keys::kUserDidNotReEnableError));
++    return;
++  }
++#endif
+
+   // Continue with the enable extension flow.
+   CheckManifestV2Deprecation();
+@@ -787,6 +816,16 @@
+ }
+
+ void ManagementUninstallFunctionBase::UninstallExtension() {
++#if BUILDFLAG(IS_ANDROID)
++  // The deferred callback can run after its browser context shuts down.
++  if (!browser_context()) {
++    Finish(false,
++           ErrorUtils::FormatErrorMessage(keys::kUninstallCanceledError,
++                                          target_extension_id_));
++    return;
++  }
++#endif
++
+   // The extension can be uninstalled in another window while the UI was
+   // showing. Do nothing in that case.
+   const Extension* target_extension =

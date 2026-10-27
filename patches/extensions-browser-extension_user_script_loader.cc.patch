@@ -1,0 +1,578 @@
+diff --git a/extensions/browser/extension_user_script_loader.cc b/extensions/browser/extension_user_script_loader.cc
+--- a/extensions/browser/extension_user_script_loader.cc
++++ b/extensions/browser/extension_user_script_loader.cc
+@@ -27,6 +27,7 @@
+ #include "base/one_shot_event.h"
+ #include "base/run_loop.h"
+ #include "base/strings/string_util.h"
++#include "build/build_config.h"
+ #include "content/public/browser/browser_context.h"
+ #include "content/public/browser/browser_task_traits.h"
+ #include "content/public/browser/browser_thread.h"
+@@ -582,6 +583,15 @@
+
+ void ExtensionUserScriptLoader::AddPendingDynamicScriptIDs(
+     std::set<std::string> script_ids) {
++#if BUILDFLAG(IS_ANDROID)
++  for (const auto& id : script_ids) {
++    auto& state = dynamic_script_states_[id];
++    if (state.epoch.is_empty()) {
++      state.epoch = base::UnguessableToken::Create();
++    }
++    state.legacy_pending = true;
++  }
++#endif
+   pending_dynamic_script_ids_.insert(
+       std::make_move_iterator(script_ids.begin()),
+       std::make_move_iterator(script_ids.end()));
+@@ -589,9 +599,297 @@
+
+ void ExtensionUserScriptLoader::RemovePendingDynamicScriptIDs(
+     const std::set<std::string>& script_ids) {
++#if BUILDFLAG(IS_ANDROID)
++  for (const auto& id : script_ids) {
++    auto& state = dynamic_script_states_[id];
++    state.epoch = base::UnguessableToken();
++    state.operations.clear();
++    state.submitted = DynamicScriptOperation();
++    state.submitted_script.reset();
++    state.legacy_pending = false;
++    state.initial_restore_cancelled = true;
++    pending_dynamic_script_ids_.erase(id);
++  }
++  PruneDynamicScriptStates();
++#else
+   for (const auto& id : script_ids)
+     pending_dynamic_script_ids_.erase(id);
+-}
++#endif
++}
++
++#if BUILDFLAG(IS_ANDROID)
++ExtensionUserScriptLoader::DynamicScriptOperation
++ExtensionUserScriptLoader::BeginDynamicScriptOperation(
++    const std::set<std::string>& script_ids, bool for_update) {
++  DynamicScriptOperation operation = base::UnguessableToken::Create();
++  auto& epochs = dynamic_script_operations_[operation];
++  for (const auto& id : script_ids) {
++    auto& state = dynamic_script_states_[id];
++    if (for_update && !IsDynamicScriptRegistrationCurrent(id)) {
++      continue;
++    }
++    if (state.epoch.is_empty() ||
++        (state.operations.empty() && !state.legacy_pending &&
++         state.committed.is_empty())) {
++      state.epoch = base::UnguessableToken::Create();
++    }
++    epochs.emplace(id, state.epoch);
++    state.operations.insert(operation);
++    pending_dynamic_script_ids_.insert(id);
++  }
++  return operation;
++}
++
++bool ExtensionUserScriptLoader::IsDynamicScriptRegistrationCurrent(
++    const std::string& id) const {
++  auto state = dynamic_script_states_.find(id);
++  return state != dynamic_script_states_.end() &&
++         !state->second.epoch.is_empty() &&
++         !state->second.committed.is_empty() &&
++         state->second.committed != state->second.retired_committed;
++}
++
++bool ExtensionUserScriptLoader::IsCurrentDynamicScriptOperation(
++    const DynamicScriptOperation& operation,
++    const std::string& id) const {
++  auto pending = dynamic_script_operations_.find(operation);
++  if (pending == dynamic_script_operations_.end()) {
++    return false;
++  }
++  auto epoch = pending->second.find(id);
++  auto state = dynamic_script_states_.find(id);
++  return epoch != pending->second.end() &&
++         state != dynamic_script_states_.end() &&
++         state->second.epoch == epoch->second &&
++         state->second.operations.contains(operation);
++}
++
++void ExtensionUserScriptLoader::FinishDynamicScriptOperation(
++    const DynamicScriptOperation& operation) {
++  auto pending = dynamic_script_operations_.extract(operation);
++  if (pending.empty()) {
++    return;
++  }
++  for (const auto& [id, epoch] : pending.mapped()) {
++    auto state = dynamic_script_states_.find(id);
++    if (state == dynamic_script_states_.end() || state->second.epoch != epoch) {
++      continue;
++    }
++    state->second.operations.erase(operation);
++    if (state->second.submitted == operation) {
++      state->second.submitted = DynamicScriptOperation();
++      state->second.submitted_script.reset();
++    }
++    if (state->second.operations.empty() && !state->second.legacy_pending) {
++      pending_dynamic_script_ids_.erase(id);
++    }
++  }
++  PruneDynamicScriptStates();
++}
++
++void ExtensionUserScriptLoader::PruneDynamicScriptStates() {
++  // Cancellation tombstones must survive until the raw StateStore input has
++  // been filtered, even when disabled sources need no native shared-memory load.
++  if (initial_dynamic_scripts_read_pending_) {
++    return;
++  }
++  std::erase_if(dynamic_script_states_, [this](const auto& entry) {
++    const auto& [id, state] = entry;
++    // An unused epoch is not ownership. Old replies still carry their unique
++    // epoch and cannot claim a newly created state after this entry is erased.
++    return state.operations.empty() && !state.submitted_script &&
++           state.committed.is_empty() && !state.legacy_pending &&
++           !pending_dynamic_script_ids_.contains(id);
++  });
++}
++
++ExtensionUserScriptLoader::DynamicScriptOwners
++ExtensionUserScriptLoader::CaptureDynamicScriptOwners(
++    const std::set<std::string>& ids) {
++  DynamicScriptOwners owners;
++  for (const auto& id : ids) {
++    auto& state = dynamic_script_states_[id];
++    if (state.committed.is_empty() &&
++        std::ranges::any_of(loaded_dynamic_scripts_, [&id](const auto& script) {
++          return script->id() == id;
++        })) {
++      state.committed = base::UnguessableToken::Create();
++    }
++    owners.emplace(id, state.committed);
++  }
++  return owners;
++}
++
++void ExtensionUserScriptLoader::AddOwnedDynamicScripts(
++    DynamicScriptOperation operation,
++    UserScriptList scripts,
++    std::set<std::string> persistent_script_ids,
++    DynamicScriptsModifiedCallback callback) {
++  std::erase_if(scripts, [this, &operation](const auto& script) {
++    return !IsCurrentDynamicScriptOperation(operation, script->id());
++  });
++  if (scripts.empty()) {
++    FinishDynamicScriptOperation(operation);
++    std::move(callback).Run(std::nullopt);
++    return;
++  }
++
++  UserScriptList scripts_to_add;
++  std::set<std::string> admitted_ids;
++  for (const auto& script : scripts) {
++    admitted_ids.insert(script->id());
++    dynamic_script_states_.at(script->id()).submitted = operation;
++    dynamic_script_states_.at(script->id()).submitted_script =
++        CopyDynamicScriptInfo(*script);
++    if (!disabled_sources_.contains(script->GetSource())) {
++      scripts_to_add.push_back(CopyDynamicScriptInfo(*script));
++    }
++  }
++  std::erase_if(persistent_script_ids, [&admitted_ids](const auto& id) {
++    return !admitted_ids.contains(id);
++  });
++
++  if (scripts_to_add.empty()) {
++    OnOwnedDynamicScriptsAdded(operation, std::move(scripts),
++                              std::move(persistent_script_ids),
++                              std::move(callback), std::nullopt);
++    return;
++  }
++  AddScripts(
++      std::move(scripts_to_add),
++      base::BindOnce(
++          [](base::WeakPtr<ExtensionUserScriptLoader> owner,
++             DynamicScriptOperation operation, UserScriptList scripts,
++             std::set<std::string> persistent_ids,
++             DynamicScriptsModifiedCallback callback, UserScriptLoader*,
++             const std::optional<std::string>& error) {
++            // Keep the terminal client outside the weak receiver. Base-loader
++            // destruction must still balance the API's response and reference.
++            if (!owner) {
++              std::move(callback).Run(error);
++              return;
++            }
++            owner->OnOwnedDynamicScriptsAdded(
++                operation, std::move(scripts), std::move(persistent_ids),
++                std::move(callback), error);
++          },
++          weak_factory_.GetWeakPtr(), operation, std::move(scripts),
++          std::move(persistent_script_ids), std::move(callback)));
++}
++
++void ExtensionUserScriptLoader::UpdateOwnedDynamicScripts(
++    DynamicScriptOperation operation,
++    UserScriptList scripts,
++    std::set<std::string> persistent_script_ids,
++    DynamicScriptsModifiedCallback callback) {
++  std::set<std::string> ids;
++  for (const auto& script : scripts) {
++    if (IsCurrentDynamicScriptOperation(operation, script->id())) {
++      ids.insert(script->id());
++    }
++  }
++  if (!ids.empty()) {
++    // Remove old base bytes without unregistering this registration epoch.
++    RemoveScripts(
++        ids, base::BindOnce(
++                 &ExtensionUserScriptLoader::OnOwnedDynamicScriptsRemoved,
++                 weak_factory_.GetWeakPtr(), CaptureDynamicScriptOwners(ids),
++                 DynamicScriptOperation(), base::DoNothing()));
++  }
++  AddOwnedDynamicScripts(operation, std::move(scripts),
++                         std::move(persistent_script_ids), std::move(callback));
++}
++
++void ExtensionUserScriptLoader::OnOwnedDynamicScriptsAdded(
++    DynamicScriptOperation operation,
++    UserScriptList scripts,
++    std::set<std::string> persistent_ids,
++    DynamicScriptsModifiedCallback callback,
++    const std::optional<std::string>& error,
++    bool restoring_persisted_scripts) {
++  // Previously persisted registrations remain registered even if native
++  // publication fails on startup. A failed new API registration must not.
++  if (!error || restoring_persisted_scripts) {
++    for (auto& script : scripts) {
++      const std::string id = script->id();
++      if (!IsCurrentDynamicScriptOperation(operation, id) ||
++          dynamic_script_states_.at(id).submitted != operation) {
++        continue;
++      }
++      // Coalesced base loads contain the latest submitted bytes. Older
++      // completions must not commit different derived metadata or persistence.
++      std::erase_if(loaded_dynamic_scripts_, [&id](const auto& loaded) {
++        return loaded->id() == id;
++      });
++      dynamic_script_states_.at(id).committed = operation;
++      dynamic_script_states_.at(id).retirement = DynamicScriptOperation();
++      dynamic_script_states_.at(id).retired_committed =
++          base::UnguessableToken();
++      if (persistent_ids.contains(id)) {
++        persistent_dynamic_script_ids_.insert(id);
++      } else {
++        persistent_dynamic_script_ids_.erase(id);
++      }
++      loaded_dynamic_scripts_.push_back(std::move(script));
++    }
++    if (!error) {
++      helper_.SetDynamicScripts(loaded_dynamic_scripts_,
++                                persistent_dynamic_script_ids_);
++    }
++  }
++  FinishDynamicScriptOperation(operation);
++  std::move(callback).Run(error);
++}
++
++void ExtensionUserScriptLoader::OnOwnedDynamicScriptsRemoved(
++    DynamicScriptOwners owners,
++    DynamicScriptOperation retirement,
++    DynamicScriptsModifiedCallback callback,
++    UserScriptLoader*,
++    const std::optional<std::string>& error) {
++  if (!error) {
++    for (const auto& [id, owner] : owners) {
++      auto state = dynamic_script_states_.find(id);
++      if (state == dynamic_script_states_.end() ||
++          state->second.committed != owner ||
++          (!retirement.is_empty() &&
++           state->second.retirement != retirement) ||
++          (owner.is_empty() && !state->second.epoch.is_empty())) {
++        continue;
++      }
++      std::erase_if(loaded_dynamic_scripts_, [&id](const auto& script) {
++        return script->id() == id;
++      });
++      state->second.committed = base::UnguessableToken();
++      state->second.retired_committed = base::UnguessableToken();
++      state->second.retirement = DynamicScriptOperation();
++      persistent_dynamic_script_ids_.erase(id);
++    }
++    helper_.SetDynamicScripts(loaded_dynamic_scripts_,
++                              persistent_dynamic_script_ids_);
++  } else if (!retirement.is_empty()) {
++    for (const auto& [id, owner] : owners) {
++      auto state = dynamic_script_states_.find(id);
++      if (owner.is_empty() || state == dynamic_script_states_.end() ||
++          state->second.committed != owner ||
++          state->second.retired_committed != owner ||
++          state->second.retirement != retirement) {
++        continue;
++      }
++      // Restore only this failed retirement of the still-published owner.
++      // Newer removals and pending-only cancellations keep their tombstones.
++      state->second.retired_committed = base::UnguessableToken();
++      state->second.retirement = DynamicScriptOperation();
++      if (state->second.epoch.is_empty()) {
++        // Never revive an epoch carried by a reply canceled by unregister.
++        state->second.epoch = base::UnguessableToken::Create();
++      }
++    }
++  }
++  PruneDynamicScriptStates();
++  std::move(callback).Run(error);
++}
++#endif
+
+ bool ExtensionUserScriptLoader::AddScriptsForExtensionLoad(
+     const Extension& extension,
+@@ -605,6 +903,9 @@
+   }
+
+   if (has_dynamic_scripts) {
++#if BUILDFLAG(IS_ANDROID)
++    initial_dynamic_scripts_read_pending_ = true;
++#endif
+     helper_.GetDynamicScripts(base::BindOnce(
+         &ExtensionUserScriptLoader::OnInitialDynamicScriptsReadFromStateStore,
+         weak_factory_.GetWeakPtr(), std::move(manifest_scripts),
+@@ -650,11 +951,37 @@
+   // the base `UserScriptLoader`, which then notifies any renderers. `scripts`
+   // contains *all* (that weren't unregistered by the extension) so that they
+   // are properly serialized and stored for future browser sessions.
++#if BUILDFLAG(IS_ANDROID)
++  AddScripts(
++      std::move(scripts_to_add),
++      base::BindOnce(
++          [](base::WeakPtr<ExtensionUserScriptLoader> owner,
++             UserScriptList added_scripts,
++             std::set<std::string> persistent_ids,
++             DynamicScriptsModifiedCallback complete_callback,
++             UserScriptLoader* loader,
++             const std::optional<std::string>& error) {
++            // UserScriptLoader drains pending callbacks with an error after
++            // the derived weak factory has been destroyed. Keep the client
++            // completion outside the weak receiver so its function reference
++            // and terminal response are still balanced exactly once.
++            if (!owner) {
++              std::move(complete_callback).Run(error);
++              return;
++            }
++            owner->OnDynamicScriptsAdded(
++                std::move(added_scripts), std::move(persistent_ids),
++                std::move(complete_callback), loader, error);
++          },
++          weak_factory_.GetWeakPtr(), std::move(scripts),
++          std::move(persistent_script_ids), std::move(callback)));
++#else
+   AddScripts(
+       std::move(scripts_to_add),
+       base::BindOnce(&ExtensionUserScriptLoader::OnDynamicScriptsAdded,
+                      weak_factory_.GetWeakPtr(), std::move(scripts),
+                      std::move(persistent_script_ids), std::move(callback)));
++#endif
+ }
+
+ void ExtensionUserScriptLoader::RemoveDynamicScripts(
+@@ -667,17 +994,51 @@
+
+   // Remove pending script ids first, so loads from previous operations which
+   // complete later will recognize the change.
++#if BUILDFLAG(IS_ANDROID)
++  DynamicScriptOwners owners = CaptureDynamicScriptOwners(ids_to_remove);
++  const DynamicScriptOperation retirement = base::UnguessableToken::Create();
++  for (const auto& [id, owner] : owners) {
++    auto& state = dynamic_script_states_.at(id);
++    state.retired_committed = owner;
++    state.retirement = retirement;
++  }
++  // Commit persistence removal only after the base scripts were published.
++#endif
+   RemovePendingDynamicScriptIDs(ids_to_remove);
++#if BUILDFLAG(IS_ANDROID)
++  RemoveScripts(
++      ids_to_remove,
++      base::BindOnce(
++          [](base::WeakPtr<ExtensionUserScriptLoader> owner,
++             DynamicScriptOwners owners, DynamicScriptOperation retirement,
++             DynamicScriptsModifiedCallback callback, UserScriptLoader* loader,
++             const std::optional<std::string>& error) {
++            if (!owner) {
++              std::move(callback).Run(error);
++              return;
++            }
++            owner->OnOwnedDynamicScriptsRemoved(
++                std::move(owners), retirement, std::move(callback), loader,
++                error);
++          },
++          weak_factory_.GetWeakPtr(), std::move(owners), retirement,
++          std::move(callback)));
++#else
+   RemoveScripts(
+       ids_to_remove,
+       base::BindOnce(&ExtensionUserScriptLoader::OnDynamicScriptsRemoved,
+                      weak_factory_.GetWeakPtr(), ids_to_remove,
+                      std::move(callback)));
++#endif
+ }
+
+ void ExtensionUserScriptLoader::ClearDynamicScripts(
+     UserScript::Source source,
+     DynamicScriptsModifiedCallback callback) {
++#if BUILDFLAG(IS_ANDROID)
++  // A pending StateStore restore may not have revealed its IDs yet.
++  cancelled_initial_script_sources_.insert(source);
++#endif
+   RemoveDynamicScripts(GetDynamicScriptIDs(source), std::move(callback));
+ }
+
+@@ -692,11 +1053,33 @@
+     // Re-enable any previously-disabled scripts.
+     disabled_sources_.erase(source);
+     UserScriptList scripts_to_add;
++#if BUILDFLAG(IS_ANDROID)
++    for (const auto& script : loaded_dynamic_scripts_) {
++      auto state = dynamic_script_states_.find(script->id());
++      if (state != dynamic_script_states_.end() &&
++          (state->second.submitted_script ||
++           (!state->second.committed.is_empty() &&
++            state->second.committed == state->second.retired_committed))) {
++        continue;
++      }
++      if (script->GetSource() == source) {
++        scripts_to_add.push_back(CopyDynamicScriptInfo(*script));
++      }
++    }
++    for (const auto& [id, state] : dynamic_script_states_) {
++      if (state.submitted_script &&
++          IsCurrentDynamicScriptOperation(state.submitted, id) &&
++          state.submitted_script->GetSource() == source) {
++        scripts_to_add.push_back(CopyDynamicScriptInfo(*state.submitted_script));
++      }
++    }
++#else
+     for (const auto& script : loaded_dynamic_scripts_) {
+       if (script->GetSource() == source) {
+         scripts_to_add.push_back(CopyDynamicScriptInfo(*script));
+       }
+     }
++#endif
+
+     if (scripts_to_add.empty()) {
+       // There were no registered scripts of the given source. Nothing more to
+@@ -754,6 +1137,14 @@
+   }
+
+   for (const std::unique_ptr<UserScript>& script : loaded_dynamic_scripts_) {
++#if BUILDFLAG(IS_ANDROID)
++    auto state = dynamic_script_states_.find(script->id());
++    if (state != dynamic_script_states_.end() &&
++        !state->second.committed.is_empty() &&
++        state->second.committed == state->second.retired_committed) {
++      continue;
++    }
++#endif
+     if (script->GetSource() == source) {
+       dynamic_script_ids.insert(script->id());
+     }
+@@ -909,6 +1300,53 @@
+     UserScriptList manifest_scripts,
+     UserScriptLoader::ScriptsLoadedCallback callback,
+     UserScriptList initial_dynamic_scripts) {
++#if BUILDFLAG(IS_ANDROID)
++  std::erase_if(initial_dynamic_scripts, [this](const auto& script) {
++    auto state = dynamic_script_states_.find(script->id());
++    return cancelled_initial_script_sources_.contains(script->GetSource()) ||
++           (state != dynamic_script_states_.end() &&
++            (state->second.initial_restore_cancelled ||
++             !state->second.operations.empty() || state->second.legacy_pending ||
++             !state->second.committed.is_empty()));
++  });
++  initial_dynamic_scripts_read_pending_ = false;
++  PruneDynamicScriptStates();
++  std::set<std::string> ids;
++  UserScriptList scripts_to_add = std::move(manifest_scripts);
++  for (const auto& script : initial_dynamic_scripts) {
++    ids.insert(script->id());
++    if (!disabled_sources_.contains(script->GetSource())) {
++      scripts_to_add.push_back(CopyDynamicScriptInfo(*script));
++    }
++  }
++  DynamicScriptOperation operation = BeginDynamicScriptOperation(ids);
++  for (const auto& script : initial_dynamic_scripts) {
++    auto& state = dynamic_script_states_.at(script->id());
++    state.submitted = operation;
++    state.submitted_script = CopyDynamicScriptInfo(*script);
++  }
++  auto complete = base::BindOnce(
++      [](base::WeakPtr<ExtensionUserScriptLoader> owner,
++         DynamicScriptOperation operation, UserScriptList scripts,
++         std::set<std::string> persistent_ids, ScriptsLoadedCallback callback,
++         UserScriptLoader* loader, const std::optional<std::string>& error) {
++        if (!owner) {
++          std::move(callback).Run(loader, error);
++          return;
++        }
++        owner->OnOwnedDynamicScriptsAdded(
++            operation, std::move(scripts), std::move(persistent_ids),
++            base::BindOnce(std::move(callback), loader), error,
++            /*restoring_persisted_scripts=*/true);
++      },
++      weak_factory_.GetWeakPtr(), operation, std::move(initial_dynamic_scripts),
++      std::move(ids), std::move(callback));
++  if (scripts_to_add.empty()) {
++    std::move(complete).Run(this, std::nullopt);
++  } else {
++    AddScripts(std::move(scripts_to_add), std::move(complete));
++  }
++#else
+   UserScriptList scripts_to_add = std::move(manifest_scripts);
+   for (const std::unique_ptr<UserScript>& script : initial_dynamic_scripts) {
+     // Only add the script to the `UserScriptLoader`'s set (thus sending it to
+@@ -924,6 +1362,7 @@
+                  &ExtensionUserScriptLoader::OnInitialExtensionScriptsLoaded,
+                  weak_factory_.GetWeakPtr(), std::move(initial_dynamic_scripts),
+                  std::move(callback)));
++#endif
+ }
+
+ void ExtensionUserScriptLoader::OnInitialExtensionScriptsLoaded(
+@@ -960,9 +1399,30 @@
+   // `added_scripts`.
+   for (const std::unique_ptr<UserScript>& script : added_scripts) {
+     pending_dynamic_script_ids_.erase(script->id());
++#if BUILDFLAG(IS_ANDROID)
++    auto state = dynamic_script_states_.find(script->id());
++    if (state != dynamic_script_states_.end()) {
++      state->second.legacy_pending = false;
++    }
++#endif
+   }
+
+   if (!error.has_value()) {
++#if BUILDFLAG(IS_ANDROID)
++    std::set<std::string> admitted_ids;
++    for (const auto& script : added_scripts) {
++      admitted_ids.insert(script->id());
++      auto& state = dynamic_script_states_[script->id()];
++      state.legacy_pending = false;
++      if (state.epoch.is_empty()) {
++        state.epoch = base::UnguessableToken::Create();
++      }
++      state.committed = base::UnguessableToken::Create();
++    }
++    std::erase_if(new_persistent_script_ids, [&admitted_ids](const auto& id) {
++      return !admitted_ids.contains(id);
++    });
++#endif
+     loaded_dynamic_scripts_.insert(
+         loaded_dynamic_scripts_.end(),
+         std::make_move_iterator(added_scripts.begin()),
+@@ -976,6 +1436,9 @@
+                               persistent_dynamic_script_ids_);
+   }
+
++#if BUILDFLAG(IS_ANDROID)
++  PruneDynamicScriptStates();
++#endif
+   std::move(callback).Run(error);
+ }
+

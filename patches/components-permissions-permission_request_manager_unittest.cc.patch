@@ -1,0 +1,180 @@
+diff --git a/components/permissions/permission_request_manager_unittest.cc b/components/permissions/permission_request_manager_unittest.cc
+--- a/components/permissions/permission_request_manager_unittest.cc
++++ b/components/permissions/permission_request_manager_unittest.cc
+@@ -33,7 +33,9 @@
+ #include "components/permissions/permission_uma_util.h"
+ #include "components/permissions/permission_util.h"
+ #include "components/permissions/prediction_service/permission_ui_selector.h"
++#if !BUILDFLAG(IS_ANDROID)
+ #include "components/permissions/prediction_service/prediction_service_messages.pb.h"
++#endif  // !BUILDFLAG(IS_ANDROID)
+ #include "components/permissions/request_type.h"
+ #include "components/permissions/resolvers/content_setting_permission_resolver.h"
+ #include "components/permissions/resolvers/permission_prompt_options.h"
+@@ -41,6 +43,9 @@
+ #include "components/permissions/test/mock_permission_request.h"
+ #include "components/permissions/test/test_permissions_client.h"
+ #include "components/prefs/testing_pref_service.h"
++#if BUILDFLAG(IS_ANDROID)
++#include "components/tabs/public/mock_tab_interface.h"
++#endif
+ #include "components/ukm/content/source_url_recorder.h"
+ #include "components/ukm/test_ukm_recorder.h"
+ #include "components/unified_consent/pref_names.h"
+@@ -696,6 +701,156 @@
+ ////////////////////////////////////////////////////////////////////////////////
+
+ #if BUILDFLAG(IS_ANDROID)
++// Keep the native getter stale during WillDeactivate, as the Java model does.
++class PermissionRequestManagerAndroidTabTest
++    : public PermissionRequestManagerTest {
++ protected:
++  void SetUp() override {
++    PermissionRequestManagerTest::SetUp();
++    ON_CALL(tab_, IsActivated())
++        .WillByDefault(testing::ReturnPointee(&active_));
++    ON_CALL(tab_, RegisterDidActivate(testing::_))
++        .WillByDefault(
++            [this](tabs::TabInterface::DidActivateCallback callback) {
++              return activated_.Add(std::move(callback));
++            });
++    ON_CALL(tab_, RegisterWillDeactivate(testing::_))
++        .WillByDefault(
++            [this](tabs::TabInterface::WillDeactivateCallback callback) {
++              return deactivated_.Add(std::move(callback));
++            });
++  }
++
++  void AdoptTab() { manager_->AdoptTabInterfaceIfNeeded(&tab_); }
++  void SetModelActive(bool active) {
++    manager_->OnAndroidTabModelActiveChanged(active);
++  }
++  void ActivateTab() {
++    active_ = true;
++    activated_.Notify(&tab_);
++  }
++  void DeactivateTab() {
++    deactivated_.Notify(&tab_);
++    active_ = false;
++  }
++
++  bool active_ = true;
++  tabs::MockTabInterface tab_;
++  base::RepeatingCallbackList<void(tabs::TabInterface*)> activated_;
++  base::RepeatingCallbackList<void(tabs::TabInterface*)> deactivated_;
++};
++
++TEST_F(PermissionRequestManagerAndroidTabTest,
++       PassiveVisiblePaneWaitsForActivation) {
++  active_ = false;
++  AdoptTab();
++  auto state = CreateAndAddRequest(request1_.first, false, 0);
++  EXPECT_FALSE(state->finished);
++
++  ActivateTab();
++  WaitForBubbleToBeShown();
++  EXPECT_TRUE(prompt_factory_->is_visible());
++  Accept();
++  EXPECT_TRUE(state->granted);
++}
++
++TEST_F(PermissionRequestManagerAndroidTabTest,
++       HiddenCurrentModelWaitsForVisibility) {
++  web_contents()->WasHidden();
++  AdoptTab();
++  auto state = CreateAndAddRequest(request1_.first, false, 0);
++
++  web_contents()->WasShown();
++  WaitForBubbleToBeShown();
++  EXPECT_TRUE(prompt_factory_->is_visible());
++  EXPECT_FALSE(state->finished);
++}
++
++TEST_F(PermissionRequestManagerAndroidTabTest,
++       DeactivationRetiresPromptButKeepsRequest) {
++  AdoptTab();
++  auto state = CreateAndAddRequest(request1_.first, true, 1);
++
++  DeactivateTab();
++  EXPECT_FALSE(prompt_factory_->is_visible());
++  EXPECT_FALSE(state->finished);
++  // Visibility cannot reactivate a passive split pane with native observers.
++  manager_->OnVisibilityChanged(content::Visibility::VISIBLE);
++  WaitForBubbleToBeShown();
++  EXPECT_FALSE(prompt_factory_->is_visible());
++
++  ActivateTab();
++  WaitForBubbleToBeShown();
++  EXPECT_TRUE(prompt_factory_->is_visible());
++  Accept();
++  EXPECT_TRUE(state->granted);
++}
++
++TEST_F(PermissionRequestManagerAndroidTabTest,
++       ModelDeselectionRetiresPromptWithTabStillCurrent) {
++  AdoptTab();
++  auto state = CreateAndAddRequest(request1_.first, true, 1);
++  SetModelActive(false);
++  EXPECT_TRUE(tab_.IsActivated());
++  EXPECT_FALSE(prompt_factory_->is_visible());
++  EXPECT_FALSE(state->finished);
++
++  // Neither native activation nor visibility can bypass the model latch.
++  ActivateTab();
++  manager_->OnVisibilityChanged(content::Visibility::VISIBLE);
++  WaitForBubbleToBeShown();
++  EXPECT_FALSE(prompt_factory_->is_visible());
++  SetModelActive(true);
++  WaitForBubbleToBeShown();
++  EXPECT_TRUE(prompt_factory_->is_visible());
++  EXPECT_EQ(2, prompt_factory_->show_count());
++}
++
++TEST_F(PermissionRequestManagerAndroidTabTest,
++       ModelReactivationStillWaitsForVisibleContents) {
++  AdoptTab();
++  auto state = CreateAndAddRequest(request1_.first, true, 1);
++  web_contents()->WasHidden();
++  SetModelActive(false);
++  EXPECT_FALSE(prompt_factory_->is_visible());
++  SetModelActive(true);
++  WaitForBubbleToBeShown();
++  EXPECT_FALSE(prompt_factory_->is_visible());
++  web_contents()->WasShown();
++  WaitForBubbleToBeShown();
++  EXPECT_TRUE(prompt_factory_->is_visible());
++  EXPECT_FALSE(state->finished);
++}
++
++TEST_F(PermissionRequestManagerAndroidTabTest,
++       OsPermissionHidePreservesNativeResult) {
++  AdoptTab();
++  auto state = CreateAndAddRequest(request1_.first, true, 1);
++
++  web_contents()->WasHidden();
++  EXPECT_TRUE(prompt_factory_->is_visible());
++  Accept();
++  EXPECT_TRUE(state->granted);
++}
++
++TEST_F(PermissionRequestManagerAndroidTabTest,
++       DeactivationAfterOsHideRetiresPrompt) {
++  AdoptTab();
++  auto state = CreateAndAddRequest(request1_.first, true, 1);
++  web_contents()->WasHidden();
++  EXPECT_TRUE(prompt_factory_->is_visible());
++
++  DeactivateTab();
++  EXPECT_FALSE(prompt_factory_->is_visible());
++  EXPECT_FALSE(state->finished);
++  ActivateTab();
++  WaitForBubbleToBeShown();
++  EXPECT_FALSE(prompt_factory_->is_visible());
++  web_contents()->WasShown();
++  WaitForBubbleToBeShown();
++  EXPECT_TRUE(prompt_factory_->is_visible());
++}
++
+ TEST_F(PermissionRequestManagerTest, TwoRequestsTabSwitch) {
+   MockPermissionRequest::MockPermissionRequestState request_mic_state;
+   MockPermissionRequest::MockPermissionRequestState request_camera_state;

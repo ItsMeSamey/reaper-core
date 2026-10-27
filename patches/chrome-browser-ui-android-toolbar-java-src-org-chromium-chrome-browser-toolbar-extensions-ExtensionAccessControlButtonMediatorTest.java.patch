@@ -1,0 +1,158 @@
+diff --git a/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/extensions/ExtensionAccessControlButtonMediatorTest.java b/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/extensions/ExtensionAccessControlButtonMediatorTest.java
+--- a/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/extensions/ExtensionAccessControlButtonMediatorTest.java
++++ b/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/extensions/ExtensionAccessControlButtonMediatorTest.java
+@@ -9,7 +9,11 @@
+ import static org.junit.Assert.assertTrue;
+ import static org.mockito.ArgumentMatchers.any;
+ import static org.mockito.ArgumentMatchers.anyInt;
++import static org.mockito.Mockito.doAnswer;
++import static org.mockito.Mockito.inOrder;
+ import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.never;
++import static org.mockito.Mockito.same;
+ import static org.mockito.Mockito.times;
+ import static org.mockito.Mockito.verify;
+ import static org.mockito.Mockito.when;
+@@ -27,6 +31,7 @@
+ import org.junit.runner.RunWith;
+ import org.mockito.ArgumentCaptor;
+ import org.mockito.Captor;
++import org.mockito.InOrder;
+ import org.mockito.Mock;
+ import org.mockito.junit.MockitoJUnit;
+ import org.mockito.junit.MockitoRule;
+@@ -132,6 +137,7 @@
+ 
+     @After
+     public void tearDown() {
++        mMediator.destroy();
+         MessagesFactory.detachMessageDispatcher(mMessageDispatcher);
+     }
+ 
+@@ -394,4 +400,126 @@
+         // scaleFactor = 2.0f
+         verify(mExtensionsToolbarBridge).getIcon("a", mWebContents, 5, 5, 2.0f);
+     }
++
++    @Test
++    public void testCompactRequestMessageDismissedWhenActionRemoved() {
++        ExtensionsToolbarBridge.Observer observer = mToolbarObserverCaptor.getValue();
++        prepareCompactMessageDismissal();
++        stubRequestAction("a", "Extension A");
++        when(mExtensionsToolbarBridge.getRequestAccessButtonParams(mWebContents))
++                .thenReturn(new RequestAccessButtonParams(new String[] {"a"}, "Request A"));
++        observer.onRequestAccessButtonParamsChanged();
++
++        ArgumentCaptor<PropertyModel> messages = ArgumentCaptor.forClass(PropertyModel.class);
++        verify(mMessageDispatcher)
++                .enqueueWindowScopedMessage(messages.capture(), any(Boolean.class));
++        PropertyModel original = messages.getValue();
++
++        // Native action IDs are already updated before this removal callback.
++        when(mExtensionsToolbarBridge.getRequestAccessButtonParams(mWebContents))
++                .thenReturn(new RequestAccessButtonParams(new String[0], ""));
++        observer.onActionRemoved("a");
++
++        verify(mMessageDispatcher).dismissMessage(same(original), anyInt());
++        observer.onRequestAccessButtonParamsChanged();
++        verify(mMessageDispatcher)
++                .enqueueWindowScopedMessage(any(), any(Boolean.class));
++        assertFalse(mModel.get(ExtensionsToolbarProperties.IS_REQUEST_ACCESS_BUTTON_VISIBLE));
++        verify(mExtensionsToolbarBridge, never()).onRequestAccessButtonClicked(any());
++    }
++
++    @Test
++    public void testCompactRequestMessageRemovalPreservesRemainingRequest() {
++        ExtensionsToolbarBridge.Observer observer = mToolbarObserverCaptor.getValue();
++        prepareCompactMessageDismissal();
++        stubRequestAction("b", "Extension B");
++        when(mContext.getString(R.string.extensions_request_access_button))
++                .thenReturn("Allow $1 extensions?");
++        when(mExtensionsToolbarBridge.getRequestAccessButtonParams(mWebContents))
++                .thenReturn(new RequestAccessButtonParams(new String[] {"a", "b"}, "A and B"));
++        observer.onRequestAccessButtonParamsChanged();
++
++        ArgumentCaptor<PropertyModel> messages = ArgumentCaptor.forClass(PropertyModel.class);
++        verify(mMessageDispatcher)
++                .enqueueWindowScopedMessage(messages.capture(), any(Boolean.class));
++        PropertyModel original = messages.getValue();
++        assertEquals("Allow 2 extensions?", original.get(MessageBannerProperties.TITLE));
++
++        when(mExtensionsToolbarBridge.getRequestAccessButtonParams(mWebContents))
++                .thenReturn(new RequestAccessButtonParams(new String[] {"b"}, "Request B"));
++        observer.onActionRemoved("a");
++
++        verify(mMessageDispatcher, times(2))
++                .enqueueWindowScopedMessage(messages.capture(), any(Boolean.class));
++        PropertyModel remaining = messages.getValue();
++        assertEquals("Allow Extension B?", remaining.get(MessageBannerProperties.TITLE));
++        assertEquals(
++                "Request from Extension B", remaining.get(MessageBannerProperties.DESCRIPTION));
++        InOrder order = inOrder(mMessageDispatcher);
++        order.verify(mMessageDispatcher)
++                .enqueueWindowScopedMessage(same(original), any(Boolean.class));
++        order.verify(mMessageDispatcher).dismissMessage(same(original), anyInt());
++        order.verify(mMessageDispatcher)
++                .enqueueWindowScopedMessage(same(remaining), any(Boolean.class));
++
++        // Removing an unrelated action and an unchanged params update must not
++        // dismiss or enqueue the still-current B request again.
++        observer.onActionRemoved("c");
++        observer.onRequestAccessButtonParamsChanged();
++        verify(mMessageDispatcher, times(2))
++                .enqueueWindowScopedMessage(any(), any(Boolean.class));
++        verify(mMessageDispatcher, never()).dismissMessage(same(remaining), anyInt());
++        verify(mExtensionsToolbarBridge, never()).onRequestAccessButtonClicked(any());
++    }
++
++    @Test
++    public void testWideRequestButtonRefreshesWhenActionRemoved() {
++        ExtensionsToolbarBridge.Observer observer = mToolbarObserverCaptor.getValue();
++        when(mExtensionsToolbarBridge.getRequestAccessButtonParams(mWebContents))
++                .thenReturn(new RequestAccessButtonParams(new String[] {"a"}, "Request A"));
++        observer.onRequestAccessButtonParamsChanged();
++        assertTrue(mModel.get(ExtensionsToolbarProperties.IS_REQUEST_ACCESS_BUTTON_VISIBLE));
++
++        observer.onActionRemoved("c");
++        assertTrue(mModel.get(ExtensionsToolbarProperties.IS_REQUEST_ACCESS_BUTTON_VISIBLE));
++        assertEquals(
++                1, mModel.get(ExtensionsToolbarProperties.REQUEST_ACCESS_BUTTON_EXTENSION_COUNT));
++
++        when(mExtensionsToolbarBridge.getRequestAccessButtonParams(mWebContents))
++                .thenReturn(new RequestAccessButtonParams(new String[0], ""));
++        observer.onActionRemoved("a");
++        assertFalse(mModel.get(ExtensionsToolbarProperties.IS_REQUEST_ACCESS_BUTTON_VISIBLE));
++        verify(mMessageDispatcher, never())
++                .enqueueWindowScopedMessage(any(), any(Boolean.class));
++        verify(mExtensionsToolbarBridge, never()).onRequestAccessButtonClicked(any());
++    }
++
++    private void prepareCompactMessageDismissal() {
++        when(mIsWindowCompactSupplier.get()).thenReturn(true);
++        // The real dispatcher invokes this callback synchronously when removing
++        // either a displayed message or one waiting in its window queue.
++        doAnswer(
++                        invocation -> {
++                            PropertyModel message = invocation.getArgument(0);
++                            int reason = invocation.getArgument(1);
++                            message.get(MessageBannerProperties.ON_DISMISSED).onResult(reason);
++                            return null;
++                        })
++                .when(mMessageDispatcher)
++                .dismissMessage(any(), anyInt());
++    }
++
++    private void stubRequestAction(String id, String name) {
++        ExtensionAction action = mock(ExtensionAction.class);
++        when(action.getName()).thenReturn(name);
++        when(mExtensionsToolbarBridge.getAction(id, mWebContents)).thenReturn(action);
++        when(mContext.getString(
++                        R.string.extensions_request_access_message_title_single_extension, name))
++                .thenReturn("Allow " + name + "?");
++        when(mContext.getString(
++                        R.string.extensions_request_access_message_description_single_extension,
++                        "example.com",
++                        name))
++                .thenReturn("Request from " + name);
++    }
+ }

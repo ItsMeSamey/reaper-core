@@ -20,10 +20,8 @@ import org.chromium.base.supplier.OneshotSupplier;
 import org.chromium.build.annotations.NullMarked;
 import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.browser.browser_controls.BrowserControlsStateProvider;
-import org.chromium.chrome.browser.lens.LensController;
 import org.chromium.chrome.browser.locale.LocaleManager;
 import org.chromium.chrome.browser.omnibox.UrlBar.ScrollType;
-import org.chromium.chrome.browser.omnibox.fusebox.FuseboxCoordinator;
 import org.chromium.chrome.browser.omnibox.styles.OmniboxResourceProvider;
 import org.chromium.chrome.browser.omnibox.suggestions.AutocompleteCoordinator;
 import org.chromium.chrome.browser.omnibox.suggestions.OmniboxLoadUrlParams;
@@ -80,7 +78,6 @@ public class BraveLocationBarMediator extends LocationBarMediator {
             BackKeyBehaviorDelegate backKeyBehavior,
             WindowAndroid windowAndroid,
             boolean isTablet,
-            LensController lensController,
             OmniboxUma omniboxUma,
             BooleanSupplier isToolbarMicEnabledSupplier,
             OmniboxSuggestionsDropdownEmbedderImpl dropdownEmbedder,
@@ -88,7 +85,6 @@ public class BraveLocationBarMediator extends LocationBarMediator {
             @Nullable BrowserControlsStateProvider browserControlsStateProvider,
             Supplier<@Nullable ModalDialogManager> modalDialogManagerSupplier,
             @Nullable PageZoomIndicatorCoordinator pageZoomIndicatorCoordinator,
-            FuseboxCoordinator fuseboxCoordinator,
             LocationBarEmbedder locationBarEmbedder,
             @Nullable OmniboxChipManager omniboxChipManager,
             @Nullable LocationBarFocusScrimHandler scrimHandler,
@@ -106,7 +102,6 @@ public class BraveLocationBarMediator extends LocationBarMediator {
                 backKeyBehavior,
                 windowAndroid,
                 isTablet,
-                lensController,
                 omniboxUma,
                 isToolbarMicEnabledSupplier,
                 dropdownEmbedder,
@@ -114,7 +109,6 @@ public class BraveLocationBarMediator extends LocationBarMediator {
                 browserControlsStateProvider,
                 modalDialogManagerSupplier,
                 pageZoomIndicatorCoordinator,
-                fuseboxCoordinator,
                 locationBarEmbedder,
                 omniboxChipManager,
                 scrimHandler,
@@ -123,10 +117,6 @@ public class BraveLocationBarMediator extends LocationBarMediator {
 
     public static Class<OmniboxUma> getOmniboxUmaClass() {
         return OmniboxUma.class;
-    }
-
-    public static Class<LensController> getLensControllerClass() {
-        return LensController.class;
     }
 
     public static Class<LocaleManager> getLocaleManagerClass() {

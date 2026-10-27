@@ -1,0 +1,128 @@
+diff --git a/chrome/browser/extensions/service_worker_registration_apitest.cc b/chrome/browser/extensions/service_worker_registration_apitest.cc
+index 21f0475fffec65f734ca9b1fef7b83cee5154f5e..7534c92511eab0835ddcb62d339b90de1ba4c780 100644
+--- a/chrome/browser/extensions/service_worker_registration_apitest.cc
++++ b/chrome/browser/extensions/service_worker_registration_apitest.cc
+@@ -14,6 +14,9 @@
+ #include "base/time/time.h"
+ #include "base/values.h"
+ #include "build/build_config.h"
++#if BUILDFLAG(IS_ANDROID)
++#include "base/functional/callback.h"
++#endif
+ #include "chrome/browser/extensions/chrome_test_extension_loader.h"
+ #include "chrome/browser/extensions/extension_apitest.h"
+ #include "chrome/browser/extensions/extension_install_prompt.h"
+@@ -65,12 +68,16 @@
+                                  int true_count,
+                                  int false_count,
+                                  base::HistogramTester& histogram_tester) {
++#if BUILDFLAG(IS_ANDROID)
++  histogram_tester.ExpectTotalCount(histogram_name, 0);
++#else
+   histogram_tester.ExpectBucketCount(histogram_name,
+                                      /*sample=*/true,
+                                      /*expected_count=*/true_count);
+   histogram_tester.ExpectBucketCount(histogram_name,
+                                      /*sample=*/false,
+                                      /*expected_count=*/false_count);
++#endif
+ }
+ 
+ // Allows test to wait for the attempt to register and unregister a worker to
+@@ -104,6 +111,11 @@
+ 
+   bool registration_delayed() const { return registration_delayed_; }
+ 
++#if BUILDFLAG(IS_ANDROID)
++  void SetActivationCallback(base::RepeatingClosure callback) {
++    on_activation_ = std::move(callback);
++  }
++#endif
+  private:
+   void WaitForWorkerUnregistrationAttemptCompleted() {
+     SCOPED_TRACE("Waiting for worker unregistration attempt to complete");
+@@ -128,6 +140,15 @@
+     }
+   }
+ 
++#if BUILDFLAG(IS_ANDROID)
++  void OnActivateExtension(const ExtensionId& extension_id, bool) override {
++    if (extension_id == expected_extension_id_ && on_activation_) {
++      on_activation_.Run();
++    }
++  }
++
++  base::RepeatingClosure on_activation_;
++#endif
+   const ExtensionId expected_extension_id_;
+   base::RunLoop registration_attempt_runloop;
+   base::RunLoop unregistration_attempt_runloop;
+@@ -221,6 +242,23 @@
+   ExtensionRegistrationAndUnregistrationWaiter registration_waiter(
+       test_extension_id);
+ 
++#if BUILDFLAG(IS_ANDROID)
++  auto* task_queue = ServiceWorkerTaskQueue::Get(profile());
++  ASSERT_TRUE(task_queue);
++  const LazyContextId lazy_context =
++      LazyContextId::ForServiceWorker(profile(), test_extension_id);
++  auto failed_callbacks = std::make_shared<int>(0);
++  registration_waiter.SetActivationCallback(base::BindLambdaForTesting([&] {
++    task_queue->AddPendingTask(
++        lazy_context,
++        base::BindLambdaForTesting(
++            [failed_callbacks](
++                std::unique_ptr<LazyContextTaskQueue::ContextInfo> context) {
++              EXPECT_FALSE(context);
++              ++*failed_callbacks;
++            }));
++  }));
++#endif
+   ChromeTestExtensionLoader(profile()).LoadUnpackedExtensionAsync(
+       extension_dir.UnpackedPath(), base::DoNothing());
+ 
+@@ -239,6 +277,28 @@
+       "Extensions.ServiceWorkerBackground.Registration_FailStatus",
+       /*sample=*/blink::ServiceWorkerStatusCode::kErrorScriptEvaluateFailed,
+       /*expected_count=*/0);
++#if BUILDFLAG(IS_ANDROID)
++  EXPECT_EQ(1, *failed_callbacks);
++  EXPECT_EQ(0u, task_queue->GetNumPendingTasksForTest(lazy_context));
++
++  base::test::TestFuture<std::unique_ptr<LazyContextTaskQueue::ContextInfo>>
++      later_request;
++  task_queue->AddPendingTask(lazy_context, later_request.GetCallback());
++  ASSERT_TRUE(later_request.IsReady());
++  EXPECT_FALSE(later_request.Get());
++  EXPECT_EQ(0u, task_queue->GetNumPendingTasksForTest(lazy_context));
++
++  // A normal reload with a valid worker creates a new activation and can
++  // service requests again. The original expected-error input above is kept.
++  registration_waiter.SetActivationCallback(base::RepeatingClosure());
++  extension_dir.WriteFile(FILE_PATH_LITERAL("background.js"), "// Valid worker");
++  ReloadExtension(test_extension_id);
++  base::test::TestFuture<std::unique_ptr<LazyContextTaskQueue::ContextInfo>>
++      recovered_request;
++  task_queue->AddPendingTask(lazy_context, recovered_request.GetCallback());
++  ASSERT_TRUE(recovered_request.Wait());
++  EXPECT_TRUE(recovered_request.Get());
++#endif
+ }
+ 
+ // Tests that a service worker registration is properly stored after extension
+@@ -274,9 +334,15 @@
+   EXPECT_EQ(content::ServiceWorkerCapability::SERVICE_WORKER_NO_FETCH_HANDLER,
+             GetServiceWorkerRegistrationState(*extension));
+ 
++#if BUILDFLAG(IS_ANDROID)
++  histogram_tester.ExpectTotalCount(
++      "Extensions.ServiceWorkerBackground.RegistrationTime",
++      /*expected_count=*/0);
++#else
+   histogram_tester.ExpectTotalCount(
+       "Extensions.ServiceWorkerBackground.RegistrationTime",
+       /*expected_count=*/1);
++#endif
+   // Confirm the time is a sane value (less than the maximum value).
+   histogram_tester.ExpectBucketCount(
+       "Extensions.ServiceWorkerBackground.RegistrationTime",

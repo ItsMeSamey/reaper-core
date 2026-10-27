@@ -1,0 +1,121 @@
+diff --git a/components/update_client/crx_downloader.cc b/components/update_client/crx_downloader.cc
+--- a/components/update_client/crx_downloader.cc
++++ b/components/update_client/crx_downloader.cc
+@@ -53,6 +53,7 @@
+   return current_url_ != urls_.end() ? *current_url_ : GURL();
+ }
+
++#if !BUILDFLAG(IS_ANDROID)
+ const std::vector<CrxDownloader::DownloadMetrics>
+ CrxDownloader::download_metrics() const {
+   std::vector<DownloadMetrics> retval = download_metrics_;
+@@ -65,6 +66,7 @@
+   }
+   return retval;
+ }
++#endif  // !BUILDFLAG(IS_ANDROID)
+
+ base::OnceClosure CrxDownloader::StartDownloadFromUrl(
+     const GURL& url,
+@@ -108,8 +110,11 @@
+
+ void CrxDownloader::OnDownloadComplete(
+     bool is_handled,
+-    const Result& result,
+-    const DownloadMetrics& download_metrics) {
++    const Result& result
++#if !BUILDFLAG(IS_ANDROID)
++    , const DownloadMetrics& download_metrics
++#endif
++) {
+   TRACE_EVENT("update_client", "CrxDownloader::OnDownloadComplete",
+               perfetto::Flow::FromPointer(this));
+   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+@@ -122,11 +127,17 @@
+   if (result.error) {
+     main_task_runner()->PostTask(
+         FROM_HERE, base::BindOnce(&CrxDownloader::HandleDownloadError, this,
+-                                  is_handled, result, download_metrics));
+-    return;
+-  }
+-
++                                  is_handled, result
++#if !BUILDFLAG(IS_ANDROID)
++                                  , download_metrics
++#endif
++                                  ));
++    return;
++  }
++
++#if !BUILDFLAG(IS_ANDROID)
+   CHECK_EQ(0, download_metrics.error);
++#endif  // !BUILDFLAG(IS_ANDROID)
+   CHECK(is_handled);
+
+   base::ThreadPool::PostTaskAndReplyWithResult(
+@@ -147,9 +158,14 @@
+           // Handles CRX verification result, and retries the download from
+           // a different URL if the verification fails.
+           [](scoped_refptr<CrxDownloader> downloader, Result result,
+-             DownloadMetrics download_metrics, CrxDownloaderError error) {
++#if !BUILDFLAG(IS_ANDROID)
++             DownloadMetrics download_metrics,
++#endif
++             CrxDownloaderError error) {
+             if (error == CrxDownloaderError::NONE) {
++#if !BUILDFLAG(IS_ANDROID)
+               downloader->download_metrics_.push_back(download_metrics);
++#endif  // !BUILDFLAG(IS_ANDROID)
+               downloader->main_task_runner()->PostTask(
+                   FROM_HERE,
+                   base::BindOnce(std::move(downloader->download_callback_),
+@@ -158,13 +174,23 @@
+             }
+             result.response.clear();
+             result.error = static_cast<int>(error);
++#if !BUILDFLAG(IS_ANDROID)
+             download_metrics.error = result.error;
++#endif  // !BUILDFLAG(IS_ANDROID)
+             downloader->main_task_runner()->PostTask(
+                 FROM_HERE,
+                 base::BindOnce(&CrxDownloader::HandleDownloadError, downloader,
+-                               true, result, download_metrics));
++                               true, result
++#if !BUILDFLAG(IS_ANDROID)
++                               , download_metrics
++#endif
++                               ));
+           },
+-          scoped_refptr<CrxDownloader>(this), result, download_metrics));
++          scoped_refptr<CrxDownloader>(this), result
++#if !BUILDFLAG(IS_ANDROID)
++          , download_metrics
++#endif
++          ));
+ }
+
+ void CrxDownloader::OnDownloadProgress(int64_t downloaded_bytes,
+@@ -180,16 +206,21 @@
+
+ void CrxDownloader::HandleDownloadError(
+     bool is_handled,
+-    const Result& result,
+-    const DownloadMetrics& download_metrics) {
++    const Result& result
++#if !BUILDFLAG(IS_ANDROID)
++    , const DownloadMetrics& download_metrics
++#endif
++) {
+   TRACE_EVENT("update_client", "CrxDownloader::HandleDownloadError",
+               perfetto::Flow::FromPointer(this));
+   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+   CHECK_NE(0, result.error);
+   CHECK(result.response.empty());
++#if !BUILDFLAG(IS_ANDROID)
+   CHECK_NE(0, download_metrics.error);
+
+   download_metrics_.push_back(download_metrics);
++#endif  // !BUILDFLAG(IS_ANDROID)
+
+   // Prevent the downloader from attempting other URLs or falling back to
+   // other downloader types (like BITS) once a cancellation is triggered.

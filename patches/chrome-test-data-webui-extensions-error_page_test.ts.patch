@@ -1,0 +1,321 @@
+diff --git a/chrome/test/data/webui/extensions/error_page_test.ts b/chrome/test/data/webui/extensions/error_page_test.ts
+index a56957fb6ce50fe495d73a9b9f16e903d2881293..934d6263af161607928b255932f7ec998c0653e2 100644
+--- a/chrome/test/data/webui/extensions/error_page_test.ts
++++ b/chrome/test/data/webui/extensions/error_page_test.ts
+@@ -169,7 +169,12 @@
+           canInspect: true,
+           contextUrl: 'http://test.com',
+           stackTrace: [{
++            // <if expr="is_android">
++            url: 'chrome-extension://' + extensionId + '/other_source.html',
++            // </if>
++            // <if expr="not is_android">
+             url: 'url',
++            // </if>
+             lineNumber: 123,
+             columnNumber: 321,
+             functionName: 'foo',
+@@ -379,4 +384,303 @@
+     await mockDelegate.testClickingCalls(
+         devtoolsButton, 'openDevToolsForError', [serviceWorkerError]);
+   });
++  // <if expr="is_android">
++
++  function createSourceResponse(highlight: string):
++      chrome.developerPrivate.RequestFileSourceResponse {
++    return {
++      source: {
++        beforeHighlight: '',
++        highlight,
++        afterHighlight: '',
++      },
++      message: '',
++      title: '',
++    };
++  }
++
++  async function resolveSource(
++      resolver:
++          PromiseResolver<chrome.developerPrivate.RequestFileSourceResponse>,
++      highlight: string) {
++    const response = createSourceResponse(highlight);
++    resolver.resolve(response);
++    await resolver.promise;
++    await microtasksFinished();
++    return response;
++  }
++
++  function displayedCode() {
++    return errorPage.shadowRoot.querySelector('extensions-code-section')!.code;
++  }
++
++  function errorButtons() {
++    return errorPage.shadowRoot.querySelectorAll<HTMLElement>(
++        '.error-item .start');
++  }
++
++  async function setTwoErrors() {
++    const data = structuredClone(extensionData);
++    data.runtimeErrors.push({
++      ...data.runtimeErrors[0]!,
++      id: 2,
++      message: 'Other error',
++      source: 'chrome-extension://' + extensionId + '/other_source.html',
++    });
++    errorPage.data = data;
++    await microtasksFinished();
++    return data.runtimeErrors;
++  }
++
++  function stackFrame(url: string, lineNumber: number):
++      chrome.developerPrivate.StackFrame {
++    return {url, lineNumber, columnNumber: 1, functionName: 'frame'};
++  }
++
++  function mixedStack() {
++    return [
++      stackFrame('extensions::internal-first', 1),
++      stackFrame('chrome-extension://' + extensionId + '/first.js', 11),
++      stackFrame('extensions::internal-middle', 2),
++      stackFrame('chrome-extension://' + extensionId + '/last.js', 33),
++      stackFrame('extensions::internal-last', 3),
++    ];
++  }
++
++  async function setStack(
++      stackTrace: chrome.developerPrivate.StackFrame[]) {
++    const data = structuredClone(extensionData);
++    data.runtimeErrors[0]!.stackTrace = stackTrace;
++    errorPage.data = data;
++    await microtasksFinished();
++    return errorPage.shadowRoot.querySelectorAll<HTMLLIElement>(
++        '.stack-trace-container li');
++  }
++
++  test('SourceResponseFollowsErrorSelection', async () => {
++    const errors = await setTwoErrors();
++    const firstRequest = mockDelegate.requestFileSourceResolver;
++    errorButtons()[1]!.click();
++    await microtasksFinished();
++    const secondRequest = mockDelegate.requestFileSourceResolver;
++    assertTrue(firstRequest !== secondRequest);
++    assertEquals(errors[1], errorPage.getSelectedError());
++    assertEquals(
++        'other_source.html', mockDelegate.requestFileSourceArgs!.pathSuffix);
++
++    const secondCode = await resolveSource(secondRequest, 'second error');
++    assertEquals(secondCode, displayedCode());
++    await resolveSource(firstRequest, 'stale first error');
++    assertEquals(errors[1], errorPage.getSelectedError());
++    assertEquals(secondCode, displayedCode());
++  });
++
++  test('SourceResponseFollowsStackFrameSelection', async () => {
++    const frames = await setStack([
++      stackFrame('chrome-extension://' + extensionId + '/first.js', 11),
++      stackFrame('chrome-extension://' + extensionId + '/last.js', 33),
++    ]);
++    frames[0]!.click();
++    await microtasksFinished();
++    const firstRequest = mockDelegate.requestFileSourceResolver;
++    frames[1]!.click();
++    await microtasksFinished();
++    const secondRequest = mockDelegate.requestFileSourceResolver;
++    assertTrue(firstRequest !== secondRequest);
++    assertEquals(null, displayedCode());
++    assertEquals('last.js', mockDelegate.requestFileSourceArgs!.pathSuffix);
++    assertEquals(33, mockDelegate.requestFileSourceArgs!.lineNumber);
++
++    const secondCode = await resolveSource(secondRequest, 'second frame');
++    assertEquals(secondCode, displayedCode());
++    await resolveSource(firstRequest, 'stale first frame');
++    assertTrue(frames[1]!.classList.contains('selected'));
++    assertEquals(0, frames[1]!.tabIndex);
++    assertEquals(secondCode, displayedCode());
++  });
++
++  test('SourceResponseFollowsRepeatedSelection', async () => {
++    const errors = await setTwoErrors();
++    const firstRequest = mockDelegate.requestFileSourceResolver;
++    errorButtons()[1]!.click();
++    await microtasksFinished();
++    const secondRequest = mockDelegate.requestFileSourceResolver;
++    errorButtons()[0]!.click();
++    await microtasksFinished();
++    const currentRequest = mockDelegate.requestFileSourceResolver;
++    assertTrue(currentRequest !== firstRequest);
++
++    const currentCode = await resolveSource(currentRequest, 'current first');
++    await resolveSource(secondRequest, 'stale second');
++    await resolveSource(firstRequest, 'stale first');
++    assertEquals(errors[0], errorPage.getSelectedError());
++    assertEquals(currentCode, displayedCode());
++  });
++
++  test('SourceResponseInvalidatedByCollapse', async () => {
++    await microtasksFinished();
++    const pending = mockDelegate.requestFileSourceResolver;
++    errorButtons()[0]!.click();
++    await microtasksFinished();
++    assertEquals(null, errorPage.getSelectedError());
++    assertEquals(null, displayedCode());
++    await resolveSource(pending, 'collapsed request');
++    assertEquals(null, displayedCode());
++
++    errorButtons()[0]!.click();
++    await microtasksFinished();
++    assertEquals(null, displayedCode());
++    const currentCode = await resolveSource(
++        mockDelegate.requestFileSourceResolver, 'reopened request');
++    assertEquals(currentCode, displayedCode());
++  });
++
++  test('SourceResponseInvalidatedByInvalidUrl', async () => {
++    await microtasksFinished();
++    const pending = mockDelegate.requestFileSourceResolver;
++    const data = structuredClone(extensionData);
++    data.runtimeErrors[0]!.source = 'invalid_url';
++    errorPage.data = data;
++    await microtasksFinished();
++    assertEquals(pending, mockDelegate.requestFileSourceResolver);
++    assertEquals(null, displayedCode());
++    await resolveSource(pending, 'old valid URL');
++    assertEquals(data.runtimeErrors[0], errorPage.getSelectedError());
++    assertEquals(null, displayedCode());
++  });
++
++  test('SourceResponseInvalidatedByClearedData', async () => {
++    for (const unset of [false, true]) {
++      errorPage.data = structuredClone(extensionData);
++      await microtasksFinished();
++      const pending = mockDelegate.requestFileSourceResolver;
++      if (unset) {
++        errorPage.data = undefined;
++      } else {
++        const empty = structuredClone(extensionData);
++        empty.runtimeErrors = [];
++        errorPage.data = empty;
++      }
++      await microtasksFinished();
++      assertEquals(null, errorPage.getSelectedError());
++      assertEquals(
++          null, errorPage.shadowRoot.querySelector('extensions-code-section'));
++
++      const restored = structuredClone(extensionData);
++      restored.runtimeErrors[0]!.source =
++          'chrome-extension://' + extensionId + '/restored.js';
++      errorPage.data = restored;
++      await microtasksFinished();
++      const currentRequest = mockDelegate.requestFileSourceResolver;
++      assertTrue(currentRequest !== pending);
++      await resolveSource(pending, 'old cleared selection');
++      assertEquals(null, displayedCode());
++      const currentCode = await resolveSource(currentRequest, 'restored source');
++      assertEquals(currentCode, displayedCode());
++    }
++  });
++
++  test('InitialStackSelectionSkipsInternalFrames', async () => {
++    const frames = await setStack(mixedStack());
++    assertEquals(5, frames.length);
++    assertTrue(frames[0]!.hidden);
++    assertTrue(frames[2]!.hidden);
++    assertTrue(frames[4]!.hidden);
++    assertFalse(frames[1]!.hidden);
++    assertTrue(frames[1]!.classList.contains('selected'));
++    assertEquals(0, frames[1]!.tabIndex);
++    assertEquals(-1, frames[0]!.tabIndex);
++    assertEquals(-1, frames[2]!.tabIndex);
++    assertEquals(-1, frames[3]!.tabIndex);
++    assertEquals(-1, frames[4]!.tabIndex);
++    assertEquals('first.js', mockDelegate.requestFileSourceArgs!.pathSuffix);
++    assertEquals(11, mockDelegate.requestFileSourceArgs!.lineNumber);
++  });
++
++  test('StackKeyboardNavigationSkipsInternalFrames', async () => {
++    const frames = await setStack(mixedStack());
++    // Select a visible frame explicitly so initial selection cannot mask
++    // a separate regression in keyboard navigation.
++    frames[1]!.click();
++    await microtasksFinished();
++    frames[1]!.focus();
++
++    const firstRequest = mockDelegate.requestFileSourceResolver;
++    frames[1]!.dispatchEvent(new KeyboardEvent('keydown', {
++      key: 'ArrowUp',
++      bubbles: true,
++      cancelable: true,
++    }));
++    await microtasksFinished();
++    assertEquals(firstRequest, mockDelegate.requestFileSourceResolver);
++    assertEquals(frames[1], errorPage.shadowRoot.activeElement);
++
++    frames[1]!.dispatchEvent(new KeyboardEvent('keydown', {
++      key: 'ArrowDown',
++      bubbles: true,
++      cancelable: true,
++    }));
++    await microtasksFinished();
++    assertTrue(frames[3]!.classList.contains('selected'));
++    assertEquals(0, frames[3]!.tabIndex);
++    assertEquals(-1, frames[1]!.tabIndex);
++    assertEquals(frames[3], errorPage.shadowRoot.activeElement);
++    assertEquals('last.js', mockDelegate.requestFileSourceArgs!.pathSuffix);
++    assertEquals(33, mockDelegate.requestFileSourceArgs!.lineNumber);
++
++    const lastRequest = mockDelegate.requestFileSourceResolver;
++    frames[3]!.dispatchEvent(new KeyboardEvent('keydown', {
++      key: 'ArrowDown',
++      bubbles: true,
++      cancelable: true,
++    }));
++    await microtasksFinished();
++    assertEquals(lastRequest, mockDelegate.requestFileSourceResolver);
++    assertEquals(frames[3], errorPage.shadowRoot.activeElement);
++
++    frames[3]!.dispatchEvent(new KeyboardEvent('keydown', {
++      key: 'ArrowUp',
++      bubbles: true,
++      cancelable: true,
++    }));
++    await microtasksFinished();
++    assertTrue(frames[1]!.classList.contains('selected'));
++    assertEquals(0, frames[1]!.tabIndex);
++    assertEquals(-1, frames[3]!.tabIndex);
++    assertEquals(frames[1], errorPage.shadowRoot.activeElement);
++    assertEquals('first.js', mockDelegate.requestFileSourceArgs!.pathSuffix);
++    assertEquals(11, mockDelegate.requestFileSourceArgs!.lineNumber);
++  });
++
++  test('StackSelectionWithNoVisibleFrames', async () => {
++    for (const stack of [
++      [],
++      [
++        stackFrame('extensions::internal-first', 1),
++        stackFrame('extensions::internal-last', 2),
++      ],
++    ]) {
++      const frames = await setStack(stack);
++      assertEquals(stack.length, frames.length);
++      for (const frame of frames) {
++        assertTrue(frame.hidden);
++        assertEquals(-1, frame.tabIndex);
++        assertFalse(frame.classList.contains('selected'));
++      }
++      assertEquals('source.html', mockDelegate.requestFileSourceArgs!.pathSuffix);
++      assertEquals(0, mockDelegate.requestFileSourceArgs!.lineNumber);
++
++      const pending = mockDelegate.requestFileSourceResolver;
++      const list = errorPage.shadowRoot.querySelector<HTMLUListElement>(
++          '.stack-trace-container')!;
++      list.dispatchEvent(new KeyboardEvent('keydown', {
++        key: 'ArrowDown',
++        bubbles: true,
++        cancelable: true,
++      }));
++      await microtasksFinished();
++      assertEquals(pending, mockDelegate.requestFileSourceResolver);
++    }
++  });
++  // </if>
+ });

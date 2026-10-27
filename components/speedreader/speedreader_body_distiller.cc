@@ -20,6 +20,7 @@
 #include "brave/components/speedreader/speedreader_rewriter_service.h"
 #include "brave/components/speedreader/speedreader_service.h"
 #include "brave/components/speedreader/speedreader_util.h"
+#include "build/build_config.h"
 #include "services/network/public/mojom/url_response_head.mojom.h"
 
 namespace speedreader {
@@ -53,7 +54,11 @@ SpeedreaderBodyDistiller::SpeedreaderBodyDistiller(
     base::WeakPtr<SpeedreaderDelegate> speedreader_delegate)
     : rewriter_service_(rewriter_service),
       speedreader_service_(speedreader_service),
-      speedreader_delegate_(std::move(speedreader_delegate)) {}
+      speedreader_delegate_(std::move(speedreader_delegate)) {
+#if BUILDFLAG(IS_ANDROID)
+  distillation_result_ = DistillationResult::kFail;
+#endif
+}
 
 SpeedreaderBodyDistiller::~SpeedreaderBodyDistiller() = default;
 

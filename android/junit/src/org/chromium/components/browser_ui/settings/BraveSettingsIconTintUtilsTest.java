@@ -9,15 +9,25 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertTrue;
 
 import android.content.Context;
 import android.content.ContextWrapper;
 import android.content.res.ColorStateList;
 import android.content.res.Resources;
+import android.graphics.Color;
+import android.graphics.drawable.ColorDrawable;
+import android.graphics.drawable.LayerDrawable;
 import android.os.Build;
 import android.view.ContextThemeWrapper;
+import android.widget.FrameLayout;
 import android.widget.ImageView;
 
+import androidx.preference.PreferenceCategory;
+import androidx.preference.PreferenceGroupAdapter;
+import androidx.preference.PreferenceManager;
+import androidx.preference.PreferenceScreen;
+import androidx.preference.PreferenceViewHolder;
 import androidx.test.core.app.ApplicationProvider;
 
 import org.junit.Test;
@@ -25,6 +35,8 @@ import org.junit.runner.RunWith;
 import org.robolectric.annotation.Config;
 
 import org.chromium.base.test.BaseRobolectricTestRunner;
+import org.chromium.chrome.browser.containers.ContainersSettings;
+import org.chromium.chrome.browser.containers.ContainersUi;
 import org.chromium.components.browser_ui.styles.R;
 import org.chromium.components.browser_ui.styles.SemanticColorUtils;
 
@@ -80,6 +92,113 @@ public class BraveSettingsIconTintUtilsTest {
 
         assertNull(icon.getCapturedTint());
         assertNull(icon.getColorFilter());
+
+        assertContainerRowsClearTintOnRebind();
+    }
+
+    private void assertContainerRowsClearTintOnRebind() {
+        Context context =
+                new DefaultTintContext(
+                        new ContextThemeWrapper(
+                                ApplicationProvider.getApplicationContext(),
+                                org.chromium.chrome.R.style.Theme_Chromium_Settings),
+                        createDefaultTint());
+        PreferenceScreen screen = new PreferenceManager(context).createPreferenceScreen(context);
+        ChromeBasePreference normal = new ChromeBasePreference(context);
+        normal.setKey("reaper_container_add");
+        normal.setIcon(new ColorDrawable(0xffaabbcc));
+        screen.addPreference(normal);
+        PreferenceCategory containers = new PreferenceCategory(context);
+        containers.setKey("reaper_container_list");
+        screen.addPreference(containers);
+        ChromeBasePreference container = new ChromeBasePreference(context);
+        container.setKey("reaper_container_11111111-1111-4111-8111-111111111111");
+        containers.addPreference(container);
+
+        TestContainersSettings settings = new TestContainersSettings();
+        try {
+            PreferenceGroupAdapter adapter = settings.onCreateAdapter(screen);
+            int normalPosition = adapter.getPreferenceAdapterPosition(normal);
+            int containerPosition = adapter.getPreferenceAdapterPosition(container);
+            assertEquals(
+                    adapter.getItemViewType(normalPosition),
+                    adapter.getItemViewType(containerPosition));
+            PreferenceViewHolder holder =
+                    adapter.onCreateViewHolder(
+                            new FrameLayout(context), adapter.getItemViewType(normalPosition));
+            ImageView rowIcon = (ImageView) holder.findViewById(android.R.id.icon);
+            assertNotNull(rowIcon);
+
+            for (int backgroundColor : new int[] {Color.BLACK, Color.WHITE}) {
+                int foregroundColor =
+                        backgroundColor == Color.BLACK ? Color.WHITE : Color.BLACK;
+                // Own the layer state before installing the recorder; ImageView.mutate()
+                // must not clone the recorder through ColorDrawable's base ConstantState.
+                LayerDrawable containerIcon =
+                        (LayerDrawable) ContainersUi.getIcon(context, 0, backgroundColor).mutate();
+                TintCapturingDrawable glyph = new TintCapturingDrawable();
+                containerIcon.setDrawable(1, glyph);
+                glyph.setTint(foregroundColor);
+                container.setIcon(containerIcon);
+
+                // A fresh bind and a recycled normal row must both retain glyph contrast.
+                adapter.onBindViewHolder(holder, containerPosition);
+                assertContainerIcon(rowIcon, containerIcon, glyph, foregroundColor);
+                int clearsBeforeRecycling = glyph.getTintClearCount();
+                adapter.onBindViewHolder(holder, normalPosition);
+                assertNotNull(rowIcon.getImageTintList());
+                adapter.onBindViewHolder(holder, containerPosition);
+                assertContainerIcon(rowIcon, containerIcon, glyph, foregroundColor);
+                assertTrue(glyph.getTintClearCount() > clearsBeforeRecycling);
+
+                // Reuse in the other direction must retain normal settings tint behavior.
+                adapter.onBindViewHolder(holder, normalPosition);
+                assertNotNull(rowIcon.getImageTintList());
+            }
+        } finally {
+            // Constructing the fragment registers its metadata observer, even before attachment.
+            settings.onDestroy();
+        }
+    }
+
+    private void assertContainerIcon(
+            ImageView rowIcon,
+            LayerDrawable expectedIcon,
+            TintCapturingDrawable glyph,
+            int foregroundColor) {
+        assertSame(expectedIcon, rowIcon.getDrawable());
+        assertNull(rowIcon.getImageTintList());
+        assertNull(rowIcon.getColorFilter());
+        assertTrue(glyph.getTintClearCount() > 0);
+        assertNotNull(glyph.getCapturedTint());
+        assertEquals(foregroundColor, glyph.getCapturedTint().getDefaultColor());
+    }
+
+    private static class TintCapturingDrawable extends ColorDrawable {
+        private ColorStateList mTint;
+        private int mTintClearCount;
+
+        @Override
+        public void setTintList(ColorStateList tint) {
+            super.setTintList(tint);
+            mTint = tint;
+            if (tint == null) mTintClearCount++;
+        }
+
+        ColorStateList getCapturedTint() {
+            return mTint;
+        }
+
+        int getTintClearCount() {
+            return mTintClearCount;
+        }
+    }
+
+    private static class TestContainersSettings extends ContainersSettings {
+        @Override
+        public PreferenceGroupAdapter onCreateAdapter(PreferenceScreen screen) {
+            return super.onCreateAdapter(screen);
+        }
     }
 
     private void assertUsesDefaultTint() {

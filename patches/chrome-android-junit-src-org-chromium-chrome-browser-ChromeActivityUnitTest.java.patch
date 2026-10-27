@@ -1,0 +1,154 @@
+diff --git a/chrome/android/junit/src/org/chromium/chrome/browser/ChromeActivityUnitTest.java b/chrome/android/junit/src/org/chromium/chrome/browser/ChromeActivityUnitTest.java
+--- a/chrome/android/junit/src/org/chromium/chrome/browser/ChromeActivityUnitTest.java
++++ b/chrome/android/junit/src/org/chromium/chrome/browser/ChromeActivityUnitTest.java
+@@ -5,6 +5,7 @@
+ package org.chromium.chrome.browser;
+ 
+ import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
+ import static org.junit.Assert.assertNotNull;
+ import static org.junit.Assert.assertNull;
+ import static org.junit.Assert.assertTrue;
+@@ -20,11 +21,13 @@
+ import android.app.Activity;
+ import android.app.PictureInPictureUiState;
+ import android.app.assist.AssistContent;
++import android.content.Intent;
+ import android.net.Uri;
+ import android.os.Build;
+ import android.os.Bundle;
+ import android.util.Pair;
+ import android.view.ViewGroup;
++import android.widget.TextView;
+ import android.window.OnBackInvokedDispatcher;
+ 
+ import androidx.annotation.Nullable;
+@@ -45,6 +48,7 @@
+ import org.mockito.junit.MockitoRule;
+ import org.robolectric.Robolectric;
+ import org.robolectric.annotation.Config;
++import org.robolectric.shadows.ShadowToast;
+ 
+ import org.chromium.base.DeviceInfo;
+ import org.chromium.base.UserDataHost;
+@@ -94,9 +98,12 @@
+ import org.chromium.content_public.browser.LoadUrlParams;
+ import org.chromium.content_public.browser.RenderFrameHost;
+ import org.chromium.content_public.browser.WebContents;
++import org.chromium.ui.base.IntentRequestTracker;
+ import org.chromium.ui.base.TestActivity;
++import org.chromium.ui.base.WindowAndroid;
+ import org.chromium.ui.theme.ThemeResourceWrapper;
+ import org.chromium.ui.theme.ThemeResourceWrapperProvider;
++import org.chromium.ui.widget.ToastManager;
+ import org.chromium.url.JUnitTestGURLs;
+ 
+ /** Unit tests for ChromeActivity. */
+@@ -219,6 +226,85 @@
+     }
+ 
+     @Test
++    public void testMissingPickerCallbackWithoutSnackbarAllowsFallback() {
++        TestChromeActivity chromeActivity = new TestChromeActivity();
++        assertFalse(chromeActivity.onIntentCallbackNotFoundError("Previous operation failed."));
++    }
++
++    @Test
++    public void testMissingPickerCallbackWithSnackbarIsHandled() {
++        TestChromeActivity chromeActivity = new TestChromeActivity();
++        SnackbarManager snackbarManager = mock(SnackbarManager.class);
++        ((SettableMonotonicObservableSupplier<SnackbarManager>)
++                        chromeActivity.getSnackbarManagerSupplier())
++                .set(snackbarManager);
++        String error = "Previous operation failed.";
++
++        assertTrue(chromeActivity.onIntentCallbackNotFoundError(error));
++
++        ArgumentCaptor<Snackbar> snackbar = ArgumentCaptor.forClass(Snackbar.class);
++        verify(snackbarManager).showSnackbar(snackbar.capture());
++        assertEquals(error, snackbar.getValue().getTextForTesting());
++    }
++
++    @Test
++    public void testRestoredPickerReportsLostCallbackAndAllowsFreshRetry() {
++        ToastManager.resetForTesting();
++        ShadowToast.reset();
++        TestChromeActivity chromeActivity = new TestChromeActivity();
++        IntentRequestTracker.Delegate delegate = mock(IntentRequestTracker.Delegate.class);
++        when(delegate.startActivityForResult(any(), anyInt())).thenReturn(true);
++        when(delegate.onCallbackNotFoundError(any()))
++                .thenAnswer(
++                        invocation ->
++                                chromeActivity.onIntentCallbackNotFoundError(
++                                        invocation.getArgument(0)));
++        IntentRequestTracker original = IntentRequestTracker.createFromDelegate(delegate);
++        WindowAndroid.IntentCallback lostCallback = mock(WindowAndroid.IntentCallback.class);
++        int requestCode =
++                original.showCancelableIntent(
++                        new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE),
++                        lostCallback,
++                        org.chromium.ui.R.string.low_memory_error);
++        assertTrue(requestCode >= 0);
++        Bundle savedState = new Bundle();
++        original.saveInstanceState(savedState);
++
++        // Recreate only the real tracker from saved state. It intentionally
++        // restores error text, never the dead caller's callback or native work.
++        IntentRequestTracker restored = IntentRequestTracker.createFromDelegate(delegate);
++        restored.restoreInstanceState(savedState);
++        Intent abandonedResult =
++                new Intent().setData(Uri.parse("content://picker.test/tree/abandoned"));
++        assertFalse(restored.onActivityResult(requestCode, Activity.RESULT_OK, abandonedResult));
++        verify(lostCallback, never()).onIntentCompleted(anyInt(), any());
++        android.widget.Toast errorToast = ShadowToast.getLatestToast();
++        assertNotNull(errorToast);
++        assertNotNull(errorToast.getView());
++        TextView errorText = errorToast.getView().findViewById(org.chromium.ui.R.id.toast_text);
++        assertNotNull(errorText);
++        assertEquals(
++                mActivity.getString(org.chromium.ui.R.string.low_memory_error),
++                errorText.getText().toString());
++
++        // Only a new explicit request gets a fresh callback. Cancellation is
++        // delivered to that callback; no abandoned URI or install is replayed.
++        ToastManager.resetForTesting();
++        ShadowToast.reset();
++        WindowAndroid.IntentCallback retryCallback = mock(WindowAndroid.IntentCallback.class);
++        int retryRequestCode =
++                restored.showCancelableIntent(
++                        new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE),
++                        retryCallback,
++                        org.chromium.ui.R.string.low_memory_error);
++        assertTrue(retryRequestCode >= 0);
++        assertTrue(restored.onActivityResult(retryRequestCode, Activity.RESULT_CANCELED, null));
++        verify(retryCallback).onIntentCompleted(Activity.RESULT_CANCELED, null);
++        verify(lostCallback, never()).onIntentCompleted(anyInt(), any());
++        assertNull(ShadowToast.getLatestToast());
++    }
++
++    @Test
+     public void testReadAloudAppMenuItemClicked() {
+         TestChromeActivity chromeActivity = Mockito.spy(new TestChromeActivity());
+ 
+@@ -435,21 +521,6 @@
+     }
+ 
+     @Test
+-    @EnableFeatures(ChromeFeatureList.GLIC)
+-    public void testExitOverviewModeOnActorPiPExpand() {
+-        TestChromeActivity activity = new TestChromeActivity();
+-        TestChromeActivity chromeActivity = Mockito.spy(activity);
+-
+-        ((SettableMonotonicObservableSupplier<LayoutManagerImpl>)
+-                        chromeActivity.getLayoutManagerSupplier())
+-                .set(mLayoutManagerMock);
+-
+-        doReturn(true).when(chromeActivity).isInOverviewMode();
+-        chromeActivity.exitOverviewModeOnActorPiPExpand();
+-        verify(mLayoutManagerMock).showLayout(eq(LayoutType.BROWSING), eq(false));
+-    }
+-
+-    @Test
+     @EnableFeatures(ChromeFeatureList.SETTINGS_IN_TAB)
+     @Config(qualifiers = "sw600dp")
+     public void testPreferencesMenuItem_SettingsInTabEnabled() {

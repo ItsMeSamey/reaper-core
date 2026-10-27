@@ -1,0 +1,563 @@
+diff --git a/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/extensions/ExtensionsMenuCoordinatorTest.java b/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/extensions/ExtensionsMenuCoordinatorTest.java
+--- a/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/extensions/ExtensionsMenuCoordinatorTest.java
++++ b/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/extensions/ExtensionsMenuCoordinatorTest.java
+@@ -7,6 +7,7 @@
+ import static org.junit.Assert.assertFalse;
+ import static org.junit.Assert.assertNotNull;
+ import static org.junit.Assert.assertNull;
++import static org.junit.Assert.assertSame;
+ import static org.junit.Assert.assertTrue;
+ import static org.mockito.ArgumentMatchers.any;
+ import static org.mockito.ArgumentMatchers.anyFloat;
+@@ -17,18 +18,27 @@
+ import static org.mockito.Mockito.clearInvocations;
+ import static org.mockito.Mockito.doAnswer;
+ import static org.mockito.Mockito.eq;
+-import static org.mockito.Mockito.isNull;
+ import static org.mockito.Mockito.mock;
+ import static org.mockito.Mockito.never;
++import static org.mockito.Mockito.same;
+ import static org.mockito.Mockito.times;
+ import static org.mockito.Mockito.verify;
+ import static org.mockito.Mockito.when;
+ 
+ import android.app.Activity;
++import android.graphics.Bitmap;
+ import android.graphics.Color;
++import android.graphics.Rect;
++import android.view.FocusFinder;
+ import android.view.View;
++import android.view.ViewGroup;
++import android.view.accessibility.AccessibilityNodeInfo;
++import android.widget.CompoundButton;
++import android.widget.ImageView;
++import android.widget.TextView;
+ 
+ import androidx.appcompat.app.AppCompatActivity;
++import androidx.recyclerview.widget.RecyclerView;
+ 
+ import org.junit.After;
+ import org.junit.Before;
+@@ -80,6 +90,7 @@
+ import java.lang.ref.WeakReference;
+ import java.util.ArrayList;
+ import java.util.List;
++import java.util.concurrent.TimeUnit;
+ 
+ /** Unit tests for ExtensionsMenuCoordinator. */
+ @RunWith(BaseRobolectricTestRunner.class)
+@@ -349,8 +360,7 @@
+         verify(shownListener, times(1)).onPopupMenuShown();
+ 
+         // Advance the clock by 250ms to pass the 200ms cooldown.
+-        mExtensionsMenuButton.postDelayed(() -> {}, 250);
+-        ShadowLooper.idleMainLooper();
++        ShadowLooper.idleMainLooper(250, TimeUnit.MILLISECONDS);
+ 
+         // A subsequent click should open it again.
+         mExtensionsMenuButton.performClick();
+@@ -398,7 +408,7 @@
+         verify(shownListener).onPopupMenuDismissed();
+         verify(mTabCreator)
+                 .createNewTab(
+-                        mLoadUrlParamsCaptor.capture(), eq(TabLaunchType.FROM_CHROME_UI), isNull());
++                        mLoadUrlParamsCaptor.capture(), eq(TabLaunchType.FROM_CHROME_UI), same(mTab));
+         assertEquals(UrlConstants.CHROME_EXTENSIONS_URL, mLoadUrlParamsCaptor.getValue().getUrl());
+     }
+ 
+@@ -423,7 +433,7 @@
+         verify(shownListener).onPopupMenuDismissed();
+         verify(mTabCreator)
+                 .createNewTab(
+-                        mLoadUrlParamsCaptor.capture(), eq(TabLaunchType.FROM_CHROME_UI), isNull());
++                        mLoadUrlParamsCaptor.capture(), eq(TabLaunchType.FROM_CHROME_UI), same(mTab));
+         assertEquals(UrlConstants.CHROME_WEBSTORE_URL, mLoadUrlParamsCaptor.getValue().getUrl());
+     }
+ 
+@@ -539,6 +549,63 @@
+                 .onSiteSettingsToggleChanged(anyLong(), eq(true));
+     }
+ 
++    @Test
++    public void testSiteSettingsToggle_HiddenRowHasNoActionAndRestoresWhenShown() {
++        mExtensionsMenuButton.performClick();
++        triggerOnMediatorReady();
++        View content = mExtensionsMenuCoordinator.getContentView();
++        View container = content.findViewById(R.id.extensions_menu_site_settings_toggle_container);
++        View toggle = content.findViewById(R.id.extensions_menu_site_settings_toggle);
++        TextView label = content.findViewById(R.id.extensions_menu_site_settings_toggle_text);
++        PropertyModel model = mExtensionsMenuCoordinator.getMainPageModel();
++
++        when(mExtensionsMenuBridgeJniMock.getSiteSettings(anyLong()))
++                .thenReturn(
++                        createSiteSettingsState(
++                                "Unavailable here",
++                                false,
++                                ExtensionsMenuTypes.ControlState.Status.HIDDEN));
++        mExtensionsMenuCoordinator.mMediator.onModelChanged();
++        assertEquals(View.VISIBLE, container.getVisibility());
++        assertEquals("Unavailable here", label.getText().toString());
++        assertEquals(View.GONE, toggle.getVisibility());
++
++        // Rebinding the callback while hidden must not restore the row action.
++        var listener = model.get(ExtensionsMenuProperties.SITE_SETTINGS_TOGGLE_CLICK_LISTENER);
++        model.set(ExtensionsMenuProperties.SITE_SETTINGS_TOGGLE_CLICK_LISTENER, null);
++        model.set(ExtensionsMenuProperties.SITE_SETTINGS_TOGGLE_CLICK_LISTENER, listener);
++        assertFalse(container.performClick());
++        assertFalse(container.performAccessibilityAction(AccessibilityNodeInfo.ACTION_CLICK, null));
++        verify(mExtensionsMenuBridgeJniMock, never())
++                .onSiteSettingsToggleChanged(anyLong(), eq(true));
++        verify(mExtensionsMenuBridgeJniMock, never())
++                .onSiteSettingsToggleChanged(anyLong(), eq(false));
++
++        when(mExtensionsMenuBridgeJniMock.getSiteSettings(anyLong()))
++                .thenReturn(createSiteSettingsState("Allowed here", false));
++        mExtensionsMenuCoordinator.mMediator.onModelChanged();
++        assertEquals(View.VISIBLE, toggle.getVisibility());
++        assertEquals("Allowed here", label.getText().toString());
++        assertTrue(container.performClick());
++        verify(mExtensionsMenuBridgeJniMock, times(1))
++                .onSiteSettingsToggleChanged(anyLong(), eq(true));
++
++        when(mExtensionsMenuBridgeJniMock.getSiteSettings(anyLong()))
++                .thenReturn(
++                        createSiteSettingsState(
++                                "Unavailable again",
++                                false,
++                                ExtensionsMenuTypes.ControlState.Status.HIDDEN));
++        mExtensionsMenuCoordinator.mMediator.onModelChanged();
++        assertEquals("Unavailable again", label.getText().toString());
++        assertFalse(container.performClick());
++        assertFalse(container.performAccessibilityAction(AccessibilityNodeInfo.ACTION_CLICK, null));
++        verify(mExtensionsMenuBridgeJniMock, times(1))
++                .onSiteSettingsToggleChanged(anyLong(), eq(true));
++        verify(mExtensionsMenuBridgeJniMock, never())
++                .onSiteSettingsToggleChanged(anyLong(), eq(false));
++    }
++
+     /** Tests that calling {@code closeExtensionsMenuIfOpen()} successfully dismisses the menu. */
+     @Test
+     public void testCloseExtensionsMenuIfOpen() {
+@@ -567,12 +634,35 @@
+                 mock(ListMenuHost.PopupMenuShownListener.class);
+         mExtensionsMenuButton.addPopupListener(popupListener);
+ 
++        // A dialog must also cancel a menu that is still waiting for native data.
++        mExtensionsMenuButton.performClick();
++        ExtensionsMenuBridge cancelledBridge = mCapturedMenuBridge;
++        assertNotNull(mExtensionsMenuCoordinator.mMediator);
++        assertFalse(mExtensionsMenuCoordinator.isExtensionsMenuOpen());
++        observerCaptor.getValue().onDialogAdded(new PropertyModel());
++        assertNull(mExtensionsMenuCoordinator.mMediator);
++        verify(mExtensionsMenuBridgeJniMock).destroy(EXTENSIONS_MENU_BRIDGE_POINTER);
++        verify(mMenuButtonPinningDelegate).requestLayoutWithViewUtils();
++
++        // A delayed ready callback cannot open the cancelled menu or read its retired model.
++        clearInvocations(mExtensionsMenuBridgeJniMock);
++        cancelledBridge.onReady();
++        verify(mExtensionsMenuBridgeJniMock, never()).getMenuEntries(anyLong());
++        verify(popupListener, never()).onPopupMenuShown();
++        assertFalse(mExtensionsMenuCoordinator.isExtensionsMenuOpen());
++
++        // A later user request still opens normally; the old callback cannot reopen it.
+         mExtensionsMenuButton.performClick();
+         triggerOnMediatorReady();
+         assertTrue(mExtensionsMenuCoordinator.isExtensionsMenuOpen());
+-
++        cancelledBridge.onReady();
++        verify(popupListener, times(1)).onPopupMenuShown();
++
++        // Preserve coverage of a dialog dismissing a menu that is already visible.
+         observerCaptor.getValue().onDialogAdded(new PropertyModel());
+         assertFalse(mExtensionsMenuCoordinator.isExtensionsMenuOpen());
++        assertNull(mExtensionsMenuCoordinator.mMediator);
++        verify(mExtensionsMenuBridgeJniMock).destroy(EXTENSIONS_MENU_BRIDGE_POINTER);
+     }
+ 
+     @Test
+@@ -656,6 +746,385 @@
+         webAppCoordinator.destroy();
+     }
+ 
++    @Test
++    public void testPinMenuIconButton_OneKeyboardStopPreservesLabelStateAndRowClick() {
++        ViewGroup menu = createZeroStateMenuForLayout();
++        layoutMenu(menu, View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
++        ViewGroup footer = menu.findViewById(R.id.extensions_menu_footer);
++        View pinRow = menu.findViewById(R.id.extensions_menu_pin_menu_icon_button);
++        CompoundButton toggle = menu.findViewById(R.id.extensions_menu_button_pinning_toggle);
++        View manage = menu.findViewById(R.id.extensions_menu_manage_extensions_button);
++        FocusFinder focusFinder = FocusFinder.getInstance();
++
++        // Traverse the inflated footer, rather than just checking the XML focusable attribute.
++        assertEquals(toggle, focusFinder.findNextFocus(footer, null, View.FOCUS_FORWARD));
++        assertEquals(manage, focusFinder.findNextFocus(footer, toggle, View.FOCUS_FORWARD));
++        assertEquals(toggle, focusFinder.findNextFocus(footer, manage, View.FOCUS_BACKWARD));
++
++        AccessibilityNodeInfo node = AccessibilityNodeInfo.obtain();
++        mExtensionsMenuCoordinator.setMenuButtonPinned(true);
++        toggle.onInitializeAccessibilityNodeInfo(node);
++        assertEquals(
++                mContext.getString(R.string.extensions_pin_to_toolbar_setting),
++                node.getContentDescription());
++        assertTrue(node.isCheckable());
++        assertTrue(node.isChecked());
++        mExtensionsMenuCoordinator.setMenuButtonPinned(false);
++        toggle.onInitializeAccessibilityNodeInfo(node);
++        assertFalse(node.isChecked());
++        node.recycle();
++
++        // Removing the redundant keyboard stop must retain both existing click targets.
++        assertTrue(pinRow.performClick());
++        assertTrue(toggle.performClick());
++        verify(mMenuButtonPinningDelegate, times(2)).setMenuButtonPinned(true);
++    }
++
++    @Test
++    public void testZeroState_ShortViewportScrollsBodyToStoreAndFooter() {
++        ViewGroup menu = createZeroStateMenuForLayout();
++        layoutMenu(menu, View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
++        View body = menu.findViewById(R.id.extensions_menu_body_scroll);
++        View storeButton = menu.findViewById(R.id.btn_open_store);
++        View header = menu.findViewById(R.id.extensions_menu_header);
++        int shortHeight = header.getHeight() + 3 * storeButton.getHeight();
++        layoutMenu(menu, View.MeasureSpec.makeMeasureSpec(shortHeight, View.MeasureSpec.AT_MOST));
++        assertTrue(menu.getHeight() <= shortHeight);
++        assertTrue(body.canScrollVertically(1));
++        Rect headerBefore = boundsInMenu(menu, header);
++        revealInBody(menu, storeButton);
++        assertTrue(body.getScrollY() > 0);
++        revealInBody(menu, menu.findViewById(R.id.extensions_menu_manage_extensions_button));
++        assertEquals(headerBefore, boundsInMenu(menu, header));
++
++        assertTrue(storeButton.performClick());
++        verify(mTabCreator)
++                .createNewTab(
++                        mLoadUrlParamsCaptor.capture(), eq(TabLaunchType.FROM_CHROME_UI), same(mTab));
++        assertEquals(UrlConstants.CHROME_WEBSTORE_URL, mLoadUrlParamsCaptor.getValue().getUrl());
++    }
++
++    @Test
++    public void testActiveState_ShortRestrictedViewportReachesEntriesAndAllFooterRows() {
++        List<ExtensionsMenuTypes.MenuEntryState> entries = new ArrayList<>();
++        for (int i = 0; i < 8; ++i) {
++            entries.add(wrap(ExtensionTestUtils.createSimpleMenuEntry(
++                    "id_" + i, "Extension " + i,
++                    ExtensionTestUtils.createSimpleIcon(Color.RED), false)));
++        }
++        when(mExtensionsMenuBridgeJniMock.getMenuEntries(anyLong())).thenReturn(entries);
++        when(mExtensionsMenuBridgeJniMock.getSiteSettings(anyLong()))
++                .thenReturn(createSiteSettingsState("Extensions are not allowed on this page",
++                        false, ExtensionsMenuTypes.ControlState.Status.HIDDEN));
++        mExtensionsMenuButton.performClick();
++        mExtensionsMenuCoordinator.mMediator.onModelChanged();
++        mExtensionsMenuCoordinator.getMainPageModel()
++                .set(ExtensionsMenuProperties.DISCOVER_EXTENSIONS_VISIBLE, true);
++        ViewGroup menu = (ViewGroup) mExtensionsMenuCoordinator.getContentView();
++        layoutMenu(menu, View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
++        View header = menu.findViewById(R.id.extensions_menu_header);
++        View primary = menu.findViewById(R.id.extensions_menu_item_primary_action);
++        int shortHeight = header.getHeight() + 2 * primary.getHeight();
++        layoutMenu(menu, View.MeasureSpec.makeMeasureSpec(shortHeight, View.MeasureSpec.AT_MOST));
++        assertTrue(menu.getHeight() <= shortHeight);
++        Rect headerBefore = boundsInMenu(menu, header);
++        View body = menu.findViewById(R.id.extensions_menu_body_scroll);
++        assertTrue(body.canScrollVertically(1));
++        View restricted = menu.findViewById(R.id.extensions_menu_site_settings_toggle_container);
++        assertEquals(View.GONE, menu.findViewById(R.id.extensions_menu_site_settings_toggle)
++                .getVisibility());
++        assertFalse(restricted.performClick());
++        revealInBody(menu, restricted);
++        revealInBody(menu, primary);
++        RecyclerView items = menu.findViewById(R.id.extensions_menu_items);
++        assertEquals(8, items.getAdapter().getItemCount());
++        View lastEntry = items.getLayoutManager().findViewByPosition(7);
++        assertNotNull(lastEntry);
++        assertEquals("Extension 7", ((TextView) lastEntry.findViewById(
++                R.id.extensions_menu_item_title)).getText().toString());
++        revealInBody(menu, lastEntry);
++        for (int id : new int[] {R.id.extensions_menu_button_pinning_toggle,
++                R.id.extensions_menu_discover_extensions_button,
++                R.id.extensions_menu_manage_extensions_button}) {
++            View action = menu.findViewById(id);
++            assertTrue(action.requestFocus());
++            revealInBody(menu, action);
++            assertTrue(action.hasFocus());
++            assertEquals(headerBefore, boundsInMenu(menu, header));
++        }
++        assertTrue(body.getScrollY() > 0);
++        revealInBody(menu, primary);
++        assertEquals(headerBefore, boundsInMenu(menu, header));
++        verify(mExtensionsMenuBridgeJniMock, never()).onSiteSettingsToggleChanged(anyLong(), eq(true));
++        verify(mExtensionsMenuBridgeJniMock, never()).onSiteSettingsToggleChanged(anyLong(), eq(false));
++
++        // Exercise the real PopupWindow detach/reattach path, not just the reusable view.
++        ListMenuHost.PopupMenuShownListener shown =
++                mock(ListMenuHost.PopupMenuShownListener.class);
++        mExtensionsMenuButton.addPopupListener(shown);
++        mExtensionsMenuButton.setMenuMaxHeight(shortHeight);
++        mCapturedMenuBridge.onReady();
++        ShadowLooper.idleMainLooper();
++        assertTrue(mExtensionsMenuCoordinator.isExtensionsMenuOpen());
++        assertTrue(menu.isAttachedToWindow());
++        View manage = menu.findViewById(R.id.extensions_menu_manage_extensions_button);
++        assertTrue(manage.requestFocus());
++        revealInBody(menu, manage);
++        assertTrue(body.getScrollY() > 0);
++        assertTrue(manage.hasFocus());
++        mExtensionsMenuCoordinator.closeExtensionsMenuIfOpen();
++        assertFalse(mExtensionsMenuCoordinator.isExtensionsMenuOpen());
++        assertNull(mExtensionsMenuCoordinator.mMediator);
++        verify(shown).onPopupMenuDismissed();
++        // Existing click-to-dismiss suppression is 200ms; use the same advance as its test.
++        ShadowLooper.idleMainLooper(250, TimeUnit.MILLISECONDS);
++        mExtensionsMenuButton.performClick();
++        assertNotNull(mExtensionsMenuCoordinator.mMediator);
++        mCapturedMenuBridge.onReady();
++        ShadowLooper.idleMainLooper();
++        verify(shown, times(2)).onPopupMenuShown();
++        assertTrue(mExtensionsMenuCoordinator.isExtensionsMenuOpen());
++        assertTrue(menu.isAttachedToWindow());
++        assertEquals(0, body.getScrollY());
++        // A further requested layout must not restore the formerly focused footer position.
++        menu.requestLayout();
++        ShadowLooper.idleMainLooper();
++        assertEquals(0, body.getScrollY());
++        Rect headerAfterReopen = boundsInMenu(menu, header);
++        revealInBody(menu, restricted);
++        assertEquals(0, body.getScrollY());
++        assertEquals(headerAfterReopen, boundsInMenu(menu, header));
++    }
++
++    private static void revealInBody(ViewGroup menu, View descendant) {
++        descendant.requestRectangleOnScreen(
++                new Rect(0, 0, descendant.getWidth(), descendant.getHeight()), true);
++        Rect viewport = boundsInMenu(menu, menu.findViewById(R.id.extensions_menu_body_scroll));
++        Rect menuBounds = new Rect(0, 0, menu.getWidth(), menu.getHeight());
++        assertTrue(menuBounds.contains(viewport));
++        Rect header = boundsInMenu(menu, menu.findViewById(R.id.extensions_menu_header));
++        assertTrue(menuBounds.contains(header));
++        assertTrue(header.bottom <= viewport.top);
++        assertTrue(header.contains(boundsInMenu(menu,
++                menu.findViewById(R.id.extensions_menu_close_button))));
++        assertTrue(viewport.contains(boundsInMenu(menu, descendant)));
++    }
++
++    @Test
++    public void testZeroState_TallViewportKeepsNaturalHeightWithoutScrolling() {
++        ViewGroup menu = createZeroStateMenuForLayout();
++        layoutMenu(menu, View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
++        int naturalHeight = menu.getHeight();
++        View zeroState = menu.findViewById(R.id.extensions_menu_zero_state);
++        int tallHeight = naturalHeight + zeroState.getHeight();
++
++        layoutMenu(menu, View.MeasureSpec.makeMeasureSpec(tallHeight, View.MeasureSpec.AT_MOST));
++        assertEquals(naturalHeight, menu.getHeight());
++        assertTrue(menu.getHeight() < tallHeight);
++        View body = menu.findViewById(R.id.extensions_menu_body_scroll);
++        assertEquals(0, body.getScrollY());
++        assertFalse(body.canScrollVertically(-1));
++        assertFalse(body.canScrollVertically(1));
++        assertTrue(
++                boundsInMenu(menu, zeroState)
++                        .contains(boundsInMenu(menu, menu.findViewById(R.id.btn_open_store))));
++        assertFooterVisible(menu);
++    }
++
++    @Test
++    public void testHostRequestAllowFocusSurvivesSiblingChanges() {
++        assertHostRequestFocusSurvivesSiblingChanges(R.id.allow_button);
++    }
++
++    @Test
++    public void testHostRequestDismissFocusSurvivesSiblingChanges() {
++        assertHostRequestFocusSurvivesSiblingChanges(R.id.dismiss_button);
++    }
++
++    private void assertHostRequestFocusSurvivesSiblingChanges(int buttonId) {
++        ViewGroup menu = createHostRequestMenu();
++        PropertyModel model = mExtensionsMenuCoordinator.getMainPageModel();
++        ExtensionsMenuTypes.HostAccessRequest a =
++                new ExtensionsMenuTypes.HostAccessRequest("a", "Alpha", null);
++        ExtensionsMenuTypes.HostAccessRequest b =
++                new ExtensionsMenuTypes.HostAccessRequest("b", "Beta", null);
++        model.set(ExtensionsMenuProperties.HOST_ACCESS_REQUESTS, List.of(a, b));
++        layoutMenu(menu, View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
++        ViewGroup list = menu.findViewById(R.id.extensions_request_access_list);
++        View rowB = list.getChildAt(1);
++        View buttonB = rowB.findViewById(buttonId);
++        assertTrue(buttonB.requestFocus());
++        assertTrue(rowB.isAttachedToWindow());
++        View.OnAttachStateChangeListener attachment = mock(View.OnAttachStateChangeListener.class);
++        rowB.addOnAttachStateChangeListener(attachment);
++        List<String> allow = new ArrayList<>();
++        List<String> dismiss = new ArrayList<>();
++        model.set(ExtensionsMenuProperties.ALLOW_EXTENSION_CLICK_LISTENER, allow::add);
++        model.set(ExtensionsMenuProperties.DISMISS_EXTENSION_CLICK_LISTENER, dismiss::add);
++
++        // Updating, removing and re-adding A must not recreate or detach B's focused control.
++        model.set(
++                ExtensionsMenuProperties.HOST_ACCESS_REQUESTS,
++                List.of(new ExtensionsMenuTypes.HostAccessRequest("a", "Alpha updated", null), b));
++        assertSame(rowB, list.getChildAt(1));
++        assertSame(buttonB, list.getChildAt(1).findViewById(buttonId));
++        assertSame(buttonB, menu.findFocus());
++        model.set(ExtensionsMenuProperties.HOST_ACCESS_REQUESTS, List.of(b));
++        assertSame(rowB, list.getChildAt(0));
++        assertSame(buttonB, menu.findFocus());
++        model.set(ExtensionsMenuProperties.HOST_ACCESS_REQUESTS, List.of(a, b));
++        assertSame(rowB, list.getChildAt(1));
++        assertSame(buttonB, menu.findFocus());
++        verify(attachment, never()).onViewDetachedFromWindow(any());
++        assertTrue(allow.isEmpty());
++        assertTrue(dismiss.isEmpty());
++    }
++
++    @Test
++    public void testHostRequestRebindsContentAndCurrentListeners() {
++        ViewGroup menu = createHostRequestMenu();
++        PropertyModel model = mExtensionsMenuCoordinator.getMainPageModel();
++        Bitmap icon = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888);
++        model.set(
++                ExtensionsMenuProperties.HOST_ACCESS_REQUESTS,
++                List.of(new ExtensionsMenuTypes.HostAccessRequest("b", "Beta", icon)));
++        ViewGroup list = menu.findViewById(R.id.extensions_request_access_list);
++        View row = list.getChildAt(0);
++        View allowButton = row.findViewById(R.id.allow_button);
++        View dismissButton = row.findViewById(R.id.dismiss_button);
++        ImageView image = row.findViewById(R.id.extension_icon);
++        assertNotNull(image.getDrawable());
++        List<String> oldListener = new ArrayList<>();
++        model.set(ExtensionsMenuProperties.ALLOW_EXTENSION_CLICK_LISTENER, oldListener::add);
++        model.set(ExtensionsMenuProperties.DISMISS_EXTENSION_CLICK_LISTENER, oldListener::add);
++        model.set(
++                ExtensionsMenuProperties.HOST_ACCESS_REQUESTS,
++                List.of(new ExtensionsMenuTypes.HostAccessRequest("b", "Beta updated", null)));
++        assertSame(row, list.getChildAt(0));
++        assertNull(image.getDrawable());
++        assertEquals("Beta updated", ((TextView) row.findViewById(R.id.extension_name)).getText());
++        assertEquals(
++                mContext.getString(
++                        R.string.extensions_menu_requests_access_section_allow_button_accessible_name,
++                        "Beta updated"),
++                allowButton.getContentDescription());
++        assertEquals(
++                mContext.getString(
++                        R.string.extensions_menu_requests_access_section_dismiss_button_accessible_name,
++                        "Beta updated"),
++                dismissButton.getContentDescription());
++
++        // Listener changes after the last list binding must also be observed at click time.
++        List<String> allow = new ArrayList<>();
++        List<String> dismiss = new ArrayList<>();
++        model.set(ExtensionsMenuProperties.ALLOW_EXTENSION_CLICK_LISTENER, allow::add);
++        model.set(ExtensionsMenuProperties.DISMISS_EXTENSION_CLICK_LISTENER, dismiss::add);
++        assertTrue(allowButton.performClick());
++        assertTrue(dismissButton.performClick());
++        assertEquals(List.of("b"), allow);
++        assertEquals(List.of("b"), dismiss);
++        assertTrue(oldListener.isEmpty());
++    }
++
++    @Test
++    public void testRemovedHostRequestCannotActivateOrStealNewerFocus() {
++        ViewGroup menu = createHostRequestMenu();
++        PropertyModel model = mExtensionsMenuCoordinator.getMainPageModel();
++        ExtensionsMenuTypes.HostAccessRequest a =
++                new ExtensionsMenuTypes.HostAccessRequest("a", "Alpha", null);
++        ExtensionsMenuTypes.HostAccessRequest b =
++                new ExtensionsMenuTypes.HostAccessRequest("b", "Beta", null);
++        model.set(ExtensionsMenuProperties.HOST_ACCESS_REQUESTS, List.of(a, b));
++        layoutMenu(menu, View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
++        ViewGroup list = menu.findViewById(R.id.extensions_request_access_list);
++        View rowA = list.getChildAt(0);
++        View rowB = list.getChildAt(1);
++        View allowB = rowB.findViewById(R.id.allow_button);
++        View dismissB = rowB.findViewById(R.id.dismiss_button);
++        assertTrue(allowB.requestFocus());
++        List<String> listener = new ArrayList<>();
++        model.set(ExtensionsMenuProperties.ALLOW_EXTENSION_CLICK_LISTENER, listener::add);
++        model.set(ExtensionsMenuProperties.DISMISS_EXTENSION_CLICK_LISTENER, listener::add);
++        model.set(ExtensionsMenuProperties.HOST_ACCESS_REQUESTS, List.of(a));
++        assertNull(rowB.getParent());
++        assertSame(rowA, list.getChildAt(0));
++        assertFalse(allowB.performClick());
++        assertFalse(dismissB.performClick());
++        assertTrue(listener.isEmpty());
++
++        View newerFocus = menu.findViewById(R.id.extensions_menu_manage_extensions_button);
++        assertTrue(newerFocus.requestFocus());
++        model.set(ExtensionsMenuProperties.HOST_ACCESS_REQUESTS, List.of(a, b));
++        ShadowLooper.idleMainLooper();
++        assertSame(newerFocus, menu.findFocus());
++        assertFalse(rowB == list.getChildAt(1));
++        assertTrue(list.getChildAt(1).findViewById(R.id.dismiss_button).performClick());
++        assertEquals(List.of("b"), listener);
++        model.set(ExtensionsMenuProperties.HOST_ACCESS_REQUESTS, null);
++        assertEquals(0, list.getChildCount());
++        assertSame(newerFocus, menu.findFocus());
++    }
++
++    private ViewGroup createHostRequestMenu() {
++        ViewGroup menu = (ViewGroup) mExtensionsMenuCoordinator.getContentView();
++        assertNull(menu.getParent());
++        mContext.setContentView(menu);
++        PropertyModel model = mExtensionsMenuCoordinator.getMainPageModel();
++        model.set(ExtensionsMenuProperties.IS_ZERO_STATE, false);
++        model.set(
++                ExtensionsMenuProperties.OPTIONAL_SECTION_TYPE,
++                ExtensionsMenuTypes.OptionalSectionType.HOST_ACCESS_REQUESTS);
++        return menu;
++    }
++
++    private ViewGroup createZeroStateMenuForLayout() {
++        when(mExtensionsMenuBridgeJniMock.getMenuEntries(anyLong())).thenReturn(new ArrayList<>());
++        mExtensionsMenuButton.performClick();
++        assertNotNull(mExtensionsMenuCoordinator.mMediator);
++        // Populate the real mediator/binder without opening a PopupWindow: the test supplies the
++        // available popup height directly, independent of Robolectric's default screen size.
++        mExtensionsMenuCoordinator.mMediator.onModelChanged();
++        ViewGroup menu = (ViewGroup) mExtensionsMenuCoordinator.getContentView();
++        assertNull(menu.getParent());
++        assertEquals(
++                View.VISIBLE, menu.findViewById(R.id.extensions_menu_zero_state).getVisibility());
++        assertEquals(
++                View.GONE, menu.findViewById(R.id.extensions_menu_active_state).getVisibility());
++        return menu;
++    }
++
++    private void layoutMenu(View menu, int heightMeasureSpec) {
++        int width = mContext.getResources().getDimensionPixelSize(R.dimen.extension_menu_max_width);
++        menu.measure(
++                View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY), heightMeasureSpec);
++        menu.layout(0, 0, menu.getMeasuredWidth(), menu.getMeasuredHeight());
++    }
++
++    private static Rect boundsInMenu(ViewGroup menu, View descendant) {
++        assertTrue(descendant.getWidth() > 0);
++        assertTrue(descendant.getHeight() > 0);
++        Rect bounds = new Rect();
++        descendant.getDrawingRect(bounds);
++        menu.offsetDescendantRectToMyCoords(descendant, bounds);
++        return bounds;
++    }
++
++    private static Rect assertFooterVisible(ViewGroup menu) {
++        Rect menuBounds = new Rect(0, 0, menu.getWidth(), menu.getHeight());
++        Rect footer = boundsInMenu(menu, menu.findViewById(R.id.extensions_menu_footer));
++        assertTrue(menuBounds.contains(footer));
++        for (int id :
++                new int[] {
++                    R.id.extensions_menu_pin_menu_icon_button,
++                    R.id.extensions_menu_manage_extensions_button
++                }) {
++            View row = menu.findViewById(id);
++            assertEquals(View.VISIBLE, row.getVisibility());
++            assertTrue(footer.contains(boundsInMenu(menu, row)));
++        }
++        return footer;
++    }
++
+     private ExtensionsMenuTypes.SiteSettingsState createSiteSettingsState(
+             String label, boolean isOn) {
+         return createSiteSettingsState(

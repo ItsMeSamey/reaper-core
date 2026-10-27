@@ -1,0 +1,99 @@
+diff --git a/extensions/browser/service_worker/service_worker_keepalive.cc b/extensions/browser/service_worker/service_worker_keepalive.cc
+--- a/extensions/browser/service_worker/service_worker_keepalive.cc
++++ b/extensions/browser/service_worker/service_worker_keepalive.cc
+@@ -3,6 +3,12 @@
+ // found in the LICENSE file.
+ 
+ #include "extensions/browser/service_worker/service_worker_keepalive.h"
++
++#include "build/build_config.h"
++
++#if BUILDFLAG(IS_ANDROID)
++#include <utility>
++#endif
+ 
+ #include "base/check.h"
+ #include "base/memory/raw_ptr.h"
+@@ -68,6 +74,12 @@
+       activity_type_(activity_type),
+       activity_extra_data_(std::move(activity_extra_data)) {
+   CHECK(browser_context_);
++#if BUILDFLAG(IS_ANDROID)
++  if (browser_context_->ShutdownStarted()) {
++    browser_context_ = nullptr;
++    return;
++  }
++#endif
+ 
+   ProcessManager* process_manager = ProcessManager::Get(browser_context_);
+   CHECK(process_manager);
+@@ -80,6 +92,14 @@
+   // be fixed).
+   // CHECK(process_manager->HasServiceWorker(worker_id_));
+ 
++#if BUILDFLAG(IS_ANDROID)
++  // Dispatch admits requests only for a PM-tracked worker. Capture its token
++  // before registration; an explicitly supplied token is never replaced.
++  if (auto running_worker =
++          process_manager->GetServiceWorkerRunningInstance(worker_id_)) {
++    worker_id_ = std::move(*running_worker);
++  }
++#endif
+   request_uuid_ = process_manager->IncrementServiceWorkerKeepaliveCount(
+       worker_id_, timeout_type, activity_type_, activity_extra_data_);
+ 
+@@ -91,21 +111,54 @@
+                                           base::Unretained(this)));
+ }
+ 
++#if BUILDFLAG(IS_ANDROID)
++ServiceWorkerKeepalive::ServiceWorkerKeepalive(ServiceWorkerKeepalive&& other)
++    : browser_context_(std::exchange(other.browser_context_, nullptr)),
++      worker_id_(std::move(other.worker_id_)),
++      activity_type_(other.activity_type_),
++      activity_extra_data_(std::move(other.activity_extra_data_)),
++      request_uuid_(std::move(other.request_uuid_)) {
++  // A moved subscription still calls the original object's address. Cancel it
++  // and bind the destination; the moved-from owner cannot release this UUID.
++  other.shutdown_subscription_ = base::CallbackListSubscription();
++  if (browser_context_ && browser_context_->ShutdownStarted()) {
++    browser_context_ = nullptr;
++  }
++  if (browser_context_) {
++    shutdown_subscription_ =
++        ServiceWorkerKeepaliveShutdownNotifierFactory::GetInstance()
++            ->Get(browser_context_)
++            ->Subscribe(base::BindRepeating(&ServiceWorkerKeepalive::Shutdown,
++                                            base::Unretained(this)));
++  }
++}
++#else
+ ServiceWorkerKeepalive::ServiceWorkerKeepalive(ServiceWorkerKeepalive&&) =
+     default;
++#endif
+ 
+ ServiceWorkerKeepalive::~ServiceWorkerKeepalive() {
+   if (!browser_context_) {
+     // Shutdown has started. Bail.
+     return;
+   }
++#if BUILDFLAG(IS_ANDROID)
++  if (browser_context_->ShutdownStarted()) {
++    return;
++  }
++#endif
+ 
+   ProcessManager* process_manager = ProcessManager::Get(browser_context_);
+   // `process_manager` should always be non-null because of the shutdown check
+   // above.
+   CHECK(process_manager);
+ 
++#if BUILDFLAG(IS_ANDROID)
++  if (!worker_id_.start_token ||
++      !process_manager->GetServiceWorkerRunningInstance(worker_id_)) {
++#else
+   if (!process_manager->HasServiceWorker(worker_id_)) {
++#endif
+     // The service worker may have legitimately already stopped (despite this
+     // keepalive). Keepalives have different styles (whether they extend past
+     // the timeout limit), and the worker may have timed out on another request.

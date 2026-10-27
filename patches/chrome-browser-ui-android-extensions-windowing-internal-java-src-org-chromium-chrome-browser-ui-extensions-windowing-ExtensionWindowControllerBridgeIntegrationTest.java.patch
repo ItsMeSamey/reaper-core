@@ -1,0 +1,150 @@
+diff --git a/chrome/browser/ui/android/extensions/windowing/internal/java/src/org/chromium/chrome/browser/ui/extensions/windowing/ExtensionWindowControllerBridgeIntegrationTest.java b/chrome/browser/ui/android/extensions/windowing/internal/java/src/org/chromium/chrome/browser/ui/extensions/windowing/ExtensionWindowControllerBridgeIntegrationTest.java
+index 4cd4e950dfa13d0d4cc086315f2088ab6f4774e3..292ab67d0e2ccbd9c6ddeb2c1bafdde55a8ca1bb 100644
+--- a/chrome/browser/ui/android/extensions/windowing/internal/java/src/org/chromium/chrome/browser/ui/extensions/windowing/ExtensionWindowControllerBridgeIntegrationTest.java
++++ b/chrome/browser/ui/android/extensions/windowing/internal/java/src/org/chromium/chrome/browser/ui/extensions/windowing/ExtensionWindowControllerBridgeIntegrationTest.java
+@@ -6,6 +6,7 @@
+ import static org.junit.Assert.assertEquals;
+ import static org.junit.Assert.assertNotEquals;
+ import static org.junit.Assert.assertNotNull;
++import static org.junit.Assert.assertTrue;
+ 
+ import android.content.Intent;
+ import android.os.Build;
+@@ -36,6 +37,10 @@
+ import org.chromium.chrome.browser.flags.ChromeFeatureList;
+ import org.chromium.chrome.browser.flags.ChromeSwitches;
+ import org.chromium.chrome.browser.profiles.Profile;
++import org.chromium.chrome.browser.app.ChromeActivity;
++import org.chromium.chrome.browser.tab.Tab;
++import org.chromium.chrome.browser.tab.TabLaunchType;
++import org.chromium.content_public.browser.LoadUrlParams;
+ import org.chromium.chrome.browser.tabmodel.IncognitoTabHostUtils;
+ import org.chromium.chrome.browser.ui.browser_window.ChromeAndroidTask;
+ import org.chromium.chrome.browser.ui.browser_window.ChromeAndroidTaskFeatureKey;
+@@ -696,6 +701,109 @@
+                 (int) extensionInternalEvents.get(extensionInternalEvents.size() - 1));
+     }
+ 
++    @Test
++    @MediumTest
++    @Features.DisableFeatures(ChromeFeatureList.ANDROID_OPEN_INCOGNITO_AS_WINDOW)
++    public void regularStartCreatesDistinctModelScopedIncognitoController() {
++        mFreshCtaTransitTestRule.startOnBlankPage();
++        var activity = mFreshCtaTransitTestRule.getActivity();
++        var regularProfile = mFreshCtaTransitTestRule.getActivityTab().getProfile();
++        var regular = getExtensionWindowControllerBridge(activity.getTaskId(), regularProfile);
++        assertNotNull(regular);
++        // The actual user action creates the incognito model and its native window.
++        Tab incognitoTab = ThreadUtils.runOnUiThreadBlocking(() ->
++                activity.getTabCreator(true).createNewTab(new LoadUrlParams("about:blank"),
++                        TabLaunchType.FROM_CHROME_UI, null));
++        assertNotNull(incognitoTab);
++        var incognito = getExtensionWindowControllerBridge(
++                activity.getTaskId(), incognitoTab.getProfile());
++        assertNotNull(incognito);
++        ThreadUtils.runOnUiThreadBlocking(() -> {
++            var task = getChromeAndroidTask(activity.getTaskId());
++            assertNotNull(task);
++            var regularSession = task.getSessionIdForTesting(regularProfile);
++            assertNotNull(regularSession);
++            assertEquals(regularSession.intValue(), regular.getExtensionWindowIdForTesting());
++            var incognitoSession = task.getSessionIdForTesting(incognitoTab.getProfile());
++            assertNotNull(incognitoSession);
++            assertEquals(incognitoSession.intValue(), incognito.getExtensionWindowIdForTesting());
++            assertNotEquals(regular.getExtensionWindowIdForTesting(),
++                    incognito.getExtensionWindowIdForTesting());
++        });
++    }
++
++    @Test
++    @MediumTest
++    @Features.DisableFeatures(ChromeFeatureList.ANDROID_OPEN_INCOGNITO_AS_WINDOW)
++    public void incognitoStartRegistersAlreadyOwnedRegularWindowBeforeSwitch() {
++        mFreshCtaTransitTestRule.startOnIncognitoBlankPage();
++        var activity = mFreshCtaTransitTestRule.getActivity();
++        var incognitoProfile = mFreshCtaTransitTestRule.getActivityTab().getProfile();
++        var regularProfile = ThreadUtils.runOnUiThreadBlocking(() ->
++                activity.getTabModelSelector().getModel(false).getProfile());
++        assertNotNull(regularProfile);
++        var regular = getExtensionWindowControllerBridge(activity.getTaskId(), regularProfile);
++        var incognito = getExtensionWindowControllerBridge(activity.getTaskId(), incognitoProfile);
++        assertNotNull(regular);
++        assertNotNull(incognito);
++        ThreadUtils.runOnUiThreadBlocking(() -> {
++            var task = getChromeAndroidTask(activity.getTaskId());
++            assertNotNull(task);
++            var regularSession = task.getSessionIdForTesting(regularProfile);
++            assertNotNull(regularSession);
++            assertEquals(regularSession.intValue(), regular.getExtensionWindowIdForTesting());
++            var incognitoSession = task.getSessionIdForTesting(incognitoProfile);
++            assertNotNull(incognitoSession);
++            assertEquals(incognitoSession.intValue(), incognito.getExtensionWindowIdForTesting());
++            assertNotEquals(regular.getExtensionWindowIdForTesting(),
++                    incognito.getExtensionWindowIdForTesting());
++            activity.getTabCreator(false).createNewTab(new LoadUrlParams("about:blank"),
++                    TabLaunchType.FROM_CHROME_UI, null);
++            assertEquals(regular, getExtensionWindowControllerBridge(
++                    activity.getTaskId(), regularProfile));
++        });
++    }
++
++    @Test
++    @MediumTest
++    @Features.DisableFeatures(ChromeFeatureList.ANDROID_OPEN_INCOGNITO_AS_WINDOW)
++    public void lastIncognitoTabRemovalDestroysOnlyItsControllerAndRecreationGetsFreshId() {
++        mFreshCtaTransitTestRule.startOnBlankPage();
++        var activity = mFreshCtaTransitTestRule.getActivity();
++        var regularProfile = mFreshCtaTransitTestRule.getActivityTab().getProfile();
++        var regular = getExtensionWindowControllerBridge(activity.getTaskId(), regularProfile);
++        assertNotNull(regular);
++        Tab first = ThreadUtils.runOnUiThreadBlocking(() ->
++                activity.getTabCreator(true).createNewTab(new LoadUrlParams("about:blank"),
++                        TabLaunchType.FROM_CHROME_UI, null));
++        assertNotNull(first);
++        var incognito = getExtensionWindowControllerBridge(activity.getTaskId(), first.getProfile());
++        assertNotNull(incognito);
++        int firstId = ThreadUtils.runOnUiThreadBlocking(incognito::getExtensionWindowIdForTesting);
++        ThreadUtils.runOnUiThreadBlocking(IncognitoTabHostUtils::closeAllIncognitoTabs);
++        CriteriaHelper.pollUiThread(() -> incognito.getNativePtrForTesting() == 0);
++        assertEquals(regular, getExtensionWindowControllerBridge(activity.getTaskId(), regularProfile));
++        Tab next = ThreadUtils.runOnUiThreadBlocking(() ->
++                activity.getTabCreator(true).createNewTab(new LoadUrlParams("about:blank"),
++                        TabLaunchType.FROM_CHROME_UI, null));
++        assertNotNull(next);
++        var nextController = getExtensionWindowControllerBridge(activity.getTaskId(), next.getProfile());
++        assertNotNull(nextController);
++        ThreadUtils.runOnUiThreadBlocking(() -> {
++            assertNotEquals(firstId, nextController.getExtensionWindowIdForTesting());
++            assertTrue(regular.getNativePtrForTesting() != 0);
++        });
++        mFreshCtaTransitTestRule.finishActivity();
++        ThreadUtils.runOnUiThreadBlocking(() -> {
++            assertEquals(0, regular.getNativePtrForTesting());
++            assertEquals(0, nextController.getNativePtrForTesting());
++            // Late focus/bounds callbacks must remain harmless after native disposal.
++            nextController.onTaskFocusChanged(true);
++            nextController.onTaskBoundsChanged(0, new android.graphics.Rect(), new android.graphics.Rect());
++            assertEquals(0, nextController.getNativePtrForTesting());
++        });
++    }
++
+     private Intent createCustomTabIntent(@CustomTabsUiType int customTabsUiType) {
+         var intent =
+                 CustomTabsIntentTestUtils.createMinimalCustomTabIntent(
+@@ -730,7 +838,15 @@
+                                     new ChromeAndroidTaskFeatureKey(
+                                             ExtensionWindowControllerBridge.class,
+                                             profile,
+-                                            activityWindowAndroid));
++                                            activityWindowAndroid,
++                                            activityWindowAndroid != null
++                                                            && activityWindowAndroid.getActivity().get()
++                                                                    instanceof ChromeActivity activity
++                                                            && activity.getActivityType() == ActivityType.TABBED
++                                                            && profile != null
++                                                    ? activity.getTabModelSelector().getModel(
++                                                            profile.isOffTheRecord())
++                                                    : null));
+                 });
+     }
+ }

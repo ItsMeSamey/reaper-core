@@ -1,0 +1,70 @@
+# Reaper Android containers lifecycle; complete raw-pin ancestry.
+substitutions:
+- description: 'Reaper Android containers: immutable tab identity, trusted CCT admission, persistent partition/SQL/reference lifecycle.'
+  regex:
+    re_pattern: '\#include\ <string_view>\
+
+      \#include\ <utility>\
+
+      \
+
+      \#include\ "base/memory/ptr_util\.h"\
+
+      \#include\ "base/token\.h"\
+
+      \#include\ "chrome/browser/tab/payload\.h"\
+
+      '
+    replace: '#include <string_view>
+
+      #include <utility>
+
+
+      #include "base/functional/bind.h"
+
+      #include "base/task/bind_post_task.h"
+
+      #include "base/memory/ptr_util.h"
+
+      #include "base/token.h"
+
+      #include "chrome/browser/tab/payload.h"
+
+      '
+- description: 'Reaper Android containers: immutable tab identity, trusted CCT admission, persistent partition/SQL/reference lifecycle.'
+  regex:
+    re_pattern: '\ \ \}\
+
+      \}\
+
+      \
+
+      void\ TabStateStorageService::CountTabsForWindow\(\
+
+      \ \ \ \ std::string_view\ window_tag,\
+
+      \ \ \ \ bool\ is_off_the_record,\
+
+      '
+    replace: "  }\n}\n\n#if BUILDFLAG(IS_ANDROID)\nvoid TabStateStorageService::GetPersistedContainerIds(\n    TabStateStorageBackend::OnContainerIds callback) {\n  if (open_batches_) {\n    // Do not destroy an active ScopedBatch or read a partial pending update.\n    open_batches_->builder.AddCallback(base::BindPostTaskToCurrentDefault(\n        base::BindOnce(&TabStateStorageService::GetPersistedContainerIds,\n                       weak_ptr_factory_.GetWeakPtr(), std::move(callback))));\n    return;\n  }\n  tab_backend_.GetPersistedContainerIds(std::move(callback));\n}\n#endif\n\nvoid TabStateStorageService::CountTabsForWindow(\n    std::string_view window_tag,\n    bool is_off_the_record,\n"
+- description: 'Reaper Android container inventory: settle an abandoned deferred reply on its originating sequence.'
+  regex:
+    re_pattern: '\ \ \ \ //\ Do\ not\ destroy\ an\ active\ ScopedBatch\ or\ read\ a\ partial\ pending\ update\.\
+
+      \ \ \ \ open_batches_\->builder\.AddCallback\(base::BindPostTaskToCurrentDefault\(\
+
+      \ \ \ \ \ \ \ \ base::BindOnce\(\&TabStateStorageService::GetPersistedContainerIds,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ weak_ptr_factory_\.GetWeakPtr\(\),\ std::move\(callback\)\)\)\);\
+
+      '
+    replace: "    // Do not destroy an active ScopedBatch or read a partial pending update.\n    // Batch callbacks run only\
+      \ after a successful commit. If this request is\n    // abandoned, release the caller's scan barrier without publishing\
+      \ inventory.\n    auto [on_committed, on_abandoned] =\n        base::SplitOnceCallback(std::move(callback));\n    base::ScopedClosureRunner\
+      \ unavailable(base::BindPostTaskToCurrentDefault(\n        base::BindOnce(\n            [](TabStateStorageBackend::OnContainerIds\
+      \ reply) {\n              std::move(reply).Run(std::nullopt);\n            },\n            std::move(on_abandoned))));\n\
+      \    open_batches_->builder.AddCallback(base::BindPostTaskToCurrentDefault(\n        base::BindOnce(\n            [](base::WeakPtr<TabStateStorageService>\
+      \ service,\n               TabStateStorageBackend::OnContainerIds reply,\n               base::ScopedClosureRunner unavailable)\
+      \ {\n              if (!service) {\n                return;\n              }\n              unavailable.ReplaceClosure(base::OnceClosure());\n\
+      \              service->GetPersistedContainerIds(std::move(reply));\n            },\n            weak_ptr_factory_.GetWeakPtr(),\
+      \ std::move(on_committed),\n            std::move(unavailable))));\n"

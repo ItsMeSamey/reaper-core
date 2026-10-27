@@ -9,7 +9,11 @@
 #include "brave/browser/permissions/permission_lifetime_manager_factory.h"
 #include "brave/components/brave_wallet/common/buildflags/buildflags.h"
 #include "brave/components/permissions/contexts/brave_google_sign_in_permission_context.h"
+#include "build/build_config.h"
+
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/permissions/contexts/brave_open_ai_chat_permission_context.h"
+#endif
 #include "brave/components/permissions/permission_lifetime_manager.h"
 #include "components/permissions/features.h"
 #include "components/permissions/permission_manager.h"
@@ -49,8 +53,10 @@ PermissionManagerFactory::BuildServiceInstanceForBrowserContext(
   permission_contexts[ContentSettingsType::BRAVE_GOOGLE_SIGN_IN] =
       std::make_unique<permissions::BraveGoogleSignInPermissionContext>(
           profile);
+#if !BUILDFLAG(IS_ANDROID)
   permission_contexts[ContentSettingsType::BRAVE_OPEN_AI_CHAT] =
       std::make_unique<permissions::BraveOpenAIChatPermissionContext>(profile);
+#endif
 
   if (base::FeatureList::IsEnabled(
           permissions::features::kPermissionLifetime)) {

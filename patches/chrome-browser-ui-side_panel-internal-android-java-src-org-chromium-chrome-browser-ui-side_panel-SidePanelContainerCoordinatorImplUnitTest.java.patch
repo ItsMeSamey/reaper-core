@@ -1,0 +1,275 @@
+diff --git a/chrome/browser/ui/side_panel/internal/android/java/src/org/chromium/chrome/browser/ui/side_panel/SidePanelContainerCoordinatorImplUnitTest.java b/chrome/browser/ui/side_panel/internal/android/java/src/org/chromium/chrome/browser/ui/side_panel/SidePanelContainerCoordinatorImplUnitTest.java
+index 4679c38c80851f3df70674d6e15783717eddb0a0..31347d147ca0d65819dede6a00ac7d2af0abf186 100644
+--- a/chrome/browser/ui/side_panel/internal/android/java/src/org/chromium/chrome/browser/ui/side_panel/SidePanelContainerCoordinatorImplUnitTest.java
++++ b/chrome/browser/ui/side_panel/internal/android/java/src/org/chromium/chrome/browser/ui/side_panel/SidePanelContainerCoordinatorImplUnitTest.java
+@@ -5,6 +5,15 @@
+ package org.chromium.chrome.browser.ui.side_panel;
+ 
+ import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertNotNull;
++import static org.junit.Assert.assertNull;
++import static org.mockito.ArgumentMatchers.any;
++import static org.mockito.ArgumentMatchers.anyLong;
++import static org.mockito.Mockito.doAnswer;
++import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.times;
++import static org.mockito.Mockito.verify;
++import static org.mockito.Mockito.when;
+ 
+ import static org.chromium.chrome.browser.ui.side_panel.SidePanelContainerCoordinator.MIN_SIDE_PANEL_CONTENT_WIDTH_DP;
+ import static org.chromium.chrome.browser.ui.side_panel.SidePanelContainerCoordinator.MIN_WINDOW_WIDTH_DP_FOR_WIDE_SIDE_PANEL;
+@@ -12,13 +21,40 @@
+ import static org.chromium.chrome.browser.ui.side_panel.SidePanelContainerCoordinator.WIDE_SIDE_PANEL_WIDTH_DP;
+ import static org.chromium.chrome.browser.ui.side_ui.SideUiCoordinator.MIN_WEB_CONTENTS_WIDTH_DP;
+ 
++import android.app.Activity;
+ import android.content.res.Resources;
++import android.view.View;
++import android.widget.FrameLayout;
+ 
+ import org.junit.Test;
+ import org.junit.runner.RunWith;
+-
++import org.robolectric.Robolectric;
++import org.robolectric.annotation.Config;
++import org.robolectric.android.controller.ActivityController;
++
++import org.chromium.base.supplier.ObservableSuppliers;
++import org.chromium.base.supplier.SettableMonotonicObservableSupplier;
+ import org.chromium.base.test.BaseRobolectricTestRunner;
++import org.chromium.chrome.browser.browser_controls.TopControlsStacker;
++import org.chromium.chrome.browser.tabmodel.IncognitoTabModel;
++import org.chromium.chrome.browser.tabmodel.SupportedProfileType;
++import org.chromium.chrome.browser.tabmodel.TabModel;
++import org.chromium.chrome.browser.tabmodel.TabModelSelector;
++import org.chromium.chrome.browser.ui.browser_window.BrowserWindowType;
++import org.chromium.chrome.browser.ui.browser_window.ChromeAndroidTask;
++import org.chromium.chrome.browser.ui.browser_window.ChromeAndroidTaskFeatureKey;
++import org.chromium.chrome.browser.ui.browser_window.ChromeAndroidTaskTrackerFactory;
++import org.chromium.chrome.browser.ui.browser_window.ChromeAndroidTaskUnitTestSupport;
++import org.chromium.chrome.browser.ui.extensions.side_panel.ExtensionSidePanelManagerBridge;
++import org.chromium.chrome.browser.ui.side_ui.SideUiCoordinator;
+ import org.chromium.chrome.browser.ui.side_ui.SideUiCoordinator.HeightType;
++import org.chromium.components.browser_ui.desktop_windowing.DesktopWindowStateManager;
++import org.chromium.components.thinwebview.ThinWebView;
++import org.chromium.components.thinwebview.ThinWebViewAttachParams;
++import org.chromium.content_public.browser.WebContents;
++
++import java.lang.ref.WeakReference;
++import java.util.List;
+ 
+ /** Unit tests for {@link SidePanelContainerCoordinatorImpl}. */
+ @RunWith(BaseRobolectricTestRunner.class)
+@@ -98,4 +134,212 @@
+                 SidePanelContainerCoordinatorImpl.getContainerBackgroundResId(
+                         HeightType.NOT_APPLICABLE));
+     }
++
++    private static final int TASK_ID = 204067;
++    private static final long NATIVE_COORDINATOR = 204;
++
++    public static class TestActivity extends Activity {
++        @Override
++        public int getTaskId() {
++            return TASK_ID;
++        }
++    }
++
++    /** A real View which queues only the native successful-presentation boundary. */
++    private static class DeferredFrameView extends FrameLayout implements ThinWebView {
++        private Runnable mNextFrame;
++
++        DeferredFrameView(Activity activity) {
++            super(activity);
++        }
++
++        @Override
++        public View getView() {
++            return this;
++        }
++
++        @Override
++        public void attachWebContents(
++                WebContents webContents, View contentView, ThinWebViewAttachParams attachParams) {}
++
++        @Override
++        public void runOnNextFrame(Runnable runnable) {
++            mNextFrame = runnable;
++        }
++
++        Runnable nextFrame() {
++            assertNotNull(mNextFrame);
++            return mNextFrame;
++        }
++
++        @Override
++        public void resizeWebContents(int width, int height) {}
++
++        @Override
++        public void destroy() {}
++    }
++
++    private static class ReplacementFixture implements AutoCloseable {
++        final ActivityController<TestActivity> activityController;
++        final ChromeAndroidTaskUnitTestSupport.ChromeAndroidTaskWithMockDeps task;
++        final ChromeAndroidTask chromeTask;
++        final TabModelSelector tabModelSelector = mock(TabModelSelector.class);
++        final TabModel tabModel = mock(TabModel.class);
++        final WeakReference<Activity> originalActivity;
++        final SideUiCoordinator sideUi = mock(SideUiCoordinator.class);
++        final SidePanelCoordinatorAndroidBridge.Natives nativeCoordinator =
++                mock(SidePanelCoordinatorAndroidBridge.Natives.class);
++        final SidePanelContainerCoordinatorImpl coordinator;
++
++        ReplacementFixture() {
++            activityController = Robolectric.buildActivity(TestActivity.class);
++            activityController.get().setTheme(R.style.Theme_BrowserUI_DayNight);
++            activityController.setup();
++            task = ChromeAndroidTaskUnitTestSupport.createChromeAndroidTaskWithMockDeps(
++                    TASK_ID, /* isPendingTask= */ false, /* isDesktopMode= */ false);
++            var window = task.mActivityWindowAndroidMocks.mMockActivityWindowAndroid;
++            var tracker = ChromeAndroidTaskTrackerFactory.getInstance();
++            tracker.remove(TASK_ID);
++            when(tabModel.getProfile()).thenReturn(task.mMockProfile);
++            SettableMonotonicObservableSupplier<TabModel> tabModelSupplier =
++                    ObservableSuppliers.createMonotonic();
++            tabModelSupplier.set(tabModel);
++            when(tabModelSelector.getModel(false)).thenReturn(tabModel);
++            when(tabModelSelector.getCurrentTabModelSupplier()).thenReturn(tabModelSupplier);
++            when(tabModelSelector.getCurrentModel()).thenReturn(tabModel);
++            var incognitoTabModel = mock(IncognitoTabModel.class);
++            when(tabModelSelector.getModel(true)).thenReturn(incognitoTabModel);
++            when(tabModelSelector.getModels()).thenReturn(List.of(tabModel, incognitoTabModel));
++            when(incognitoTabModel.getProfile()).thenReturn(null);
++            chromeTask = tracker.obtainTask(
++                    BrowserWindowType.NORMAL,
++                    new ChromeAndroidTask.ActivityScopedObjects(
++                            window, tabModelSelector, BrowserWindowType.NORMAL,
++                            SupportedProfileType.REGULAR, mock(DesktopWindowStateManager.class)),
++                    /* pendingId= */ null);
++            assertNotNull(chromeTask);
++            originalActivity = window.getActivity();
++            when(window.getActivity()).thenReturn(new WeakReference<>(activityController.get()));
++
++            SidePanelContainerCoordinatorImpl createdCoordinator = null;
++            try {
++                var registryNative = mock(WindowScopedSidePanelRegistryBridge.Natives.class);
++                when(registryNative.create(any(), anyLong())).thenReturn(1L);
++                WindowScopedSidePanelRegistryBridgeJni.setInstanceForTesting(registryNative);
++                when(nativeCoordinator.create(any(), anyLong())).thenReturn(NATIVE_COORDINATOR);
++                SidePanelCoordinatorAndroidBridgeJni.setInstanceForTesting(nativeCoordinator);
++
++                chromeTask.addFeature(
++                        new ChromeAndroidTaskFeatureKey(
++                                ExtensionSidePanelManagerBridge.class,
++                                task.mMockProfile,
++                                window,
++                                tabModel),
++                        () -> mock(ExtensionSidePanelManagerBridge.class));
++                createdCoordinator = new SidePanelContainerCoordinatorImpl(
++                        window, sideUi, tabModelSelector, mock(TopControlsStacker.class));
++                createdCoordinator.init();
++                createdCoordinator.configDeferredViewReplacementForTesting(true);
++                coordinator = createdCoordinator;
++            } catch (RuntimeException | Error failure) {
++                try {
++                    closeFixture(createdCoordinator);
++                } catch (RuntimeException | Error cleanupFailure) {
++                    failure.addSuppressed(cleanupFailure);
++                }
++                throw failure;
++            }
++        }
++
++        DeferredFrameView replace(View oldView) {
++            coordinator.startOpeningPanel(new SidePanelContent(oldView), true);
++            var next = new DeferredFrameView(activityController.get());
++            coordinator.startReplacingPanelContent(new SidePanelContent(next));
++            assertNotNull(next.nextFrame());
++            return next;
++        }
++
++        private void closeFixture(SidePanelContainerCoordinatorImpl createdCoordinator) {
++            try {
++                when(tabModel.getProfile()).thenReturn(task.mMockProfile);
++                if (createdCoordinator != null) createdCoordinator.destroy();
++            } finally {
++                // The task registered with this original Activity's lifecycle dispatcher.
++                when(task.mActivityWindowAndroidMocks.mMockActivityWindowAndroid.getActivity())
++                        .thenReturn(originalActivity);
++                try {
++                    ChromeAndroidTaskTrackerFactory.getInstance().remove(TASK_ID);
++                } finally {
++                    activityController.pause().stop().destroy();
++                }
++            }
++        }
++
++        @Override
++        public void close() {
++            closeFixture(coordinator);
++        }
++    }
++
++    @Test
++    @Config(sdk = {33, 34})
++    public void testDestroyCompletesDeferredReplacementOnceBeforeBridgeRemoval() {
++        try (var fixture = new ReplacementFixture()) {
++            var oldView = new View(fixture.activityController.get());
++            var nextView = fixture.replace(oldView);
++            Runnable lateFrame = nextView.nextFrame();
++            when(fixture.tabModel.getProfile())
++                    .thenReturn(null);
++            doAnswer(invocation -> {
++                fixture.coordinator.startOpeningPanel(new SidePanelContent(new View(
++                        fixture.activityController.get())), true);
++                fixture.coordinator.startReplacingPanelContent(new SidePanelContent(
++                        new DeferredFrameView(fixture.activityController.get())));
++                return null;
++            }).when(fixture.nativeCoordinator).onPanelContentReplaced(NATIVE_COORDINATOR);
++
++            fixture.coordinator.destroy();
++            fixture.coordinator.destroy();
++            assertNull(fixture.coordinator.getContentView());
++            assertNull(oldView.getParent());
++            assertNull(nextView.getParent());
++            lateFrame.run();
++            lateFrame.run();
++            verify(fixture.nativeCoordinator, times(1))
++                    .onPanelContentReplaced(NATIVE_COORDINATOR);
++            verify(fixture.sideUi, times(1)).unregisterSideUiContainer(fixture.coordinator);
++        }
++    }
++
++    @Test
++    @Config(sdk = {33, 34})
++    public void testCompletionPreservesReentrantDeferredReplacement() {
++        try (var fixture = new ReplacementFixture()) {
++            var oldView = new View(fixture.activityController.get());
++            var firstView = fixture.replace(oldView);
++            var secondView = new DeferredFrameView(fixture.activityController.get());
++            int[] completions = {0};
++            doAnswer(invocation -> {
++                if (++completions[0] == 1) {
++                    fixture.coordinator.startReplacingPanelContent(
++                            new SidePanelContent(secondView));
++                }
++                return null;
++            }).when(fixture.nativeCoordinator).onPanelContentReplaced(NATIVE_COORDINATOR);
++
++            fixture.coordinator.completePendingContentReplacement();
++            assertNull(oldView.getParent());
++            assertNotNull(firstView.getParent());
++            assertNotNull(secondView.nextFrame());
++            assertEquals(secondView, fixture.coordinator.getContentView());
++            fixture.coordinator.completePendingContentReplacement();
++            assertNull(firstView.getParent());
++            assertNotNull(secondView.getParent());
++            firstView.nextFrame().run();
++            secondView.nextFrame().run();
++            verify(fixture.nativeCoordinator, times(2))
++                    .onPanelContentReplaced(NATIVE_COORDINATOR);
++        }
++    }
++
+ }

@@ -1,0 +1,61 @@
+diff --git a/ui/android/java/src/org/chromium/ui/display/DisplayAndroidManager.java b/ui/android/java/src/org/chromium/ui/display/DisplayAndroidManager.java
+index 0ddd8f1644b22856bf5d463e556c654791b8ebb6..11b5049c33b8b11e780cc08209f2a023938692e1 100644
+--- a/ui/android/java/src/org/chromium/ui/display/DisplayAndroidManager.java
++++ b/ui/android/java/src/org/chromium/ui/display/DisplayAndroidManager.java
+@@ -61,8 +61,11 @@ public class DisplayAndroidManager {
+             // newDisplaysAbsoluteCoordinates)} when {@link
+             // DisplayTopologyListenerBackend#onDisplayTopologyChanged(SparseArray<RectF>
+             // absoluteBounds)} is triggered.
+-            // If Display Topology is not available, then DisplayAndroid is added lazily on first
+-            // use.
++            // Without topology, preserve lazy registration until a caller needs the complete
++            // display list (for example the extension system.display API).
++            if (!isDisplayTopologyAvailable() && mRegisterAllDisplays) {
++                updateDisplay(sdkDisplayId);
++            }
+         }
+ 
+         @Override
+@@ -120,6 +123,7 @@ public class DisplayAndroidManager {
+ 
+     private long mNativePointer;
+     private int mMainSdkDisplayId;
++    private boolean mRegisterAllDisplays;
+     @VisibleForTesting final SparseArray<DisplayAndroid> mIdMap = new SparseArray<>();
+     private final DisplayListenerBackend mBackend = new DisplayListenerBackend();
+ 
+@@ -223,6 +227,20 @@ public class DisplayAndroidManager {
+         singleton.setNativePointer(nativePointer);
+     }
+ 
++    @CalledByNative
++    static void ensureAllDisplaysRegistered() {
++        ThreadUtils.assertOnUiThread();
++        final DisplayAndroidManager singleton = getInstance();
++        if (isDisplayTopologyAvailable() || singleton.mRegisterAllDisplays) return;
++
++        // The manager already owns the process-wide DisplayListener. Keep its
++        // existing native update and removal paths; no profile/window is retained.
++        singleton.mRegisterAllDisplays = true;
++        for (Display display : getDisplayManager().getDisplays()) {
++            singleton.getDisplayAndroid(display);
++        }
++    }
++
+     private DisplayAndroidManager() {}
+ 
+     private void initialize() {
+@@ -346,8 +364,12 @@ public class DisplayAndroidManager {
+ 
+         // Note display null check here is needed because there appear to be an edge case in
+         // android display code, similar to onDisplayAdded.
+-        if (displayAndroid != null && display != null) {
++        if (display == null) return;
++        if (displayAndroid != null) {
+             displayAndroid.updateFromDisplay(display);
++        } else if (mRegisterAllDisplays && !isDisplayTopologyAvailable()) {
++            // Also recovers an added display whose first platform lookup was null.
++            getDisplayAndroid(display);
+         }
+     }
+ 

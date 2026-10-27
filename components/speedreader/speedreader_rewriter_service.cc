@@ -8,6 +8,8 @@
 #include <string_view>
 #include <utility>
 
+#include "build/build_config.h"
+
 #include "base/base64.h"
 #include "base/check_op.h"
 #include "base/command_line.h"
@@ -36,6 +38,16 @@ namespace {
 
 constexpr const char kSpeedreaderStylesheet[] = "speedreader-stylesheet";
 
+std::string GetDefaultStylesheet() {
+  auto& resources = ui::ResourceBundle::GetSharedInstance();
+  std::string stylesheet =
+      resources.LoadDataResourceString(IDR_SPEEDREADER_STYLE_DESKTOP);
+#if BUILDFLAG(IS_ANDROID)
+  stylesheet += resources.LoadDataResourceString(IDR_SPEEDREADER_STYLE_ANDROID);
+#endif
+  return stylesheet;
+}
+
 std::string WrapStylesheetWithCSP(const std::string& stylesheet,
                                   const std::string& atkinson,
                                   const std::string& open_dyslexic) {
@@ -59,6 +71,10 @@ std::string WrapStylesheetWithCSP(const std::string& stylesheet,
   };
 
   return base::StrCat({kCSP,
+#if BUILDFLAG(IS_ANDROID)
+                       "<meta name=\"viewport\" content=\"width=device-width, "
+                       "initial-scale=1\">",
+#endif
                        make_style_data("brave_speedreader_style", stylesheet),
                        make_style_data("atkinson_hyperligible_font", atkinson),
                        make_style_data("open_dyslexic_font", open_dyslexic)});
@@ -71,8 +87,7 @@ std::string GetDistilledPageStylesheet(const base::FilePath& stylesheet_path) {
   if (!success || stylesheet.empty()) {
     VLOG(1) << "Failed to read speedreader override stylesheet from "
             << stylesheet_path;
-    stylesheet = ui::ResourceBundle::GetSharedInstance().LoadDataResourceString(
-        IDR_SPEEDREADER_STYLE_DESKTOP);
+    stylesheet = GetDefaultStylesheet();
   }
 
   base::ReplaceChars(stylesheet, "\r\n", "\n", &stylesheet);
@@ -103,8 +118,7 @@ SpeedreaderRewriterService::SpeedreaderRewriterService()
     : speedreader_(new speedreader::SpeedReader) {
   // Load the built-in stylesheet as the default
   content_stylesheet_ = WrapStylesheetWithCSP(
-      ui::ResourceBundle::GetSharedInstance().LoadDataResourceString(
-          IDR_SPEEDREADER_STYLE_DESKTOP),
+      GetDefaultStylesheet(),
       ui::ResourceBundle::GetSharedInstance().LoadDataResourceString(
           IDR_SPEEDREADER_ATKINSON_HYPERLIGIBLE),
       ui::ResourceBundle::GetSharedInstance().LoadDataResourceString(

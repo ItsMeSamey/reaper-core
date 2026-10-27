@@ -1,0 +1,51 @@
+diff --git a/chrome/browser/ui/android/extensions/extension_install_dialog_view_android.cc b/chrome/browser/ui/android/extensions/extension_install_dialog_view_android.cc
+index 8bf04e5863a0c1da8aa36e438921c6de86f4e594..e73fb4da56c19b68a60de11f4406ece5d1247630 100644
+--- a/chrome/browser/ui/android/extensions/extension_install_dialog_view_android.cc
++++ b/chrome/browser/ui/android/extensions/extension_install_dialog_view_android.cc
+@@ -54,8 +54,9 @@ void ShowExtensionInstallDialogAndroid(
+     return;
+   }
+ 
+-  // WebContents is optional (e.g. for permission prompts requested from a
+-  // background context) and is only used if the user clicks a Web Store link.
++  // WebContents identifies the requesting tab for dialog ownership and Web
++  // Store links. Native-window-only prompts (e.g. background permission
++  // requests) have no contents and retain the selected-tab fallback.
+   content::WebContents* web_contents = show_params->GetParentWebContents();
+   auto* dialog_view = new extensions::ExtensionInstallDialogViewAndroid(
+       web_contents, std::move(prompt), std::move(done_callback));
+@@ -77,7 +78,9 @@ ExtensionInstallDialogViewAndroid::ExtensionInstallDialogViewAndroid(
+ 
+ ExtensionInstallDialogViewAndroid::~ExtensionInstallDialogViewAndroid() {
+   JNIEnv* env = base::android::AttachCurrentThread();
+-  Java_ExtensionInstallDialogBridge_clearNativePtr(env, java_object_);
++  if (!java_object_.is_null()) {
++    Java_ExtensionInstallDialogBridge_clearNativePtr(env, java_object_);
++  }
+ 
+   if (!done_callback_) {
+     return;
+@@ -93,7 +96,22 @@ void ExtensionInstallDialogViewAndroid::ShowDialog(
+     ui::WindowAndroid* window_android) {
+   JNIEnv* env = base::android::AttachCurrentThread();
+   java_object_.Reset(Java_ExtensionInstallDialogBridge_create(
+-      env, reinterpret_cast<intptr_t>(this), window_android->GetJavaObject()));
++      env, reinterpret_cast<intptr_t>(this), window_android->GetJavaObject(),
++      web_contents_.get()));
++  if (java_object_.is_null()) {
++    // No Java object exists to dismiss or destroy this self-owned view. Move
++    // the callback out before deleting it so the destructor cannot report a
++    // second result. A missing UI must never become an installation approval.
++    prompt_->OnDialogCanceled();
++    auto done_callback = std::move(done_callback_);
++    delete this;
++    if (done_callback) {
++      std::move(done_callback)
++          .Run(ExtensionInstallPrompt::DoneCallbackPayload(
++              ExtensionInstallPrompt::Result::ABORTED));
++    }
++    return;
++  }
+ 
+   BuildPropertyModel();
+   Java_ExtensionInstallDialogBridge_showDialog(env, java_object_);

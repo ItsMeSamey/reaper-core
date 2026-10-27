@@ -1,0 +1,497 @@
+diff --git a/chrome/android/java/src/org/chromium/chrome/browser/compositor/CompositorViewHolder.java b/chrome/android/java/src/org/chromium/chrome/browser/compositor/CompositorViewHolder.java
+--- a/chrome/android/java/src/org/chromium/chrome/browser/compositor/CompositorViewHolder.java
++++ b/chrome/android/java/src/org/chromium/chrome/browser/compositor/CompositorViewHolder.java
+@@ -118,6 +118,7 @@
+ import org.chromium.ui.resources.dynamics.DynamicResourceLoader;
+ import org.chromium.ui.util.AccessibilityUtil;
+ import org.chromium.ui.util.MotionEventUtils;
++import org.chromium.ui.util.TokenHolder;
+ import org.chromium.url.GURL;
+ 
+ import java.util.ArrayList;
+@@ -229,6 +230,30 @@
+      */
+     private @Nullable ContentView mContentView;
+ 
++    private @Nullable SplitTabCoordinator mSplitTabCoordinator;
++    private int mSplitControlsToken = TokenHolder.INVALID_TOKEN;
++    private boolean mSplitTouchObserverRegistered;
++    private boolean mUpdatingTab;
++    private boolean mSplitDestroyed;
++    private final Runnable mSplitRefresh =
++            () -> {
++                if (!mSplitDestroyed) onContentChanged();
++            };
++    // Pane selection must happen in Java before the initiating touch reaches a
++    // renderer. Keep split gestures on the existing Android dispatch path.
++    private final TouchEventObserver mSplitTouchObserver =
++            new TouchEventObserver() {
++                @Override
++                public boolean onInterceptTouchEvent(MotionEvent event) {
++                    return false;
++                }
++
++                @Override
++                public boolean mayInterceptTouchSequenceInWebContents() {
++                    return true;
++                }
++            };
++
+     // Cache objects that should not be created frequently.
+     private final Rect mCacheRect = new Rect();
+     private final Point mCachePoint = new Point();
+@@ -272,8 +297,8 @@
+     private boolean mHasKeyboardGeometryChangeFired;
+ 
+     /**
+-     * By default, the virtual keyboard overlays content, only resizing the visual viewport.
+-     * Web content can use APIs that can change this to cause the WebContents to be resized.
++     * By default, the virtual keyboard overlays content, only resizing the visual viewport. Web
++     * content can use APIs that can change this to cause the WebContents to be resized.
+      */
+     @VirtualKeyboardMode.EnumType
+     private int mVirtualKeyboardMode = VirtualKeyboardMode.RESIZES_VISUAL;
+@@ -630,8 +655,8 @@
+     }
+ 
+     /**
+-     * @param layoutManager The {@link LayoutManagerImpl} instance that will be driving what
+-     *                      shows in this {@link CompositorViewHolder}.
++     * @param layoutManager The {@link LayoutManagerImpl} instance that will be driving what shows
++     *     in this {@link CompositorViewHolder}.
+      */
+     public void setLayoutManager(LayoutManagerImpl layoutManager) {
+         mLayoutManager = layoutManager;
+@@ -821,6 +846,10 @@
+             mBrowserControlsManager.removeObserver(this);
+         }
+ 
++        mSplitDestroyed = true;
++        removeCallbacks(mSplitRefresh);
++        if (mSplitTabCoordinator != null) mSplitTabCoordinator.destroy();
++        releaseSplitControls();
+         setTab(null);
+         if (mApplicationBottomInsetSupplier != null) {
+             assert mOnViewportInsetsChanged != null;
+@@ -1139,6 +1168,42 @@
+         WebContents webContents = tab.getWebContents();
+         View view = tab.getContentView();
+         if (webContents == null || view == null) return;
++        SplitTabCoordinator splitCoordinator = mSplitTabCoordinator;
++        Rect splitBounds =
++                splitCoordinator == null ? null : splitCoordinator.getContentBounds(tab);
++        if (splitCoordinator != null && splitBounds != null) {
++            if (splitBounds.isEmpty() || webContents.isDestroyed()) return;
++            RectF visible = new RectF();
++            getVisibleViewport(visible);
++            int visibleHeight =
++                    Math.max(
++                            0,
++                            Math.min(splitBounds.bottom, (int) visible.bottom)
++                                    - Math.max(splitBounds.top, (int) visible.top));
++            int mode = webContents.getVirtualKeyboardMode();
++            if (mode == VirtualKeyboardMode.UNSET) mode = defaultVirtualKeyboardMode();
++            int layoutHeight =
++                    mode == VirtualKeyboardMode.RESIZES_CONTENT
++                            ? visibleHeight
++                            : splitBounds.height();
++            webContents.setSize(splitBounds.width(), Math.max(1, layoutHeight));
++            ((ContentView) view).setContentOffsetXPix(0);
++            int controlsOffset = splitCoordinator.getContentOffset(tab);
++            int bottomControls =
++                    mBrowserControlsManager == null
++                            ? 0
++                            : getBottomControlsHeightPixels()
++                                    - mBrowserControlsManager.getBottomControlOffset();
++            onPhysicalBackingSizeChanged(
++                    webContents,
++                    splitBounds.width(),
++                    Math.max(1, visibleHeight) + controlsOffset + Math.max(0, bottomControls));
++            onControlsResizeViewChanged(webContents, mControlsResizeView);
++            if (mode == VirtualKeyboardMode.OVERLAYS_CONTENT) {
++                notifySplitKeyboardGeometry(webContents, splitBounds, visible);
++            }
++            return;
++        }
+ 
+         Point viewportSize = getViewportSize();
+         int width = viewportSize.x;
+@@ -1302,6 +1367,15 @@
+      */
+     private void notifyVirtualKeyboardOverlayGeometryChangeEvent(
+             int viewportWidth, int viewportHeight, WebContents webContents) {
++        if (mSplitTabCoordinator != null) {
++            Rect pane = mSplitTabCoordinator.getContentBounds(webContents);
++            if (pane != null) {
++                RectF visible = new RectF();
++                getVisibleViewport(visible);
++                notifySplitKeyboardGeometry(webContents, pane, visible);
++                return;
++            }
++        }
+         assert mVirtualKeyboardMode == VirtualKeyboardMode.OVERLAYS_CONTENT;
+ 
+         int keyboardHeight =
+@@ -1353,6 +1427,13 @@
+ 
+     @Override
+     public void onSurfaceResized(int width, int height) {
++        if (mSplitTabCoordinator != null && mSplitTabCoordinator.hasSplit()) {
++            updateSplitViewport();
++            resizeSplitContents();
++            WebContents active = getWebContents();
++            if (active != null) syncBackgroundCapturedTabsPhysicalSize(active, width, height);
++            return;
++        }
+         View view = getContentView();
+         WebContents activeWebContents = getWebContents();
+         if (view == null || activeWebContents == null) return;
+@@ -1376,6 +1457,8 @@
+                 if (tabWebContents != null
+                         && tabWebContents != activeWebContents
+                         && tabWebContents.isBeingCaptured()) {
++                    if (mSplitTabCoordinator != null
++                            && mSplitTabCoordinator.getContentBounds(tab) != null) continue;
+                     onPhysicalBackingSizeChanged(tabWebContents, width, height);
+                 }
+             }
+@@ -1599,6 +1682,7 @@
+     }
+ 
+     private void repositionTabViewForSideUi(SideUiSpecs sideUiSpecs) {
++        if (mSplitTabCoordinator != null && mSplitTabCoordinator.hasSplit()) return;
+         Tab currentTab = getCurrentTab();
+         if (mSideUiStateProvider == null || mView == null || currentTab == null) return;
+ 
+@@ -1706,6 +1790,7 @@
+     }
+ 
+     private void onViewportChanged() {
++        updateSplitViewport();
+         if (mLayoutManager != null) mLayoutManager.onViewportChanged();
+     }
+ 
+@@ -1915,15 +2000,23 @@
+     }
+ 
+     /**
+-     * Sets the URL bar. This is needed so that the ContentViewHolder can find out
+-     * whether it can claim focus.
++     * Sets the URL bar. This is needed so that the ContentViewHolder can find out whether it can
++     * claim focus.
+      */
+     public void setUrlBar(View urlBar) {
+         mUrlBar = urlBar;
+     }
+ 
+     @Override
++    protected void onAttachedToWindow() {
++        super.onAttachedToWindow();
++        if (mSplitTabCoordinator != null && !mSplitDestroyed) post(mSplitRefresh);
++    }
++
++    @Override
+     public void onDetachedFromWindow() {
++        if (mSplitTabCoordinator != null) mSplitTabCoordinator.setShown(false);
++        releaseSplitControls();
+         super.onDetachedFromWindow();
+ 
+         // Removes the accessibility node provider from this view.
+@@ -1984,6 +2077,22 @@
+                 bottomControlsOffsetSupplier);
+ 
+         mTabModelSelector = tabModelSelector;
++        mSplitTabCoordinator =
++                new SplitTabCoordinator(
++                        getContext(),
++                        tabModelSelector,
++                        new SplitTabCoordinator.Host() {
++                            @Override
++                            public void onSplitStateChanged() {
++                                onContentChanged();
++                            }
++
++                            @Override
++                            public void onSplitGeometryChanged() {
++                                resizeSplitContents();
++                            }
++                        });
++        mLayoutManager.setSplitTabCoordinator(mSplitTabCoordinator);
+         mTabModelSelector.getCurrentTabSupplier().addSyncObserver((tab) -> onContentChanged());
+         tabModelSelector.addObserver(
+                 new TabModelSelectorObserver() {
+@@ -1998,6 +2107,31 @@
+     }
+ 
+     private void updateContentOverlayVisibility(boolean show) {
++        if (mSplitTabCoordinator != null && mSplitTabCoordinator.hasSplit()) {
++            if (show) {
++                if (!mSplitTouchObserverRegistered) {
++                    addTouchEventObserver(mSplitTouchObserver);
++                    mSplitTouchObserverRegistered = true;
++                }
++                if (mSplitControlsToken == TokenHolder.INVALID_TOKEN
++                        && mBrowserControlsManager != null) {
++                    mSplitControlsToken =
++                            mBrowserControlsManager
++                                    .getBrowserVisibilityDelegate()
++                                    .showControlsPersistent();
++                }
++                updateSplitViewport();
++                mSplitTabCoordinator.showIn(this);
++                updateFocusability(false, false);
++                if (mView != null && (mUrlBar == null || !mUrlBar.hasFocus())) mView.requestFocus();
++            } else {
++                mSplitTabCoordinator.setShown(false);
++                releaseSplitControls();
++                if (mView != null && mView.getParent() == this) removeView(mView);
++            }
++            return;
++        }
++        releaseSplitControls();
+         if (mView == null) return;
+         WebContents webContents = getWebContents();
+         if (show) {
+@@ -2040,6 +2174,7 @@
+ 
+     @Override
+     public void onContentChanged() {
++        if (mSplitDestroyed) return;
+         if (mTabModelSelector == null) {
+             // Not yet initialized, onContentChanged() will eventually get called by
+             // setTabModelSelector.
+@@ -2079,52 +2214,77 @@
+     }
+ 
+     private void setTab(@Nullable Tab tab) {
+-        if (tab != null && !tab.isDetachedFromActivity()) {
+-            tab.loadIfNeeded(/* forceBackingSize= */ false);
+-        }
+-
+-        View newView = tab != null ? tab.getView() : null;
+-        if (mView == newView && mTabVisible == tab) return;
+-
+-        // TODO(dtrainor): Look into changing this only if the views differ, but still parse the
+-        // WebContents list even if they're the same.
+-        updateContentOverlayVisibility(false);
+-
+-        if (mTabVisible != tab) {
+-            // Reset the geometrychange event flag so it can fire on the current active tab.
+-            mHasKeyboardGeometryChangeFired = false;
+-            mContentViewScrolling = false;
+-            mInTouch = false;
+-            mInGesture = false;
+-            updateInMotion();
+-            if (mTabVisible != null) mTabVisible.removeObserver(mTabObserver);
+-            if (tab != null) {
+-                tab.addObserver(mTabObserver);
+-                mCompositorView.onTabChanged();
+-            }
+-            updateViewStateListener(tab != null ? tab.getContentView() : null);
+-        }
+-
+-        mTabVisible = tab;
+-        mView = newView;
+-
+-        updateContentOverlayVisibility(mContentOverlayVisiblity);
+-
+-        if (mTabVisible != null) initializeTab(mTabVisible);
+-
+-        if (mOnscreenContentProvider == null) {
+-            mOnscreenContentProvider =
+-                    new OnscreenContentProvider(
+-                            getContext(), this, assumeNonNull(getWebContents()));
+-        } else {
+-            mOnscreenContentProvider.onWebContentsChanged(assumeNonNull(getWebContents()));
+-        }
+-
+-        // Clear drop permissions when tab changes unless this is a new tab loading from the drop.
+-        if (mDropUri == null
+-                || tab == null
+-                || !tab.getUrl().getSpec().equals(mDropUri.toString())) {
+-            releaseDragAndDropPermissions();
++        if (mUpdatingTab) {
++            removeCallbacks(mSplitRefresh);
++            if (!mSplitDestroyed) postOnAnimation(mSplitRefresh);
++            return;
++        }
++        mUpdatingTab = true;
++        try {
++
++            if (tab != null && !tab.isDetachedFromActivity()) {
++                tab.loadIfNeeded(/* forceBackingSize= */ false);
++            }
++
++            boolean splitChanged = mSplitTabCoordinator != null && mSplitTabCoordinator.update(tab);
++            View newView = tab != null ? tab.getView() : null;
++            if (mView == newView
++                    && mTabVisible == tab
++                    && !splitChanged
++                    && !(mSplitTabCoordinator != null
++                            && mSplitTabCoordinator.hasSplit()
++                            && !mSplitTabCoordinator.isShown())) return;
++
++            // TODO(dtrainor): Look into changing this only if the views differ, but still parse the
++            // WebContents list even if they're the same.
++            // Changing focus between panes must not detach either live view or its
++            // owner-bound dialog. Visibility changes only when membership changes.
++            if (mSplitTabCoordinator == null || !mSplitTabCoordinator.isShown() || splitChanged) {
++                updateContentOverlayVisibility(false);
++            }
++
++            if (mTabVisible != tab) {
++                // Reset the geometrychange event flag so it can fire on the current active tab.
++                mHasKeyboardGeometryChangeFired = false;
++                mContentViewScrolling = false;
++                mInTouch = false;
++                mInGesture = false;
++                updateInMotion();
++                if (mTabVisible != null) mTabVisible.removeObserver(mTabObserver);
++                if (tab != null) {
++                    tab.addObserver(mTabObserver);
++                    mCompositorView.onTabChanged();
++                }
++                updateViewStateListener(tab != null ? tab.getContentView() : null);
++            }
++
++            mTabVisible = tab;
++            mView = newView;
++
++            updateContentOverlayVisibility(mContentOverlayVisiblity);
++
++            if (mTabVisible != null) initializeTab(mTabVisible);
++            if (mSplitTabCoordinator != null && mSplitTabCoordinator.hasSplit())
++                resizeSplitContents();
++
++            if (mOnscreenContentProvider == null) {
++                mOnscreenContentProvider =
++                        new OnscreenContentProvider(
++                                getContext(), this, assumeNonNull(getWebContents()));
++            } else {
++                mOnscreenContentProvider.onWebContentsChanged(assumeNonNull(getWebContents()));
++            }
++
++            // Clear drop permissions when tab changes unless this is a new tab loading from the
++            // drop.
++            if (mDropUri == null
++                    || tab == null
++                    || !tab.getUrl().getSpec().equals(mDropUri.toString())) {
++                releaseDragAndDropPermissions();
++            }
++
++        } finally {
++            mUpdatingTab = false;
+         }
+     }
+ 
+@@ -2136,7 +2296,9 @@
+         }
+         if (newContentView != null) {
+             newContentView.addOnHierarchyChangeListener(this);
+-            newContentView.setEventOffsetHandlerForDragDrop(mEventOffsetHandler);
++            if (mSplitTabCoordinator == null || !mSplitTabCoordinator.hasSplit()) {
++                newContentView.setEventOffsetHandlerForDragDrop(mEventOffsetHandler);
++            }
+         }
+         mContentView = newContentView;
+     }
+@@ -2166,9 +2328,18 @@
+     /**
+      * Sets the correct size for {@link View} on {@code tab} and sets the correct rendering
+      * parameters on {@link WebContents} on {@code tab}.
++     *
+      * @param tab The {@link Tab} to initialize.
+      */
+     private void initializeTab(Tab tab) {
++        if (mSplitTabCoordinator != null && mSplitTabCoordinator.getContentBounds(tab) != null) {
++            WebContents contents = tab.getWebContents();
++            if (contents != null && tab == getCurrentTab()) {
++                updateVirtualKeyboardMode(contents.getVirtualKeyboardMode());
++            }
++            updateWebContentsSize(tab);
++            return;
++        }
+         WebContents webContents = tab.getWebContents();
+         if (webContents != null) {
+             onPhysicalBackingSizeChanged(
+@@ -2188,6 +2359,72 @@
+         if (tab.getView() != tab.getContentView()) return;
+ 
+         updateWebContentsSize(tab);
++    }
++
++    private void updateSplitViewport() {
++        if (mSplitTabCoordinator == null || !mSplitTabCoordinator.hasSplit()) return;
++        RectF viewport = new RectF();
++        getVisibleViewport(viewport);
++        // Match the existing single-content keyboard policy: an Android resize is
++        // compensated in visual/overlay modes, while RESIZES_CONTENT uses the
++        // smaller layout viewport. Physical backing still uses the visible area.
++        if (mApplicationBottomInsetSupplier != null) {
++            viewport.bottom +=
++                    mApplicationBottomInsetSupplier.getInsets().viewVisibleHeightInset
++                            - getEffectiveWebContentsHeightInset();
++        }
++        Rect pixels = new Rect();
++        viewport.round(pixels);
++        mSplitTabCoordinator.setViewport(pixels);
++    }
++
++    private void notifySplitKeyboardGeometry(WebContents contents, Rect pane, RectF visible) {
++        int keyboardHeight =
++                KeyboardVisibilityDelegate.getInstance()
++                        .calculateTotalKeyboardHeight(getRootView());
++        if (keyboardHeight <= 0) {
++            notifyVirtualKeyboardOverlayRect(contents, 0, 0, 0, 0);
++            return;
++        }
++        int bottomControls =
++                mBrowserControlsManager == null
++                        ? 0
++                        : getBottomControlsHeightPixels()
++                                - mBrowserControlsManager.getBottomControlOffset();
++        int keyboardTop = (int) visible.bottom + Math.max(0, bottomControls);
++        Rect overlap = new Rect(0, keyboardTop, getWidth(), keyboardTop + keyboardHeight);
++        if (!overlap.intersect(pane)) overlap.setEmpty();
++        if (overlap.isEmpty()) {
++            notifyVirtualKeyboardOverlayRect(contents, 0, 0, 0, 0);
++        } else {
++            notifyVirtualKeyboardOverlayRect(
++                    contents,
++                    overlap.left - pane.left,
++                    overlap.top - pane.top,
++                    overlap.width(),
++                    overlap.height());
++        }
++    }
++
++    private void resizeSplitContents() {
++        if (mSplitTabCoordinator == null || !mSplitTabCoordinator.hasSplit()) return;
++        updateWebContentsSize(mSplitTabCoordinator.getFirstTab());
++        updateWebContentsSize(mSplitTabCoordinator.getSecondTab());
++        requestRender();
++    }
++
++    private void releaseSplitControls() {
++        if (mSplitTouchObserverRegistered) {
++            removeTouchEventObserver(mSplitTouchObserver);
++            mSplitTouchObserverRegistered = false;
++        }
++        if (mSplitControlsToken != TokenHolder.INVALID_TOKEN && mBrowserControlsManager != null) {
++            int token = mSplitControlsToken;
++            mSplitControlsToken = TokenHolder.INVALID_TOKEN;
++            mBrowserControlsManager
++                    .getBrowserVisibilityDelegate()
++                    .releasePersistentShowingToken(token);
++        }
+     }
+ 
+     @Override
+@@ -2265,7 +2502,6 @@
+         } else {
+             setDescendantFocusability(FOCUS_BEFORE_DESCENDANTS);
+         }
+-
+     }
+ 
+     // TabObscuringHandler.Observer

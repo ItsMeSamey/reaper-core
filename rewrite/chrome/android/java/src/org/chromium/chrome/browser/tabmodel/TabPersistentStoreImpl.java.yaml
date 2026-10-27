@@ -1,0 +1,721 @@
+# Android real split persistence and recently-closed restoration.
+substitutions:
+- description: Key pending split restoration by the persisted native token
+  count: 1
+  regex:
+    re_pattern: import\ org\.chromium\.base\.ThreadUtils;
+    replace: 'import org.chromium.base.ThreadUtils;
+
+      import org.chromium.base.Token;'
+- description: Retain immutable saved split metadata separately from live native membership during startup
+  count: 1
+  regex:
+    re_pattern: \ \ \ \ private\ boolean\ mDestroyed;
+    replace: "    private boolean mDestroyed;\n\n    // Keep original saved values until both members exist; native attachment may clear the mirror.\n    private final Map<Tab, Tab.SplitData> mPendingSplitRestores = new HashMap<>();"
+- description: Collect split restore state using actual returned tabs, including remapped Android IDs
+  count: 1
+  regex:
+    re_pattern: \ \ \ \ \ \ \ \ if\ \(tab\ !=\ null\ \&\&\ tabState\.shouldMigrate\)\ \{
+    replace: "        if (tab != null && Tab.SplitData.isValid(tabState.splitTabId, tabState.splitLayout,\n                tabState.splitRatio, tabState.splitPosition)) {\n            mPendingSplitRestores.put(tab, new Tab.SplitData(assumeNonNull(tabState.splitTabId),\n                    tabState.splitLayout, tabState.splitRatio, tabState.splitPosition));\n        }\n        if (tab != null && tabState.shouldMigrate) {"
+- description: Release unfinished split restore snapshots when the persistent store is destroyed
+  count: 1
+  regex:
+    re_pattern: \ \ \ \ \ \ \ \ mDestroyed\ =\ true;
+    replace: "        mDestroyed = true;\n        mPendingSplitRestores.clear();"
+- description: Preserve pending pair metadata across synchronous saves and migration during partial startup
+  count: 2
+  regex:
+    re_pattern: TabStateExtractor\.from\(tab\)
+    replace: extractTabState(tab)
+- description: Preserve pending pair metadata across asynchronous saves and migration during partial startup
+  count: 2
+  regex:
+    re_pattern: TabStateExtractor\.from\(mTab\)
+    replace: extractTabState(mTab)
+- description: Reconstruct complete native splits at the all-tabs-loaded UI barrier
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ private\ void\ onStateLoaded\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ for\ \(TabPersistentStoreObserver\ observer\ :\ mObservers\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ //\ mergeState\(\)\ starts\ an\ AsyncTask\ to\ call\ this\ and\ this\ calls\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ //\ onTabStateInitialized\ which\ should\ be\ called\ from\ the\ UI\ thread\.\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ PostTask\.runOrPostTask\(TaskTraits\.UI_DEFAULT,\ observer::onStateLoaded\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \}'
+    replace: "    private void onStateLoaded() {\n        // Merging can finish off-thread; rebuild pairs and signal completion in one UI task.\n        PostTask.runOrPostTask(TaskTraits.UI_DEFAULT, () -> {\n            if (mDestroyed) return;\n            restorePendingSplits();\n            if (mDestroyed) return;\n            for (TabPersistentStoreObserver observer : mObservers) observer.onStateLoaded();\n        });\n    }"
+- description: Validate complete pairs and restore them through the native model instead of trusting saved metadata
+  count: 1
+  regex:
+    re_pattern: \ \ \ \ private\ void\ onStateLoaded\(\)\ \{
+    replace: "    /** Preserve saved pairs while their second member is still being loaded. */\n    private @Nullable TabState extractTabState(Tab tab) {\n        TabState state = TabStateExtractor.from(tab);\n        Tab.SplitData pending = mPendingSplitRestores.get(tab);\n        if (state != null && pending != null) {\n            state.splitTabId = pending.getToken();\n            state.splitLayout = pending.getLayout();\n            state.splitRatio = pending.getRatio();\n            state.splitPosition = pending.getPosition();\n        }\n        return state;\n    }\n\n    /** Rebuild real native collections only when both saved members have arrived. */\n    @VisibleForTesting\n    void restorePendingSplits() {\n        ThreadUtils.assertOnUiThread();\n        Map<Tab, Tab.SplitData> saved = new HashMap<>(mPendingSplitRestores);\n        mPendingSplitRestores.clear();\n        for (boolean incognito : new boolean[] {false, true}) {\n            if (mDestroyed) return;\n            TabModel model = mTabModelSelector.getModel(incognito);\n            Map<Token, List<Tab>> pairs = new HashMap<>();\n            for (Entry<Tab, Tab.SplitData> entry : saved.entrySet()) {\n                Tab tab = entry.getKey();\n                if (tab.isDestroyed() || tab.isIncognito() != incognito\n                        || model.getTabById(tab.getId()) != tab) continue;\n                pairs.computeIfAbsent(entry.getValue().getToken(), ignored -> new ArrayList<>()).add(tab);\n            }\n            for (List<Tab> members : pairs.values()) {\n                if (mDestroyed) return;\n                members.removeIf(tab -> tab.isDestroyed() || model.getTabById(tab.getId()) != tab);\n                boolean restored = false;\n                if (members.size() == 2) {\n                    Tab first = members.get(0);\n                    Tab second = members.get(1);\n                    Tab.SplitData a = assumeNonNull(saved.get(first));\n                    Tab.SplitData b = assumeNonNull(saved.get(second));\n                    if (a.getPosition() != b.getPosition() && a.getLayout() == b.getLayout()\n                            && Double.compare(a.getRatio(), b.getRatio()) == 0) {\n                        restored = model.restoreSplit(new SplitInfo(a.getToken(),\n                                a.getPosition() == 0 ? first.getId() : second.getId(),\n                                a.getPosition() == 0 ? second.getId() : first.getId(),\n                                a.getLayout(), a.getRatio()));\n                    }\n                }\n                if (mDestroyed) return;\n                if (!restored) {\n                    for (Tab member : members) {\n                        // A user or synchronous observer may already have made a different real pair.\n                        if (!member.isDestroyed() && model.getTabById(member.getId()) == member\n                                && model.getSplitInfoForTab(member.getId()) == null) {\n                            member.setSplitData(null, 0, 0.5, -1);\n                        }\n                    }\n                }\n            }\n        }\n    }\n\n    private void onStateLoaded() {"
+- description: Format modified Android split persistence Java sources
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ tabState\.legacyFileToDelete\ =\ null;\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ //\ This\ may\ not\ create\ a\ frozen\ tab\ for\ reparenting\ cases\ which\ is\ misleading\.\
+
+      \ \ \ \ \ \ \ \ Tab\ tab\ =\ tabCreator\.createFrozenTab\(tabState,\ tabToRestore\.id,\ restoredIndex\);\
+
+      \ \ \ \ \ \ \ \ if\ \(tab\ !=\ null\ \&\&\ Tab\.SplitData\.isValid\(tabState\.splitTabId,\ tabState\.splitLayout,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ tabState\.splitRatio,\ tabState\.splitPosition\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mPendingSplitRestores\.put\(tab,\ new\ Tab\.SplitData\(assumeNonNull\(tabState\.splitTabId\),\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ tabState\.splitLayout,\ tabState\.splitRatio,\ tabState\.splitPosition\)\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ if\ \(tab\ !=\ null\ \&\&\ tabState\.shouldMigrate\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mTabsToMigrate\.add\(tab\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      '
+    replace: "            tabState.legacyFileToDelete = null;\n        }\n        // This may not create a frozen tab for reparenting cases which is misleading.\n        Tab tab = tabCreator.createFrozenTab(tabState, tabToRestore.id, restoredIndex);\n        if (tab != null\n                && Tab.SplitData.isValid(\n                        tabState.splitTabId,\n                        tabState.splitLayout,\n                        tabState.splitRatio,\n                        tabState.splitPosition)) {\n            mPendingSplitRestores.put(\n                    tab,\n                    new Tab.SplitData(\n                            assumeNonNull(tabState.splitTabId),\n                            tabState.splitLayout,\n                            tabState.splitRatio,\n                            tabState.splitPosition));\n        }\n        if (tab != null && tabState.shouldMigrate) {\n            mTabsToMigrate.add(tab);\n        }\n"
+- description: Format modified Android split persistence Java sources
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ TabModel\ model\ =\ mTabModelSelector\.getModel\(incognito\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ Map<Token,\ List<Tab>>\ pairs\ =\ new\ HashMap<>\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ for\ \(Entry<Tab,\ Tab\.SplitData>\ entry\ :\ saved\.entrySet\(\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ Tab\ tab\ =\ entry\.getKey\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ if\ \(tab\.isDestroyed\(\)\ \|\|\ tab\.isIncognito\(\)\ !=\ incognito\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \|\|\ model\.getTabById\(tab\.getId\(\)\)\ !=\ tab\)\ continue;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ pairs\.computeIfAbsent\(entry\.getValue\(\)\.getToken\(\),\ ignored\ \->\ new\ ArrayList<>\(\)\)\.add\(tab\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ for\ \(List<Tab>\ members\ :\ pairs\.values\(\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ if\ \(mDestroyed\)\ return;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ members\.removeIf\(tab\ \->\ tab\.isDestroyed\(\)\ \|\|\ model\.getTabById\(tab\.getId\(\)\)\ !=\ tab\);\
+
+      '
+    replace: "            TabModel model = mTabModelSelector.getModel(incognito);\n            Map<Token, List<Tab>> pairs = new HashMap<>();\n            for (Entry<Tab, Tab.SplitData> entry : saved.entrySet()) {\n                Tab tab = entry.getKey();\n                if (tab.isDestroyed()\n                        || tab.isIncognito() != incognito\n                        || model.getTabById(tab.getId()) != tab) continue;\n                pairs.computeIfAbsent(entry.getValue().getToken(), ignored -> new ArrayList<>())\n                        .add(tab);\n            }\n            for (List<Tab> members : pairs.values()) {\n                if (mDestroyed) return;\n                members.removeIf(tab -> tab.isDestroyed() || model.getTabById(tab.getId()) != tab);\n"
+- description: Format modified Android split persistence Java sources
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ Tab\ first\ =\ members\.get\(0\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ Tab\ second\ =\ members\.get\(1\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ Tab\.SplitData\ a\ =\ assumeNonNull\(saved\.get\(first\)\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ Tab\.SplitData\ b\ =\ assumeNonNull\(saved\.get\(second\)\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ if\ \(a\.getPosition\(\)\ !=\ b\.getPosition\(\)\ \&\&\ a\.getLayout\(\)\ ==\ b\.getLayout\(\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \&\&\ Double\.compare\(a\.getRatio\(\),\ b\.getRatio\(\)\)\ ==\ 0\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ restored\ =\ model\.restoreSplit\(new\ SplitInfo\(a\.getToken\(\),\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ a\.getPosition\(\)\ ==\ 0\ \?\ first\.getId\(\)\ :\ second\.getId\(\),\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ a\.getPosition\(\)\ ==\ 0\ \?\ second\.getId\(\)\ :\ first\.getId\(\),\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ a\.getLayout\(\),\ a\.getRatio\(\)\)\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ if\ \(mDestroyed\)\ return;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ if\ \(!restored\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ for\ \(Tab\ member\ :\ members\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ //\ A\ user\ or\ synchronous\ observer\ may\ already\ have\ made\ a\ different\ real\ pair\.\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ if\ \(!member\.isDestroyed\(\)\ \&\&\ model\.getTabById\(member\.getId\(\)\)\ ==\ member\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \&\&\ model\.getSplitInfoForTab\(member\.getId\(\)\)\ ==\ null\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ member\.setSplitData\(null,\ 0,\ 0\.5,\ \-1\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      '
+    replace: "                    Tab first = members.get(0);\n                    Tab second = members.get(1);\n                    Tab.SplitData a = assumeNonNull(saved.get(first));\n                    Tab.SplitData b = assumeNonNull(saved.get(second));\n                    if (a.getPosition() != b.getPosition()\n                            && a.getLayout() == b.getLayout()\n                            && Double.compare(a.getRatio(), b.getRatio()) == 0) {\n                        restored =\n                                model.restoreSplit(\n                                        new SplitInfo(\n                                                a.getToken(),\n                                                a.getPosition() == 0\n                                                        ? first.getId()\n                                                        : second.getId(),\n                                                a.getPosition() == 0\n                                                        ? second.getId()\n                                                        : first.getId(),\n                                                a.getLayout(),\n                                                a.getRatio()));\n                    }\n                }\n                if (mDestroyed) return;\n                if (!restored) {\n                    for (Tab member : members) {\n                        // A user or synchronous observer may already have made a different real\n                        // pair.\n                        if (!member.isDestroyed()\n                                && model.getTabById(member.getId()) == member\n                                && model.getSplitInfoForTab(member.getId()) == null) {\n                            member.setSplitData(null, 0, 0.5, -1);\n                        }\n                    }\n"
+- description: Format modified Android split persistence Java sources
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ \}\
+
+      \
+
+      \ \ \ \ private\ void\ onStateLoaded\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ //\ Merging\ can\ finish\ off\-thread;\ rebuild\ pairs\ and\ signal\ completion\ in\ one\ UI\ task\.\
+
+      \ \ \ \ \ \ \ \ PostTask\.runOrPostTask\(TaskTraits\.UI_DEFAULT,\ \(\)\ \->\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(mDestroyed\)\ return;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ restorePendingSplits\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(mDestroyed\)\ return;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ for\ \(TabPersistentStoreObserver\ observer\ :\ mObservers\)\ observer\.onStateLoaded\(\);\
+
+      \ \ \ \ \ \ \ \ \}\);\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ private\ void\ loadNextTabs\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ if\ \(mDestroyed\)\ return;\
+
+      '
+    replace: "    }\n\n    private void onStateLoaded() {\n        // Merging can finish off-thread; rebuild pairs and signal completion in one UI task.\n        PostTask.runOrPostTask(\n                TaskTraits.UI_DEFAULT,\n                () -> {\n                    if (mDestroyed) return;\n                    restorePendingSplits();\n                    if (mDestroyed) return;\n                    for (TabPersistentStoreObserver observer : mObservers) observer.onStateLoaded();\n                });\n    }\n\n    private void loadNextTabs() {\n        if (mDestroyed) return;\n"
+
+# Reaper Android containers lifecycle successor; retain the complete inherited recipe.
+- description: 'Reaper Android containers: immutable tab identity, trusted CCT admission, persistent partition/SQL/reference lifecycle.'
+  regex:
+    re_pattern: 'import\ org\.chromium\.chrome\.browser\.flags\.ChromeFeatureList;\
+
+      import\ org\.chromium\.chrome\.browser\.preferences\.ChromePreferenceKeys;\
+
+      import\ org\.chromium\.chrome\.browser\.preferences\.ChromeSharedPreferences;\
+
+      import\ org\.chromium\.chrome\.browser\.tab\.Tab;\
+
+      import\ org\.chromium\.chrome\.browser\.tab\.TabCreationState;\
+
+      import\ org\.chromium\.chrome\.browser\.tab\.TabId;\
+
+      '
+    replace: 'import org.chromium.chrome.browser.flags.ChromeFeatureList;
+
+      import org.chromium.chrome.browser.preferences.ChromePreferenceKeys;
+
+      import org.chromium.chrome.browser.preferences.ChromeSharedPreferences;
+
+      import org.chromium.chrome.browser.containers.ContainersBridge;
+
+      import org.chromium.chrome.browser.containers.ContainersPersistentTabReferences;
+
+      import org.chromium.chrome.browser.profiles.Profile;
+
+      import org.chromium.chrome.browser.tab.Tab;
+
+      import org.chromium.chrome.browser.tab.TabCreationState;
+
+      import org.chromium.chrome.browser.tab.TabId;
+
+      '
+- description: 'Reaper Android containers: immutable tab identity, trusted CCT admission, persistent partition/SQL/reference lifecycle.'
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ public\ final\ String\ url;\
+
+      \ \ \ \ \ \ \ \ public\ final\ @TriState\ int\ isIncognito;\
+
+      \ \ \ \ \ \ \ \ public\ final\ boolean\ fromMerge;\
+
+      \
+
+      \ \ \ \ \ \ \ \ public\ TabRestoreDetails\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ int\ id,\
+
+      '
+    replace: "        public final String url;\n        public final @TriState int isIncognito;\n        public final boolean fromMerge;\n        // Null only for pre-container metadata, whose per-tab state is authoritative.\n        public final @Nullable String containerId;\n\n        public TabRestoreDetails(\n                int id,\n"
+- description: 'Reaper Android containers: immutable tab identity, trusted CCT admission, persistent partition/SQL/reference lifecycle.'
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ @TriState\ int\ isIncognito,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ String\ url,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ boolean\ fromMerge\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ this\.id\ =\ id;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ this\.originalIndex\ =\ originalIndex;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ this\.url\ =\ url;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ this\.isIncognito\ =\ isIncognito;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ this\.fromMerge\ =\ fromMerge;\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \}\
+
+      \
+
+      '
+    replace: "                @TriState int isIncognito,\n                String url,\n                boolean fromMerge) {\n            this(id, originalIndex, isIncognito, url, fromMerge, null);\n        }\n\n        public TabRestoreDetails(\n                int id, int originalIndex, @TriState int isIncognito,\n                String url, boolean fromMerge, @Nullable String containerId) {\n            this.id = id;\n            this.originalIndex = originalIndex;\n            this.url = url;\n            this.isIncognito = isIncognito;\n            this.fromMerge = fromMerge;\n            this.containerId = containerId;\n        }\n    }\n\n"
+- description: 'Reaper Android containers: immutable tab identity, trusted CCT admission, persistent partition/SQL/reference lifecycle.'
+  regex:
+    re_pattern: '\
+
+      \ \ \ \ @Override\
+
+      \ \ \ \ public\ void\ saveState\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ //\ Temporarily\ allowing\ disk\ access\.\ TODO:\ Fix\.\ See\ http://b/5518024\
+
+      \ \ \ \ \ \ \ \ StrictMode\.ThreadPolicy\ oldPolicy\ =\ StrictMode\.allowThreadDiskWrites\(\);\
+
+      \ \ \ \ \ \ \ \ try\ \{\
+
+      '
+    replace: "\n    @Override\n    public void saveState() {\n        Profile containerWriteProfile = beginContainerPersistenceWrite();\n        // Temporarily allowing disk access. TODO: Fix. See http://b/5518024\n        StrictMode.ThreadPolicy oldPolicy = StrictMode.allowThreadDiskWrites();\n        try {\n"
+- description: 'Reaper Android containers: immutable tab identity, trusted CCT admission, persistent partition/SQL/reference lifecycle.'
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ mTabsToSave\.clear\(\);\
+
+      \ \ \ \ \ \ \ \ \}\ finally\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ StrictMode\.setThreadPolicy\(oldPolicy\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \}\
+
+      \
+
+      '
+    replace: "            mTabsToSave.clear();\n        } finally {\n            StrictMode.setThreadPolicy(oldPolicy);\n            endContainerPersistenceWrite(containerWriteProfile);\n        }\n    }\n\n"
+- description: 'Reaper Android containers: immutable tab identity, trusted CCT admission, persistent partition/SQL/reference lifecycle.'
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ TabRestoreDetails\ tabToRestore,\ @Nullable\ TabState\ tabState,\ boolean\ setAsActive\)\ \{\
+
+      \ \ \ \ \ \ \ \ //\ If\ we\ don''t\ have\ enough\ information\ about\ the\ Tab,\ bail\ out\.\
+
+      \ \ \ \ \ \ \ \ boolean\ isIncognito\ =\ isIncognitoTabBeingRestored\(tabToRestore,\ tabState\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ if\ \(tabState\ ==\ null\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(tabToRestore\.isIncognito\ ==\ TriState\.NOT_SET\)\ \{\
+
+      '
+    replace: "            TabRestoreDetails tabToRestore, @Nullable TabState tabState, boolean setAsActive) {\n        // If we don't have enough information about the Tab, bail out.\n        boolean isIncognito = isIncognitoTabBeingRestored(tabToRestore, tabState);\n        if (tabToRestore.containerId != null\n                && tabState != null\n                && !tabToRestore.containerId.equals(tabState.containerId)) {\n            Log.w(TAG, \"Conflicting persisted storage identity; refusing URL fallback\");\n            return;\n        }\n        if (tabToRestore.containerId != null\n                && !ContainersBridge.isContainerIdWellFormed(tabToRestore.containerId)) return;\n\n        if (tabState == null) {\n            if (tabToRestore.isIncognito == TriState.NOT_SET) {\n"
+- description: 'Reaper Android containers: immutable tab identity, trusted CCT admission, persistent partition/SQL/reference lifecycle.'
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ recordingTabCreator\.recordFallbackTab\(tabToRestore\.id,\ tabToRestore\.url\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ tab\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ tabCreator\.createNewTab\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ new\ LoadUrlParams\(tabToRestore\.url\),\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ TabLaunchType\.FROM_RESTORE,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ /\*\ parent=\ \*/\ null,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ restoredIndex\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ recordRestorationResult\(tab,\ TabRestoreMethod\.CREATE_NEW_TAB\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ \ \ \ \ //\ restoredIndex\ might\ not\ be\ the\ one\ used\ in\ createNewTab\ so\ update\ accordingly\.\
+
+      '
+    replace: "                    recordingTabCreator.recordFallbackTab(tabToRestore.id, tabToRestore.url);\n                }\n            }\n            if (tabToRestore.containerId != null && !tabToRestore.containerId.isEmpty()) {\n                if (!ContainersBridge.restoreContainerIdentity(\n                        assumeNonNull(model.getProfile()), tabToRestore.containerId)) return;\n                if (tabCreator instanceof ChromeTabCreator chromeTabCreator) {\n                    tab = chromeTabCreator.createNewTabInContainer(\n                            new LoadUrlParams(tabToRestore.url), TabLaunchType.FROM_RESTORE,\n                            tabToRestore.containerId, restoredIndex);\n                } else if (tabCreator instanceof ArchivedTabCreator archivedTabCreator) {\n                    tab = archivedTabCreator.createNewTabInContainer(\n                            new LoadUrlParams(tabToRestore.url), TabLaunchType.FROM_RESTORE,\n                            tabToRestore.containerId, restoredIndex);\n                } else {\n                    return;\n                }\n            } else {\n                tab =\n                        tabCreator.createNewTab(\n                                new LoadUrlParams(tabToRestore.url),\n                                TabLaunchType.FROM_RESTORE,\n                                /* parent= */ null,\n                                restoredIndex);\n            }\n            recordRestorationResult(tab, TabRestoreMethod.CREATE_NEW_TAB);\n\n            // restoredIndex might not be the one used in createNewTab so update accordingly.\n"
+- description: 'Reaper Android containers: immutable tab identity, trusted CCT admission, persistent partition/SQL/reference lifecycle.'
+  regex:
+    re_pattern: '\ \ \ \ \ \*/\
+
+      \ \ \ \ private\ OnTabStateReadCallback\ createOnTabStateReadCallback\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ final\ boolean\ isIncognitoSelected,\ final\ boolean\ fromMerge\)\ \{\
+
+      \ \ \ \ \ \ \ \ return\ \(int\ index,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ int\ id,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ String\ url,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ @TriState\ int\ isIncognito,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ boolean\ isStandardActiveIndex,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ boolean\ isIncognitoActiveIndex\)\ \->\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(shouldCancelTabLoad\(isIncognito\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ return;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      '
+    replace: "     */\n    private OnTabStateReadCallback createOnTabStateReadCallback(\n            final boolean isIncognitoSelected, final boolean fromMerge) {\n        return new OnTabStateReadCallback() {\n            @Override\n            public void onDetailsRead(\n                    int index, int id, String url, @TriState int isIncognito,\n                    boolean isStandardActiveIndex, boolean isIncognitoActiveIndex) {\n                onDetailsReadWithContainer(index, id, url, isIncognito,\n                        isStandardActiveIndex, isIncognitoActiveIndex, null);\n            }\n\n            @Override\n            public void onDetailsReadWithContainer(\n                    int index, int id, String url, @TriState int isIncognito,\n                    boolean isStandardActiveIndex, boolean isIncognitoActiveIndex,\n                    @Nullable String containerId) {\n            if (shouldCancelTabLoad(isIncognito)) {\n                return;\n            }\n"
+- description: 'Reaper Android containers: immutable tab identity, trusted CCT admission, persistent partition/SQL/reference lifecycle.'
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ //\ the\ current\ tab\ from\ the\ standard\ model\.\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ //\ This\ logic\ only\ works\ because\ we\ store\ the\ incognito\ indices\ first\.\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ TabRestoreDetails\ details\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ new\ TabRestoreDetails\(id,\ index,\ isIncognito,\ url,\ fromMerge\);\
+
+      \
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(!fromMerge\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \&\&\ \(\(isIncognitoActiveIndex\ \&\&\ isIncognitoSelected\)\
+
+      '
+    replace: "            // the current tab from the standard model.\n            // This logic only works because we store the incognito indices first.\n            TabRestoreDetails details =\n                    new TabRestoreDetails(id, index, isIncognito, url, fromMerge, containerId);\n\n            if (!fromMerge\n                    && ((isIncognitoActiveIndex && isIncognitoSelected)\n"
+- description: 'Reaper Android containers: immutable tab identity, trusted CCT admission, persistent partition/SQL/reference lifecycle.'
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ isIncognitoActiveIndex,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ isIncognito,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ fromMerge\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \};\
+
+      \ \ \ \ \}\
+
+      '
+    replace: "                        isIncognitoActiveIndex,\n                        isIncognito,\n                        fromMerge);\n            }\n            }\n        };\n    }\n"
+- description: 'Reaper Android containers: immutable tab identity, trusted CCT admission, persistent partition/SQL/reference lifecycle.'
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ private\ class\ SaveTabTask\ extends\ AsyncTask<Void>\ \{\
+
+      \ \ \ \ \ \ \ \ final\ Tab\ mTab;\
+
+      \ \ \ \ \ \ \ \ final\ int\ mId;\
+
+      \ \ \ \ \ \ \ \ final\ boolean\ mEncrypted;\
+
+      '
+    replace: "        }\n    }\n\n    private @Nullable Profile beginContainerPersistenceWrite() {\n        Profile profile = mTabModelSelector.getModel(false).getProfile();\n        if (profile == null || !profile.isNativeInitialized() || profile.shutdownStarted()) return null;\n        ContainersPersistentTabReferences.beginPersistenceWrite(profile);\n        return profile;\n    }\n\n    private static void endContainerPersistenceWrite(@Nullable Profile profile) {\n        if (profile != null) ContainersPersistentTabReferences.endPersistenceWrite(profile);\n    }\n\n    private abstract class ContainerPersistenceTask extends AsyncTask<Void> {\n        private @Nullable Profile mContainerWriteProfile;\n\n        @Override\n        protected void onPreExecute() {\n            mContainerWriteProfile = beginContainerPersistenceWrite();\n        }\n\n        final void finishContainerPersistenceWrite() {\n            Profile profile = mContainerWriteProfile;\n            mContainerWriteProfile = null;\n            endContainerPersistenceWrite(profile);\n        }\n\n        @Override\n        protected void onCancelled() {\n            finishContainerPersistenceWrite();\n        }\n    }\n\n    private class SaveTabTask extends ContainerPersistenceTask {\n        final Tab mTab;\n        final int mId;\n        final boolean mEncrypted;\n"
+- description: 'Reaper Android containers: immutable tab identity, trusted CCT admission, persistent partition/SQL/reference lifecycle.'
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ @Override\
+
+      \ \ \ \ \ \ \ \ protected\ void\ onPreExecute\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(mDestroyed\ \|\|\ mTab\.isDestroyed\(\)\ \|\|\ isCancelled\(\)\)\ return;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ TabStateAttributes\ attributes\ =\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ TabStateAttributesRegistry\.getAttributesFor\(mTab,\ TabPersistentStoreImpl\.class\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(attributes\ !=\ null\)\ \{\
+
+      '
+    replace: "        @Override\n        protected void onPreExecute() {\n            if (mDestroyed || mTab.isDestroyed() || isCancelled()) return;\n            super.onPreExecute();\n            TabStateAttributes attributes =\n                    TabStateAttributesRegistry.getAttributesFor(mTab, TabPersistentStoreImpl.class);\n            if (attributes != null) {\n"
+- description: 'Reaper Android containers: immutable tab identity, trusted CCT admission, persistent partition/SQL/reference lifecycle.'
+  regex:
+    re_pattern: '\
+
+      \ \ \ \ \ \ \ \ @Override\
+
+      \ \ \ \ \ \ \ \ protected\ void\ onPostExecute\(Void\ v\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(mDestroyed\ \|\|\ isCancelled\(\)\)\ return;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mSaveTabTask\ =\ null;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ saveNextTab\(\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ /\*\*\ Migrate\ Tab\ to\ new\ FlatBuffer\ format\.\ \*/\
+
+      \ \ \ \ @VisibleForTesting\
+
+      \ \ \ \ public\ class\ MigrateTabTask\ extends\ AsyncTask<Void>\ \{\
+
+      \ \ \ \ \ \ \ \ final\ Tab\ mTab;\
+
+      \ \ \ \ \ \ \ \ final\ int\ mId;\
+
+      \ \ \ \ \ \ \ \ final\ boolean\ mEncrypted;\
+
+      '
+    replace: "\n        @Override\n        protected void onPostExecute(Void v) {\n            try {\n                if (mDestroyed || isCancelled()) return;\n                mSaveTabTask = null;\n                saveNextTab();\n                    } finally {\n                finishContainerPersistenceWrite();\n            }\n        }\n    }\n\n    /** Migrate Tab to new FlatBuffer format. */\n    @VisibleForTesting\n    public class MigrateTabTask extends ContainerPersistenceTask {\n        final Tab mTab;\n        final int mId;\n        final boolean mEncrypted;\n"
+- description: 'Reaper Android containers: immutable tab identity, trusted CCT admission, persistent partition/SQL/reference lifecycle.'
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ @Override\
+
+      \ \ \ \ \ \ \ \ protected\ void\ onPreExecute\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(mDestroyed\ \|\|\ mTab\.isDestroyed\(\)\ \|\|\ isCancelled\(\)\)\ return;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ try\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mState\ =\ extractTabState\(mTab\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\ catch\ \(Exception\ e\)\ \{\
+
+      '
+    replace: "        @Override\n        protected void onPreExecute() {\n            if (mDestroyed || mTab.isDestroyed() || isCancelled()) return;\n            super.onPreExecute();\n            try {\n                mState = extractTabState(mTab);\n            } catch (Exception e) {\n"
+- description: 'Reaper Android containers: immutable tab identity, trusted CCT admission, persistent partition/SQL/reference lifecycle.'
+  regex:
+    re_pattern: '\
+
+      \ \ \ \ \ \ \ \ @Override\
+
+      \ \ \ \ \ \ \ \ protected\ void\ onPostExecute\(Void\ v\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(mDestroyed\ \|\|\ isCancelled\(\)\)\ return;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ mMigrateTabTask\ =\ null;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ migrateNextTabIfApplicable\(mNumMigration\ \+\ 1\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ private\ class\ SaveListTask\ extends\ AsyncTask<Void>\ \{\
+
+      \ \ \ \ \ \ \ \ @Nullable\ TabModelSelectorMetadata\ mMetadata;\
+
+      \
+
+      \ \ \ \ \ \ \ \ @Override\
+
+      \ \ \ \ \ \ \ \ protected\ void\ onPreExecute\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(mDestroyed\ \|\|\ isCancelled\(\)\)\ return;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ try\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mMetadata\ =\ extractTabMetadata\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\ catch\ \(IOException\ e\)\ \{\
+
+      '
+    replace: "\n        @Override\n        protected void onPostExecute(Void v) {\n            try {\n                if (mDestroyed || isCancelled()) return;\n                mMigrateTabTask = null;\n                migrateNextTabIfApplicable(mNumMigration + 1);\n                    } finally {\n                finishContainerPersistenceWrite();\n            }\n        }\n    }\n\n    private class SaveListTask extends ContainerPersistenceTask {\n        @Nullable TabModelSelectorMetadata mMetadata;\n\n        @Override\n        protected void onPreExecute() {\n            if (mDestroyed || isCancelled()) return;\n            super.onPreExecute();\n            try {\n                mMetadata = extractTabMetadata();\n            } catch (IOException e) {\n"
+- description: 'Reaper Android containers: immutable tab identity, trusted CCT admission, persistent partition/SQL/reference lifecycle.'
+  regex:
+    re_pattern: '\
+
+      \ \ \ \ \ \ \ \ @Override\
+
+      \ \ \ \ \ \ \ \ protected\ void\ onPostExecute\(Void\ v\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(mDestroyed\ \|\|\ isCancelled\(\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mMetadata\ =\ null;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ return;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(mSaveListTask\ ==\ this\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mSaveListTask\ =\ null;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ for\ \(TabPersistentStoreObserver\ observer\ :\ mObservers\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ observer\.onMetadataSavedAsynchronously\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ mMetadata\ =\ null;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \}\
+
+      '
+    replace: "\n        @Override\n        protected void onPostExecute(Void v) {\n            try {\n                if (mDestroyed || isCancelled()) {\n                    mMetadata = null;\n                    return;\n                }\n\n                if (mSaveListTask == this) {\n                    mSaveListTask = null;\n                    for (TabPersistentStoreObserver observer : mObservers) {\n                        observer.onMetadataSavedAsynchronously();\n                    }\n                    mMetadata = null;\n                }\n                    } finally {\n                finishContainerPersistenceWrite();\n            }\n        }\n    }\n"
+- description: 'Reaper Android containers: immutable tab identity, trusted CCT admission, persistent partition/SQL/reference lifecycle.'
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ if\ \(details\.isIncognito\ !=\ TriState\.FALSE\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ incognitoInfo\.ids\.add\(details\.id\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ incognitoInfo\.urls\.add\(details\.url\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\ else\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ normalInfo\.ids\.add\(details\.id\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ normalInfo\.urls\.add\(details\.url\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      '
+    replace: "                if (details.isIncognito != TriState.FALSE) {\n                    incognitoInfo.ids.add(details.id);\n                    incognitoInfo.urls.add(details.url);\n                    incognitoInfo.containerIds.add(\n                            details.containerId == null ? \"\" : details.containerId);\n                } else {\n                    normalInfo.ids.add(details.id);\n                    normalInfo.urls.add(details.url);\n                    normalInfo.containerIds.add(\n                            details.containerId == null ? \"\" : details.containerId);\n                }\n            }\n        }\n"
+- description: 'Reaper Android containers: immutable tab identity, trusted CCT admission, persistent partition/SQL/reference lifecycle.'
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ modelInfo\.ids\.add\(tab\.getId\(\)\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ modelInfo\.urls\.add\(tab\.getUrl\(\)\.getSpec\(\)\);\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ return\ modelInfo;\
+
+      \ \ \ \ \}\
+
+      '
+    replace: "            }\n            modelInfo.ids.add(tab.getId());\n            modelInfo.urls.add(tab.getUrl().getSpec());\n            modelInfo.containerIds.add(tab.getContainerId());\n        }\n        return modelInfo;\n    }\n"
+- description: Remove import for the excluded Actor background restoration helper
+  regex:
+    pattern: 'import org.chromium.chrome.browser.actor.BackgroundTabRestorationHelper;
+
+      '
+    replace: ''
+  count: 1
+- description: Remove Actor-only persisted background tab ID sets
+  regex:
+    pattern: "    private Set<@TabId Integer> mBackgroundTabIds = Collections.emptySet();\n    private Set<@TabId Integer>\
+      \ mRemainingBackgroundTabIds = Collections.emptySet();\n"
+    replace: ''
+  count: 1
+- description: Remove Actor ID discovery while retaining ordinary metadata loading
+  regex:
+    pattern: "        mBackgroundTabIds =\n                BackgroundTabRestorationHelper.fetchBackgroundTabIds(\n       \
+      \                 mOrchestratorType, mTabModelSelector, ignoreRegularFiles, mIsAuthoritative);\n        mRemainingBackgroundTabIds\
+      \ =\n                BackgroundTabRestorationHelper.claimRemainingBackgroundTabIds(\n                        mOrchestratorType,\
+      \ mTabModelSelector, ignoreRegularFiles, mIsAuthoritative);\n"
+    replace: ''
+  count: 1
+- description: Remove Actor ID discovery while retaining normal active-tab restore and batching
+  regex:
+    pattern: "        if (mBackgroundTabIds.isEmpty()) {\n            mBackgroundTabIds =\n                    BackgroundTabRestorationHelper.fetchBackgroundTabIds(\n\
+      \                            mOrchestratorType,\n                            mTabModelSelector,\n                  \
+      \          mCancelNormalTabLoads,\n                            mIsAuthoritative);\n            assert mRemainingBackgroundTabIds.isEmpty();\n\
+      \            mRemainingBackgroundTabIds =\n                    BackgroundTabRestorationHelper.claimRemainingBackgroundTabIds(\n\
+      \                            mOrchestratorType,\n                            mTabModelSelector,\n                  \
+      \          mCancelNormalTabLoads,\n                            mIsAuthoritative);\n        }\n"
+    replace: ''
+  count: 1
+- description: Restore ordinary reparenting and tab-state fallback without the removed Actor interception
+  regex:
+    pattern: "        if (maybeRestoreBackgroundTab(\n                tabToRestore, restoredIndex, tabState, isIncognito,\
+      \ setAsActive)) {\n            // Handled as a background tab.\n            if (setAsActive || (tabToRestore.fromMerge\
+      \ && restoredIndex == 0)) {\n                TabModelUtils.setIndex(model, TabModelUtils.getTabIndexById(model, tabId));\n\
+      \            }\n            return;\n        } else if (isFromReparenting) {\n"
+    replace: '        if (isFromReparenting) {
+
+      '
+  count: 1
+- description: Remove private Actor tab interception helper
+  regex:
+    pattern: "    private boolean maybeRestoreBackgroundTab(\n            TabRestoreDetails tabToRestore,\n            int\
+      \ restoredIndex,\n            @Nullable TabState tabState,\n            boolean isIncognito,\n            boolean setAsActive)\
+      \ {\n        if (!BackgroundTabRestorationHelper.shouldIntercept(\n                        mOrchestratorType, isIncognito,\
+      \ mIsAuthoritative)\n                || !mBackgroundTabIds.contains(tabToRestore.id)) {\n            return false;\n\
+      \        }\n\n        Tab tab =\n                BackgroundTabRestorationHelper.maybeRestoreBackgroundTab(\n       \
+      \                 mOrchestratorType,\n                        mTabModelSelector,\n                        tabToRestore.id,\n\
+      \                        restoredIndex,\n                        tabState,\n                        mIsAuthoritative);\n\
+      \        if (tab == null) return false;\n\n        if (setAsActive) {\n            notifyActiveTabLoaded(isIncognito);\n\
+      \        }\n        mSeenTabIds.add(tabToRestore.id);\n        if (tab.getId() != tabToRestore.id) {\n            mSeenTabIds.add(tab.getId());\n\
+      \        }\n        return true;\n    }\n\n"
+    replace: ''
+  count: 1
+- description: Remove Actor ID resets from ordinary store destruction
+  regex:
+    pattern: "        mBackgroundTabIds = Collections.emptySet();\n        mRemainingBackgroundTabIds = Collections.emptySet();\n"
+    replace: ''
+  count: 1
+- description: Remove Actor-only remaining-background-tab completion
+  regex:
+    pattern: '            restoreRemainingBackgroundTabs();
+
+      '
+    replace: ''
+  count: 1
+- description: Remove private Actor completion helper
+  regex:
+    pattern: "    private void restoreRemainingBackgroundTabs() {\n        List<Tab> remainingTabs =\n                BackgroundTabRestorationHelper.restoreRemainingBackgroundTabs(\n\
+      \                        mOrchestratorType,\n                        mTabModelSelector,\n                        mRemainingBackgroundTabIds,\n\
+      \                        mIsAuthoritative);\n        for (Tab tab : remainingTabs) {\n            mSeenTabIds.add(tab.getId());\n\
+      \        }\n        mRemainingBackgroundTabIds = Collections.emptySet();\n    }\n\n"
+    replace: ''
+  count: 1
+- description: Remove the Collections import whose only users were removed Actor ID sets
+  regex:
+    pattern: 'import java.util.Collections;
+
+      '
+    replace: ''
+  count: 1
+- description: Keep the existing public migration-test API while making its container persistence superclass equally accessible
+  regex:
+    pattern: '    private abstract class ContainerPersistenceTask extends AsyncTask<Void> {
+
+      '
+    replace: '    public abstract class ContainerPersistenceTask extends AsyncTask<Void> {
+
+      '
+  count: 1
+- description: Use the existing virtual container-aware creator contract for legacy URL fallback.
+  regex:
+    pattern: "                if (tabCreator instanceof ChromeTabCreator chromeTabCreator) {\n                    tab = chromeTabCreator.createNewTabInContainer(\n\
+      \                            new LoadUrlParams(tabToRestore.url), TabLaunchType.FROM_RESTORE,\n                    \
+      \        tabToRestore.containerId, restoredIndex);\n                } else if (tabCreator instanceof ArchivedTabCreator\
+      \ archivedTabCreator) {\n                    tab = archivedTabCreator.createNewTabInContainer(\n                   \
+      \         new LoadUrlParams(tabToRestore.url), TabLaunchType.FROM_RESTORE,\n                            tabToRestore.containerId,\
+      \ restoredIndex);\n                } else {\n                    return;\n                }\n"
+    replace: "                tab =\n                        tabCreator.createNewTabInContainer(\n                       \
+      \         new LoadUrlParams(tabToRestore.url),\n                                TabLaunchType.FROM_RESTORE,\n      \
+      \                          tabToRestore.containerId,\n                                restoredIndex);\n"
+  count: 1
+- description: Preserve unknown legacy identity while this tab awaits restoration
+  regex:
+    pattern: "incognitoInfo.containerIds.add(\n                            details.containerId == null ? \"\" : details.containerId);"
+    replace: incognitoInfo.containerIds.add(details.containerId);
+  count: 1
+- description: Preserve unknown legacy identity while this tab awaits restoration
+  regex:
+    pattern: "normalInfo.containerIds.add(\n                            details.containerId == null ? \"\" : details.containerId);"
+    replace: normalInfo.containerIds.add(details.containerId);
+  count: 1

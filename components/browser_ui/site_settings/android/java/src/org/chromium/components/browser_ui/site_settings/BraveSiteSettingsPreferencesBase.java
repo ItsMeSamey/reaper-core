@@ -18,7 +18,6 @@ public class BraveSiteSettingsPreferencesBase extends BaseSiteSettingsFragment {
     private static final String ADS_KEY = "ads";
     private static final String BACKGROUND_SYNC_KEY = "background_sync";
     private static final String IDLE_DETECTION = "idle_detection";
-    private static final String PERMISSION_AUTOREVOCATION_KEY = "permission_autorevocation";
     public static final String ETHEREUM_CONNECTED_SITES_KEY = "ethereum_connected_sites";
     public static final String SOLANA_CONNECTED_SITES_KEY = "solana_connected_sites";
 
@@ -74,38 +73,6 @@ public class BraveSiteSettingsPreferencesBase extends BaseSiteSettingsFragment {
         removePreferenceIfPresent(ADS_KEY);
         removePreferenceIfPresent(BACKGROUND_SYNC_KEY);
 
-        // Hide Ethereum and Solana connected sites when wallet is disabled by policy.
-        if (isWalletDisabledByPolicy()) {
-            removePreferenceIfPresent(ETHEREUM_CONNECTED_SITES_KEY);
-            removePreferenceIfPresent(SOLANA_CONNECTED_SITES_KEY);
-        }
-
-        // We want to place these Settings at the bottom.
-        // See https://github.com/brave/brave-browser/issues/46547
-        // for the context
-        Preference prefPermissionAutorevocation =
-                getPreferenceScreen().findPreference(PERMISSION_AUTOREVOCATION_KEY);
-        assert prefPermissionAutorevocation != null
-                : "Remove the order adjustment if the prefs are removed from upstream";
-        if (prefPermissionAutorevocation != null) {
-            Preference prefSolanaConnectedSites =
-                    getPreferenceScreen().findPreference(SOLANA_CONNECTED_SITES_KEY);
-            // Solana preference may be removed if wallet is disabled by policy.
-            if (prefSolanaConnectedSites != null) {
-                int solanaConnectedSitesOrder = prefSolanaConnectedSites.getOrder();
-                prefPermissionAutorevocation.setOrder(solanaConnectedSitesOrder + 1);
-            }
-        }
     }
 
-    private boolean isWalletDisabledByPolicy() {
-        if (!hasSiteSettingsDelegate()) {
-            return false;
-        }
-        SiteSettingsDelegate delegate = getSiteSettingsDelegate();
-        if (delegate instanceof BraveWalletSiteSettingsDelegate) {
-            return ((BraveWalletSiteSettingsDelegate) delegate).isWalletDisabledByPolicy();
-        }
-        return false;
-    }
 }

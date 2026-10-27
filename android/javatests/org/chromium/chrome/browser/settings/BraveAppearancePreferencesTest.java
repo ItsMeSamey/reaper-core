@@ -63,7 +63,7 @@ public class BraveAppearancePreferencesTest {
 
         // All keys from applyOrdering() listed in expected display order. Preferences that are
         // conditionally absent (e.g. address_bar on older devices, toolbar_shortcut when adaptive
-        // toolbar is disabled, show_brave_rewards_icon when Rewards is unsupported) are skipped in
+        // toolbar is disabled) are skipped in
         // the comparison when null.
         final String[] sortedPrefKeys = {
             AppearancePreferences.PREF_NAVIGATION_SECTION,
@@ -79,8 +79,6 @@ public class BraveAppearancePreferencesTest {
             AppearancePreferences.PREF_GENERAL_SECTION,
             AppearancePreferences.PREF_BRAVE_NIGHT_MODE_ENABLED,
             AppearancePreferences.PREF_BRAVE_DISABLE_SHARING_HUB,
-            AppearancePreferences.PREF_SHOW_BRAVE_REWARDS_ICON,
-            AppearancePreferences.PREF_ADS_SWITCH,
             AppearanceSettingsFragment.PREF_BOOKMARK_BAR,
             AppearancePreferences.PREF_BRAVE_ENABLE_TAB_GROUPS,
             AppearancePreferences.PREF_SHOW_UNDO_WHEN_TABS_CLOSED,

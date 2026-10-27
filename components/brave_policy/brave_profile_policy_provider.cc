@@ -8,7 +8,9 @@
 #include <utility>
 
 #include "base/values.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_origin/brave_origin_utils.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_policy/ad_block_only_mode/ad_block_only_mode_policy_manager.h"
 #include "build/build_config.h"
 #include "components/policy/core/common/policy_bundle.h"
@@ -29,11 +31,13 @@ void BraveProfilePolicyProvider::Init(policy::SchemaRegistry* registry) {
   // Call base class Init first
   policy::ConfigurationPolicyProvider::Init(registry);
 
+#if !BUILDFLAG(IS_ANDROID)
   // Register as BraveOriginPolicyManager observer.
   // This ensures feature flags and local state are available before policy
   // loading.
   brave_origin_observation_.Observe(
       brave_origin::BraveOriginPolicyManager::GetInstance());
+#endif  // !BUILDFLAG(IS_ANDROID)
 
   // Register as AdBlockOnlyModePolicyManager observer.
   ad_block_only_mode_policy_observation_.Observe(
@@ -52,6 +56,11 @@ void BraveProfilePolicyProvider::RefreshPolicies(
 
 bool BraveProfilePolicyProvider::IsInitializationComplete(
     policy::PolicyDomain domain) const {
+#if BUILDFLAG(IS_ANDROID)
+  // Android has no Origin service to await. The synchronous ad-block-only
+  // source continues to publish policies through its existing observer.
+  return true;
+#else
   auto* manager = brave_origin::BraveOriginPolicyManager::GetInstance();
   // Short-circuit when the factory has not been registered in this process.
   // This is the case for upstream unit tests (e.g.
@@ -73,6 +82,7 @@ bool BraveProfilePolicyProvider::IsInitializationComplete(
   // observe an empty managed pref store before Brave Origin policies (e.g.
   // `BraveRewardsDisabled`) have been merged.
   return first_policies_loaded_ && manager->IsInitialized();
+#endif
 }
 
 bool BraveProfilePolicyProvider::IsFirstPolicyLoadComplete(
@@ -97,9 +107,11 @@ void BraveProfilePolicyProvider::OnBravePoliciesReady() {
 policy::PolicyBundle BraveProfilePolicyProvider::LoadPolicies() {
   policy::PolicyBundle bundle;
 
+#if !BUILDFLAG(IS_ANDROID)
   if (brave_origin::IsBraveOriginPurchased()) {
     LoadBraveOriginPolicies(bundle);
   }
+#endif  // !BUILDFLAG(IS_ANDROID)
 
   MaybeLoadAdBlockOnlyModePolicies(bundle);
 
@@ -111,6 +123,7 @@ CreateBraveProfilePolicyProvider() {
   return std::make_unique<BraveProfilePolicyProvider>();
 }
 
+#if !BUILDFLAG(IS_ANDROID)
 void BraveProfilePolicyProvider::LoadBraveOriginPolicies(
     policy::PolicyBundle& bundle) {
   // Only process if we have a profile ID
@@ -146,6 +159,7 @@ void BraveProfilePolicyProvider::LoadBraveOriginPolicy(
                         policy::POLICY_SCOPE_USER, policy::POLICY_SOURCE_BRAVE,
                         base::Value(enabled), nullptr);
 }
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 void BraveProfilePolicyProvider::MaybeLoadAdBlockOnlyModePolicies(
     policy::PolicyBundle& bundle) {

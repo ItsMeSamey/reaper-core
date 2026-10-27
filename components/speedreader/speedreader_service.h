@@ -6,12 +6,16 @@
 #ifndef BRAVE_COMPONENTS_SPEEDREADER_SPEEDREADER_SERVICE_H_
 #define BRAVE_COMPONENTS_SPEEDREADER_SPEEDREADER_SERVICE_H_
 
+#include "build/build_config.h"
+
 #include <string>
 
 #include "base/memory/raw_ptr.h"
 #include "base/observer_list.h"
 #include "brave/components/speedreader/common/speedreader_toolbar.mojom.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/speedreader/speedreader_metrics.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "components/content_settings/core/common/content_settings.h"
 #include "components/keyed_service/core/keyed_service.h"
 
@@ -96,7 +100,9 @@ class SpeedreaderService : public KeyedService {
   std::string GetFontFamilyName() const;
   std::string GetColumnWidth() const;
 
+#if !BUILDFLAG(IS_ANDROID)
   SpeedreaderMetrics& metrics() { return metrics_; }
+#endif  // !BUILDFLAG(IS_ANDROID)
 
   SpeedreaderService(const SpeedreaderService&) = delete;
   SpeedreaderService& operator=(const SpeedreaderService&) = delete;
@@ -111,7 +117,9 @@ class SpeedreaderService : public KeyedService {
   raw_ptr<HostContentSettingsMap> content_rules_ = nullptr;
   raw_ptr<PrefService> prefs_ = nullptr;
   base::ObserverList<Observer> observers_;
+#if !BUILDFLAG(IS_ANDROID)
   SpeedreaderMetrics metrics_;
+#endif  // !BUILDFLAG(IS_ANDROID)
 };
 
 }  // namespace speedreader

@@ -3,7 +3,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+#include "build/build_config.h"
+
 #include "brave/browser/brave_content_browser_client.h"
+
+#include "brave/components/ntp_background_images/buildflags/buildflags.h"
 
 #include <algorithm>
 #include <optional>
@@ -21,7 +25,9 @@
 #include "base/strings/string_number_conversions.h"
 #include "base/system/sys_info.h"
 #include "brave/browser/bluetooth/brave_bluetooth_delegate.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/brave_account/brave_account_navigation_throttle.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/brave_browser_features.h"
 #include "brave/browser/brave_browser_main_extra_parts.h"
 #include "brave/browser/brave_browser_process.h"
@@ -29,32 +35,46 @@
 #include "brave/browser/brave_search/backup_results_service_factory.h"
 #include "brave/browser/brave_shields/brave_shields_settings_service_factory.h"
 #include "brave/browser/brave_shields/brave_shields_web_contents_observer.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/brave_stats/first_run_util.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/cosmetic_filters/cosmetic_filters_tab_helper.h"
 #include "brave/browser/debounce/debounce_service_factory.h"
 #include "brave/browser/ephemeral_storage/ephemeral_storage_service_factory.h"
 #include "brave/browser/ephemeral_storage/ephemeral_storage_tab_helper.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/misc_metrics/process_misc_metrics.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/net/brave_proxying_url_loader_factory.h"
 #include "brave/browser/net/brave_proxying_web_socket.h"
 #include "brave/browser/net/features.h"
 #include "brave/browser/new_tab/new_tab_shows_navigation_throttle.h"
 #include "brave/browser/profiles/brave_renderer_updater.h"
 #include "brave/browser/profiles/brave_renderer_updater_factory.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/skus/skus_service_factory.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/ui/brave_ui_features.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/ui/webui/skus_internals_ui.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/updater/buildflags.h"
 #include "brave/browser/url_sanitizer/url_sanitizer_service_factory.h"
 #include "brave/components/ai_chat/core/common/buildflags/buildflags.h"
 #include "brave/components/body_sniffer/body_sniffer_throttle.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_account/features.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_account/mojom/brave_account.mojom.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_ads/buildflags/buildflags.h"
 #include "brave/components/brave_education/buildflags.h"
 #include "brave/components/brave_news/common/buildflags/buildflags.h"
 #include "brave/components/brave_origin/buildflags/buildflags.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_origin/mojom/brave_origin_settings.mojom.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_rewards/core/buildflags/buildflags.h"
 #include "brave/components/brave_search/browser/backup_results_service.h"
 #include "brave/components/brave_search/browser/brave_search_default_host.h"
@@ -86,15 +106,19 @@
 #include "brave/components/google_sign_in_permission/google_sign_in_permission_throttle.h"
 #include "brave/components/google_sign_in_permission/google_sign_in_permission_util.h"
 #include "brave/components/local_ai/buildflags/buildflags.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/ntp_background_images/browser/mojom/ntp_background_images.mojom.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/password_strength_meter/password_strength_meter.mojom.h"
 #include "brave/components/playlist/core/common/buildflags/buildflags.h"
 #include "brave/components/psst/buildflags/buildflags.h"
 #include "brave/components/request_otr/common/buildflags/buildflags.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/skus/common/features.h"
 #include "brave/components/skus/common/skus_internals.mojom.h"
 #include "brave/components/skus/common/skus_sdk.mojom.h"
 #include "brave/components/skus/common/skus_utils.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/speedreader/common/buildflags/buildflags.h"
 #include "brave/components/tor/buildflags/buildflags.h"
 #include "brave/components/traffic_control/buildflags/buildflags.h"
@@ -102,7 +126,6 @@
 #include "brave/components/url_sanitizer/core/browser/url_sanitizer_service.h"
 #include "brave/grit/brave_generated_resources.h"
 #include "brave/third_party/blink/renderer/brave_farbling_constants.h"
-#include "build/build_config.h"
 #include "chrome/browser/bluetooth/chrome_bluetooth_delegate_impl_client.h"
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/chrome_browser_interface_binders.h"
@@ -117,6 +140,7 @@
 #include "chrome/grit/branded_strings.h"
 #include "components/content_settings/browser/page_specific_content_settings.h"
 #include "components/content_settings/core/browser/host_content_settings_map.h"
+#include "components/content_settings/core/common/content_settings_types.h"
 #include "components/embedder_support/switches.h"
 #include "components/prefs/pref_service.h"
 #include "components/user_prefs/user_prefs.h"
@@ -159,6 +183,13 @@
 #include "third_party/widevine/cdm/buildflags.h"
 #include "ui/base/l10n/l10n_util.h"
 #include "url/origin.h"
+
+#if BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+#include "chrome/common/chrome_switches.h"
+#include "content/public/browser/navigation_controller.h"
+#include "content/public/browser/navigation_entry.h"
+#include "extensions/common/extension_urls.h"
+#endif
 
 #if !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/hid/brave_hid_delegate.h"
@@ -220,7 +251,7 @@ using content::ContentBrowserClient;
 using content::RenderFrameHost;
 using content::WebContents;
 
-#if BUILDFLAG(ENABLE_EXTENSIONS)
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
 #include "chrome/browser/extensions/chrome_content_browser_client_extensions_part.h"
 #include "extensions/browser/extension_registry.h"
 #include "extensions/common/constants.h"
@@ -261,8 +292,12 @@ using extensions::ChromeContentBrowserClientExtensionsPart;
 
 #if !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/ui/split_view/split_view_link_navigation_throttle.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/ui/webui/brave_account/brave_account_ui_desktop.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_account/mojom/brave_account.mojom.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/commands/common/commands.mojom.h"
 #include "brave/components/commands/common/features.h"
 #include "brave/ui/webui/brave_color_change_listener/brave_color_change_handler.h"
@@ -272,12 +307,9 @@ using extensions::ChromeContentBrowserClientExtensionsPart;
 #include "brave/browser/ui/ai_chat/utils.h"
 #endif
 #else
-#include "brave/browser/ui/webui/brave_account/brave_account_ui_android.h"
 #if BUILDFLAG(ENABLE_AI_CHAT)
 #include "brave/components/ai_chat/core/browser/android/ai_chat_iap_subscription_android.h"
 #endif
-#include "brave/components/brave_origin/features.h"
-#include "brave/components/brave_origin/origin_iap_subscription.h"
 #endif
 
 #if BUILDFLAG(ENABLE_TOR)
@@ -313,7 +345,9 @@ using extensions::ChromeContentBrowserClientExtensionsPart;
 
 #if BUILDFLAG(IS_ANDROID)
 #include "base/files/memory_mapped_file.h"
+#if BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
 #include "brave/browser/ui/webui/new_tab_takeover/android/new_tab_takeover_ui.h"
+#endif  // BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
 #include "chrome/common/chrome_descriptors_android.h"
 #include "content/public/browser/posix_file_descriptor_info.h"
 #include "ui/base/resource/resource_bundle_android.h"
@@ -359,7 +393,7 @@ using extensions::ChromeContentBrowserClientExtensionsPart;
 #include "brave/components/windows_recall/windows_recall.h"
 #endif
 
-#if BUILDFLAG(ENABLE_OMAHA4)
+#if BUILDFLAG(ENABLE_OMAHA4) && !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/brave_browser_main_extra_parts_p3a.h"
 #endif
 
@@ -380,6 +414,51 @@ using extensions::ChromeContentBrowserClientExtensionsPart;
 #endif
 
 namespace {
+
+#if BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+// Honor the author's viewport without changing the Store's existing UA policy.
+// Recompute the normal Android default as well, so this preference does not
+// persist after leaving the Store or choosing Desktop site.
+bool UpdateStoreAuthorViewport(WebContents* web_contents,
+                               content::SiteInstance& main_frame_site,
+                               WebPreferences* prefs) {
+  if (&main_frame_site !=
+      web_contents->GetPrimaryMainFrame()->GetSiteInstance()) {
+    return false;
+  }
+
+  const auto* entry = web_contents->GetController().GetVisibleEntry();
+  const auto& ua_metadata =
+      web_contents->GetUserAgentOverride().ua_metadata_override;
+  // Match WebContentsImpl's Android viewport-meta default, including arbitrary
+  // mobile UA overrides and overrides without UA metadata.
+  const bool desktop_ua = entry && entry->GetIsOverridingUserAgent() &&
+                          ua_metadata && !ua_metadata->mobile;
+  bool honor_store_viewport = false;
+  // A pending navigation or address-bar alias must not admit the exception.
+  const auto* main_frame = web_contents->GetPrimaryMainFrame();
+  const GURL& url = main_frame->GetLastCommittedURL();
+  if (desktop_ua && !main_frame->IsErrorDocument() && url.SchemeIs("https") &&
+      url::Origin::Create(url).IsSameOriginWith(
+          extension_urls::GetNewWebstoreLaunchURL()) &&
+      !base::CommandLine::ForCurrentProcess()->HasSwitch(
+          switches::kRequestDesktopSites)) {
+    auto* settings = HostContentSettingsMapFactory::GetForProfile(
+        web_contents->GetBrowserContext());
+    // A site or global Desktop-site choice must retain normal desktop layout.
+    honor_store_viewport =
+        settings && settings->GetContentSetting(
+                        url, url, ContentSettingsType::REQUEST_DESKTOP_SITE) !=
+                        CONTENT_SETTING_ALLOW;
+  }
+  const bool viewport_meta_enabled = !desktop_ua || honor_store_viewport;
+  if (prefs->viewport_meta_enabled == viewport_meta_enabled) {
+    return false;
+  }
+  prefs->viewport_meta_enabled = viewport_meta_enabled;
+  return true;
+}
+#endif
 
 void BindCosmeticFiltersResourcesOnTaskRunner(
     mojo::PendingReceiver<cosmetic_filters::mojom::CosmeticFiltersResources>
@@ -418,6 +497,7 @@ void BindBraveSearchFallbackHost(
       std::move(receiver));
 }
 
+#if !BUILDFLAG(IS_ANDROID)
 void BindWeb3Metrics(
     content::RenderFrameHost* const frame_host,
     mojo::PendingReceiver<misc_metrics::mojom::Web3Metrics> receiver) {
@@ -427,6 +507,7 @@ void BindWeb3Metrics(
   g_brave_browser_process->process_misc_metrics()->web3_metrics().BindReceiver(
       std::move(receiver));
 }
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 void BindBraveSearchDefaultHost(
     content::RenderFrameHost* const frame_host,
@@ -469,24 +550,6 @@ void BindIAPSubscription(
 }
 #endif
 
-#if BUILDFLAG(IS_ANDROID)
-void BindOriginIAPSubscription(
-    content::RenderFrameHost* const frame_host,
-    mojo::PendingReceiver<brave_origin::mojom::OriginIAPSubscription>
-        receiver) {
-  const GURL& frame_host_url = frame_host->GetLastCommittedURL();
-  if (!skus::IsSafeOrigin(frame_host_url)) {
-    return;
-  }
-  auto* context = frame_host->GetBrowserContext();
-  auto* profile = Profile::FromBrowserContext(context);
-  mojo::MakeSelfOwnedReceiver(
-      std::make_unique<brave_origin::OriginIAPSubscription>(
-          profile->GetPrefs()),
-      std::move(receiver));
-}
-#endif
-
 #if BUILDFLAG(ENABLE_BRAVE_VPN)
 void MaybeBindBraveVpnImpl(
     content::RenderFrameHost* const frame_host,
@@ -500,6 +563,7 @@ void MaybeBindBraveVpnImpl(
                                                     std::move(receiver));
 }
 #endif
+#if !BUILDFLAG(IS_ANDROID)
 void MaybeBindSkusSdkImpl(
     content::RenderFrameHost* const frame_host,
     mojo::PendingReceiver<skus::mojom::SkusService> receiver) {
@@ -510,6 +574,7 @@ void MaybeBindSkusSdkImpl(
   auto* context = frame_host->GetBrowserContext();
   skus::SkusServiceFactory::BindForContext(context, std::move(receiver));
 }
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 #if !BUILDFLAG(IS_ANDROID)
 void MaybeBindColorChangeHandler(
@@ -572,7 +637,7 @@ BraveContentBrowserClient::CreateBrowserMainParts(bool is_integration_test) {
   ChromeBrowserMainParts* chrome_main_parts =
       static_cast<ChromeBrowserMainParts*>(main_parts.get());
   chrome_main_parts->AddParts(std::make_unique<BraveBrowserMainExtraParts>());
-#if BUILDFLAG(ENABLE_OMAHA4)
+#if BUILDFLAG(ENABLE_OMAHA4) && !BUILDFLAG(IS_ANDROID)
   chrome_main_parts->AddParts(
       std::make_unique<BraveBrowserMainExtraPartsP3A>());
 #endif
@@ -677,7 +742,7 @@ void BraveContentBrowserClient::RegisterTrustedWebUIInterfaceBrokers(
 #endif
 
   // BraveSettingsUI interfaces
-#if BUILDFLAG(ENABLE_CONTAINERS)
+#if BUILDFLAG(ENABLE_CONTAINERS) && !BUILDFLAG(IS_ANDROID)
   if (base::FeatureList::IsEnabled(containers::features::kContainers)) {
     registry.ForWebUI<BraveSettingsUI>()
         .Add<containers::mojom::ContainersSettingsHandler>();
@@ -744,9 +809,11 @@ void BraveContentBrowserClient::RegisterTrustedWebUIInterfaceBrokers(
 #endif  // BUILDFLAG(ENABLE_BRAVE_REWARDS)
 #endif  // BUILDFLAG(ENABLE_BRAVE_ADS)
 
+#if !BUILDFLAG(IS_ANDROID)
   if (base::FeatureList::IsEnabled(skus::features::kSkusFeature)) {
     registry.ForWebUI<SkusInternalsUI>().Add<skus::mojom::SkusInternals>();
   }
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 #if BUILDFLAG(ENABLE_BRAVE_REWARDS)
   registry.ForWebUI<brave_rewards::RewardsPageUI>()
@@ -857,16 +924,11 @@ void BraveContentBrowserClient::RegisterTrustedWebUIInterfaceBrokers(
 #endif
 
 #else   // !BUILDFLAG(IS_ANDROID)
+#if BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
   registry.ForWebUI<NewTabTakeoverUI>()
       .Add<new_tab_takeover::mojom::NewTabTakeover>();
+#endif  // BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
 
-  if (brave_account::features::IsBraveAccountEnabled()) {
-    registry.ForWebUI<BraveAccountUIAndroid>()
-        .Add<brave_account::mojom::Authentication>()
-        .Add<brave_account::mojom::DialogOpener>()
-        .Add<brave_account::mojom::DialogController>()
-        .Add<password_strength_meter::mojom::PasswordStrengthMeter>();
-  }
 #endif  // !BUILDFLAG(IS_ANDROID)
 
 #if BUILDFLAG(ENABLE_PSST)
@@ -977,11 +1039,13 @@ BraveContentBrowserClient::GetAsrSession() {
 }
 #endif
 
+#if !BUILDFLAG(IS_ANDROID)
 std::unique_ptr<optimization_guide::ModelBrokerClient>
 BraveContentBrowserClient::CreateModelBrokerClient(content::BrowserContext*) {
   // Brave does not use optimization guide models.
   return nullptr;
 }
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 bool BraveContentBrowserClient::CanCreateWindow(
     content::RenderFrameHost* opener,
@@ -1045,8 +1109,10 @@ void BraveContentBrowserClient::RegisterBrowserInterfaceBindersForFrame(
       render_frame_host, map);
   map->Add<cosmetic_filters::mojom::CosmeticFiltersResources>(
       base::BindRepeating(&BindCosmeticFiltersResources));
+#if !BUILDFLAG(IS_ANDROID)
   map->Add<misc_metrics::mojom::Web3Metrics>(
       base::BindRepeating(&BindWeb3Metrics));
+#endif  // !BUILDFLAG(IS_ANDROID)
   if (brave_search::IsDefaultAPIEnabled()) {
     map->Add<brave_search::mojom::BraveSearchDefault>(
         base::BindRepeating(&BindBraveSearchDefaultHost));
@@ -1066,8 +1132,10 @@ void BraveContentBrowserClient::RegisterBrowserInterfaceBindersForFrame(
   }
 #endif
 
+#if !BUILDFLAG(IS_ANDROID)
   map->Add<skus::mojom::SkusService>(
       base::BindRepeating(&MaybeBindSkusSdkImpl));
+#endif  // !BUILDFLAG(IS_ANDROID)
 #if BUILDFLAG(ENABLE_LOCAL_AI)
   if (base::FeatureList::IsEnabled(local_ai::kBraveOnDeviceSpeechRecognition)) {
     content::RegisterWebUIControllerInterfaceBinder<
@@ -1111,13 +1179,6 @@ void BraveContentBrowserClient::RegisterBrowserInterfaceBindersForFrame(
         base::BindRepeating(&BindIAPSubscription));
   }
 #endif
-#endif
-
-#if BUILDFLAG(IS_ANDROID)
-  if (base::FeatureList::IsEnabled(brave_origin::features::kBraveOrigin)) {
-    map->Add<brave_origin::mojom::OriginIAPSubscription>(
-        base::BindRepeating(&BindOriginIAPSubscription));
-  }
 #endif
 
 #if BUILDFLAG(ENABLE_SPEEDREADER) && !BUILDFLAG(IS_ANDROID)
@@ -1420,7 +1481,7 @@ void BraveContentBrowserClient::MaybeHideReferrer(
     const GURL& document_url,
     blink::mojom::ReferrerPtr* referrer) {
   DCHECK(referrer && !referrer->is_null());
-#if BUILDFLAG(ENABLE_EXTENSIONS)
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
   if (document_url.SchemeIs(extensions::kExtensionScheme) ||
       request_url.SchemeIs(extensions::kExtensionScheme)) {
     return;
@@ -1454,7 +1515,7 @@ std::optional<GURL> BraveContentBrowserClient::GetEffectiveURL(
     return url;
   }
 
-#if BUILDFLAG(ENABLE_EXTENSIONS)
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
   if (extensions::ChromeContentBrowserClientExtensionsPart::
           AreExtensionsDisabledForProfile(profile)) {
     return url;
@@ -1526,7 +1587,9 @@ void BraveContentBrowserClient::CreateThrottlesForNavigation(
   content::BrowserContext* context =
       navigation_handle.GetWebContents()->GetBrowserContext();
 
+#if !BUILDFLAG(IS_ANDROID)
   BraveAccountNavigationThrottle::MaybeCreateAndAdd(registry);
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 #if !BUILDFLAG(IS_ANDROID)
   NewTabShowsNavigationThrottle::MaybeCreateAndAdd(registry);
@@ -1624,9 +1687,11 @@ std::vector<url::Origin>
 BraveContentBrowserClient::GetOriginsRequiringDedicatedProcess() {
   std::vector<url::Origin> isolated_origin_list;
 
+#if !BUILDFLAG(IS_ANDROID)
   std::transform(skus::kSafeOrigins.cbegin(), skus::kSafeOrigins.cend(),
                  std::back_inserter(isolated_origin_list),
                  [](auto& url) { return url::Origin::Create(GURL(url)); });
+#endif  // !BUILDFLAG(IS_ANDROID)
 
   if (brave_search::IsDefaultAPIEnabled()) {
     std::transform(brave_search::kVettedHosts.cbegin(),
@@ -1651,6 +1716,10 @@ bool BraveContentBrowserClient::OverrideWebPreferencesAfterNavigation(
       ChromeContentBrowserClient::OverrideWebPreferencesAfterNavigation(
           web_contents, main_frame_site, prefs);
 
+#if BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+  changed = UpdateStoreAuthorViewport(web_contents, main_frame_site, prefs) ||
+            changed;
+#endif
   return UpdateGlobalPrivacyControlWebPreference(web_contents, prefs) ||
          changed;
 }
@@ -1662,6 +1731,10 @@ void BraveContentBrowserClient::OverrideWebPreferences(
   ChromeContentBrowserClient::OverrideWebPreferences(
       web_contents, main_frame_site, web_prefs);
   UpdateGlobalPrivacyControlWebPreference(web_contents, web_prefs);
+
+#if BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+  UpdateStoreAuthorViewport(web_contents, main_frame_site, web_prefs);
+#endif
 
   // WebPreferences are rebuilt from defaults on every recompute (theme, font
   // and other pref changes), so derive `is_tor_window` here. Otherwise the

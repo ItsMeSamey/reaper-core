@@ -1,0 +1,94 @@
+# Copyright (c) 2026 The Reaper Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+substitutions:
+- description: Cancel Android uninstall dialogs when the target disappears before icon load
+  regex:
+    re_pattern: '\#include\ <string>\
+
+      \
+
+      \#include\ "base/functional/callback_helpers\.h"\
+
+      \#include\ "base/run_loop\.h"\
+
+      \#include\ "base/strings/stringprintf\.h"\
+
+      \#include\ "chrome/browser/extensions/extension_browsertest\.h"\
+
+      \#include\ "chrome/browser/profiles/profile\.h"\
+
+      \#include\ "content/public/browser/web_contents\.h"\
+
+      '
+    replace: '#include <string>
+
+
+      #include "base/functional/callback_helpers.h"
+
+      #include "base/location.h"
+
+      #include "base/run_loop.h"
+
+      #include "base/strings/stringprintf.h"
+
+      #include "base/task/single_thread_task_runner.h"
+
+      #include "base/test/bind.h"
+
+      #include "base/test/test_future.h"
+
+      #include "build/build_config.h"
+
+      #include "chrome/browser/extensions/extension_browsertest.h"
+
+      #include "chrome/browser/profiles/profile.h"
+
+      #include "content/public/browser/web_contents.h"
+
+      '
+- description: Cancel Android uninstall dialogs when the target disappears before icon load
+  regex:
+    re_pattern: '\#include\ "content/public/test/browser_test_utils\.h"\
+
+      \#include\ "content/public/test/test_navigation_observer\.h"\
+
+      \#include\ "extensions/browser/extension_dialog_auto_confirm\.h"\
+
+      \#include\ "extensions/browser/uninstall_reason\.h"\
+
+      \#include\ "extensions/common/extension\.h"\
+
+      \#include\ "extensions/test/extension_test_message_listener\.h"\
+
+      '
+    replace: '#include "content/public/test/browser_test_utils.h"
+
+      #include "content/public/test/test_navigation_observer.h"
+
+      #include "extensions/browser/extension_dialog_auto_confirm.h"
+
+      #include "extensions/browser/extension_registrar.h"
+
+      #include "extensions/browser/extension_registry.h"
+
+      #include "extensions/browser/uninstall_reason.h"
+
+      #include "extensions/common/extension.h"
+
+      #include "extensions/test/extension_test_message_listener.h"
+
+      '
+- description: Cancel Android uninstall dialogs when the target disappears before icon load
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ GetWebContentsAt\(1\)\->GetLastCommittedURL\(\)\.spec\(\)\);\
+
+      \}\
+
+      \
+
+      \}\ \ //\ namespace\ extensions\
+
+      '
+    replace: "            GetWebContentsAt(1)->GetLastCommittedURL().spec());\n}\n\n#if BUILDFLAG(IS_ANDROID)\nnamespace {\n\nclass ScopedUninstallDialogShownObserver {\n public:\n  ScopedUninstallDialogShownObserver()\n      : callback_(base::BindLambdaForTesting([this] {\n          ++count_;\n          if (!shown_.IsReady()) {\n            shown_.SetValue();\n          }\n        })) {\n    ExtensionUninstallDialog::SetOnShownCallbackForTesting(&callback_);\n  }\n\n  ~ScopedUninstallDialogShownObserver() {\n    ExtensionUninstallDialog::SetOnShownCallbackForTesting(nullptr);\n  }\n\n  int count() const { return count_; }\n  bool Wait() { return shown_.Wait(); }\n\n private:\n  int count_ = 0;\n  base::test::TestFuture<void> shown_;\n  base::RepeatingClosure callback_;\n};\n\n}  // namespace\n\nclass AndroidExtensionUninstallDialogBrowserTest : public ExtensionBrowserTest {\n protected:\n  scoped_refptr<const Extension> LoadExtensionWithoutIcon() {\n    test_dir_.WriteManifest(R\"({\n      \"name\": \"Pending uninstall dialog\",\n      \"version\": \"1.0\",\n      \"manifest_version\": 3\n    })\");\n    return LoadExtension(test_dir_.UnpackedPath());\n  }\n\n  void WaitPastDefaultIconCallback() {\n    // With no manifest icon, IconImage::LoadImageForScaleAsync posts its\n    // completion to this sequence. This marker follows that exact queued task.\n    base::test::TestFuture<void> marker;\n    ASSERT_TRUE(base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(\n        FROM_HERE, marker.GetCallback()));\n    ASSERT_TRUE(marker.Wait());\n  }\n\n  void CheckRemovalBeforeIconLoad(bool terminated, bool destroy_on_close) {\n    scoped_refptr<const Extension> extension = LoadExtensionWithoutIcon();\n    ASSERT_TRUE(extension);\n    auto* registrar = ExtensionRegistrar::Get(profile());\n    auto* registry = ExtensionRegistry::Get(profile());\n    if (terminated) {\n      registrar->TerminateExtension(extension->id());\n      ASSERT_TRUE(registry->terminated_extensions().Contains(extension->id()));\n    } else {\n      DisableExtension(extension->id());\n      ASSERT_TRUE(registry->disabled_extensions().Contains(extension->id()));\n    }\n\n    ScopedTestDialogAutoConfirm auto_confirm(ScopedTestDialogAutoConfirm::NONE);\n    ScopedUninstallDialogShownObserver shown;\n    std::unique_ptr<ExtensionUninstallDialog> dialog;\n    int close_count = 0;\n    TestExtensionUninstallDialogDelegate delegate(\n        base::BindLambdaForTesting([&] {\n          ++close_count;\n          if (destroy_on_close) {\n            dialog.reset();\n          }\n        }));\n    // Keep the delegate alive if an assertion exits with a shown dialog.\n    base::ScopedClosureRunner cleanup(\n        base::BindLambdaForTesting([&] { dialog.reset(); }));\n    dialog = ExtensionUninstallDialog::Create(\n        profile(), GetActiveWebContents()->GetTopLevelNativeWindow(), &delegate);\n    auto weak_dialog = dialog->AsWeakPtr();\n    dialog->ConfirmUninstall(extension, UNINSTALL_REASON_FOR_TESTING,\n                             UNINSTALL_SOURCE_FOR_TESTING);\n    ASSERT_EQ(0, shown.count());\n    ASSERT_EQ(0, close_count);\n\n    // Do not pump the UI sequence between ConfirmUninstall and removal. A\n    // disabled/terminated target emits no unload event that could show the UI.\n    ASSERT_TRUE(registrar->UninstallExtension(\n        extension->id(), UNINSTALL_REASON_FOR_TESTING, nullptr));\n    EXPECT_EQ(1, close_count);\n    EXPECT_TRUE(delegate.canceled());\n    EXPECT_EQ(u\"Extension was removed before dialog closed.\", delegate.error());\n    EXPECT_EQ(!destroy_on_close, static_cast<bool>(weak_dialog));\n    EXPECT_FALSE(registry->GetInstalledExtension(extension->id()));\n\n    WaitPastDefaultIconCallback();\n    EXPECT_EQ(0, shown.count());\n    EXPECT_EQ(1, close_count);\n  }\n\n private:\n  TestExtensionDir test_dir_;\n};\n\nIN_PROC_BROWSER_TEST_F(AndroidExtensionUninstallDialogBrowserTest,\n                       DisabledExtensionRemovedBeforeIconLoad) {\n  CheckRemovalBeforeIconLoad(/*terminated=*/false, /*destroy_on_close=*/false);\n}\n\nIN_PROC_BROWSER_TEST_F(AndroidExtensionUninstallDialogBrowserTest,\n                       TerminatedExtensionRemovedBeforeIconLoad) {\n  CheckRemovalBeforeIconLoad(/*terminated=*/true, /*destroy_on_close=*/false);\n}\n\nIN_PROC_BROWSER_TEST_F(AndroidExtensionUninstallDialogBrowserTest,\n                       PendingRemovalDelegateDestroysDialog) {\n  CheckRemovalBeforeIconLoad(/*terminated=*/false, /*destroy_on_close=*/true);\n}\n\nIN_PROC_BROWSER_TEST_F(AndroidExtensionUninstallDialogBrowserTest,\n                       DisabledExtensionRemovedAfterDialogShown) {\n  scoped_refptr<const Extension> extension = LoadExtensionWithoutIcon();\n  ASSERT_TRUE(extension);\n  DisableExtension(extension->id());\n  ScopedTestDialogAutoConfirm auto_confirm(ScopedTestDialogAutoConfirm::NONE);\n  ScopedUninstallDialogShownObserver shown;\n  base::test::TestFuture<void> closed;\n  TestExtensionUninstallDialogDelegate delegate(closed.GetRepeatingCallback());\n  auto dialog = ExtensionUninstallDialog::Create(\n      profile(), GetActiveWebContents()->GetTopLevelNativeWindow(), &delegate);\n  dialog->ConfirmUninstall(extension, UNINSTALL_REASON_FOR_TESTING,\n                           UNINSTALL_SOURCE_FOR_TESTING);\n  ASSERT_TRUE(shown.Wait());\n  EXPECT_EQ(1, shown.count());\n  EXPECT_FALSE(closed.IsReady());\n\n  ASSERT_TRUE(ExtensionRegistrar::Get(profile())->UninstallExtension(\n      extension->id(), UNINSTALL_REASON_FOR_TESTING, nullptr));\n  ASSERT_TRUE(closed.Wait());\n  EXPECT_TRUE(delegate.canceled());\n  EXPECT_EQ(u\"Extension was removed before dialog closed.\", delegate.error());\n  WaitPastDefaultIconCallback();\n  EXPECT_EQ(1, shown.count());\n}\n\nIN_PROC_BROWSER_TEST_F(AndroidExtensionUninstallDialogBrowserTest,\n                       UnchangedTargetAutoCancelPreservesInstallation) {\n  scoped_refptr<const Extension> extension = LoadExtensionWithoutIcon();\n  ASSERT_TRUE(extension);\n  DisableExtension(extension->id());\n  ScopedTestDialogAutoConfirm auto_confirm(ScopedTestDialogAutoConfirm::CANCEL);\n  ScopedUninstallDialogShownObserver shown;\n  base::test::TestFuture<void> closed;\n  TestExtensionUninstallDialogDelegate delegate(closed.GetRepeatingCallback());\n  auto dialog = ExtensionUninstallDialog::Create(\n      profile(), GetActiveWebContents()->GetTopLevelNativeWindow(), &delegate);\n  dialog->ConfirmUninstall(extension, UNINSTALL_REASON_FOR_TESTING,\n                           UNINSTALL_SOURCE_FOR_TESTING);\n  ASSERT_TRUE(closed.Wait());\n  EXPECT_TRUE(delegate.canceled());\n  EXPECT_EQ(u\"User canceled uninstall dialog\", delegate.error());\n  EXPECT_EQ(1, shown.count());\n  EXPECT_TRUE(ExtensionRegistry::Get(profile())->disabled_extensions().Contains(\n      extension->id()));\n  WaitPastDefaultIconCallback();\n  EXPECT_EQ(1, shown.count());\n}\n#endif  // BUILDFLAG(IS_ANDROID)\n\n}  // namespace extensions\n"

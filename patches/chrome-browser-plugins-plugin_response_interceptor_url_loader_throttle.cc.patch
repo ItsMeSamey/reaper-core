@@ -1,0 +1,86 @@
+diff --git a/chrome/browser/plugins/plugin_response_interceptor_url_loader_throttle.cc b/chrome/browser/plugins/plugin_response_interceptor_url_loader_throttle.cc
+--- a/chrome/browser/plugins/plugin_response_interceptor_url_loader_throttle.cc
++++ b/chrome/browser/plugins/plugin_response_interceptor_url_loader_throttle.cc
+@@ -13,14 +13,18 @@
+ #include "base/numerics/safe_conversions.h"
+ #include "base/unguessable_token.h"
+ #include "base/uuid.h"
++#include "build/build_config.h"
+ #include "chrome/browser/extensions/api/mime_handlers/dispatch_mime_handler_event.h"
+ #include "chrome/browser/plugins/plugin_utils.h"
+ #include "content/public/browser/browser_task_traits.h"
+ #include "content/public/browser/browser_thread.h"
+ #include "content/public/browser/download_utils.h"
+ #include "content/public/browser/web_contents.h"
++#include "content/public/common/buildflags.h"
+ #include "extensions/browser/extension_registry.h"
++#if BUILDFLAG(ENABLE_PLUGINS)
+ #include "extensions/browser/guest_view/mime_handler_view/mime_handler_view_attach_helper.h"
++#endif
+ #include "extensions/browser/mime_handler/mime_handler_body_cache.h"
+ #include "extensions/browser/mime_handler/mime_handler_page.h"
+ #include "extensions/browser/mime_handler/mime_handler_stream_manager.h"
+@@ -197,6 +201,16 @@
+ 
+   std::string extension_id;
+   std::optional<MimeHandlerStreamManager::CachedFallbackBody> cached_body;
++#if BUILDFLAG(IS_ANDROID)
++  // A native fallback reload must reach Android's existing PDF/download path,
++  // including after redirects. Never let the same extension reclaim it.
++  if (auto* manager = MimeHandlerStreamManager::FromWebContents(web_contents);
++      manager &&
++      manager->ShouldBypassForNativeFallback(frame_tree_node_id_)) {
++    return;
++  }
++#endif
++#if BUILDFLAG(ENABLE_PDF)
+   if (response_head->mime_type == pdf::kPDFMimeType) {
+     // A generic MIME handler extension called
+     // chrome.mimeHandler.abortAndFallbackToNativeHandler() on a prior
+@@ -222,6 +236,8 @@
+     }
+   }
+ 
++#endif  // BUILDFLAG(ENABLE_PDF)
++
+   if (extension_id.empty()) {
+     extension_id = PluginUtils::GetExtensionIdForMimeType(
+         web_contents->GetBrowserContext(), response_head->mime_type, embedded);
+@@ -292,6 +308,7 @@
+         response_url, response_head->mime_type, internal_id,
+         /*use_oopif=*/true, /*is_oopif_pdf=*/is_for_oopif_pdf);
+   } else {
++#if BUILDFLAG(ENABLE_PLUGINS)
+     // The resource is handled by frame-based MimeHandlerView, so let the
+     // MimeHandlerView code set the payload.
+     payload = extensions::MimeHandlerViewAttachHelper::
+@@ -301,6 +318,10 @@
+             base::BindOnce(
+                 &PluginResponseInterceptorURLLoaderThrottle::ResumeLoad,
+                 weak_factory_.GetWeakPtr()));
++#else
++    // PluginUtils excludes legacy handlers on Android before reaching here.
++    return;
++#endif
+   }
+   *defer = true;
+ 
+@@ -423,6 +444,7 @@
+     // every other generic-handler response, skip the cost. On
+     // forwarding-pipe creation failure the original source handle is
+     // returned via `forwarding_pipe`, so the body is never lost.
++#if BUILDFLAG(ENABLE_PDF)
+     if (is_for_generic_mime_handler &&
+         original_mime_type == pdf::kPDFMimeType &&
+         chrome_pdf::features::IsOopifPdfEnabled()) {
+@@ -430,7 +452,9 @@
+       body_cache = extensions::MimeHandlerBodyCache::Create(
+           std::move(consumer_handle), &forwarding_pipe);
+       transferrable_loader->body = std::move(forwarding_pipe);
+-    } else {
++    } else
++#endif
++    {
+       transferrable_loader->body = std::move(consumer_handle);
+     }
+   }

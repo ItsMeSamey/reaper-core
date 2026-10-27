@@ -3,6 +3,8 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at https://mozilla.org/MPL/2.0/.
 
+#include "build/build_config.h"
+
 #include "brave/components/brave_shields/core/browser/ad_block_component_service_manager.h"
 
 #include <cstddef>
@@ -21,7 +23,9 @@
 #include "brave/components/brave_shields/core/browser/ad_block_filter_list_catalog_provider.h"
 #include "brave/components/brave_shields/core/browser/ad_block_filters_provider.h"
 #include "brave/components/brave_shields/core/browser/ad_block_filters_provider_manager.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_shields/core/browser/ad_block_list_p3a.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_shields/core/browser/filter_list_catalog_entry.h"
 #include "brave/components/brave_shields/core/common/brave_shield_constants.h"
 #include "brave/components/brave_shields/core/common/features.h"
@@ -101,11 +105,17 @@ TEST_P(AdBlockComponentServiceManagerDATCacheTest,
 
   AdBlockFiltersProviderManager filters_provider_manager;
   AdBlockFilterListCatalogProvider catalog_provider(nullptr);
+#if !BUILDFLAG(IS_ANDROID)
   AdBlockListP3A list_p3a(&prefs);
+#endif  // !BUILDFLAG(IS_ANDROID)
 
   AdBlockComponentServiceManager service_manager(
       &prefs, &filters_provider_manager, "en", nullptr, &catalog_provider,
+#if BUILDFLAG(IS_ANDROID)
+      nullptr);
+#else
       &list_p3a);
+#endif  // BUILDFLAG(IS_ANDROID)
 
   const auto& default_providers =
       filters_provider_manager.GetProviders(/*is_for_default_engine=*/true);
@@ -168,11 +178,17 @@ TEST_P(AdBlockComponentServiceManagerGatesTest,
 
   AdBlockFiltersProviderManager filters_provider_manager;
   AdBlockFilterListCatalogProvider catalog_provider(nullptr);
+#if !BUILDFLAG(IS_ANDROID)
   AdBlockListP3A list_p3a(&prefs);
+#endif  // !BUILDFLAG(IS_ANDROID)
 
   AdBlockComponentServiceManager service_manager(
       &prefs, &filters_provider_manager, "en", nullptr, &catalog_provider,
+#if BUILDFLAG(IS_ANDROID)
+      nullptr);
+#else
       &list_p3a);
+#endif  // BUILDFLAG(IS_ANDROID)
 
   // Pre-consume the startup change notifications so that later OnChanged calls
   // go through NotifyObservers instead of being swallowed. Without this, the
@@ -239,12 +255,19 @@ class AdBlockComponentServiceManagerAdblockOnlyModeTest : public testing::Test {
   }
 
   void SetUpAdBlockComponentServiceManager() {
+#if !BUILDFLAG(IS_ANDROID)
     list_p3a_ = std::make_unique<AdBlockListP3A>(&local_state_);
+#endif  // !BUILDFLAG(IS_ANDROID)
     catalog_provider_ =
         std::make_unique<AdBlockFilterListCatalogProvider>(nullptr);
     manager_ = std::make_unique<AdBlockComponentServiceManager>(
         &local_state_, /*filters_provider_manager=*/nullptr, "en-US",
-        /*cus=*/nullptr, catalog_provider_.get(), list_p3a_.get());
+        /*cus=*/nullptr, catalog_provider_.get(),
+#if BUILDFLAG(IS_ANDROID)
+        nullptr);
+#else
+        list_p3a_.get());
+#endif  // BUILDFLAG(IS_ANDROID)
     base::ListValue catalog;
     for (const auto& [uuid, default_enabled] : kFilterListCatalogEntries) {
       catalog.Append(base::DictValue()
@@ -259,7 +282,9 @@ class AdBlockComponentServiceManagerAdblockOnlyModeTest : public testing::Test {
   base::test::TaskEnvironment task_environment_;
   base::test::ScopedFeatureList feature_list_;
   TestingPrefServiceSimple local_state_;
+#if !BUILDFLAG(IS_ANDROID)
   std::unique_ptr<AdBlockListP3A> list_p3a_;
+#endif  // !BUILDFLAG(IS_ANDROID)
   std::unique_ptr<AdBlockFilterListCatalogProvider> catalog_provider_;
   std::unique_ptr<AdBlockComponentServiceManager> manager_;
 };

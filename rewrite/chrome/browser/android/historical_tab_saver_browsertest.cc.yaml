@@ -1,0 +1,521 @@
+# Android real split persistence and recently-closed restoration.
+substitutions:
+- description: Exercise real native split collections, session history and deferred Java-group reconstruction
+  count: 1
+  regex:
+    re_pattern: \#include\ "base/android/jni_android\.h"
+    replace: '#include "base/android/jni_android.h"
+
+      #include "base/android/jni_array.h"
+
+      #include "base/android/jni_string.h"
+
+      #include "base/android/token_android.h"
+
+      #include "chrome/browser/sessions/tab_restore_service_factory.h"
+
+      #include "chrome/browser/ui/android/tab_model/android_live_tab_context_wrapper.h"
+
+      #include "chrome/browser/ui/android/tab_model/tab_model.h"
+
+      #include "chrome/browser/ui/android/tab_model/tab_model_list.h"
+
+      #include "components/sessions/content/content_live_tab.h"
+
+      #include "components/sessions/core/tab_restore_service.h"
+
+      #include "components/sessions/core/tab_restore_types.h"
+
+      #include "components/tabs/public/android/jni_conversion.h"
+
+      #include "content/public/browser/web_contents.h"
+
+      #include "url/android/gurl_android.h"'
+- description: Use the production restore bridge so history regression does not depend on split toolbar mounting
+  count: 1
+  regex:
+    re_pattern: namespace\ historical_tab_saver\ \{
+    replace: '#include "chrome/android/chrome_jni_headers/TabModelJniBridge_jni.h"
+
+
+      namespace historical_tab_saver {'
+- description: Cover native split history values and order across unsplit, complete-pair restoration and orphan filtering
+  count: 1
+  regex:
+    re_pattern: //\ Test\ WebContentsByteBuffer\ non\-empty\ object\ creation\.
+    replace: "IN_PROC_BROWSER_TEST_F(HistoricalTabSaverBrowserTest,\n                       SplitHistoryKeepsOrderAndReconstructsAfterGrouping) {\n  Navigate();\n  JNIEnv* env = base::android::AttachCurrentThread();\n  TabAndroid* leading = TabAndroid::FromWebContents(GetActiveWebContents());\n  ASSERT_TRUE(leading);\n  TabModel* model = TabModelList::FindTabModelWithWindowSessionId(leading->GetWindowId());\n  ASSERT_TRUE(model);\n  const GURL url = embedded_test_server()->GetURL(\"/android/google.html\");\n  auto* opened = model->OpenTab(url, model->GetTabCount(), false);\n  ASSERT_TRUE(opened);\n  TabAndroid* trailing = TabAndroid::FromWebContents(opened->GetContents());\n  ASSERT_TRUE(trailing);\n  ASSERT_TRUE(content::NavigateToURL(trailing->web_contents(), url));\n  const auto id = split_tabs::SplitTabId::GenerateNew();\n  ASSERT_TRUE(Java_TabModelJniBridge_restoreSplit(\n      env, model->GetJavaObject(), id.token(),\n      std::vector<int>{leading->GetAndroidId(), trailing->GetAndroidId()}, 1, 0.37));\n  ASSERT_EQ(leading->GetSplit(), id);\n  ASSERT_EQ(trailing->GetSplit(), id);\n\n  std::vector<WebContentsStateByteBuffer> states;\n  states.emplace_back(WebContentsState::GetContentsStateAsByteBuffer(env, trailing->web_contents()), 2);\n  states.emplace_back(WebContentsState::GetContentsStateAsByteBuffer(env, leading->web_contents()), 2);\n  AndroidLiveTabContextCloseWrapper closing(model, {trailing, leading}, {}, {}, {}, std::move(states));\n  auto* first = closing.GetLiveTabAt(0);\n  auto* second = closing.GetLiveTabAt(1);\n  ASSERT_NE(first, second);\n  EXPECT_EQ(&static_cast<sessions::ContentLiveTab*>(first)->GetWebContents(), leading->web_contents());\n  EXPECT_EQ(&static_cast<sessions::ContentLiveTab*>(second)->GetWebContents(), trailing->web_contents());\n  EXPECT_EQ(closing.GetLiveTabAt(0), first);\n  model->Unsplit(id);\n  EXPECT_FALSE(leading->GetSplit());\n  EXPECT_EQ(closing.GetSplitForTab(0), id);\n  EXPECT_EQ(closing.GetSplitForTab(1), id);\n  ASSERT_TRUE(closing.GetVisualDataForSplit(id));\n  EXPECT_EQ(closing.GetVisualDataForSplit(id)->split_layout(), split_tabs::SplitTabLayout::kStacked);\n  EXPECT_DOUBLE_EQ(closing.GetVisualDataForSplit(id)->split_ratio(), 0.37);\n\n  auto* service = TabRestoreServiceFactory::GetForProfile(GetProfile());\n  ASSERT_TRUE(service);\n  service->ClearEntries();\n  service->BrowserClosing(&closing);\n  service->BrowserClosed(&closing);\n  ASSERT_EQ(service->entries().size(), 1u);\n  ASSERT_EQ(service->entries().front()->type, sessions::tab_restore::Type::WINDOW);\n  const auto& saved = static_cast<const sessions::tab_restore::Window&>(*service->entries().front());\n  ASSERT_EQ(saved.tabs.size(), 2u);\n  EXPECT_EQ(saved.tabs[0]->split_id, id);\n  EXPECT_EQ(saved.tabs[1]->split_id, id);\n  ASSERT_TRUE(saved.tabs[0]->split_visual_data);\n  EXPECT_DOUBLE_EQ(saved.tabs[0]->split_visual_data->split_ratio(), 0.37);\n\n  AndroidLiveTabContextRestoreWrapper restoring(model);\n  restoring.ReconstructSplit(first, second, id, *closing.GetVisualDataForSplit(id));\n  EXPECT_FALSE(leading->GetSplit());\n  // The Java group restore happens at this boundary in the real bridge.\n  restoring.RestoreSplits();\n  EXPECT_EQ(leading->GetSplit(), id);\n  EXPECT_EQ(trailing->GetSplit(), id);\n  restoring.RestoreSplits();\n  EXPECT_EQ(leading->GetSplit(), id);\n\n  std::vector<WebContentsStateByteBuffer> orphan_state;\n  orphan_state.emplace_back(WebContentsState::GetContentsStateAsByteBuffer(env, leading->web_contents()), 2);\n  AndroidLiveTabContextCloseWrapper orphan(model, {leading}, {}, {}, {}, std::move(orphan_state));\n  EXPECT_FALSE(orphan.GetSplitForTab(0));\n  model->Unsplit(id);\n  service->ClearEntries();\n}\n\n// Test WebContentsByteBuffer non-empty object creation."
+- description: Format modified Android split persistence implementation
+  count: 1
+  regex:
+    re_pattern: '\#include\ "base/android/jni_android\.h"\
+
+      \#include\ "base/android/jni_array\.h"\
+
+      \#include\ "base/android/jni_string\.h"\
+
+      \#include\ "base/android/token_android\.h"\
+
+      \#include\ "chrome/browser/sessions/tab_restore_service_factory\.h"\
+
+      \#include\ "chrome/browser/ui/android/tab_model/android_live_tab_context_wrapper\.h"\
+
+      \#include\ "chrome/browser/ui/android/tab_model/tab_model\.h"\
+
+      \#include\ "chrome/browser/ui/android/tab_model/tab_model_list\.h"\
+
+      \#include\ "components/sessions/content/content_live_tab\.h"\
+
+      \#include\ "components/sessions/core/tab_restore_service\.h"\
+
+      \#include\ "components/sessions/core/tab_restore_types\.h"\
+
+      \#include\ "components/tabs/public/android/jni_conversion\.h"\
+
+      \#include\ "content/public/browser/web_contents\.h"\
+
+      \#include\ "url/android/gurl_android\.h"\
+
+      \#include\ "base/test/gtest_util\.h"\
+
+      \#include\ "chrome/browser/android/tab_android\.h"\
+
+      \#include\ "chrome/browser/profiles/profile\.h"\
+
+      \#include\ "chrome/browser/profiles/profile_manager\.h"\
+
+      \#include\ "chrome/browser/tab/web_contents_state\.h"\
+
+      \#include\ "chrome/test/base/android/android_browser_test\.h"\
+
+      \#include\ "chrome/test/base/chrome_test_utils\.h"\
+
+      \#include\ "content/public/test/browser_test\.h"\
+
+      \#include\ "content/public/test/browser_test_utils\.h"\
+
+      \#include\ "net/test/embedded_test_server/embedded_test_server\.h"\
+
+      \
+
+      \#include\ "chrome/android/chrome_jni_headers/TabModelJniBridge_jni\.h"\
+
+      \
+
+      namespace\ historical_tab_saver\ \{\
+
+      '
+    replace: '#include "base/android/jni_android.h"
+
+      #include "base/android/jni_array.h"
+
+      #include "base/android/jni_string.h"
+
+      #include "base/android/token_android.h"
+
+      #include "base/test/gtest_util.h"
+
+      #include "chrome/browser/android/tab_android.h"
+
+      #include "chrome/browser/profiles/profile.h"
+
+      #include "chrome/browser/profiles/profile_manager.h"
+
+      #include "chrome/browser/sessions/tab_restore_service_factory.h"
+
+      #include "chrome/browser/tab/web_contents_state.h"
+
+      #include "chrome/browser/ui/android/tab_model/android_live_tab_context_wrapper.h"
+
+      #include "chrome/browser/ui/android/tab_model/tab_model.h"
+
+      #include "chrome/browser/ui/android/tab_model/tab_model_list.h"
+
+      #include "chrome/test/base/android/android_browser_test.h"
+
+      #include "chrome/test/base/chrome_test_utils.h"
+
+      #include "components/sessions/content/content_live_tab.h"
+
+      #include "components/sessions/core/tab_restore_service.h"
+
+      #include "components/sessions/core/tab_restore_types.h"
+
+      #include "components/tabs/public/android/jni_conversion.h"
+
+      #include "content/public/browser/web_contents.h"
+
+      #include "content/public/test/browser_test.h"
+
+      #include "content/public/test/browser_test_utils.h"
+
+      #include "net/test/embedded_test_server/embedded_test_server.h"
+
+      #include "url/android/gurl_android.h"
+
+
+      #include "chrome/android/chrome_jni_headers/TabModelJniBridge_jni.h"
+
+
+      namespace historical_tab_saver {
+
+      '
+- description: Format modified Android split persistence implementation
+  count: 1
+  regex:
+    re_pattern: '\ \ Navigate\(\);\
+
+      \ \ JNIEnv\*\ env\ =\ base::android::AttachCurrentThread\(\);\
+
+      \ \ TabAndroid\*\ leading\ =\ TabAndroid::FromWebContents\(GetActiveWebContents\(\)\);\
+
+      \ \ ASSERT_TRUE\(leading\);\
+
+      \ \ TabModel\*\ model\ =\ TabModelList::FindTabModelWithWindowSessionId\(leading\->GetWindowId\(\)\);\
+
+      \ \ ASSERT_TRUE\(model\);\
+
+      \ \ const\ GURL\ url\ =\ embedded_test_server\(\)\->GetURL\("/android/google\.html"\);\
+
+      \ \ auto\*\ opened\ =\ model\->OpenTab\(url,\ model\->GetTabCount\(\),\ false\);\
+
+      \ \ ASSERT_TRUE\(opened\);\
+
+      '
+    replace: "  Navigate();\n  JNIEnv* env = base::android::AttachCurrentThread();\n  TabAndroid* leading = TabAndroid::FromWebContents(GetActiveWebContents());\n  ASSERT_TRUE(leading);\n  TabModel* model =\n      TabModelList::FindTabModelWithWindowSessionId(leading->GetWindowId());\n  ASSERT_TRUE(model);\n  const GURL url = embedded_test_server()->GetURL(\"/android/google.html\");\n  auto* opened = model->OpenTab(url, model->GetTabCount(), false);\n  ASSERT_TRUE(opened);\n"
+- description: Format modified Android split persistence implementation
+  count: 1
+  regex:
+    re_pattern: '\ \ ASSERT_TRUE\(content::NavigateToURL\(trailing\->web_contents\(\),\ url\)\);\
+
+      \ \ const\ auto\ id\ =\ split_tabs::SplitTabId::GenerateNew\(\);\
+
+      \ \ ASSERT_TRUE\(Java_TabModelJniBridge_restoreSplit\(\
+
+      \ \ \ \ \ \ env,\ model\->GetJavaObject\(\),\ id\.token\(\),\
+
+      \ \ \ \ \ \ std::vector<int>\{leading\->GetAndroidId\(\),\ trailing\->GetAndroidId\(\)\},\ 1,\ 0\.37\)\);\
+
+      \ \ ASSERT_EQ\(leading\->GetSplit\(\),\ id\);\
+
+      \ \ ASSERT_EQ\(trailing\->GetSplit\(\),\ id\);\
+
+      \
+
+      \ \ std::vector<WebContentsStateByteBuffer>\ states;\
+
+      \ \ states\.emplace_back\(WebContentsState::GetContentsStateAsByteBuffer\(env,\ trailing\->web_contents\(\)\),\ 2\);\
+
+      \ \ states\.emplace_back\(WebContentsState::GetContentsStateAsByteBuffer\(env,\ leading\->web_contents\(\)\),\ 2\);\
+
+      \ \ AndroidLiveTabContextCloseWrapper\ closing\(model,\ \{trailing,\ leading\},\ \{\},\ \{\},\ \{\},\ std::move\(states\)\);\
+
+      \ \ auto\*\ first\ =\ closing\.GetLiveTabAt\(0\);\
+
+      \ \ auto\*\ second\ =\ closing\.GetLiveTabAt\(1\);\
+
+      \ \ ASSERT_NE\(first,\ second\);\
+
+      \ \ EXPECT_EQ\(\&static_cast<sessions::ContentLiveTab\*>\(first\)\->GetWebContents\(\),\ leading\->web_contents\(\)\);\
+
+      \ \ EXPECT_EQ\(\&static_cast<sessions::ContentLiveTab\*>\(second\)\->GetWebContents\(\),\ trailing\->web_contents\(\)\);\
+
+      \ \ EXPECT_EQ\(closing\.GetLiveTabAt\(0\),\ first\);\
+
+      \ \ model\->Unsplit\(id\);\
+
+      \ \ EXPECT_FALSE\(leading\->GetSplit\(\)\);\
+
+      \ \ EXPECT_EQ\(closing\.GetSplitForTab\(0\),\ id\);\
+
+      \ \ EXPECT_EQ\(closing\.GetSplitForTab\(1\),\ id\);\
+
+      \ \ ASSERT_TRUE\(closing\.GetVisualDataForSplit\(id\)\);\
+
+      \ \ EXPECT_EQ\(closing\.GetVisualDataForSplit\(id\)\->split_layout\(\),\ split_tabs::SplitTabLayout::kStacked\);\
+
+      \ \ EXPECT_DOUBLE_EQ\(closing\.GetVisualDataForSplit\(id\)\->split_ratio\(\),\ 0\.37\);\
+
+      \
+
+      \ \ auto\*\ service\ =\ TabRestoreServiceFactory::GetForProfile\(GetProfile\(\)\);\
+
+      \ \ ASSERT_TRUE\(service\);\
+
+      \ \ service\->ClearEntries\(\);\
+
+      \ \ service\->BrowserClosing\(\&closing\);\
+
+      \ \ service\->BrowserClosed\(\&closing\);\
+
+      \ \ ASSERT_EQ\(service\->entries\(\)\.size\(\),\ 1u\);\
+
+      \ \ ASSERT_EQ\(service\->entries\(\)\.front\(\)\->type,\ sessions::tab_restore::Type::WINDOW\);\
+
+      \ \ const\ auto\&\ saved\ =\ static_cast<const\ sessions::tab_restore::Window\&>\(\*service\->entries\(\)\.front\(\)\);\
+
+      \ \ ASSERT_EQ\(saved\.tabs\.size\(\),\ 2u\);\
+
+      \ \ EXPECT_EQ\(saved\.tabs\[0\]\->split_id,\ id\);\
+
+      \ \ EXPECT_EQ\(saved\.tabs\[1\]\->split_id,\ id\);\
+
+      \ \ ASSERT_TRUE\(saved\.tabs\[0\]\->split_visual_data\);\
+
+      \ \ EXPECT_DOUBLE_EQ\(saved\.tabs\[0\]\->split_visual_data\->split_ratio\(\),\ 0\.37\);\
+
+      \
+
+      \ \ AndroidLiveTabContextRestoreWrapper\ restoring\(model\);\
+
+      \ \ restoring\.ReconstructSplit\(first,\ second,\ id,\ \*closing\.GetVisualDataForSplit\(id\)\);\
+
+      \ \ EXPECT_FALSE\(leading\->GetSplit\(\)\);\
+
+      \ \ //\ The\ Java\ group\ restore\ happens\ at\ this\ boundary\ in\ the\ real\ bridge\.\
+
+      \ \ restoring\.RestoreSplits\(\);\
+
+      \ \ EXPECT_EQ\(leading\->GetSplit\(\),\ id\);\
+
+      '
+    replace: "  ASSERT_TRUE(content::NavigateToURL(trailing->web_contents(), url));\n  const auto id = split_tabs::SplitTabId::GenerateNew();\n  ASSERT_TRUE(Java_TabModelJniBridge_restoreSplit(\n      env, model->GetJavaObject(), id.token(),\n      std::vector<int>{leading->GetAndroidId(), trailing->GetAndroidId()}, 1,\n      0.37));\n  ASSERT_EQ(leading->GetSplit(), id);\n  ASSERT_EQ(trailing->GetSplit(), id);\n\n  std::vector<WebContentsStateByteBuffer> states;\n  states.emplace_back(WebContentsState::GetContentsStateAsByteBuffer(\n                          env, trailing->web_contents()),\n                      2);\n  states.emplace_back(WebContentsState::GetContentsStateAsByteBuffer(\n                          env, leading->web_contents()),\n                      2);\n  AndroidLiveTabContextCloseWrapper closing(model, {trailing, leading}, {}, {},\n                                            {}, std::move(states));\n  auto* first = closing.GetLiveTabAt(0);\n  auto* second = closing.GetLiveTabAt(1);\n  ASSERT_NE(first, second);\n  EXPECT_EQ(&static_cast<sessions::ContentLiveTab*>(first)->GetWebContents(),\n            leading->web_contents());\n  EXPECT_EQ(&static_cast<sessions::ContentLiveTab*>(second)->GetWebContents(),\n            trailing->web_contents());\n  EXPECT_EQ(closing.GetLiveTabAt(0), first);\n  model->Unsplit(id);\n  EXPECT_FALSE(leading->GetSplit());\n  EXPECT_EQ(closing.GetSplitForTab(0), id);\n  EXPECT_EQ(closing.GetSplitForTab(1), id);\n  ASSERT_TRUE(closing.GetVisualDataForSplit(id));\n  EXPECT_EQ(closing.GetVisualDataForSplit(id)->split_layout(),\n            split_tabs::SplitTabLayout::kStacked);\n  EXPECT_DOUBLE_EQ(closing.GetVisualDataForSplit(id)->split_ratio(), 0.37);\n\n  auto* service = TabRestoreServiceFactory::GetForProfile(GetProfile());\n  ASSERT_TRUE(service);\n  service->ClearEntries();\n  service->BrowserClosing(&closing);\n  service->BrowserClosed(&closing);\n  ASSERT_EQ(service->entries().size(), 1u);\n  ASSERT_EQ(service->entries().front()->type,\n            sessions::tab_restore::Type::WINDOW);\n  const auto& saved = static_cast<const sessions::tab_restore::Window&>(\n      *service->entries().front());\n  ASSERT_EQ(saved.tabs.size(), 2u);\n  EXPECT_EQ(saved.tabs[0]->split_id, id);\n  EXPECT_EQ(saved.tabs[1]->split_id, id);\n  ASSERT_TRUE(saved.tabs[0]->split_visual_data);\n  EXPECT_DOUBLE_EQ(saved.tabs[0]->split_visual_data->split_ratio(), 0.37);\n\n  AndroidLiveTabContextRestoreWrapper restoring(model);\n  restoring.ReconstructSplit(first, second, id,\n                             *closing.GetVisualDataForSplit(id));\n  EXPECT_FALSE(leading->GetSplit());\n  // The Java group restore happens at this boundary in the real bridge.\n  restoring.RestoreSplits();\n  EXPECT_EQ(leading->GetSplit(), id);\n"
+- description: Format modified Android split persistence implementation
+  count: 1
+  regex:
+    re_pattern: '\ \ restoring\.RestoreSplits\(\);\
+
+      \ \ EXPECT_EQ\(leading\->GetSplit\(\),\ id\);\
+
+      \
+
+      \ \ std::vector<WebContentsStateByteBuffer>\ orphan_state;\
+
+      \ \ orphan_state\.emplace_back\(WebContentsState::GetContentsStateAsByteBuffer\(env,\ leading\->web_contents\(\)\),\ 2\);\
+
+      \ \ AndroidLiveTabContextCloseWrapper\ orphan\(model,\ \{leading\},\ \{\},\ \{\},\ \{\},\ std::move\(orphan_state\)\);\
+
+      \ \ EXPECT_FALSE\(orphan\.GetSplitForTab\(0\)\);\
+
+      \ \ model\->Unsplit\(id\);\
+
+      \ \ service\->ClearEntries\(\);\
+
+      \}\
+
+      '
+    replace: "  restoring.RestoreSplits();\n  EXPECT_EQ(leading->GetSplit(), id);\n\n  std::vector<WebContentsStateByteBuffer> orphan_state;\n  orphan_state.emplace_back(WebContentsState::GetContentsStateAsByteBuffer(\n                                env, leading->web_contents()),\n                            2);\n  AndroidLiveTabContextCloseWrapper orphan(model, {leading}, {}, {}, {},\n                                           std::move(orphan_state));\n  EXPECT_FALSE(orphan.GetSplitForTab(0));\n  model->Unsplit(id);\n  service->ClearEntries();\n}\n"
+- description: Preserve the existing split restore arguments and checks through the native JNI owner.
+  regex:
+    re_pattern: Java_TabModelJniBridge_restoreSplit\(
+    replace: TabModelJniBridge::RestoreSplit(
+- description: Use the ordinary native model bridge interface for split restoration.
+  regex:
+    re_pattern: '\#include\ "chrome/browser/ui/android/tab_model/tab_model\.h"\
+
+      '
+    replace: '#include "chrome/browser/ui/android/tab_model/tab_model.h"
+
+      #include "chrome/browser/ui/android/tab_model/tab_model_jni_bridge.h"
+
+      '
+- description: Remove the foreign owned JNI header from this split restoration caller.
+  regex:
+    re_pattern: '\#include\ "chrome/android/chrome_jni_headers/TabModelJniBridge_jni\.h"\
+
+      \
+
+      '
+    replace: ''
+
+# Reaper Android containers lifecycle successor; retain the complete inherited recipe.
+- description: 'Reaper Android containers: immutable tab identity, trusted CCT admission, persistent partition/SQL/reference lifecycle.'
+  regex:
+    re_pattern: '\#include\ "base/android/jni_array\.h"\
+
+      \#include\ "base/android/jni_string\.h"\
+
+      \#include\ "base/android/token_android\.h"\
+
+      \#include\ "base/test/gtest_util\.h"\
+
+      \#include\ "chrome/browser/android/tab_android\.h"\
+
+      \#include\ "chrome/browser/profiles/profile\.h"\
+
+      \#include\ "chrome/browser/profiles/profile_manager\.h"\
+
+      \#include\ "chrome/browser/sessions/tab_restore_service_factory\.h"\
+
+      \#include\ "chrome/browser/tab/web_contents_state\.h"\
+
+      \#include\ "chrome/browser/ui/android/tab_model/android_live_tab_context_wrapper\.h"\
+
+      \#include\ "chrome/browser/ui/android/tab_model/tab_model\.h"\
+
+      \#include\ "chrome/browser/ui/android/tab_model/tab_model_jni_bridge\.h"\
+
+      \#include\ "chrome/browser/ui/android/tab_model/tab_model_list\.h"\
+
+      \#include\ "chrome/test/base/android/android_browser_test\.h"\
+
+      \#include\ "chrome/test/base/chrome_test_utils\.h"\
+
+      \#include\ "components/sessions/content/content_live_tab\.h"\
+
+      \#include\ "components/sessions/core/tab_restore_service\.h"\
+
+      \#include\ "components/sessions/core/tab_restore_types\.h"\
+
+      \#include\ "components/tabs/public/android/jni_conversion\.h"\
+
+      \#include\ "content/public/browser/web_contents\.h"\
+
+      \#include\ "content/public/test/browser_test\.h"\
+
+      \#include\ "content/public/test/browser_test_utils\.h"\
+
+      \#include\ "net/test/embedded_test_server/embedded_test_server\.h"\
+
+      \#include\ "url/android/gurl_android\.h"\
+
+      \
+
+      namespace\ historical_tab_saver\ \{\
+
+      '
+    replace: '#include "base/android/jni_array.h"
+
+      #include "base/android/jni_string.h"
+
+      #include "base/android/token_android.h"
+
+      #include "base/functional/bind.h"
+
+      #include "base/functional/callback_helpers.h"
+
+      #include "base/test/gtest_util.h"
+
+      #include "base/test/scoped_feature_list.h"
+
+      #include "brave/browser/containers/android/containers_bridge.h"
+
+      #include "brave/components/containers/core/common/features.h"
+
+      #include "chrome/browser/android/tab_android.h"
+
+      #include "chrome/browser/flags/android/chrome_feature_list.h"
+
+      #include "chrome/browser/profiles/profile.h"
+
+      #include "chrome/browser/profiles/profile_manager.h"
+
+      #include "chrome/browser/sessions/session_restore.h"
+
+      #include "chrome/browser/sessions/tab_restore_service_factory.h"
+
+      #include "chrome/browser/tab/web_contents_state.h"
+
+      #include "chrome/browser/ui/android/tab_model/android_live_tab_context_wrapper.h"
+
+      #include "chrome/browser/ui/android/tab_model/tab_model.h"
+
+      #include "chrome/browser/ui/android/tab_model/tab_model_jni_bridge.h"
+
+      #include "chrome/browser/ui/android/tab_model/tab_model_list.h"
+
+      #include "chrome/common/webui_url_constants.h"
+
+      #include "chrome/test/base/android/android_browser_test.h"
+
+      #include "chrome/test/base/chrome_test_utils.h"
+
+      #include "components/sessions/content/content_live_tab.h"
+
+      #include "components/sessions/core/tab_restore_service.h"
+
+      #include "components/sessions/core/tab_restore_types.h"
+
+      #include "components/tabs/public/android/jni_conversion.h"
+
+      #include "content/public/browser/security_principal.h"
+
+      #include "content/public/browser/site_instance.h"
+
+      #include "content/public/browser/storage_partition_config.h"
+
+      #include "content/public/browser/web_contents.h"
+
+      #include "content/public/test/browser_test.h"
+
+      #include "content/public/test/browser_test_utils.h"
+
+      #include "net/test/embedded_test_server/embedded_test_server.h"
+
+      #include "ui/base/window_open_disposition.h"
+
+      #include "url/android/gurl_android.h"
+
+
+      namespace historical_tab_saver {
+
+      '
+- description: 'Reaper Android containers: immutable tab identity, trusted CCT admission, persistent partition/SQL/reference lifecycle.'
+  regex:
+    re_pattern: '\
+
+      \ \ Profile\*\ GetProfile\(\)\ \{\ return\ chrome_test_utils::GetProfile\(this\);\ \}\
+
+      \
+
+      \ private:\
+
+      \ \ void\ SetUpOnMainThread\(\)\ override\ \{\
+
+      \ \ \ \ ASSERT_TRUE\(embedded_test_server\(\)\->Start\(\)\);\
+
+      '
+    replace: "\n  Profile* GetProfile() { return chrome_test_utils::GetProfile(this); }\n\n  TabAndroid* OpenContainer(std::string_view id) {\n    if (!containers::android::RestoreContainerIdentity(GetProfile(), id)) return nullptr;\n    auto config = containers::android::ResolveContainerStoragePartition(GetProfile(), id);\n    if (!config) return nullptr;\n    auto* current = TabAndroid::FromWebContents(GetActiveWebContents());\n    if (!current) return nullptr;\n    auto* model = TabModelList::FindTabModelWithWindowSessionId(current->GetWindowId());\n    if (!model) return nullptr;\n    content::WebContents::CreateParams params(GetProfile());\n    params.site_instance = content::SiteInstance::CreateForFixedStoragePartition(\n        GetProfile(), GURL(), *config);\n    params.initially_hidden = true;\n    auto* added = model->CreateTab(nullptr, content::WebContents::Create(params),\n        model->GetTabCount(), TabModel::TabLaunchType::FROM_RECENT_TABS, false);\n    return added ? TabAndroid::FromTabInterface(added) : nullptr;\n  }\n\n\n private:\n  void SetUpOnMainThread() override {\n    ASSERT_TRUE(embedded_test_server()->Start());\n"
+- description: 'Reaper Android containers: immutable tab identity, trusted CCT admission, persistent partition/SQL/reference lifecycle.'
+  regex:
+    re_pattern: '\ \ \}\
+
+      \};\
+
+      \
+
+      \}\ \ //\ namespace\
+
+      \
+
+      //\ \-\-\-\-\-\ HistoricalTabSaver\ TESTS\ BEGIN\ \-\-\-\-\-\
+
+      \
+
+      IN_PROC_BROWSER_TEST_F\(HistoricalTabSaverBrowserTest,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ SplitHistoryKeepsOrderAndReconstructsAfterGrouping\)\ \{\
+
+      '
+    replace: "  }\n};\n\nclass ContainerHistoricalTabSaverBrowserTest : public HistoricalTabSaverBrowserTest {\n protected:\n  ContainerHistoricalTabSaverBrowserTest() {\n    feature_list_.InitAndEnableFeature(containers::features::kContainers);\n  }\n\n private:\n  base::test::ScopedFeatureList feature_list_;\n};\n\nclass IsolatedCctHistoricalTabSaverBrowserTest\n    : public HistoricalTabSaverBrowserTest {\n protected:\n  IsolatedCctHistoricalTabSaverBrowserTest() {\n    feature_list_.InitWithFeatures(\n        {containers::features::kContainers,\n         chrome::android::kMayLaunchUrlUsesSeparateStoragePartition},\n        {});\n  }\n\n private:\n  base::test::ScopedFeatureList feature_list_;\n};\n\n}  // namespace\n\n// ----- HistoricalTabSaver TESTS BEGIN -----\n\nIN_PROC_BROWSER_TEST_F(IsolatedCctHistoricalTabSaverBrowserTest,\n                       IsolatedMayLaunchUrlCctAdoptsActualFactoryContentsOnly) {\n  net::EmbeddedTestServer https(net::EmbeddedTestServer::TYPE_HTTPS);\n  https.ServeFilesFromSourceDirectory(\"chrome/test/data\");\n  ASSERT_TRUE(https.Start());\n  const auto url = https.GetURL(\"/android/google.html\");\n  auto* default_contents = GetActiveWebContents();\n  ASSERT_TRUE(content::NavigateToURL(default_contents, url));\n  ASSERT_TRUE(\n      content::ExecJs(default_contents, \"localStorage.reaperCct = 'default'\"));\n\n  JNIEnv* env = base::android::AttachCurrentThread();\n  auto factory = base::android::GetClass(\n      env, \"org/chromium/chrome/browser/content/WebContentsFactory\");\n  auto warmup_class =\n      base::android::GetClass(env, \"org/chromium/chrome/browser/WarmupManager\");\n  const auto create = env->GetStaticMethodID(\n      factory.obj(),\n      \"createWebContentsWithSeparateStoragePartitionForExperiment\",\n      \"(Lorg/chromium/chrome/browser/profiles/Profile;)\"\n      \"Lorg/chromium/content_public/browser/WebContents;\");\n  const auto matches = env->GetStaticMethodID(\n      factory.obj(), \"isWebContentsForSeparateStoragePartitionExperiment\",\n      \"(Lorg/chromium/chrome/browser/profiles/Profile;\"\n      \"Lorg/chromium/content_public/browser/WebContents;)Z\");\n  const auto get_warmup =\n      env->GetStaticMethodID(warmup_class.obj(), \"getInstance\",\n                             \"()Lorg/chromium/chrome/browser/WarmupManager;\");\n  const auto regular_spare =\n      env->GetMethodID(warmup_class.obj(), \"createRegularSpareTab\",\n                       \"(Lorg/chromium/chrome/browser/profiles/Profile;\"\n                       \"Lorg/chromium/content_public/browser/WebContents;)V\");\n  const auto isolated_spare = env->GetMethodID(\n      warmup_class.obj(),\n      \"createRegularSpareTabForSeparateStoragePartitionExperiment\",\n      \"(Lorg/chromium/chrome/browser/profiles/Profile;\"\n      \"Lorg/chromium/content_public/browser/WebContents;)V\");\n  const auto destroy_spare =\n      env->GetMethodID(warmup_class.obj(), \"destroySpareTab\", \"()V\");\n  const auto take_spare =\n      env->GetMethodID(warmup_class.obj(), \"takeSpareTab\",\n                       \"(Lorg/chromium/chrome/browser/profiles/Profile;ZI)\"\n                       \"Lorg/chromium/chrome/browser/tab/Tab;\");\n  ASSERT_TRUE(create && matches && get_warmup && regular_spare &&\n              isolated_spare && destroy_spare && take_spare);\n  auto profile = GetProfile()->GetJavaObject();\n  base::android::ScopedJavaLocalRef<jobject> warmup(\n      env, env->CallStaticObjectMethod(warmup_class.obj(), get_warmup));\n  ASSERT_FALSE(env->ExceptionCheck());\n  ASSERT_FALSE(warmup.is_null());\n  base::WeakPtr<content::WebContents> isolated_contents;\n  base::android::ScopedJavaGlobalRef<jobject> cleanup_tab;\n  base::ScopedClosureRunner cleanup(base::BindOnce(\n      [env, manager = base::android::ScopedJavaGlobalRef<jobject>(warmup),\n       destroy_spare, &isolated_contents, &cleanup_tab]() {\n        // An assertion may return with a Java exception pending. Clear it so\n        // cleanup can release the actual Java/native owners on every exit.\n        env->ExceptionClear();\n        env->CallVoidMethod(manager.obj(), destroy_spare);\n        const bool spare_destroyed = !env->ExceptionCheck();\n        EXPECT_TRUE(spare_destroyed);\n        env->ExceptionClear();\n        if (!cleanup_tab.is_null()) {\n          auto tab_class = base::android::GetClass(\n              env, \"org/chromium/chrome/browser/tab/Tab\");\n          env->CallVoidMethod(\n              cleanup_tab.obj(),\n              env->GetMethodID(tab_class.obj(), \"destroy\", \"()V\"));\n          EXPECT_FALSE(env->ExceptionCheck());\n          env->ExceptionClear();\n        } else if (spare_destroyed && isolated_contents) {\n          // Rejected factory contents have not transferred into a Tab. If a\n          // spare adopted them, destroying that spare invalidated this weak\n          // ptr.\n          delete isolated_contents.get();\n        }\n      }));\n  env->CallVoidMethod(warmup.obj(), destroy_spare);\n  base::android::ScopedJavaLocalRef<jobject> java_contents(\n      env, env->CallStaticObjectMethod(factory.obj(), create, profile.obj()));\n  ASSERT_FALSE(env->ExceptionCheck());\n  auto *contents = content::WebContents::FromJavaWebContents(java_contents);\n  if (contents) {\n    isolated_contents = contents->GetWeakPtr();\n  }\n  ASSERT_TRUE(contents);\n  auto config = contents->GetSiteInstance()\n                    ->GetSecurityPrincipal()\n                    .GetStoragePartitionConfig();\n  EXPECT_EQ(config.partition_domain(),\n            \"MayLaunchUrlUsesSeparateStoragePartitionDomain\");\n  EXPECT_EQ(config.partition_name(), \"1\");\n  EXPECT_TRUE(config.in_memory());\n  EXPECT_EQ(contents->GetBrowserContext(), GetProfile());\n  EXPECT_FALSE(containers::android::WebContentsMatchesContainer(GetProfile(),\n                                                                contents, \"\"));\n  EXPECT_TRUE(env->CallStaticBooleanMethod(factory.obj(), matches,\n                                           profile.obj(), java_contents.obj()));\n  EXPECT_FALSE(env->CallStaticBooleanMethod(\n      factory.obj(), matches,\n      GetProfile()\n          ->GetPrimaryOTRProfile(/*create_if_needed=*/true)\n          ->GetJavaObject()\n          .obj(),\n      java_contents.obj()));\n\n  // The ordinary spare path must still reject the nondefault partition before\n  // it allocates a Tab or WindowAndroid. The rejected contents remain usable.\n  env->CallVoidMethod(warmup.obj(), regular_spare, profile.obj(),\n                      java_contents.obj());\n  ASSERT_TRUE(env->ExceptionCheck());\n  auto exception = env->ExceptionOccurred();\n  env->ExceptionClear();\n  auto illegal_argument =\n      base::android::GetClass(env, \"java/lang/IllegalArgumentException\");\n  EXPECT_TRUE(env->IsInstanceOf(exception, illegal_argument.obj()));\n  env->DeleteLocalRef(exception);\n  env->CallVoidMethod(warmup.obj(), isolated_spare, profile.obj(),\n                      default_contents->GetJavaWebContents().obj());\n  ASSERT_TRUE(\n      env->ExceptionCheck());  // Dedicated route rejects default contents too.\n  env->ExceptionClear();\n  auto* named = OpenContainer(\"4a4d13b6-c971-4c61-ae11-e7a864f58165\");\n  ASSERT_TRUE(named);\n  env->CallVoidMethod(warmup.obj(), isolated_spare, profile.obj(),\n                      named->web_contents()->GetJavaWebContents().obj());\n  ASSERT_TRUE(\n      env->ExceptionCheck());  // It also rejects genuine Reaper containers.\n  env->ExceptionClear();\n\n  // Seed a real ordinary spare. The trusted CCT boundary must replace it,\n  // not return its default storage when the caller supplies isolated contents.\n  env->CallVoidMethod(warmup.obj(), regular_spare, profile.obj(),\n                      static_cast<jobject>(nullptr));\n  ASSERT_FALSE(env->ExceptionCheck());\n  env->CallVoidMethod(warmup.obj(), isolated_spare, profile.obj(),\n                      java_contents.obj());\n  ASSERT_FALSE(env->ExceptionCheck());\n  const jint launch = static_cast<jint>(\n      TabModel::TabLaunchType::FROM_SPECULATIVE_BACKGROUND_CREATION);\n  base::android::ScopedJavaLocalRef<jobject> java_tab(\n      env, env->CallObjectMethod(warmup.obj(), take_spare, profile.obj(),\n                                 JNI_TRUE, launch));\n  if (!java_tab.is_null()) {\n    cleanup_tab.Reset(java_tab);\n  }\n  ASSERT_FALSE(env->ExceptionCheck());\n  ASSERT_FALSE(java_tab.is_null());\n  auto *tab = TabAndroid::GetNativeTab(env, java_tab);\n  ASSERT_TRUE(tab);\n  EXPECT_EQ(tab->web_contents(), contents);\n  EXPECT_EQ(tab->GetContainerId(), \"\");\n  ASSERT_TRUE(content::NavigateToURL(contents, url));\n  EXPECT_EQ(contents->GetSiteInstance()\n                ->GetSecurityPrincipal()\n                .GetStoragePartitionConfig(),\n            config);\n  ASSERT_TRUE(content::ExecJs(contents, \"localStorage.reaperCct = 'isolated'\"));\n  EXPECT_EQ(content::EvalJs(contents, \"localStorage.reaperCct\"), \"isolated\");\n  EXPECT_EQ(content::EvalJs(default_contents, \"localStorage.reaperCct\"),\n            \"default\");\n  EXPECT_TRUE(env->CallStaticBooleanMethod(factory.obj(), matches,\n                                           profile.obj(), java_contents.obj()));\n  EXPECT_FALSE(containers::android::WebContentsMatchesContainer(GetProfile(),\n                                                                contents, \"\"));\n}\n\nIN_PROC_BROWSER_TEST_F(ContainerHistoricalTabSaverBrowserTest,\n                       ContainerJavaAdoptionSeparatesTwoRealDomStorageJars) {\n  Navigate();\n  auto* default_contents = GetActiveWebContents();\n  constexpr char first_id[] = \"4a4d13b6-c971-4c61-ae11-e7a864f58165\";\n  constexpr char second_id[] = \"22a6d27a-e4ef-46ec-8f8f-11a93d558b33\";\n  auto* first = OpenContainer(first_id);\n  auto* second = OpenContainer(second_id);\n  ASSERT_TRUE(first && second);\n  EXPECT_EQ(first->GetContainerId(), first_id);\n  EXPECT_EQ(second->GetContainerId(), second_id);\n  ASSERT_TRUE(containers::android::WebContentsMatchesContainer(\n      GetProfile(), first->web_contents(), first_id));\n  ASSERT_TRUE(containers::android::WebContentsMatchesContainer(\n      GetProfile(), second->web_contents(), second_id));\n  const auto url = embedded_test_server()->GetURL(\"/android/google.html\");\n  ASSERT_TRUE(content::NavigateToURL(first->web_contents(), url));\n  ASSERT_TRUE(content::NavigateToURL(second->web_contents(), url));\n  ASSERT_TRUE(content::ExecJs(default_contents, \"localStorage.reaperContainer = 'default'\"));\n  ASSERT_TRUE(content::ExecJs(first->web_contents(), \"localStorage.reaperContainer = 'first'\"));\n  ASSERT_TRUE(content::ExecJs(second->web_contents(), \"localStorage.reaperContainer = 'second'\"));\n  EXPECT_EQ(content::EvalJs(default_contents, \"localStorage.reaperContainer\"), \"default\");\n  EXPECT_EQ(content::EvalJs(first->web_contents(), \"localStorage.reaperContainer\"), \"first\");\n  EXPECT_EQ(content::EvalJs(second->web_contents(), \"localStorage.reaperContainer\"), \"second\");\n  EXPECT_FALSE(containers::android::WebContentsMatchesContainer(\n      GetProfile(), first->web_contents(), second_id));\n}\n\nIN_PROC_BROWSER_TEST_F(ContainerHistoricalTabSaverBrowserTest,\n                       ContainerInternalNtpThenHttpsKeepsActualFixedPartition) {\n  constexpr char id[] = \"4a4d13b6-c971-4c61-ae11-e7a864f58165\";\n  auto* tab = OpenContainer(id);\n  ASSERT_TRUE(tab);\n  ASSERT_TRUE(content::NavigateToURL(tab->web_contents(), GURL(chrome::kChromeUINewTabURL)));\n  EXPECT_EQ(tab->GetContainerId(), id);\n  EXPECT_TRUE(containers::android::WebContentsMatchesContainer(GetProfile(), tab->web_contents(), id));\n  net::EmbeddedTestServer https(net::EmbeddedTestServer::TYPE_HTTPS);\n  https.ServeFilesFromSourceDirectory(\"chrome/test/data\");\n  ASSERT_TRUE(https.Start());\n  ASSERT_TRUE(content::NavigateToURL(tab->web_contents(),\n      https.GetURL(\"/android/google.html\")));\n  EXPECT_EQ(tab->GetContainerId(), id);\n  EXPECT_TRUE(containers::android::WebContentsMatchesContainer(GetProfile(), tab->web_contents(), id));\n  EXPECT_FALSE(containers::android::WebContentsMatchesContainer(GetProfile(), tab->web_contents(), \"\"));\n}\n\nIN_PROC_BROWSER_TEST_F(ContainerHistoricalTabSaverBrowserTest,\n                       ContainerSerializedColdContentsRestoreKeepsJavaIdentityAndRejectsDefault) {\n  constexpr char id[] = \"t-4a4d13b6-c971-4c61-ae11-e7a864f58165\";\n  auto* tab = OpenContainer(id);\n  ASSERT_TRUE(tab);\n  ASSERT_TRUE(content::NavigateToURL(tab->web_contents(),\n      embedded_test_server()->GetURL(\"/android/google.html\")));\n  JNIEnv* env = base::android::AttachCurrentThread();\n  WebContentsStateByteBuffer state(\n      WebContentsState::GetContentsStateAsByteBuffer(env, tab->web_contents()), 2);\n  auto restored = WebContentsState::RestoreContentsFromByteBuffer(\n      GetProfile(), &state, true, true, id);\n  ASSERT_TRUE(restored);\n  EXPECT_TRUE(containers::android::WebContentsMatchesContainer(GetProfile(), restored.get(), id));\n  EXPECT_FALSE(WebContentsState::RestoreContentsFromByteBuffer(\n      GetProfile(), &state, true, true, \"\"));\n  auto* model = TabModelList::FindTabModelWithWindowSessionId(tab->GetWindowId());\n  ASSERT_TRUE(model);\n  auto* added = model->CreateTab(nullptr, std::move(restored), model->GetTabCount(),\n      TabModel::TabLaunchType::FROM_RECENT_TABS, false);\n  ASSERT_TRUE(added);\n  auto* restored_tab = TabAndroid::FromTabInterface(added);\n  ASSERT_TRUE(restored_tab);\n  EXPECT_EQ(restored_tab->GetContainerId(), id);\n  EXPECT_TRUE(containers::android::WebContentsMatchesContainer(\n      GetProfile(), restored_tab->web_contents(), id));\n}\n\n\nIN_PROC_BROWSER_TEST_F(HistoricalTabSaverBrowserTest,\n                       SplitHistoryKeepsOrderAndReconstructsAfterGrouping) {\n"
+
+# Match retained compiler test helpers to current public APIs; preserve ordinary cases/assertions.
+- description: "Compiler API: adopt owned WarmupManager local result"
+  regex:
+    re_pattern: "\\ \\ base::android::ScopedJavaLocalRef<jobject>\\ warmup\\(\\\n\\ \\ \\ \\ \\ \\ env,\\ env\\->CallStaticObjectMethod\\(warmup_class\\.obj\\(\\),\\ get_warmup\\)\\);"
+    replace: "  auto warmup = base::android::ScopedJavaLocalRef<jobject>::Adopt(\n      env, env->CallStaticObjectMethod(warmup_class.obj(), get_warmup));"
+  count: 1
+- description: "Compiler API: bind stateless cleanup with explicit same-lifetime state"
+  regex:
+    re_pattern: "\\ \\ base::ScopedClosureRunner\\ cleanup\\(base::BindOnce\\(\\\n\\ \\ \\ \\ \\ \\ \\[env,\\ manager\\ =\\ base::android::ScopedJavaGlobalRef<jobject>\\(warmup\\),\\\n\\ \\ \\ \\ \\ \\ \\ destroy_spare,\\ \\&isolated_contents,\\ \\&cleanup_tab\\]\\(\\)\\ \\{\\\n\\ \\ \\ \\ \\ \\ \\ \\ //\\ An\\ assertion\\ may\\ return\\ with\\ a\\ Java\\ exception\\ pending\\.\\ Clear\\ it\\ so\\\n\\ \\ \\ \\ \\ \\ \\ \\ //\\ cleanup\\ can\\ release\\ the\\ actual\\ Java/native\\ owners\\ on\\ every\\ exit\\.\\\n\\ \\ \\ \\ \\ \\ \\ \\ env\\->ExceptionClear\\(\\);\\\n\\ \\ \\ \\ \\ \\ \\ \\ env\\->CallVoidMethod\\(manager\\.obj\\(\\),\\ destroy_spare\\);\\\n\\ \\ \\ \\ \\ \\ \\ \\ const\\ bool\\ spare_destroyed\\ =\\ !env\\->ExceptionCheck\\(\\);\\\n\\ \\ \\ \\ \\ \\ \\ \\ EXPECT_TRUE\\(spare_destroyed\\);\\\n\\ \\ \\ \\ \\ \\ \\ \\ env\\->ExceptionClear\\(\\);\\\n\\ \\ \\ \\ \\ \\ \\ \\ if\\ \\(!cleanup_tab\\.is_null\\(\\)\\)\\ \\{\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ auto\\ tab_class\\ =\\ base::android::GetClass\\(\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ env,\\ \"org/chromium/chrome/browser/tab/Tab\"\\);\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ env\\->CallVoidMethod\\(\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ cleanup_tab\\.obj\\(\\),\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ env\\->GetMethodID\\(tab_class\\.obj\\(\\),\\ \"destroy\",\\ \"\\(\\)V\"\\)\\);\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ EXPECT_FALSE\\(env\\->ExceptionCheck\\(\\)\\);\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ env\\->ExceptionClear\\(\\);\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\}\\ else\\ if\\ \\(spare_destroyed\\ \\&\\&\\ isolated_contents\\)\\ \\{\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ //\\ Rejected\\ factory\\ contents\\ have\\ not\\ transferred\\ into\\ a\\ Tab\\.\\ If\\ a\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ //\\ spare\\ adopted\\ them,\\ destroying\\ that\\ spare\\ invalidated\\ this\\ weak\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ //\\ ptr\\.\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ delete\\ isolated_contents\\.get\\(\\);\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\}\\\n\\ \\ \\ \\ \\ \\ \\}\\)\\);"
+    replace: "  base::ScopedClosureRunner cleanup(base::BindOnce(\n      [](JNIEnv* env, base::android::ScopedJavaGlobalRef<jobject> manager,\n         jmethodID destroy_spare,\n         base::WeakPtr<content::WebContents>* isolated_contents_ptr,\n         base::android::ScopedJavaGlobalRef<jobject>* cleanup_tab_ptr) {\n        auto& isolated_contents = *isolated_contents_ptr;\n        auto& cleanup_tab = *cleanup_tab_ptr;\n        // An assertion may return with a Java exception pending. Clear it so\n        // cleanup can release the actual Java/native owners on every exit.\n        env->ExceptionClear();\n        env->CallVoidMethod(manager.obj(), destroy_spare);\n        const bool spare_destroyed = !env->ExceptionCheck();\n        EXPECT_TRUE(spare_destroyed);\n        env->ExceptionClear();\n        if (!cleanup_tab.is_null()) {\n          auto tab_class = base::android::GetClass(\n              env, \"org/chromium/chrome/browser/tab/Tab\");\n          env->CallVoidMethod(\n              cleanup_tab.obj(),\n              env->GetMethodID(tab_class.obj(), \"destroy\", \"()V\"));\n          EXPECT_FALSE(env->ExceptionCheck());\n          env->ExceptionClear();\n        } else if (spare_destroyed && isolated_contents) {\n          // Rejected factory contents have not transferred into a Tab. If a\n          // spare adopted them, destroying that spare invalidated this weak\n          // ptr.\n          delete isolated_contents.get();\n        }\n      },\n      base::Unretained(env),\n      base::android::ScopedJavaGlobalRef<jobject>(warmup), destroy_spare,\n      base::Unretained(&isolated_contents), base::Unretained(&cleanup_tab)));"
+  count: 1
+- description: "Compiler API: adopt owned WebContents local result"
+  regex:
+    re_pattern: "\\ \\ base::android::ScopedJavaLocalRef<jobject>\\ java_contents\\(\\\n\\ \\ \\ \\ \\ \\ env,\\ env\\->CallStaticObjectMethod\\(factory\\.obj\\(\\),\\ create,\\ profile\\.obj\\(\\)\\)\\);"
+    replace: "  auto java_contents = base::android::ScopedJavaLocalRef<jobject>::Adopt(\n      env, env->CallStaticObjectMethod(factory.obj(), create, profile.obj()));"
+  count: 1
+- description: "Compiler API: adopt owned taken Tab local result"
+  regex:
+    re_pattern: "\\ \\ base::android::ScopedJavaLocalRef<jobject>\\ java_tab\\(\\\n\\ \\ \\ \\ \\ \\ env,\\ env\\->CallObjectMethod\\(warmup\\.obj\\(\\),\\ take_spare,\\ profile\\.obj\\(\\),\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ JNI_TRUE,\\ launch\\)\\);"
+    replace: "  auto java_tab = base::android::ScopedJavaLocalRef<jobject>::Adopt(\n      env, env->CallObjectMethod(warmup.obj(), take_spare, profile.obj(),\n                                 JNI_TRUE, launch));"
+  count: 1

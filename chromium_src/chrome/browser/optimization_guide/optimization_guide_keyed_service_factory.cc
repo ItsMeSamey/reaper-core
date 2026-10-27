@@ -10,6 +10,9 @@
 // itself is safe to use because Brave blocks remote fetching via
 // IsUserPermittedToFetchFromRemoteOptimizationGuide returning false.
 
+#include "build/build_config.h"
+
+#if !BUILDFLAG(IS_ANDROID)
 #include "components/history_embeddings/core/history_embeddings_features.h"
 #include "components/optimization_guide/core/optimization_guide_features.h"
 
@@ -23,6 +26,8 @@ bool IsOptimizationHintsEnabled_Brave() {
 }  // namespace optimization_guide::features
 
 #define IsOptimizationHintsEnabled IsOptimizationHintsEnabled_Brave
+
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 #include <chrome/browser/optimization_guide/optimization_guide_keyed_service_factory.cc>
 

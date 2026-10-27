@@ -1,0 +1,150 @@
+diff --git a/extensions/browser/process_manager.cc b/extensions/browser/process_manager.cc
+--- a/extensions/browser/process_manager.cc
++++ b/extensions/browser/process_manager.cc
+@@ -23,6 +23,7 @@
+ #include "base/time/time.h"
+ #include "base/trace_event/trace_event.h"
+ #include "base/uuid.h"
++#include "build/build_config.h"
+ #include "components/back_forward_cache/back_forward_cache_disable.h"
+ #include "components/back_forward_cache/disabled_reason_id.h"
+ #include "content/public/browser/browser_context.h"
+@@ -231,6 +232,9 @@
+   DCHECK(background_hosts_.empty());
+   content::DevToolsAgentHost::RemoveObserver(this);
+ 
++#if BUILDFLAG(IS_ANDROID)
++  service_worker_keepalives_.clear();
++#endif
+   for (auto& observer : observer_list_)
+     observer.OnProcessManagerShutdown(this);
+ }
+@@ -818,6 +822,9 @@
+   auto iter = service_worker_keepalives_.find(request_uuid);
+   CHECK(iter != service_worker_keepalives_.end());
+   CHECK_EQ(iter->second.worker_id, worker_id);
++#if BUILDFLAG(IS_ANDROID)
++  CHECK(iter->second.worker_id.start_token == worker_id.start_token);
++#endif
+   CHECK_EQ(iter->second.activity_type, activity_type);
+   CHECK_EQ(iter->second.extra_data, extra_data);
+   service_worker_keepalives_.erase(iter);
+@@ -959,6 +966,18 @@
+ }
+ 
+ void ProcessManager::UnregisterExtension(const ExtensionId& extension_id) {
++#if BUILDFLAG(IS_ANDROID)
++  // Frame observers can close owners or reactivate an extension. Snapshot the
++  // unloading ownership before invoking them, rather than selecting new state.
++  const auto workers_at_unload =
++      all_running_extension_workers_.GetAllForExtension(extension_id);
++  std::vector<base::Uuid> keepalives_at_unload;
++  for (const auto& [uuid, data] : service_worker_keepalives_) {
++    if (data.worker_id.extension_id == extension_id) {
++      keepalives_at_unload.push_back(uuid);
++    }
++  }
++#endif
+   // The lazy_keepalive_count may be greater than zero at this point because
+   // RenderFrameHosts are still alive. During extension reloading, they will
+   // decrement the lazy_keepalive_count to negative for the new extension
+@@ -978,14 +997,29 @@
+ 
+   background_page_data_.erase(extension_id);
+ 
++#if BUILDFLAG(IS_ANDROID)
++  for (const WorkerId& worker_id : workers_at_unload) {
++#else
+   for (const WorkerId& worker_id :
+        all_running_extension_workers_.GetAllForExtension(extension_id)) {
++#endif
+     StopTrackingServiceWorkerRunningInstance(worker_id);
+   }
++#if BUILDFLAG(IS_ANDROID)
++  for (const auto& uuid : keepalives_at_unload) {
++    service_worker_keepalives_.erase(uuid);
++  }
++#if DCHECK_IS_ON()
++  for (const WorkerId& worker_id : workers_at_unload) {
++    DCHECK(!GetServiceWorkerRunningInstance(worker_id));
++  }
++#endif
++#else
+ #if DCHECK_IS_ON()
+   // Sanity check: No worker entry should exist for |extension_id|.
+   DCHECK(
+       all_running_extension_workers_.GetAllForExtension(extension_id).empty());
++#endif
+ #endif
+ }
+ 
+@@ -1074,15 +1108,33 @@
+   // TODO(crbug.com/40936639): Remove the ability for multiple workers to be
+   // stored for an extension and then remove all these similar checks and loops
+   // that are assuming there can be more than one.
++#if BUILDFLAG(IS_ANDROID)
++  // WorkerId ordering ignores start_token. A delayed stop must not retire a
++  // newer incarnation with otherwise identical fields.
++  if (!worker_id.start_token ||
++      !GetServiceWorkerRunningInstance(worker_id)) {
++    return;
++  }
++#else
+   if (!all_running_extension_workers_.Contains(worker_id)) {
+     // Multiple notifications can try to remove a worker when the worker
+     // stops (DidStopServiceWorkerContext(),
+     // ProcessManager::RenderProcessExit(), or extension uninstall/disable).
+     return;
+   }
++#endif
+ 
+   all_running_extension_workers_.Remove(worker_id);
+   worker_context_ids_.erase(worker_id);
++#if BUILDFLAG(IS_ANDROID)
++  // Remove membership before metadata and callbacks so late owners observe
++  // retirement even if the task queue has not yet processed this stop.
++  std::erase_if(service_worker_keepalives_, [&worker_id](const auto& entry) {
++    const WorkerId& recorded_worker = entry.second.worker_id;
++    return recorded_worker == worker_id &&
++           recorded_worker.start_token == worker_id.start_token;
++  });
++#endif
+   for (auto& observer : observer_list_)
+     observer.OnStoppedTrackingServiceWorkerInstance(*browser_context(),
+                                                     worker_id);
+@@ -1113,7 +1165,34 @@
+       StopTrackingServiceWorkerRunningInstance(worker_id);
+     }
+   }
+-}
++#if BUILDFLAG(IS_ANDROID)
++  // A direct C++ owner may register a full-token keepalive before PM tracking.
++  // The ordinary token-bearing stop still retires only that incarnation.
++  std::erase_if(service_worker_keepalives_,
++                [&](const auto& entry) {
++                  const WorkerId& worker = entry.second.worker_id;
++                  return worker.extension_id == extension_id &&
++                         worker.version_id == worker_version_id &&
++                         worker.start_token == service_worker_token;
++                });
++#endif
++}
++
++#if BUILDFLAG(IS_ANDROID)
++std::optional<WorkerId> ProcessManager::GetServiceWorkerRunningInstance(
++    const WorkerId& worker_id) const {
++  for (const WorkerId& running_worker :
++       all_running_extension_workers_.GetAllForExtension(
++           worker_id.extension_id)) {
++    if (running_worker == worker_id &&
++        (!worker_id.start_token ||
++         running_worker.start_token == worker_id.start_token)) {
++      return running_worker;
++    }
++  }
++  return std::nullopt;
++}
++#endif
+ 
+ bool ProcessManager::HasServiceWorker(const WorkerId& worker_id) const {
+   return all_running_extension_workers_.Contains(worker_id);

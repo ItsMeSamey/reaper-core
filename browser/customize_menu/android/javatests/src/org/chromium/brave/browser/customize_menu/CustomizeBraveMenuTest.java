@@ -329,8 +329,7 @@ public class CustomizeBraveMenuTest {
         assertTrue(CustomizeBraveMenu.isVisible(mResources, R.id.downloads_menu_id));
         assertTrue(CustomizeBraveMenu.isVisible(mResources, R.id.all_bookmarks_menu_id));
         assertTrue(CustomizeBraveMenu.isVisible(mResources, R.id.open_history_menu_id));
-        assertTrue(CustomizeBraveMenu.isVisible(mResources, R.id.brave_wallet_id));
-        assertTrue(CustomizeBraveMenu.isVisible(mResources, R.id.brave_leo_id));
+        assertTrue(CustomizeBraveMenu.isVisible(mResources, R.id.reaper_speedreader_menu_id));
     }
 
     @Test
@@ -386,11 +385,8 @@ public class CustomizeBraveMenuTest {
                 R.drawable.ic_history,
                 CustomizeBraveMenu.getDrawableResFromMenuItemId(R.id.open_history_menu_id));
         assertEquals(
-                R.drawable.ic_product_brave_wallet,
-                CustomizeBraveMenu.getDrawableResFromMenuItemId(R.id.brave_wallet_id));
-        assertEquals(
-                R.drawable.ic_product_brave_leo,
-                CustomizeBraveMenu.getDrawableResFromMenuItemId(R.id.brave_leo_id));
+                R.drawable.ic_reaper_speedreader,
+                CustomizeBraveMenu.getDrawableResFromMenuItemId(R.id.reaper_speedreader_menu_id));
     }
 
     @SuppressLint("ResourceType")

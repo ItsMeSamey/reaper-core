@@ -58,6 +58,7 @@
 #include "components/language/core/browser/language_prefs.h"
 #include "components/network_session_configurator/common/network_switches.h"
 #include "content/public/browser/reload_type.h"
+#include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/render_view_host.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
@@ -70,6 +71,9 @@
 #include "net/test/embedded_test_server/http_response.h"
 #include "services/network/public/cpp/network_switches.h"
 #include "ui/events/base_event_utils.h"
+#include "ui/events/keycodes/dom/dom_code.h"
+#include "ui/events/keycodes/dom/dom_key.h"
+#include "ui/events/keycodes/keyboard_codes.h"
 
 #if BUILDFLAG(ENABLE_AI_CHAT)
 #include "brave/components/ai_chat/core/common/features.h"
@@ -684,6 +688,86 @@ IN_PROC_BROWSER_TEST_F(SpeedReaderBrowserTest, ShowOriginalPage) {
   ASSERT_TRUE(ClickReaderButton());
   content::WaitForLoadStop(web_contents);
   EXPECT_TRUE(speedreader::IsDistilled(tab_helper->PageDistillState()));
+}
+
+IN_PROC_BROWSER_TEST_F(SpeedReaderBrowserTest,
+                       AndroidControlsKeyboardShowOriginalPage) {
+  EnableSpeedreaderAllowedForAllSites();
+  NavigateToPageSynchronously(kTestPageReadable);
+  auto* web_contents = ActiveWebContents();
+  constexpr ui::KeyboardCode kActivationKeys[] = {ui::VKEY_RETURN,
+                                                  ui::VKEY_SPACE};
+  for (const auto key : kActivationKeys) {
+    SCOPED_TRACE(key);
+    ASSERT_TRUE(WaitDistilled());
+    // The desktop harness exercises the Android DOM branch, not Android's
+    // hardware-key dispatch. Keep the ordinary desktop click test above.
+    static constexpr char kReady[] = R"js(
+      typeof speedreaderUtils !== 'undefined' &&
+      !!speedreaderUtils.speedreaderData &&
+      document.getElementById('c93e2206-2f31-4ddc-9828-2bb8e8ed940e')
+        ?.innerText === 'View original'
+    )js";
+    const base::TimeTicks deadline =
+        base::TimeTicks::Now() + TestTimeouts::action_max_timeout();
+    for (;;) {
+      NonBlockingDelay(base::Milliseconds(10));
+      if (content::EvalJs(web_contents, kReady,
+                          content::EXECUTE_SCRIPT_DEFAULT_OPTIONS,
+                          ISOLATED_WORLD_ID_BRAVE_INTERNAL)
+              .ExtractBool()) {
+        break;
+      }
+      ASSERT_LT(base::TimeTicks::Now(), deadline)
+          << "Timeout waiting for original-page control initialization";
+    }
+
+    web_contents->Focus();
+    content::SimulateEndOfPaintHoldingOnPrimaryMainFrame(web_contents);
+    ASSERT_TRUE(content::ExecJs(web_contents, R"js(
+      speedreaderUtils.speedreaderData.androidControls = true;
+      speedreaderUtils.initShowOriginalLink();
+      const original =
+        document.getElementById('c93e2206-2f31-4ddc-9828-2bb8e8ed940e');
+      const before = document.createElement('button');
+      before.textContent = 'Before original-page control';
+      original.before(before);
+      before.focus();
+    )js",
+                                content::EXECUTE_SCRIPT_DEFAULT_OPTIONS,
+                                ISOLATED_WORLD_ID_BRAVE_INTERNAL));
+    content::SimulateKeyPressWithoutChar(web_contents, ui::DomKey::TAB,
+                                         ui::DomCode::TAB, ui::VKEY_TAB, false,
+                                         false, false, false);
+    content::RunUntilInputProcessed(
+        web_contents->GetPrimaryMainFrame()->GetRenderWidgetHost());
+    ASSERT_TRUE(content::EvalJs(web_contents, R"js(
+      (() => {
+        const original =
+          document.getElementById('c93e2206-2f31-4ddc-9828-2bb8e8ed940e');
+        return document.activeElement === original &&
+          original instanceof HTMLButtonElement && original.type === 'button' &&
+          original.innerText === 'View original';
+      })()
+    )js",
+                                content::EXECUTE_SCRIPT_DEFAULT_OPTIONS,
+                                ISOLATED_WORLD_ID_BRAVE_INTERNAL)
+                    .ExtractBool());
+
+    content::TestNavigationObserver original_navigation(web_contents);
+    content::SimulateKeyPress(
+        web_contents,
+        key == ui::VKEY_RETURN ? ui::DomKey::ENTER
+                               : ui::DomKey::FromCharacter(' '),
+        key == ui::VKEY_RETURN ? ui::DomCode::ENTER : ui::DomCode::SPACE, key,
+        false, false, false, false);
+    original_navigation.Wait();
+    EXPECT_TRUE(speedreader::IsDistillable(tab_helper()->PageDistillState()));
+    EXPECT_TRUE(speedreader_service()->IsAllowedForSite(web_contents));
+    if (key == ui::VKEY_RETURN) {
+      ASSERT_TRUE(ClickReaderButton());
+    }
+  }
 }
 
 IN_PROC_BROWSER_TEST_F(SpeedReaderBrowserTest, ShowOriginalPageOnUnreadable) {

@@ -1,0 +1,114 @@
+diff --git a/components/safe_browsing/core/browser/db/sb_local_database_manager_unittest.cc b/components/safe_browsing/core/browser/db/sb_local_database_manager_unittest.cc
+--- a/components/safe_browsing/core/browser/db/sb_local_database_manager_unittest.cc
++++ b/components/safe_browsing/core/browser/db/sb_local_database_manager_unittest.cc
+@@ -645,6 +645,17 @@
+     StartLocalDatabaseManager();
+   }
+ 
++  void ResetExtensionOnlyDatabaseManager() {
++    StopLocalDatabaseManager();
++    sb_local_database_manager_ =
++        SBLocalDatabaseManager::CreateForExtensionBlocklist(
++            base_dir_.GetPath(), base::SequencedTaskRunner::GetCurrentDefault(),
++            base::SequencedTaskRunner::GetCurrentDefault(), erl_callback_);
++    sb_local_database_manager_->task_runner_ = task_runner_;
++    StartLocalDatabaseManager();
++    WaitForTasksOnTaskRunner();
++  }
++
+   void ResetSBDatabase() { sb_local_database_manager_->sb_database_.reset(); }
+ 
+   void StartLocalDatabaseManager() {
+@@ -1988,6 +1999,26 @@
+   }
+ }
+ 
++TEST_F(SBLocalDatabaseManagerTest, ExtensionOnlyListsAndUpdates) {
++  ResetExtensionOnlyDatabaseManager();
++  ASSERT_EQ(1u, GetListInfos().size());
++  EXPECT_TRUE(GetListInfos()[0].fetch_updates());
++  EXPECT_EQ(GetChromeExtMalwareId(), GetListInfos()[0].list_id());
++  EXPECT_EQ(StoresToCheck({GetChromeExtMalwareId()}),
++            sb_local_database_manager_->GetStoresForFullHashRequests());
++  ASSERT_TRUE(sb_local_database_manager_->IsDatabaseReady());
++  auto states = sb_local_database_manager_->GetStoreStateMap();
++  EXPECT_EQ(1u, states->size());
++  EXPECT_TRUE(states->contains(GetChromeExtMalwareId()));
++
++  base::test::TestFuture<void> updated;
++  auto subscription = sb_local_database_manager_->RegisterDatabaseUpdatedCallback(
++      updated.GetRepeatingCallback());
++  DatabaseUpdated();
++  WaitForTasksOnTaskRunner();
++  EXPECT_TRUE(updated.IsReady());
++}
++
+ class SBLocalDatabaseManagerTest_ExtensionNetworkQuery
+     : public SBLocalDatabaseManagerTest {
+  public:
+@@ -2150,6 +2181,65 @@
+   EXPECT_FALSE(client.on_check_extensions_result_called());
+   WaitForTasksOnTaskRunner();
+   EXPECT_TRUE(client.on_check_extensions_result_called());
++}
++
++TEST_P(SBLocalDatabaseManagerTest_ExtensionSkipNetworkQuery,
++       ExtensionOnlyMatchAndDisableRestart) {
++  ResetExtensionOnlyDatabaseManager();
++  const FullHashStr bad_id("aapbdbdomjkkjkaonfhkkikfgjllcleb");
++  const FullHashStr good_id("aapbdbdomjkkjkaonfhkkikfgjllclec");
++  StoreAndHashPrefixes prefixes;
++  prefixes.emplace_back(GetChromeExtMalwareId(),
++                        GetParam().enable_v5 ? SBStore::ExtensionIdToHash(bad_id)
++                                             : bad_id);
++  ReplaceSBDatabase(prefixes, /*stores_available=*/true);
++  TestExtensionClient client({bad_id});
++  EXPECT_FALSE(sb_local_database_manager_->CheckExtensionIDs(
++      {bad_id, good_id}, &client));
++  WaitForTasksOnTaskRunner();
++  EXPECT_TRUE(client.on_check_extensions_result_called());
++
++  StopLocalDatabaseManager();
++  EXPECT_FALSE(sb_local_database_manager_->IsDatabaseReady());
++  TestExtensionClient disabled_client({});
++  EXPECT_TRUE(sb_local_database_manager_->CheckExtensionIDs(
++      {bad_id}, &disabled_client));
++  StartLocalDatabaseManager();
++  WaitForTasksOnTaskRunner();
++  EXPECT_TRUE(sb_local_database_manager_->IsDatabaseReady());
++  EXPECT_EQ(StoresToCheck({GetChromeExtMalwareId()}),
++            sb_local_database_manager_->GetStoresForFullHashRequests());
++}
++
++TEST_P(SBLocalDatabaseManagerTest_ExtensionSkipNetworkQuery,
++       ExtensionOnlyQueuedCancellationAndShutdown) {
++  ResetExtensionOnlyDatabaseManager();
++  StopLocalDatabaseManager();
++  StartLocalDatabaseManager();
++  TestExtensionClient cancelled({});
++  EXPECT_FALSE(sb_local_database_manager_->CheckExtensionIDs(
++      {"aapbdbdomjkkjkaonfhkkikfgjllcleb"}, &cancelled));
++  EXPECT_EQ(1u, GetQueuedChecks().size());
++  sb_local_database_manager_->CancelCheck(&cancelled);
++  EXPECT_TRUE(GetQueuedChecks().empty());
++  WaitForTasksOnTaskRunner();
++  EXPECT_FALSE(cancelled.on_check_extensions_result_called());
++
++  StopLocalDatabaseManager();
++  StartLocalDatabaseManager();
++  TestExtensionClient disabled({});
++  EXPECT_FALSE(sb_local_database_manager_->CheckExtensionIDs(
++      {"aapbdbdomjkkjkaonfhkkikfgjllcleb"}, &disabled));
++  StopLocalDatabaseManager();
++  EXPECT_TRUE(disabled.on_check_extensions_result_called());
++
++  StartLocalDatabaseManager();
++  TestExtensionClient shutdown({});
++  EXPECT_FALSE(sb_local_database_manager_->CheckExtensionIDs(
++      {"aapbdbdomjkkjkaonfhkkikfgjllcleb"}, &shutdown));
++  ShutdownLocalDatabaseManager();
++  EXPECT_TRUE(GetQueuedChecks().empty());
++  EXPECT_FALSE(shutdown.on_check_extensions_result_called());
+ }
+ 
+ // This is similar to `TestCheckExtensionIDsOneIsBlocklisted`, but it uses a

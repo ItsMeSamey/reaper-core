@@ -3,7 +3,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+#include "build/build_config.h"
+
 #include "brave/browser/ui/webui/brave_web_ui_controller_factory.h"
+
+#include "brave/components/ntp_background_images/buildflags/buildflags.h"
 
 #include <memory>
 #include <string>
@@ -13,8 +17,12 @@
 #include "base/memory/ptr_util.h"
 #include "base/no_destructor.h"
 #include "brave/browser/brave_browser_features.h"
+#if BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
 #include "brave/browser/ntp_background/view_counter_service_factory.h"
+#endif  // BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/ui/webui/skus_internals_ui.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/ai_chat/core/common/buildflags/buildflags.h"
 #include "brave/components/brave_ads/buildflags/buildflags.h"
 #include "brave/components/brave_news/common/buildflags/buildflags.h"
@@ -22,15 +30,17 @@
 #include "brave/components/constants/pref_names.h"
 #include "brave/components/constants/webui_url_constants.h"
 #include "brave/components/playlist/core/common/buildflags/buildflags.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/skus/common/features.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/tor/buildflags/buildflags.h"
-#include "build/build_config.h"
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/common/url_constants.h"
 #include "components/optimization_guide/core/optimization_guide_features.h"
 #include "components/optimization_guide/optimization_guide_internals/webui/url_constants.h"
 #include "content/public/browser/web_contents.h"
+#include "content/public/browser/web_ui_controller.h"
 #include "content/public/common/url_utils.h"
 #include "url/gurl.h"
 
@@ -84,6 +94,7 @@ namespace {
 typedef WebUIController* (*WebUIFactoryFunction)(WebUI* web_ui,
                                                  const GURL& url);
 
+#if !BUILDFLAG(IS_ANDROID)
 WebUIController* NewWebUI(WebUI* web_ui, const GURL& url) {
   std::string_view host = url.host();
   Profile* profile = Profile::FromBrowserContext(
@@ -158,12 +169,15 @@ WebUIController* NewWebUI(WebUI* web_ui, const GURL& url) {
   return nullptr;
 }
 
+#endif  // !BUILDFLAG(IS_ANDROID)
+
 // Returns a function that can be used to create the right type of WebUI for a
 // tab, based on its URL. Returns NULL if the URL doesn't have WebUI associated
 // with it.
 WebUIFactoryFunction GetWebUIFactoryFunction(WebUI* web_ui,
                                              Profile* profile,
                                              const GURL& url) {
+#if !BUILDFLAG(IS_ANDROID)
   // This will get called a lot to check all URLs, so do a quick check of other
   // schemes to filter out most URLs.
   //
@@ -198,6 +212,8 @@ WebUIFactoryFunction GetWebUIFactoryFunction(WebUI* web_ui,
        base::FeatureList::IsEnabled(skus::features::kSkusFeature))) {
     return &NewWebUI;
   }
+
+#endif  // !BUILDFLAG(IS_ANDROID)
 
   return nullptr;
 }

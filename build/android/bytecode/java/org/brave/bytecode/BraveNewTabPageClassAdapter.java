@@ -16,26 +16,8 @@ public class BraveNewTabPageClassAdapter extends BraveClassVisitor {
 
         redirectConstructor(sNewTabPageClassName, sBraveNewTabPageClassName);
 
-        deleteField(sBraveNewTabPageClassName, "mBrowserControlsStateProvider");
-        makeProtectedField(sNewTabPageClassName, "mBrowserControlsStateProvider");
-
         deleteField(sBraveNewTabPageClassName, "mNewTabPageLayout");
         makeProtectedField(sNewTabPageClassName, "mNewTabPageLayout");
-
-        deleteField(sBraveNewTabPageClassName, "mNewTabPageCoordinator");
-        makeProtectedField(sNewTabPageClassName, "mNewTabPageCoordinator");
-
-        deleteField(sBraveNewTabPageClassName, "mFeedSurfaceProvider");
-        makeProtectedField(sNewTabPageClassName, "mFeedSurfaceProvider");
-
-        deleteField(sBraveNewTabPageClassName, "mToolbarSupplier");
-        makeProtectedField(sNewTabPageClassName, "mToolbarSupplier");
-
-        deleteField(sBraveNewTabPageClassName, "mBottomSheetController");
-        makeProtectedField(sNewTabPageClassName, "mBottomSheetController");
-
-        deleteField(sBraveNewTabPageClassName, "mTabStripHeightSupplier");
-        makeProtectedField(sNewTabPageClassName, "mTabStripHeightSupplier");
 
         makePublicMethod(sNewTabPageClassName, "updateSearchProvider");
         addMethodAnnotation(

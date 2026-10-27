@@ -1,8 +1,33 @@
 diff --git a/chrome/browser/file_select_helper.cc b/chrome/browser/file_select_helper.cc
-index 227ace408690fc9586b39692234902336a22cd1a..32bcb20179d3c63ebbeb321c01237bfc1c19030a 100644
 --- a/chrome/browser/file_select_helper.cc
 +++ b/chrome/browser/file_select_helper.cc
-@@ -73,6 +73,7 @@ DEFINE_LOCAL_ELEMENT_IDENTIFIER_VALUE(kCancelButtonId);
+@@ -55,6 +55,25 @@
+ 
+ #if BUILDFLAG(IS_ANDROID)
+ #include "base/android/content_uri_utils.h"
++#include "chrome/browser/android/tab_android.h"
++#include "chrome/browser/tab_list/tab_list_interface.h"
++#include "chrome/browser/ui/android/tab_model/tab_model.h"
++#include "chrome/browser/ui/android/tab_model/tab_model_list.h"
++#include "chrome/browser/ui/android/tab_model/tab_model_observer.h"
++#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
++#include "extensions/buildflags/buildflags.h"
++#include "ui/android/view_android.h"
++#include "ui/base/base_window.h"
++#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
++#include "chrome/browser/extensions/extension_view_host.h"
++#include "chrome/browser/extensions/window_controller.h"
++#include "extensions/browser/extension_host_registry.h"
++#include "extensions/browser/extension_registry.h"
++#include "extensions/browser/extension_util.h"
++#include "extensions/common/extension.h"
++#include "extensions/common/manifest_handlers/incognito_info.h"
++#include "extensions/common/mojom/view_type.mojom.h"
++#endif
+ #else
+ #include "chrome/browser/picture_in_picture/picture_in_picture_window_manager.h"
+ #include "chrome/browser/picture_in_picture/scoped_disallow_picture_in_picture.h"
+@@ -73,6 +92,7 @@
  namespace {
  
  void DeleteFiles(std::vector<base::FilePath> paths) {
@@ -10,15 +35,309 @@ index 227ace408690fc9586b39692234902336a22cd1a..32bcb20179d3c63ebbeb321c01237bfc
    for (auto& file_path : paths)
      base::DeleteFile(file_path);
  }
-@@ -465,6 +466,11 @@ void FileSelectHelper::ContentAnalysisCompletionCallback(
+@@ -89,6 +109,50 @@
+ }
+ 
+ #if BUILDFLAG(IS_ANDROID)
++BrowserWindowInterface* GetAndroidExtensionPickerBrowser(
++    content::WebContents* contents,
++    Profile* profile) {
++#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
++  auto* registry = extensions::ExtensionHostRegistry::Get(profile);
++  auto* host = registry ? registry->GetExtensionHostForPrimaryMainFrame(
++                              contents->GetPrimaryMainFrame())
++                        : nullptr;
++  if (!host || host->host_contents() != contents || !host->extension() ||
++      (host->extension_host_type() !=
++           extensions::mojom::ViewType::kExtensionPopup &&
++       host->extension_host_type() !=
++           extensions::mojom::ViewType::kExtensionSidePanel) ||
++      !extensions::ExtensionRegistry::Get(profile)
++           ->enabled_extensions()
++           .Contains(host->extension()->id())) {
++    return nullptr;
++  }
++  // Popup/side-panel hosts are Chrome ExtensionViewHosts. Their delegate keeps
++  // the exact weak browser or tab supplied by the factory, never last-focused.
++  auto* controller = static_cast<extensions::ExtensionViewHost*>(host)
++                         ->GetExtensionWindowController();
++  auto* browser =
++      controller ? controller->GetBrowserWindowInterface() : nullptr;
++  if (!browser || !browser->GetWindow()) {
++    return nullptr;
++  }
++  Profile* owner_profile = browser->GetProfile();
++  // Spanning incognito extensions intentionally execute in the original
++  // profile; require that precise factory-supported relationship and grant.
++  if (owner_profile != profile &&
++      (!owner_profile->IsOffTheRecord() ||
++       owner_profile->GetOriginalProfile() != profile ||
++       extensions::IncognitoInfo::IsSplitMode(host->extension()) ||
++       !extensions::util::IsIncognitoEnabled(host->extension()->id(),
++                                             owner_profile))) {
++    return nullptr;
++  }
++  return browser;
++#else
++  return nullptr;
++#endif
++}
++
+ std::u16string GetDisplayName(const base::FilePath& content_uri) {
+   std::u16string display_name;
+   if (!base::MaybeGetFileDisplayName(content_uri, &display_name)) {
+@@ -108,6 +172,39 @@
+   const std::u16string display_name_;
+   std::vector<blink::mojom::NativeFileInfoPtr> results_;
+ };
++
++#if BUILDFLAG(IS_ANDROID)
++// Model selection is distinct from Activity visibility and from the current
++// tab retained by each regular/incognito model. Retire the original request
++// when its model loses selection, even if that model is selected again later.
++class FileSelectHelper::AndroidPickerModelObserver : public TabModelObserver {
++ public:
++  AndroidPickerModelObserver(FileSelectHelper* helper, TabModel* model)
++      : helper_(helper), model_(model) {
++    model_->AddObserver(this);
++  }
++  ~AndroidPickerModelObserver() override {
++    if (model_) {
++      model_->RemoveObserver(this);
++    }
++  }
++  void OnWillActiveStateChange(TabModel& model, bool active) override {
++    if (!active) {
++      helper_->RunFileChooserEnd();
++    }
++  }
++  void OnTabModelDestroyed(TabModel& model) override {
++    // Shutdown can be dispatched by the model's last JNI observer bridge.
++    // Forget the dying model before the owner deletes this observer.
++    model_ = nullptr;
++    helper_->RunFileChooserEnd();
++  }
++
++ private:
++  raw_ptr<FileSelectHelper> helper_;
++  raw_ptr<TabModel> model_;
++};
++#endif
+ 
+ FileSelectHelper::FileSelectHelper(Profile* profile)
+     : profile_(profile),
+@@ -465,8 +562,29 @@
  
  void FileSelectHelper::NotifyListenerAndEnd(
      std::vector<blink::mojom::FileChooserFileInfoPtr> list) {
++#if BUILDFLAG(IS_ANDROID)
++  scoped_refptr<FileSelectHelper> keep_alive(this);
++  // This method also runs again after asynchronous image metadata stripping.
++  // Directory enumeration is not a renderer file-picker request.
++  if (!listener_ ||
++      (android_file_picker_request_ && !IsAndroidPickerOwnerValid())) {
++    RunFileChooserEnd();
++    return;
++  }
++#endif
 +  if (brave::MaybeStripImageMetadataForUpload(
 +          image_metadata_processed_, temporary_files_, list,
 +          base::BindOnce(&FileSelectHelper::NotifyListenerAndEnd, this))) {
 +    return;
 +  }
++#if BUILDFLAG(IS_ANDROID)
++  // The listener can synchronously navigate, close, or change the active tab.
++  auto listener = std::move(listener_);
++  listener->FileSelected(std::move(list), base_dir_, dialog_mode_);
++#else
    listener_->FileSelected(std::move(list), base_dir_, dialog_mode_);
    listener_.reset();
++#endif
  
+   // No members should be accessed from here on.
+   RunFileChooserEnd();
+@@ -624,6 +742,10 @@
+ 
+   render_frame_host_ = render_frame_host;
+   web_contents_ = WebContents::FromRenderFrameHost(render_frame_host);
++#if BUILDFLAG(IS_ANDROID)
++  android_file_picker_request_ = true;
++  requesting_document_ = render_frame_host->GetWeakDocumentPtr();
++#endif
+   listener_ = std::move(listener);
+   InitLifecycleObserver(web_contents_);
+ 
+@@ -690,20 +812,29 @@
+     return;
+   }
+ 
+-#if !BUILDFLAG(IS_ANDROID)
+   // The dialog is parented to the browser window rather than to the tab, so
+   // showing it for a tab that is not the active tab would put it on top of
+   // whichever page the user is actually looking at. That is reachable both
+   // when the request came from a background tab and when the user switched
+   // tabs during the asynchronous work above. Cancel the request instead; the
+   // page sees this as a `cancel` event on the input.
++#if BUILDFLAG(IS_ANDROID)
++  if (!IsAndroidPickerOwnerValid() || !requesting_tab_->IsActivated() ||
++      web_contents_->GetVisibility() == content::Visibility::HIDDEN ||
++      (android_extension_picker_request_ &&
++       (!requesting_extension_browser_->GetWindow() ||
++        !requesting_extension_browser_->GetWindow()->IsActive() ||
++        !web_contents_->GetNativeView() ||
++        !web_contents_->GetNativeView()
++             ->IsAttachedAndVisibleWithWindowFocus()))) {
++#else
+   tabs::TabInterface* tab =
+       tabs::TabInterface::MaybeGetFromContents(web_contents_);
+   if (tab && !tab->IsActivated()) {
++#endif
+     RunFileChooserEnd();
+     return;
+   }
+-#endif  // !BUILDFLAG(IS_ANDROID)
+ 
+   select_file_dialog_ = ui::SelectFileDialog::Create(
+       this, std::make_unique<ChromeSelectFilePolicy>(web_contents_));
+@@ -751,6 +882,10 @@
+   const GURL* caller =
+       &render_frame_host_->GetMainFrame()->GetLastCommittedURL();
+ 
++#if BUILDFLAG(IS_ANDROID)
++  // SelectFile can synchronously launch an external Activity and hide Chrome.
++  android_file_picker_started_ = true;
++#endif
+   select_file_dialog_->SelectFile(
+       dialog_type_, params->title, default_file_path, select_file_types_.get(),
+       file_type_index, base::FilePath::StringType(), owning_window, caller);
+@@ -762,6 +897,22 @@
+ // dialog or if the renderer was destroyed. Perform any cleanup and release the
+ // reference we added in RunFileChooser().
+ void FileSelectHelper::RunFileChooserEnd() {
++#if BUILDFLAG(IS_ANDROID)
++  scoped_refptr<FileSelectHelper> keep_alive(this);
++  tab_hidden_subscription_ = {};
++  picker_model_observer_.reset();
++  // Temp-file cleanup may keep this object alive, but not the pending request.
++  // Move the listener before invoking it to make cancellation reentrant-safe.
++  if (listener_) {
++    auto listener = std::move(listener_);
++    listener->FileSelectionCanceled();
++  }
++  if (select_file_dialog_) {
++    select_file_dialog_->ListenerDestroyed();
++    select_file_dialog_.reset();
++  }
++  render_frame_host_ = nullptr;
++#endif
+ #if !BUILDFLAG(IS_ANDROID)
+   // Ensure picture-in-picture occlusion mitigation stops, even if we need to
+   // keep this instance alive for temporary files.
+@@ -776,7 +927,15 @@
+   // until web_contents_ is destroyed, so that this instance can delete the
+   // temporary files.
+   if (!temporary_files_.empty()) {
+-    return;
++#if BUILDFLAG(IS_ANDROID)
++    if (!web_contents_) {
++      DeleteTemporaryFiles();
++    } else {
++      return;
++    }
++#else
++    return;
++#endif
+   }
+ 
+   if (listener_) {
+@@ -862,7 +1021,31 @@
+ 
+   tabs::TabInterface* tab_interface =
+       tabs::TabInterface::MaybeGetFromContents(web_contents);
++#if BUILDFLAG(IS_ANDROID)
++  if (!tab_interface && android_file_picker_request_) {
++    if (auto* browser =
++            GetAndroidExtensionPickerBrowser(web_contents, profile_)) {
++      android_extension_picker_request_ = true;
++      requesting_extension_browser_ = browser->GetWeakPtr();
++      auto* tab_list = TabListInterface::From(browser);
++      tab_interface = tab_list ? tab_list->GetActiveTab() : nullptr;
++    }
++  }
++  if (android_file_picker_request_ && tab_interface) {
++    if (auto* model = TabModelList::GetTabModelForTabAndroid(
++            TabAndroid::FromTabInterface(tab_interface))) {
++      picker_model_observer_ =
++          std::make_unique<AndroidPickerModelObserver>(this, model);
++    }
++  }
++#endif
+   if (tab_interface) {
++#if BUILDFLAG(IS_ANDROID)
++    requesting_tab_ = tab_interface->GetWeakPtr();
++    tab_hidden_subscription_ =
++        tab_interface->RegisterWillBecomeHidden(base::BindRepeating(
++            &FileSelectHelper::OnAndroidTabHidden, base::Unretained(this)));
++#endif
+     tab_deactivated_subscription_ =
+         tab_interface->RegisterWillDeactivate(base::BindRepeating(
+             &FileSelectHelper::OnTabDeactivated, base::Unretained(this)));
+@@ -872,6 +1055,58 @@
+ void FileSelectHelper::OnTabDeactivated(tabs::TabInterface* tab) {
+   RunFileChooserEnd();
+ }
++
++#if BUILDFLAG(IS_ANDROID)
++void FileSelectHelper::OnVisibilityChanged(content::Visibility visibility) {
++  if (android_file_picker_request_ && !android_file_picker_started_ &&
++      visibility == content::Visibility::HIDDEN) {
++    RunFileChooserEnd();
++  }
++}
++
++void FileSelectHelper::OnAndroidTabHidden(tabs::TabInterface* tab) {
++  // A launched OS picker naturally hides its owner. Only preparation is
++  // canceled on hide; actual tab deactivation remains a cancellation above.
++  if (android_file_picker_request_ && !android_file_picker_started_) {
++    RunFileChooserEnd();
++  }
++}
++
++bool FileSelectHelper::IsAndroidPickerOwnerValid() const {
++  auto* document = requesting_document_.AsRenderFrameHostIfValid();
++  if (!document || !document->IsActive() || document != render_frame_host_ ||
++      !web_contents_ ||
++      WebContents::FromRenderFrameHost(document) != web_contents_ ||
++      !IsValidProfile(profile_) ||
++      Profile::FromBrowserContext(web_contents_->GetBrowserContext()) !=
++          profile_) {
++    return false;
++  }
++  auto* tab = requesting_tab_.get();
++  if (!tab) {
++    return false;
++  }
++  if (android_extension_picker_request_) {
++    auto* browser = requesting_extension_browser_.get();
++    auto* tab_list = browser ? TabListInterface::From(browser) : nullptr;
++    if (!browser || !tab_list ||
++        GetAndroidExtensionPickerBrowser(web_contents_, profile_) != browser ||
++        tab_list->GetActiveTab() != tab ||
++        browser->GetProfile() != tab->GetProfile() ||
++        !web_contents_->GetTopLevelNativeWindow()) {
++      return false;
++    }
++  } else if (TabAndroid::FromWebContents(web_contents_) != tab ||
++             tab->GetContents() != web_contents_ ||
++             tab->GetProfile() != profile_) {
++    return false;
++  }
++  auto* model =
++      TabModelList::GetTabModelForTabAndroid(TabAndroid::FromTabInterface(tab));
++  return model && model->GetProfile() == tab->GetProfile() &&
++         model->IsActiveModel() && model->GetActiveTab() == tab;
++}
++#endif
+ 
+ // static
+ bool FileSelectHelper::IsAcceptTypeValid(const std::string& accept_type) {

@@ -1,0 +1,468 @@
+diff --git a/chrome/android/junit/src/org/chromium/chrome/browser/download/DownloadUtilsUnitTest.java b/chrome/android/junit/src/org/chromium/chrome/browser/download/DownloadUtilsUnitTest.java
+index 7911ce7a3d1e460d4773aa8d807734b975be235f..27d0ab880eb48e470d50ee2f2a27b10e2b8d7683 100644
+--- a/chrome/android/junit/src/org/chromium/chrome/browser/download/DownloadUtilsUnitTest.java
++++ b/chrome/android/junit/src/org/chromium/chrome/browser/download/DownloadUtilsUnitTest.java
+@@ -11,10 +11,17 @@
+ import static org.mockito.ArgumentMatchers.any;
+ import static org.mockito.ArgumentMatchers.anyBoolean;
+ import static org.mockito.ArgumentMatchers.eq;
++import static org.mockito.Mockito.doAnswer;
++import static org.mockito.Mockito.doNothing;
++import static org.mockito.Mockito.doThrow;
++import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.never;
++import static org.mockito.Mockito.verifyNoInteractions;
+ import static org.mockito.Mockito.times;
+ import static org.mockito.Mockito.verify;
+ import static org.mockito.Mockito.when;
+ 
++import android.app.Activity;
+ import android.content.Context;
+ import android.content.Intent;
+ import android.content.pm.ActivityInfo;
+@@ -28,21 +35,49 @@
+ import org.junit.Rule;
+ import org.junit.Test;
+ import org.junit.runner.RunWith;
++import org.mockito.ArgumentCaptor;
+ import org.mockito.Mock;
+ import org.mockito.junit.MockitoJUnit;
+ import org.mockito.junit.MockitoRule;
++import org.robolectric.Robolectric;
+ import org.robolectric.RuntimeEnvironment;
++import org.robolectric.android.controller.ActivityController;
++import org.robolectric.annotation.Config;
+ import org.robolectric.Shadows;
+ import org.robolectric.shadows.ShadowPackageManager;
+-
++import org.robolectric.util.ReflectionHelpers;
++
++import org.chromium.base.ActivityState;
++import org.chromium.base.ApplicationStatus;
++import org.chromium.base.Callback;
+ import org.chromium.base.test.BaseRobolectricTestRunner;
+ import org.chromium.base.test.util.Feature;
+ import org.chromium.base.test.util.Features.DisableFeatures;
+ import org.chromium.base.test.util.Features.EnableFeatures;
+ import org.chromium.base.test.util.HistogramWatcher;
++import org.chromium.chrome.browser.app.download.home.DownloadActivityLauncher;
+ import org.chromium.chrome.browser.download.DownloadMetrics.DownloadOpenTarget;
+ import org.chromium.chrome.browser.flags.ChromeFeatureList;
++import org.chromium.chrome.browser.preferences.Pref;
+ import org.chromium.chrome.browser.profiles.OtrProfileId;
++import org.chromium.chrome.browser.profiles.Profile;
++import org.chromium.chrome.browser.profiles.ProfileManager;
++import org.chromium.chrome.browser.tab.Tab;
++import org.chromium.components.offline_items_collection.ContentId;
++import org.chromium.components.prefs.PrefService;
++import org.chromium.components.profile_metrics.BrowserProfileType;
++import org.chromium.components.user_prefs.UserPrefs;
++import org.chromium.content.browser.BrowserStartupControllerImpl;
++import org.chromium.ui.base.WindowAndroid;
++import org.chromium.ui.modaldialog.DialogDismissalCause;
++import org.chromium.ui.modaldialog.ModalDialogManager;
++import org.chromium.ui.modaldialog.ModalDialogManagerHolder;
++import org.chromium.ui.modaldialog.ModalDialogProperties;
++import org.chromium.ui.modelutil.PropertyModel;
++
++import java.lang.ref.WeakReference;
++import java.util.ArrayList;
++import java.util.List;
+ 
+ /** Unit tests for {@link DownloadUtils} helper methods and preferred app routing. */
+ @RunWith(BaseRobolectricTestRunner.class)
+@@ -72,11 +107,15 @@
+     private Context mContext;
+     private ShadowPackageManager mShadowPackageManager;
+     private DownloadManagerService mOriginalDownloadManagerService;
++    private DownloadActivityLauncher mOriginalDownloadActivityLauncher;
++    private DownloadActivityLauncher mMockDownloadActivityLauncher;
+ 
+     @Before
+     public void setUp() {
+         DownloadUtils.resetLastOpenFileForTesting();
+         mContext = RuntimeEnvironment.getApplication();
++        mOriginalDownloadActivityLauncher =
++                ReflectionHelpers.getStaticField(DownloadActivityLauncher.class, "sInstance");
+         mShadowPackageManager = Shadows.shadowOf(mContext.getPackageManager());
+         mOriginalDownloadManagerService =
+                 DownloadManagerService.setDownloadManagerService(mMockDownloadManagerService);
+@@ -86,6 +125,378 @@
+     public void tearDown() {
+         DownloadUtils.resetLastOpenFileForTesting();
+         DownloadManagerService.setDownloadManagerService(mOriginalDownloadManagerService);
++        ReflectionHelpers.setStaticField(
++                DownloadActivityLauncher.class, "sInstance", mOriginalDownloadActivityLauncher);
++    }
++
++    /** Keep the real singleton getter and restore its previous value after every test. */
++    private void installMockDownloadActivityLauncher() {
++        mMockDownloadActivityLauncher = mock(DownloadActivityLauncher.class);
++        ReflectionHelpers.setStaticField(
++                DownloadActivityLauncher.class, "sInstance", mMockDownloadActivityLauncher);
++    }
++
++    /** Real Activity and dialog controller; only presentation is captured by a mock manager. */
++    public static class PdfDialogHost extends Activity implements ModalDialogManagerHolder {
++        final ModalDialogManager manager = mock(ModalDialogManager.class);
++
++        @Override
++        public ModalDialogManager getModalDialogManager() {
++            return manager;
++        }
++    }
++
++    private List<Callback<Activity>> holdPdfDialogActivityCallbacks() {
++        Intent intent = new Intent(Intent.ACTION_VIEW);
++        intent.setDataAndType(Uri.parse("file:///empty.pdf"), "application/pdf");
++        // Two handlers select the generic dialog title without resolving an application label.
++        registerIntentHandler(intent, EXTERNAL_APP_PACKAGE, EXTERNAL_APP_CLASS);
++        registerIntentHandler(intent, "other.pdf.viewer", "other.pdf.viewer.Activity");
++        installMockDownloadActivityLauncher();
++        List<Callback<Activity>> callbacks = new ArrayList<>();
++        doAnswer(invocation -> {
++                    callbacks.add(invocation.getArgument(0));
++                    return null;
++                })
++                .when(mMockDownloadActivityLauncher)
++                .getActivityForOpenDialog(any());
++        return callbacks;
++    }
++
++    private static PropertyModel capturePdfDialog(PdfDialogHost host) {
++        ArgumentCaptor<PropertyModel> model = ArgumentCaptor.forClass(PropertyModel.class);
++        verify(host.manager).showDialog(model.capture(), eq(ModalDialogManager.ModalDialogType.TAB));
++        return model.getValue();
++    }
++
++    @Test
++    public void testPdfDialogDelayedHostAfterNativeDestroyDoesNothing() {
++        List<Callback<Activity>> callbacks = holdPdfDialogActivityCallbacks();
++        PrefService prefs = mock(PrefService.class);
++        UserPrefs.setPrefServiceForTesting(prefs);
++        OpenDownloadDialogBridge.Natives natives = mock(OpenDownloadDialogBridge.Natives.class);
++        OpenDownloadDialogBridgeJni.setInstanceForTesting(natives);
++        OpenDownloadDialogBridge bridge = new OpenDownloadDialogBridge(123);
++        bridge.showDialog(mock(Profile.class), TEST_GUID);
++        assertEquals(1, callbacks.size());
++        ReflectionHelpers.callInstanceMethod(bridge, "destroy");
++
++        ActivityController<PdfDialogHost> host = Robolectric.buildActivity(PdfDialogHost.class).setup();
++        try {
++            callbacks.get(0).onResult(host.get());
++            verifyNoInteractions(host.get().manager, prefs, natives);
++        } finally {
++            host.pause().stop().destroy();
++        }
++    }
++
++    @Test
++    public void testPdfDialogResultsAfterNativeDestroyDoNotCallNativeOrPrefs() {
++        List<Callback<Activity>> callbacks = holdPdfDialogActivityCallbacks();
++        PrefService prefs = mock(PrefService.class);
++        UserPrefs.setPrefServiceForTesting(prefs);
++        OpenDownloadDialogBridge.Natives natives = mock(OpenDownloadDialogBridge.Natives.class);
++        OpenDownloadDialogBridgeJni.setInstanceForTesting(natives);
++        // Dismiss, Just Once, and Always Open each exercise the real dialog result callback.
++        for (int result = 0; result < 3; ++result) {
++            ActivityController<PdfDialogHost> host =
++                    Robolectric.buildActivity(PdfDialogHost.class).setup();
++            try {
++                OpenDownloadDialogBridge bridge = new OpenDownloadDialogBridge(123);
++                bridge.showDialog(mock(Profile.class), TEST_GUID);
++                callbacks.get(result).onResult(host.get());
++                PropertyModel model = capturePdfDialog(host.get());
++                model.set(ModalDialogProperties.CHECKBOX_CHECKED, result == 2);
++                ReflectionHelpers.callInstanceMethod(bridge, "destroy");
++                model.get(ModalDialogProperties.CONTROLLER)
++                        .onDismiss(
++                                model,
++                                result == 0
++                                        ? DialogDismissalCause.NAVIGATE_BACK
++                                        : DialogDismissalCause.POSITIVE_BUTTON_CLICKED);
++                verifyNoInteractions(natives);
++                verify(prefs, never()).setBoolean(eq(Pref.AUTO_OPEN_PDF_ENABLED), anyBoolean());
++            } finally {
++                host.pause().stop().destroy();
++            }
++        }
++    }
++
++    @Test
++    public void testPdfDialogLiveAlwaysOpenStillConfirmsAndUpdatesPreference() {
++        List<Callback<Activity>> callbacks = holdPdfDialogActivityCallbacks();
++        PrefService prefs = mock(PrefService.class);
++        UserPrefs.setPrefServiceForTesting(prefs);
++        OpenDownloadDialogBridge.Natives natives = mock(OpenDownloadDialogBridge.Natives.class);
++        OpenDownloadDialogBridgeJni.setInstanceForTesting(natives);
++        ActivityController<PdfDialogHost> host = Robolectric.buildActivity(PdfDialogHost.class).setup();
++        try {
++            OpenDownloadDialogBridge bridge = new OpenDownloadDialogBridge(123);
++            bridge.showDialog(mock(Profile.class), TEST_GUID);
++            callbacks.get(0).onResult(host.get());
++            PropertyModel model = capturePdfDialog(host.get());
++            model.set(ModalDialogProperties.CHECKBOX_CHECKED, true);
++            model.get(ModalDialogProperties.CONTROLLER)
++                    .onDismiss(model, DialogDismissalCause.POSITIVE_BUTTON_CLICKED);
++            verify(natives).onConfirmed(123, TEST_GUID, true);
++            verify(prefs).setBoolean(Pref.AUTO_OPEN_PDF_ENABLED, true);
++        } finally {
++            host.pause().stop().destroy();
++        }
++    }
++
++    @Test
++    public void testPdfDialogCannotRestartAfterNativeDestroy() {
++        List<Callback<Activity>> callbacks = holdPdfDialogActivityCallbacks();
++        OpenDownloadDialogBridge.Natives natives = mock(OpenDownloadDialogBridge.Natives.class);
++        OpenDownloadDialogBridgeJni.setInstanceForTesting(natives);
++        OpenDownloadDialogBridge bridge = new OpenDownloadDialogBridge(123);
++        ReflectionHelpers.callInstanceMethod(bridge, "destroy");
++        bridge.showDialog(mock(Profile.class), TEST_GUID);
++        assertTrue(callbacks.isEmpty());
++        verifyNoInteractions(mMockDownloadActivityLauncher, natives);
++    }
++
++    private static class RevealHost implements AutoCloseable {
++        final ActivityController<Activity> controller;
++        final Activity activity;
++        final Tab tab = mock(Tab.class);
++        final Profile profile = mock(Profile.class);
++        final WindowAndroid window = mock(WindowAndroid.class);
++
++        RevealHost() {
++            if (!ApplicationStatus.isInitialized()) {
++                ApplicationStatus.initialize(RuntimeEnvironment.getApplication());
++            }
++            controller = Robolectric.buildActivity(Activity.class).setup();
++            activity = controller.get();
++            when(tab.isInitialized()).thenReturn(true);
++            when(tab.getProfile()).thenReturn(profile);
++            when(tab.getWindowAndroid()).thenReturn(window);
++            when(window.getActivity()).thenReturn(new WeakReference<>(activity));
++            when(profile.isNativeInitialized()).thenReturn(true);
++            when(profile.getOriginalProfile()).thenReturn(profile);
++            assertEquals(ActivityState.RESUMED, ApplicationStatus.getStateForActivity(activity));
++        }
++
++        @Override
++        public void close() {
++            controller.pause().stop().destroy();
++        }
++    }
++
++    @Test
++    public void testExtensionRevealRequiresResumedAttachedTab() {
++        try (RevealHost host = new RevealHost()) {
++            assertTrue(DownloadManagerService.canShowDownloadItemForExtension(
++                    host.tab, host.profile));
++            ApplicationStatus.onStateChangeForTesting(host.activity, ActivityState.PAUSED);
++            assertFalse(DownloadManagerService.canShowDownloadItemForExtension(
++                    host.tab, host.profile));
++            ApplicationStatus.onStateChangeForTesting(host.activity, ActivityState.RESUMED);
++            when(host.tab.isHidden()).thenReturn(true);
++            assertFalse(DownloadManagerService.canShowDownloadItemForExtension(
++                    host.tab, host.profile));
++            when(host.tab.isHidden()).thenReturn(false);
++            when(host.tab.isClosing()).thenReturn(true);
++            assertFalse(DownloadManagerService.canShowDownloadItemForExtension(
++                    host.tab, host.profile));
++            when(host.tab.isClosing()).thenReturn(false);
++            when(host.tab.isDestroyed()).thenReturn(true);
++            assertFalse(DownloadManagerService.canShowDownloadItemForExtension(
++                    host.tab, host.profile));
++            when(host.tab.isDestroyed()).thenReturn(false);
++            when(host.tab.getWindowAndroid()).thenReturn(null);
++            assertFalse(DownloadManagerService.canShowDownloadItemForExtension(
++                    host.tab, host.profile));
++            assertFalse(DownloadManagerService.canShowDownloadItemForExtension(null, host.profile));
++        }
++    }
++
++    @Test
++    public void testExtensionRevealDoesNotBorrowAnotherForegroundActivity() {
++        try (RevealHost host = new RevealHost(); RevealHost other = new RevealHost()) {
++            ApplicationStatus.onStateChangeForTesting(host.activity, ActivityState.PAUSED);
++            assertEquals(ActivityState.RESUMED, ApplicationStatus.getStateForActivity(other.activity));
++            assertFalse(DownloadManagerService.canShowDownloadItemForExtension(
++                    host.tab, host.profile));
++            // A different foreground host cannot borrow the selected item's original profile.
++            assertFalse(DownloadManagerService.canShowDownloadItemForExtension(
++                    other.tab, host.profile));
++            assertTrue(DownloadManagerService.canShowDownloadItemForExtension(
++                    other.tab, other.profile));
++        }
++    }
++
++    @Test
++    public void testExtensionRevealRejectsProfileShutdownAndMissingNativeProfile() {
++        try (RevealHost host = new RevealHost()) {
++            when(host.profile.shutdownStarted()).thenReturn(true);
++            assertFalse(DownloadManagerService.canShowDownloadItemForExtension(
++                    host.tab, host.profile));
++            when(host.profile.shutdownStarted()).thenReturn(false);
++            when(host.profile.isNativeInitialized()).thenReturn(false);
++            assertFalse(DownloadManagerService.canShowDownloadItemForExtension(
++                    host.tab, host.profile));
++            assertFalse(DownloadManagerService.canShowDownloadItemForExtension(host.tab, null));
++        }
++    }
++
++    @Test
++    public void testExtensionRevealRequiresExactExistingPrimaryOtr() {
++        try (RevealHost host = new RevealHost()) {
++            Profile otr = mock(Profile.class);
++            OtrProfileId id = OtrProfileId.getPrimaryOtrProfileId();
++            when(otr.isNativeInitialized()).thenReturn(true);
++            when(otr.isOffTheRecord()).thenReturn(true);
++            when(otr.isPrimaryOtrProfile()).thenReturn(true);
++            when(otr.getOriginalProfile()).thenReturn(host.profile);
++            when(otr.getOtrProfileId()).thenReturn(id);
++            when(host.profile.getOffTheRecordProfile(id, false)).thenReturn(otr);
++            assertTrue(DownloadManagerService.canShowDownloadItemForExtension(host.tab, otr));
++            verify(host.profile).getOffTheRecordProfile(id, false);
++            when(host.profile.getOffTheRecordProfile(id, false)).thenReturn(mock(Profile.class));
++            assertFalse(DownloadManagerService.canShowDownloadItemForExtension(host.tab, otr));
++            when(host.profile.getOffTheRecordProfile(id, false)).thenReturn(null);
++            assertFalse(DownloadManagerService.canShowDownloadItemForExtension(host.tab, otr));
++            when(host.profile.getOffTheRecordProfile(id, false)).thenReturn(otr);
++            when(otr.isPrimaryOtrProfile()).thenReturn(false);
++            assertFalse(DownloadManagerService.canShowDownloadItemForExtension(host.tab, otr));
++        }
++    }
++
++    @Test
++    public void testExtensionRevealForwardsExactIdentityAndCompletion() {
++        try (RevealHost host = new RevealHost()) {
++            installMockDownloadActivityLauncher();
++            List<Boolean> results = new ArrayList<>();
++            ContentId id = new ContentId("LEGACY_DOWNLOAD", TEST_GUID);
++            when(mMockDownloadActivityLauncher.showDownloadItem(
++                    eq(host.activity), eq(host.profile), eq(id), any()))
++                    .thenAnswer(invocation -> {
++                        Callback<Boolean> completion = invocation.getArgument(3);
++                        completion.onResult(true);
++                        return 41L;
++                    });
++            assertEquals(41L, DownloadManagerService.showDownloadItemForExtension(
++                    host.tab, host.profile, id.namespace, id.id, results::add));
++            assertEquals(List.of(true), results);
++            verify(mMockDownloadActivityLauncher).showDownloadItem(
++                    eq(host.activity), eq(host.profile), eq(id), any());
++            DownloadManagerService.cancelDownloadItemForExtension(41L);
++            verify(mMockDownloadActivityLauncher).cancelDownloadItem(41L);
++        }
++    }
++
++    @Test
++    public void testExtensionRevealInvalidIdentityFailsSynchronouslyOnce() {
++        try (RevealHost host = new RevealHost()) {
++            installMockDownloadActivityLauncher();
++            List<Boolean> results = new ArrayList<>();
++            assertEquals(0L, DownloadManagerService.showDownloadItemForExtension(
++                    host.tab, host.profile, "LEGACY_DOWNLOAD", "", results::add));
++            assertEquals(List.of(false), results);
++            verifyNoInteractions(mMockDownloadActivityLauncher);
++        }
++    }
++
++    @Test
++    public void testExtensionRevealMissingHostFailsSynchronouslyOnce() {
++        installMockDownloadActivityLauncher();
++        List<Boolean> results = new ArrayList<>();
++        assertEquals(0L, DownloadManagerService.showDownloadItemForExtension(
++                null, null, "LEGACY_DOWNLOAD", TEST_GUID, results::add));
++        assertEquals(List.of(false), results);
++        DownloadManagerService.cancelDownloadItemForExtension(0L);
++        verifyNoInteractions(mMockDownloadActivityLauncher);
++    }
++
++    @Test
++    public void testExtensionCollectionRejectsMissingOrClosingTab() {
++        assertFalse(DownloadManagerService.showDownloadsForExtension(null));
++        Tab tab = mock(Tab.class);
++        when(tab.isDestroyed()).thenReturn(true);
++        assertFalse(DownloadManagerService.showDownloadsForExtension(tab));
++        when(tab.isDestroyed()).thenReturn(false);
++        when(tab.isClosing()).thenReturn(true);
++        assertFalse(DownloadManagerService.showDownloadsForExtension(tab));
++    }
++
++    @Test
++    public void testExtensionCollectionRejectsDetachedWindow() {
++        Tab tab = mock(Tab.class);
++        assertFalse(DownloadManagerService.showDownloadsForExtension(tab));
++        WindowAndroid window = mock(WindowAndroid.class);
++        when(tab.getWindowAndroid()).thenReturn(window);
++        when(window.getActivity()).thenReturn(new WeakReference<>(null));
++        assertFalse(DownloadManagerService.showDownloadsForExtension(tab));
++    }
++
++    @Test
++    @Config(qualifiers = "sw320dp")
++    public void testExtensionCollectionForwardsProfileAndReportsUiFailure() {
++        Tab tab = mock(Tab.class);
++        WindowAndroid window = mock(WindowAndroid.class);
++        Activity activity = mock(Activity.class);
++        Profile profile = mock(Profile.class);
++        Profile regular = mock(Profile.class);
++        OtrProfileId otr = OtrProfileId.getPrimaryOtrProfileId();
++        when(tab.getWindowAndroid()).thenReturn(window);
++        when(window.getActivity()).thenReturn(new WeakReference<>(activity));
++        when(activity.getResources()).thenReturn(mContext.getResources());
++        when(tab.getProfile()).thenReturn(profile);
++        when(profile.getOtrProfileId()).thenReturn(otr);
++        when(profile.isOffTheRecord()).thenReturn(true);
++        when(profile.isPrimaryOtrProfile()).thenReturn(true);
++        when(regular.hasOffTheRecordProfile(otr)).thenReturn(true);
++        ProfileManager.setLastUsedProfileForTesting(regular);
++        BrowserStartupControllerImpl.overrideInstanceForTest(
++                mock(BrowserStartupControllerImpl.class));
++        installMockDownloadActivityLauncher();
++        HistogramWatcher routing =
++                HistogramWatcher.newBuilder()
++                        .expectIntRecordTimes(
++                                "Android.DownloadPage.OpenSource", DownloadOpenSource.UNKNOWN, 2)
++                        .expectIntRecords(
++                                "Download.OpenDownloads.PerProfileType",
++                                BrowserProfileType.INCOGNITO,
++                                BrowserProfileType.REGULAR)
++                        .build();
++
++        assertTrue(DownloadManagerService.showDownloadsForExtension(tab));
++        verify(mMockDownloadActivityLauncher).showDownloadActivity(activity, otr, false);
++        // The service reads the profile, then the real Downloads metrics reads the forwarded tab.
++        verify(tab, times(2)).getProfile();
++        when(profile.getOtrProfileId()).thenReturn(null);
++        when(profile.isOffTheRecord()).thenReturn(false);
++        assertTrue(DownloadManagerService.showDownloadsForExtension(tab));
++        verify(mMockDownloadActivityLauncher).showDownloadActivity(activity, null, false);
++        // Regular routing also derives its OTR value from that same tab inside DownloadUtils.
++        verify(tab, times(5)).getProfile();
++        routing.assertExpected();
++
++        // Exercise the real DownloadUtils false return when the requested OTR profile is gone.
++        when(profile.getOtrProfileId()).thenReturn(otr);
++        when(regular.hasOffTheRecordProfile(otr)).thenReturn(false);
++        assertFalse(DownloadManagerService.showDownloadsForExtension(tab));
++        verify(mMockDownloadActivityLauncher, times(2)).showDownloadActivity(any(), any(), anyBoolean());
++        when(regular.hasOffTheRecordProfile(otr)).thenReturn(true);
++        doThrow(new SecurityException("test rejection"))
++                .when(mMockDownloadActivityLauncher)
++                .showDownloadActivity(activity, otr, false);
++        assertFalse(DownloadManagerService.showDownloadsForExtension(tab));
++        // Restore a successful UI boundary so the following early-rejection checks cannot pass
++        // merely because the launcher is still configured to throw.
++        doNothing().when(mMockDownloadActivityLauncher).showDownloadActivity(activity, otr, false);
++        when(profile.shutdownStarted()).thenReturn(true);
++        assertFalse(DownloadManagerService.showDownloadsForExtension(tab));
++        when(profile.shutdownStarted()).thenReturn(false);
++        when(activity.isFinishing()).thenReturn(true);
++        assertFalse(DownloadManagerService.showDownloadsForExtension(tab));
++        when(activity.isFinishing()).thenReturn(false);
++        when(activity.isDestroyed()).thenReturn(true);
++        assertFalse(DownloadManagerService.showDownloadsForExtension(tab));
++        verify(mMockDownloadActivityLauncher, times(3)).showDownloadActivity(any(), any(), anyBoolean());
+     }
+ 
+     private static ResolveInfo createResolveInfo(String packageName, String className) {

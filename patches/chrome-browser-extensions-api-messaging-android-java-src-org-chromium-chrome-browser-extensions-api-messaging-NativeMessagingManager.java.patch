@@ -1,0 +1,61 @@
+diff --git a/chrome/browser/extensions/api/messaging/android/java/src/org/chromium/chrome/browser/extensions/api/messaging/NativeMessagingManager.java b/chrome/browser/extensions/api/messaging/android/java/src/org/chromium/chrome/browser/extensions/api/messaging/NativeMessagingManager.java
+--- a/chrome/browser/extensions/api/messaging/android/java/src/org/chromium/chrome/browser/extensions/api/messaging/NativeMessagingManager.java
++++ b/chrome/browser/extensions/api/messaging/android/java/src/org/chromium/chrome/browser/extensions/api/messaging/NativeMessagingManager.java
+@@ -31,13 +31,27 @@
+ @NullMarked
+ public class NativeMessagingManager implements Destroyable, NativeMessagingConnection.Observer {
+     private static @Nullable ProfileKeyedMap<NativeMessagingManager> sProfileMap;
++    private static @Nullable ProfileKeyedMap<NativeMessagingManager> sAuthorizedProfileMap;
+ 
+     private long mNativePtr;
+     private final Map<String, NativeMessagingConnection> mConnections = new HashMap<>();
+ 
+     /** Return the {@link NativeMessagingManager} associated with the passed in {@link Profile}. */
+     public static NativeMessagingManager getForProfile(Profile profile) {
++        return getForProfile(profile, /* requireAuthorizedCompanion= */ false);
++    }
++
++    public static NativeMessagingManager getForProfile(
++            Profile profile, boolean requireAuthorizedCompanion) {
+         ThreadUtils.assertOnUiThread();
++        if (requireAuthorizedCompanion) {
++            if (sAuthorizedProfileMap == null) {
++                sAuthorizedProfileMap =
++                        ProfileKeyedMap.createMapOfDestroyables(
++                                ProfileKeyedMap.ProfileSelection.OWN_INSTANCE);
++            }
++            return sAuthorizedProfileMap.getForProfile(profile, NativeMessagingManager::new);
++        }
+         if (sProfileMap == null) {
+             sProfileMap =
+                     ProfileKeyedMap.createMapOfDestroyables(
+@@ -85,13 +99,17 @@
+             String packageName,
+             String extensionId,
+             boolean isVerifiedExtension,
++            boolean requireAuthorizedCompanion,
+             byte[][] certificates,
+             NativeMessageAndroidPort port) {
+         ThreadUtils.assertOnUiThread();
+ 
+         // If `certificates` is empty, then signing certificate checks for the external app will be
+-        // skipped. If this method is called with an empty `certificates` array, assume callers of
+-        // this method have authorized it.
++        // skipped only on the preserved legacy route. Generic companions always require an
++        // explicit target certificate.
++        if (requireAuthorizedCompanion && certificates.length == 0) {
++            return NativeMessagingConnection.getUnableToConnectError(packageName);
++        }
+         if (certificates.length > 0
+                 && !hasAnyMatchingSigningCertificate(packageName, certificates)) {
+             return NativeMessagingConnection.getUnableToConnectError(packageName);
+@@ -108,7 +126,8 @@
+             mConnections.put(packageName, connection);
+         }
+ 
+-        return connection.addPort(extensionId, isVerifiedExtension, port);
++        return connection.addPort(
++                extensionId, isVerifiedExtension, requireAuthorizedCompanion, port);
+     }
+ 
+     private static boolean hasAnyMatchingSigningCertificate(

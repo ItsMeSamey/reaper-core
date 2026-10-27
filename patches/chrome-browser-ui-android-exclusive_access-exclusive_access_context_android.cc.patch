@@ -1,0 +1,115 @@
+diff --git a/chrome/browser/ui/android/exclusive_access/exclusive_access_context_android.cc b/chrome/browser/ui/android/exclusive_access/exclusive_access_context_android.cc
+index 918106b77c8a15865fbb4e658a0d616c25dc8dd5..64c99e96b001650df551029380144f1661739277 100644
+--- a/chrome/browser/ui/android/exclusive_access/exclusive_access_context_android.cc
++++ b/chrome/browser/ui/android/exclusive_access/exclusive_access_context_android.cc
+@@ -4,6 +4,7 @@
+ 
+ #include "exclusive_access_context_android.h"
+ 
++#include "base/functional/bind.h"
+ #include "base/functional/callback.h"
+ #include "base/notreached.h"
+ #include "base/task/single_thread_task_runner.h"
+@@ -16,10 +17,12 @@
+     JNIEnv* env,
+     const jni_zero::JavaRef<jobject>& j_window_android,
+     const jni_zero::JavaRef<jobject>& j_fullscreen_manager,
+-    const jni_zero::JavaRef<jobject>& j_activity_tab_provider) {
++    const jni_zero::JavaRef<jobject>& j_activity_tab_provider,
++    const jni_zero::JavaRef<jobject>& j_exclusive_access_manager) {
+   java_context_.Reset(Java_ExclusiveAccessContext_create(
+       env, reinterpret_cast<int64_t>(this), j_window_android,
+-      j_fullscreen_manager, j_activity_tab_provider));
++      j_fullscreen_manager, j_activity_tab_provider,
++      j_exclusive_access_manager));
+ }
+ 
+ ExclusiveAccessContextAndroid::ExclusiveAccessContextAndroid() = default;
+@@ -33,6 +36,25 @@
+ 
+ void ExclusiveAccessContextAndroid::Destroy(JNIEnv* env) {
+   Java_ExclusiveAccessContext_destroy(env, java_context_);
++}
++
++void ExclusiveAccessContextAndroid::SetBrowserFullscreenExtensionIdentity(
++    const GURL& extension_url,
++    const std::u16string& extension_display_name) {
++  browser_fullscreen_extension_origin_ = url::Origin::Create(extension_url);
++  browser_fullscreen_extension_name_ = extension_display_name;
++}
++
++std::optional<std::u16string>
++ExclusiveAccessContextAndroid::GetBrowserFullscreenExtensionName(
++    const ExclusiveAccessBubbleParams& params) const {
++  if (params.type ==
++          EXCLUSIVE_ACCESS_BUBBLE_TYPE_EXTENSION_FULLSCREEN_EXIT_INSTRUCTION &&
++      !browser_fullscreen_extension_name_.empty() &&
++      params.origin == browser_fullscreen_extension_origin_) {
++    return browser_fullscreen_extension_name_;
++  }
++  return std::nullopt;
+ }
+ 
+ Profile* ExclusiveAccessContextAndroid::GetProfile() {
+@@ -60,11 +82,30 @@
+   auto params = ExclusiveAccessBubbleParams{origin, bubble_type};
+   if (!exclusive_access_bubble_) {
+     exclusive_access_bubble_ = std::make_unique<ExclusiveAccessBubbleAndroid>(
+-        params, base::NullCallback(), java_context_);
++        params, base::NullCallback(), java_context_,
++        GetBrowserFullscreenExtensionName(params));
+   }
+   {
+-    exclusive_access_bubble_->Update(params, base::NullCallback());
+-  }
++    exclusive_access_bubble_->Update(params, base::NullCallback(),
++                                     GetBrowserFullscreenExtensionName(params));
++  }
++}
++
++base::OnceClosure
++ExclusiveAccessContextAndroid::GetTabFullscreenExitCallback() {
++  JNIEnv* env = jni_zero::AttachCurrentThread();
++  const int64_t request_generation =
++      Java_ExclusiveAccessContext_getTabFullscreenRequestGeneration(
++          env, java_context_);
++  return base::BindOnce(&ExclusiveAccessContextAndroid::ExitTabFullscreen,
++                        GetAsWeakPtr(), request_generation);
++}
++
++void ExclusiveAccessContextAndroid::ExitTabFullscreen(
++    int64_t request_generation) {
++  JNIEnv* env = jni_zero::AttachCurrentThread();
++  Java_ExclusiveAccessContext_exitTabFullscreenMode(
++      env, java_context_, request_generation);
+ }
+ 
+ void ExclusiveAccessContextAndroid::ExitFullscreen() {
+@@ -115,12 +156,14 @@
+           exclusive_access_bubble_destruction_task_id_.value());
+       exclusive_access_bubble_destruction_task_id_.reset();
+     }
+-    exclusive_access_bubble_->Update(params, std::move(first_hide_callback));
++    exclusive_access_bubble_->Update(params, std::move(first_hide_callback),
++                                     GetBrowserFullscreenExtensionName(params));
+     return;
+   }
+ 
+   exclusive_access_bubble_ = std::make_unique<ExclusiveAccessBubbleAndroid>(
+-      params, std::move(first_hide_callback), java_context_);
++      params, std::move(first_hide_callback), java_context_,
++      GetBrowserFullscreenExtensionName(params));
+ }
+ 
+ void ExclusiveAccessContextAndroid::DestroyAnyExclusiveAccessBubble() {
+@@ -148,7 +191,9 @@
+       // Set force_update to true to bypass the was_shown_ check and force
+       // the notice to re-show.
+       force_params.force_update = true;
+-      exclusive_access_bubble_->Update(force_params, base::NullCallback());
++      exclusive_access_bubble_->Update(
++          force_params, base::NullCallback(),
++          GetBrowserFullscreenExtensionName(force_params));
+     } else {
+       exclusive_access_bubble_->OnUserInput();
+     }

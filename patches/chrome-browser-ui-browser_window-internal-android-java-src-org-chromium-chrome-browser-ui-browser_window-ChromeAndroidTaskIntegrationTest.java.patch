@@ -1,0 +1,608 @@
+diff --git a/chrome/browser/ui/browser_window/internal/android/java/src/org/chromium/chrome/browser/ui/browser_window/ChromeAndroidTaskIntegrationTest.java b/chrome/browser/ui/browser_window/internal/android/java/src/org/chromium/chrome/browser/ui/browser_window/ChromeAndroidTaskIntegrationTest.java
+index efb5b2ab1310d8acd2e51402896399ef2b9375d4..45daa9f5222197d9b8c0f05bb21b4e03c7132bee 100644
+--- a/chrome/browser/ui/browser_window/internal/android/java/src/org/chromium/chrome/browser/ui/browser_window/ChromeAndroidTaskIntegrationTest.java
++++ b/chrome/browser/ui/browser_window/internal/android/java/src/org/chromium/chrome/browser/ui/browser_window/ChromeAndroidTaskIntegrationTest.java
+@@ -4,6 +4,7 @@
+ 
+ package org.chromium.chrome.browser.ui.browser_window;
+ 
++import static org.chromium.build.NullUtil.assumeNonNull;
+ import static org.junit.Assert.assertEquals;
+ import static org.junit.Assert.assertFalse;
+ import static org.junit.Assert.assertNotEquals;
+@@ -11,39 +12,36 @@
+ import static org.junit.Assert.assertNull;
+ import static org.junit.Assert.assertTrue;
+ 
+-import static org.chromium.build.NullUtil.assumeNonNull;
+-
+ import android.annotation.SuppressLint;
+ import android.app.Activity;
+ import android.content.Intent;
+ import android.graphics.Rect;
+ import android.os.Build;
+ import android.os.Build.VERSION_CODES;
++import android.os.Bundle;
+ 
+ import androidx.test.core.app.ApplicationProvider;
+ import androidx.test.filters.MediumTest;
+-
+-import org.hamcrest.Matchers;
+-import org.junit.Assert;
+-import org.junit.Rule;
+-import org.junit.Test;
+-import org.junit.runner.RunWith;
+ 
+ import org.chromium.base.AconfigFlaggedApiDelegate;
+ import org.chromium.base.ApplicationStatus;
+ import org.chromium.base.IntentUtils;
++import org.chromium.base.JniOnceCallback;
+ import org.chromium.base.ThreadUtils;
+ import org.chromium.base.test.util.CommandLineFlags;
+ import org.chromium.base.test.util.Criteria;
+ import org.chromium.base.test.util.CriteriaHelper;
+ import org.chromium.base.test.util.DoNotBatch;
+ import org.chromium.base.test.util.Features.DisableFeatures;
++import org.chromium.base.test.util.Features.EnableFeatures;
+ import org.chromium.base.test.util.MinAndroidSdkLevel;
+ import org.chromium.base.test.util.Restriction;
+ import org.chromium.build.annotations.NullMarked;
+ import org.chromium.build.annotations.Nullable;
+ import org.chromium.chrome.browser.ChromeTabbedActivity;
++import org.chromium.chrome.browser.app.tabmodel.AsyncTabParamsManagerSingleton;
+ import org.chromium.chrome.browser.browserservices.intents.BrowserServicesIntentDataProvider.CustomTabsUiType;
++import org.chromium.chrome.browser.content.WebContentsFactory;
+ import org.chromium.chrome.browser.customtabs.CustomTabActivityTestRule;
+ import org.chromium.chrome.browser.customtabs.CustomTabActivityTypeTestUtils;
+ import org.chromium.chrome.browser.customtabs.CustomTabIntentDataProvider;
+@@ -54,6 +52,8 @@
+ import org.chromium.chrome.browser.init.AsyncInitializationActivity;
+ import org.chromium.chrome.browser.lifecycle.DestroyObserver;
+ import org.chromium.chrome.browser.profiles.Profile;
++import org.chromium.chrome.browser.profiles.ProfileManager;
++import org.chromium.chrome.browser.tabmodel.TabReparentingParams;
+ import org.chromium.chrome.browser.webapps.WebappActivityTestRule;
+ import org.chromium.chrome.test.ChromeJUnit4ClassRunner;
+ import org.chromium.chrome.test.transit.ChromeTransitTestRules;
+@@ -61,10 +61,17 @@
+ import org.chromium.chrome.test.transit.ntp.RegularNewTabPageStation;
+ import org.chromium.chrome.test.transit.page.WebPageStation;
+ import org.chromium.chrome.test.util.FullscreenTestUtils;
++import org.chromium.content_public.browser.WebContents;
++import org.chromium.content_public.browser.test.util.JavaScriptUtils;
+ import org.chromium.ui.base.DeviceFormFactor;
+ import org.chromium.ui.base.WindowResizePrecheckResult;
+ import org.chromium.ui.display.DisplayUtil;
+ import org.chromium.ui.mojom.WindowShowState;
++import org.hamcrest.Matchers;
++import org.junit.Assert;
++import org.junit.Rule;
++import org.junit.Test;
++import org.junit.runner.RunWith;
+ 
+ import java.util.ArrayList;
+ import java.util.HashSet;
+@@ -1080,6 +1087,108 @@
+ 
+         // Act.
+         mFreshCtaTransitTestRule.finishActivity();
++    }
++
++    @Test
++    @MediumTest
++    @EnableFeatures(ChromeFeatureList.ENABLE_EXCLUSIVE_ACCESS_MANAGER)
++    public void browserFullscreenSurvivesDomFullscreenAndTabNavigation() throws Exception {
++        mFreshCtaTransitTestRule.startOnTestServerUrl("/chrome/test/data/android/about.html");
++        var activity = mFreshCtaTransitTestRule.getActivity();
++        var task = assumeNonNull(getChromeAndroidTask(activity.getTaskId()));
++        var tab = mFreshCtaTransitTestRule.getActivityTab();
++        var contents = ThreadUtils.runOnUiThreadBlocking(() -> assumeNonNull(tab.getWebContents()));
++        var fullscreenManager = ThreadUtils.runOnUiThreadBlocking(activity::getFullscreenManager);
++        var exclusiveAccessManager =
++                ThreadUtils.runOnUiThreadBlocking(
++                        () ->
++                                assumeNonNull(
++                                        activity.getRootUiCoordinatorForTesting()
++                                                .getExclusiveAccessManager()));
++        var unrelatedContents =
++                ThreadUtils.runOnUiThreadBlocking(
++                        () -> WebContentsFactory.createWebContents(tab.getProfile(), false, false));
++        try {
++            ThreadUtils.runOnUiThreadBlocking(() -> task.setFullscreen(true));
++            CriteriaHelper.pollUiThread(
++                    () ->
++                            fullscreenManager.getBrowserFullscreenMode()
++                                    && fullscreenManager.getFullscreenUiModeSupplier().get()
++                                    && task.isFullscreen());
++            ThreadUtils.runOnUiThreadBlocking(
++                    () -> {
++                        assertFalse(fullscreenManager.getPersistentFullscreenMode());
++                        assertFalse(exclusiveAccessManager.hasExclusiveAccess());
++                        assertFalse(exclusiveAccessManager.isFullscreenForTabOrPending(contents));
++                        var savedState = new Bundle();
++                        exclusiveAccessManager.saveFullscreenState(savedState);
++                        assertTrue(savedState.isEmpty());
++                    });
++
++            assertEquals(
++                    "true",
++                    JavaScriptUtils.runJavascriptWithUserGestureAndAsyncResult(
++                            contents,
++                            "document.documentElement.requestFullscreen().then(() => "
++                                    + "domAutomationController.send(document.fullscreenElement !== null));"));
++            CriteriaHelper.pollUiThread(
++                    () ->
++                            exclusiveAccessManager.hasExclusiveAccess()
++                                    && exclusiveAccessManager.isFullscreenForTabOrPending(contents)
++                                    && fullscreenManager.getPersistentFullscreenMode());
++            ThreadUtils.runOnUiThreadBlocking(
++                    () -> {
++                        assertTrue(fullscreenManager.getBrowserFullscreenMode());
++                        assertTrue(fullscreenManager.getFullscreenUiModeSupplier().get());
++                        var savedState = new Bundle();
++                        exclusiveAccessManager.saveFullscreenState(savedState);
++                        assertFalse(savedState.isEmpty());
++                        // A different WebContents cannot retire the accepted DOM request.
++                        exclusiveAccessManager.exitFullscreenModeForTab(unrelatedContents);
++                        var retainedState = new Bundle();
++                        exclusiveAccessManager.saveFullscreenState(retainedState);
++                        assertFalse(retainedState.isEmpty());
++                        assertTrue(exclusiveAccessManager.hasExclusiveAccess());
++                        assertTrue(exclusiveAccessManager.isFullscreenForTabOrPending(contents));
++                        assertFalse(exclusiveAccessManager.isFullscreenForTabOrPending(unrelatedContents));
++                        assertTrue(fullscreenManager.getPersistentFullscreenMode());
++                    });
++            assertEquals(
++                    "true",
++                    JavaScriptUtils.executeJavaScriptAndWaitForResult(
++                            contents, "document.fullscreenElement !== null"));
++
++            mFreshCtaTransitTestRule.getActivityTestRule().loadUrl("about:blank");
++            assertEquals(
++                    "true",
++                    JavaScriptUtils.executeJavaScriptAndWaitForResult(
++                            contents, "document.fullscreenElement === null"));
++            CriteriaHelper.pollUiThread(
++                    () ->
++                            !exclusiveAccessManager.hasExclusiveAccess()
++                                    && !exclusiveAccessManager.isFullscreenForTabOrPending(contents)
++                                    && !fullscreenManager.getPersistentFullscreenMode());
++            ThreadUtils.runOnUiThreadBlocking(
++                    () -> {
++                        assertTrue(fullscreenManager.getBrowserFullscreenMode());
++                        assertTrue(fullscreenManager.getFullscreenUiModeSupplier().get());
++                        assertTrue(task.isFullscreen());
++                        var savedState = new Bundle();
++                        exclusiveAccessManager.saveFullscreenState(savedState);
++                        assertTrue(savedState.isEmpty());
++                    });
++        } finally {
++            ThreadUtils.runOnUiThreadBlocking(
++                    () -> {
++                        task.setFullscreen(false);
++                        unrelatedContents.destroy();
++                    });
++        }
++        CriteriaHelper.pollUiThread(
++                () ->
++                        !fullscreenManager.getBrowserFullscreenMode()
++                                && !fullscreenManager.getFullscreenUiModeSupplier().get()
++                                && !task.isFullscreen());
+     }
+ 
+     @Test
+@@ -1477,6 +1586,329 @@
+                 });
+     }
+ 
++    private static AndroidBrowserWindowCreateParams pendingPopupParams(
++            Profile profile, @Nullable WebContents contents) {
++        return AndroidBrowserWindowCreateParamsImpl.create(
++                BrowserWindowType.POPUP,
++                profile,
++                0,
++                0,
++                320,
++                480,
++                WindowShowState.DEFAULT,
++                contents);
++    }
++
++    // This observes Java once dispatch. The native WebAuthFlow browser regression
++    // separately exercises a real allocated native callback and deferred deletion.
++    private static final class CountingNativeCompletion implements JniOnceCallback<Long> {
++        int mCalls;
++        int mDestroyCalls;
++        long mValue = -1;
++        @Nullable Runnable mInspection;
++
++        @Override
++        public void onResult(Long value) {
++            mCalls++;
++            mValue = value;
++            if (mInspection != null) mInspection.run();
++        }
++
++        @Override
++        public void destroy() {
++            mDestroyCalls++;
++        }
++    }
++
++    @Test
++    @MediumTest
++    public void heldPendingPopup_realOtrDestructionDisposesWindowBeforeOnceNullCompletion() {
++        mFreshCtaTransitTestRule.startOnBlankPage();
++        var activity = mFreshCtaTransitTestRule.getActivity();
++        var pendingRef = new AtomicReference<ChromeAndroidTaskImpl>();
++        var unrelatedRef = new AtomicReference<ChromeAndroidTaskImpl>();
++        var otrRef = new AtomicReference<Profile>();
++        var callback = new CountingNativeCompletion();
++        var reentrantCallback = new CountingNativeCompletion();
++        boolean[] observed = new boolean[5];
++        try {
++            ThreadUtils.runOnUiThreadBlocking(
++                    () -> {
++                        var tracker =
++                                (ChromeAndroidTaskTrackerImpl)
++                                        ChromeAndroidTaskTrackerFactory.getInstance();
++                        var regular = assumeNonNull(activity.getActivityTab()).getProfile();
++                        assertNull(regular.getPrimaryOtrProfile(false));
++                        var otr = regular.getOrCreatePrimaryOtrProfile();
++                        otrRef.set(otr);
++                        tracker.pausePendingTaskActivityCreationForTesting();
++                        var unrelated =
++                                tracker.createPendingTask(pendingPopupParams(regular, null), null);
++                        assertNotNull(unrelated);
++                        unrelatedRef.set(unrelated);
++                        int unrelatedId =
++                                assumeNonNull(unrelated.getPendingTaskInfo()).mPendingTaskId;
++                        var pending =
++                                tracker.createPendingTask(pendingPopupParams(otr, null), callback);
++                        assertNotNull(pending);
++                        pendingRef.set(pending);
++                        int pendingId = assumeNonNull(pending.getPendingTaskInfo()).mPendingTaskId;
++                        assertNotEquals(0L, pending.getOrCreateNativeBrowserWindowPtr(otr));
++                        var window = pending.getBrowserWindowsForTesting(otr).get(0);
++                        assertNotEquals(0L, window.getNativePtr());
++                        callback.mInspection =
++                                () -> {
++                                    observed[0] =
++                                            tracker.getPendingTaskForTesting(pendingId) == null;
++                                    observed[1] =
++                                            window.getNativePtr() == 0 && pending.isDestroyed();
++                                    observed[2] = otr.shutdownStarted();
++                                    observed[3] =
++                                            tracker.getPendingTaskForTesting(unrelatedId)
++                                                    == unrelated;
++                                    observed[4] =
++                                            tracker.createPendingTask(
++                                                            pendingPopupParams(otr, null),
++                                                            reentrantCallback)
++                                                    == null;
++                                };
++                        // This invokes the production deferred ProfileDestroyer path,
++                        // including Java notification before native ProfileObservers.
++                        ProfileManager.destroyWhenAppropriate(otr);
++                        assertEquals(1, callback.mCalls);
++                        assertEquals(0L, callback.mValue);
++                        assertEquals(0, callback.mDestroyCalls);
++                        assertEquals(1, reentrantCallback.mCalls);
++                        assertEquals(0L, reentrantCallback.mValue);
++                        for (boolean value : observed) assertTrue(value);
++                        assertTrue(tracker.isPendingTaskAvailable(unrelatedId));
++                        assertFalse(tracker.isPendingTaskAvailable(pendingId));
++                        assertEquals(1, tracker.getHeldPendingTaskIdsForTesting().length);
++                        tracker.resumePendingTaskActivityCreationForTesting(pendingId);
++                        assertEquals(1, callback.mCalls);
++                        pending.destroy();
++                        assertEquals(1, callback.mCalls);
++                        assertFalse(activity.isFinishing());
++                    });
++            CriteriaHelper.pollUiThread(() -> !assumeNonNull(otrRef.get()).isNativeInitialized());
++        } finally {
++            ThreadUtils.runOnUiThreadBlocking(
++                    () -> {
++                        var pending = pendingRef.get();
++                        if (pending != null) pending.destroy();
++                        var unrelated = unrelatedRef.get();
++                        if (unrelated != null) unrelated.destroy();
++                        var tracker =
++                                (ChromeAndroidTaskTrackerImpl)
++                                        ChromeAndroidTaskTrackerFactory.getInstance();
++                        tracker.clearActivityCreationPauseForTesting();
++                        var otr = otrRef.get();
++                        if (otr != null && otr.isNativeInitialized() && !otr.shutdownStarted()) {
++                            ProfileManager.destroyWhenAppropriate(otr);
++                        }
++                    });
++        }
++    }
++
++    @Test
++    @MediumTest
++    public void
++            issuedTransferredPopup_realOtrDestructionRejectsLateActivityAndDestroysOwnedContents() {
++        mFreshCtaTransitTestRule.startOnBlankPage();
++        var activity = mFreshCtaTransitTestRule.getActivity();
++        var pendingRef = new AtomicReference<ChromeAndroidTaskImpl>();
++        var otrRef = new AtomicReference<Profile>();
++        var launchedActivity = new AtomicReference<Activity>();
++        var pendingIdRef = new AtomicReference<Integer>();
++        var callback = new CountingNativeCompletion();
++        boolean[] disposedBeforeCompletion = new boolean[3];
++        ApplicationStatus.ActivityStateListener listener =
++                (candidate, state) -> {
++                    Integer id =
++                            ChromeAndroidTaskTracker.getPendingTaskIdFromIntent(
++                                    candidate.getIntent());
++                    if (id != null && id.equals(pendingIdRef.get()))
++                        launchedActivity.set(candidate);
++                };
++        try {
++            ThreadUtils.runOnUiThreadBlocking(
++                    () -> {
++                        ApplicationStatus.registerStateListenerForAllActivities(listener);
++                        var tracker =
++                                (ChromeAndroidTaskTrackerImpl)
++                                        ChromeAndroidTaskTrackerFactory.getInstance();
++                        var regular = assumeNonNull(activity.getActivityTab()).getProfile();
++                        assertNull(regular.getPrimaryOtrProfile(false));
++                        var otr = regular.getOrCreatePrimaryOtrProfile();
++                        otrRef.set(otr);
++                        var contents = WebContentsFactory.createWebContents(otr, false, false);
++                        // The actual creator issues Android startActivity and transfers
++                        // this real WebContents through TabReparentingParams. No creator
++                        // interception or synthesized Profile notification is used.
++                        var pending =
++                                tracker.createPendingTask(
++                                        pendingPopupParams(otr, contents), callback);
++                        assertNotNull(pending);
++                        pendingRef.set(pending);
++                        int pendingId = assumeNonNull(pending.getPendingTaskInfo()).mPendingTaskId;
++                        pendingIdRef.set(pendingId);
++                        var paramsManager = AsyncTabParamsManagerSingleton.getInstance();
++                        int transferredId = -1;
++                        for (int i = 0; i < paramsManager.getAsyncTabParams().size(); i++) {
++                            var params = paramsManager.getAsyncTabParams().valueAt(i);
++                            if (params instanceof TabReparentingParams transferred
++                                    && transferred.getTabToReparent().getWebContents()
++                                            == contents) {
++                                transferredId = paramsManager.getAsyncTabParams().keyAt(i);
++                            }
++                        }
++                        assertTrue(transferredId != -1);
++                        int tabId = transferredId;
++                        assertNull(contents.getTopLevelNativeWindow());
++                        assertNotEquals(0L, pending.getOrCreateNativeBrowserWindowPtr(otr));
++                        var window = pending.getBrowserWindowsForTesting(otr).get(0);
++                        callback.mInspection =
++                                () -> {
++                                    disposedBeforeCompletion[0] =
++                                            tracker.getPendingTaskForTesting(pendingId) == null;
++                                    disposedBeforeCompletion[1] = window.getNativePtr() == 0;
++                                    disposedBeforeCompletion[2] =
++                                            contents.isDestroyed()
++                                                    && paramsManager.getAsyncTabParams().get(tabId)
++                                                            == null;
++                                };
++                        // Remain in this UI task: the issued Activity cannot complete
++                        // startup before genuine Profile destruction cancels its request.
++                        ProfileManager.destroyWhenAppropriate(otr);
++                        assertEquals(1, callback.mCalls);
++                        assertEquals(0L, callback.mValue);
++                        assertEquals(0, callback.mDestroyCalls);
++                        for (boolean value : disposedBeforeCompletion) assertTrue(value);
++                        assertFalse(activity.isFinishing());
++                    });
++            CriteriaHelper.pollUiThread(
++                    () -> {
++                        var launched = launchedActivity.get();
++                        return launched != null && launched.isDestroyed();
++                    },
++                    "Issued cancelled popup Activity did not terminate.");
++            CriteriaHelper.pollUiThread(() -> !assumeNonNull(otrRef.get()).isNativeInitialized());
++            ThreadUtils.runOnUiThreadBlocking(
++                    () -> {
++                        var regular = assumeNonNull(activity.getActivityTab()).getProfile();
++                        assertNull(regular.getPrimaryOtrProfile(false));
++                        assertFalse(activity.isFinishing());
++                        assertEquals(1, callback.mCalls);
++                        assertTrue(assumeNonNull(pendingRef.get()).isDestroyed());
++                    });
++        } finally {
++            ThreadUtils.runOnUiThreadBlocking(
++                    () -> {
++                        ApplicationStatus.unregisterActivityStateListener(listener);
++                        var launched = launchedActivity.get();
++                        if (launched != null && !launched.isDestroyed()) launched.finish();
++                        var pending = pendingRef.get();
++                        if (pending != null) pending.destroy();
++                        var otr = otrRef.get();
++                        if (otr != null && otr.isNativeInitialized() && !otr.shutdownStarted()) {
++                            ProfileManager.destroyWhenAppropriate(otr);
++                        }
++                    });
++        }
++    }
++
++    @Test
++    @MediumTest
++    public void
++            consumedTransferredPopup_taskDestructionLeavesActualAttachedContentsToActivityOwner() {
++        mFreshCtaTransitTestRule.startOnBlankPage();
++        var activity = mFreshCtaTransitTestRule.getActivity();
++        var pendingRef = new AtomicReference<ChromeAndroidTaskImpl>();
++        var contentsRef = new AtomicReference<WebContents>();
++        var launchedActivity = new AtomicReference<Activity>();
++        var pendingIdRef = new AtomicReference<Integer>();
++        var callback = new CountingNativeCompletion();
++        int[] transferredId = {-1};
++        // Keep the original params strongly alive so the cleanup must prove
++        // consumption by exact manager membership, rather than just a GC miss.
++        var originalParams = new AtomicReference<TabReparentingParams>();
++        ApplicationStatus.ActivityStateListener listener =
++                (candidate, state) -> {
++                    Integer id =
++                            ChromeAndroidTaskTracker.getPendingTaskIdFromIntent(
++                                    candidate.getIntent());
++                    if (id != null && id.equals(pendingIdRef.get()))
++                        launchedActivity.set(candidate);
++                };
++        try {
++            ThreadUtils.runOnUiThreadBlocking(
++                    () -> {
++                        ApplicationStatus.registerStateListenerForAllActivities(listener);
++                        var tracker =
++                                (ChromeAndroidTaskTrackerImpl)
++                                        ChromeAndroidTaskTrackerFactory.getInstance();
++                        var regular = assumeNonNull(activity.getActivityTab()).getProfile();
++                        var contents = WebContentsFactory.createWebContents(regular, false, false);
++                        contentsRef.set(contents);
++                        var pending =
++                                tracker.createPendingTask(
++                                        pendingPopupParams(regular, contents), callback);
++                        assertNotNull(pending);
++                        pendingRef.set(pending);
++                        pendingIdRef.set(
++                                assumeNonNull(pending.getPendingTaskInfo()).mPendingTaskId);
++                        var params =
++                                AsyncTabParamsManagerSingleton.getInstance().getAsyncTabParams();
++                        for (int i = 0; i < params.size(); i++) {
++                            if (params.valueAt(i) instanceof TabReparentingParams transferred
++                                    && transferred.getTabToReparent().getWebContents()
++                                            == contents) {
++                                transferredId[0] = params.keyAt(i);
++                                originalParams.set(transferred);
++                            }
++                        }
++                        assertTrue(transferredId[0] != -1);
++                    });
++            CriteriaHelper.pollUiThread(() -> callback.mCalls == 1);
++            ThreadUtils.runOnUiThreadBlocking(
++                    () -> {
++                        assertTrue(callback.mValue != 0L);
++                        var transferred = assumeNonNull(originalParams.get());
++                        var tab = transferred.getTabToReparent();
++                        var contents = assumeNonNull(contentsRef.get());
++                        assertEquals(contents, tab.getWebContents());
++                        assertFalse(tab.isDetachedFromActivity());
++                        assertNotNull(contents.getTopLevelNativeWindow());
++                        assertNull(
++                                AsyncTabParamsManagerSingleton.getInstance()
++                                        .getAsyncTabParams()
++                                        .get(transferredId[0]));
++                        var pending = assumeNonNull(pendingRef.get());
++                        pending.destroy();
++                        assertTrue(pending.isDestroyed());
++                        assertFalse(contents.isDestroyed());
++                        assertFalse(tab.isDestroyed());
++                        assertEquals(contents, tab.getWebContents());
++                        assertEquals(1, callback.mCalls);
++                        assertEquals(0, callback.mDestroyCalls);
++                        assertFalse(activity.isFinishing());
++                        var launched = assumeNonNull(launchedActivity.get());
++                        assertFalse(launched.isDestroyed());
++                        launched.finish();
++                    });
++            CriteriaHelper.pollUiThread(() -> assumeNonNull(contentsRef.get()).isDestroyed());
++        } finally {
++            ThreadUtils.runOnUiThreadBlocking(
++                    () -> {
++                        ApplicationStatus.unregisterActivityStateListener(listener);
++                        var launched = launchedActivity.get();
++                        if (launched != null && !launched.isDestroyed()) launched.finish();
++                        var pending = pendingRef.get();
++                        if (pending != null) pending.destroy();
++                    });
++        }
++    }
++
+     private static final class TestChromeAndroidTaskFeature implements ChromeAndroidTaskFeature {
+ 
+         final List<Boolean> mTaskFocusChangedParams = new ArrayList<>();
+@@ -1494,4 +1926,84 @@
+     }
+ 
+     private static final class TestAconfigFlaggedApiDelegate implements AconfigFlaggedApiDelegate {}
++
++    @Test
++    @MediumTest
++    public void
++            completedTrustedPopup_reentrantTaskDestructionCompletesOnceAndPreservesSourceWindow() {
++        mFreshCtaTransitTestRule.startOnBlankPage();
++        var activity = mFreshCtaTransitTestRule.getActivity();
++        var pendingRef = new AtomicReference<ChromeAndroidTaskImpl>();
++        var popupActivity = new AtomicReference<Activity>();
++        var contentsRef = new AtomicReference<WebContents>();
++        var callback = new CountingNativeCompletion();
++        boolean[] retiredBeforeCallbackReturns = {false};
++        try {
++            ThreadUtils.runOnUiThreadBlocking(
++                    () -> {
++                        var tracker =
++                                (ChromeAndroidTaskTrackerImpl)
++                                        ChromeAndroidTaskTrackerFactory.getInstance();
++                        var sourceTab = assumeNonNull(activity.getActivityTab());
++                        var profile = sourceTab.getProfile();
++                        var sourceTask =
++                                (ChromeAndroidTaskImpl)
++                                        assumeNonNull(tracker.get(activity.getTaskId()));
++                        var sourceWindow = sourceTask.getBrowserWindowsForTesting(profile).get(0);
++                        long sourcePtr = sourceWindow.getNativePtr();
++                        var contents = WebContentsFactory.createWebContents(profile, false, false);
++                        contentsRef.set(contents);
++                        callback.mInspection =
++                                () -> {
++                                    var task = assumeNonNull(pendingRef.get());
++                                    var topWindow =
++                                            assumeNonNull(task.getTopActivityWindowAndroid());
++                                    var popup = assumeNonNull(topWindow.getActivity().get());
++                                    assertTrue(popup != activity);
++                                    popupActivity.set(popup);
++                                    var window = task.getBrowserWindowsForTesting(profile).get(0);
++                                    assertEquals(callback.mValue, window.getNativePtr());
++                                    task.destroy();
++                                    retiredBeforeCallbackReturns[0] =
++                                            task.isDestroyed()
++                                                    && window.getNativePtr() == 0
++                                                    && task.getActivityScopedObjectsListForTesting()
++                                                            .isEmpty();
++                                    assertFalse(sourceTask.isDestroyed());
++                                    assertEquals(sourcePtr, sourceWindow.getNativePtr());
++                                    assertEquals(sourceTab, activity.getActivityTab());
++                                    assertFalse(activity.isFinishing());
++                                    popup.finish();
++                                };
++                        var task =
++                                tracker.createPendingTask(
++                                        pendingPopupParams(profile, contents), callback);
++                        assertNotNull(task);
++                        pendingRef.set(task);
++                    });
++            CriteriaHelper.pollUiThread(() -> callback.mCalls == 1);
++            CriteriaHelper.pollUiThread(
++                    () -> {
++                        var popup = popupActivity.get();
++                        return popup != null && popup.isDestroyed();
++                    });
++            CriteriaHelper.pollUiThread(() -> assumeNonNull(contentsRef.get()).isDestroyed());
++            ThreadUtils.runOnUiThreadBlocking(
++                    () -> {
++                        assertTrue(callback.mValue != 0L);
++                        assertTrue(retiredBeforeCallbackReturns[0]);
++                        assertEquals(1, callback.mCalls);
++                        assertEquals(0, callback.mDestroyCalls);
++                        assertFalse(activity.isFinishing());
++                    });
++        } finally {
++            ThreadUtils.runOnUiThreadBlocking(
++                    () -> {
++                        var popup = popupActivity.get();
++                        if (popup != null && !popup.isDestroyed()) popup.finish();
++                        var task = pendingRef.get();
++                        if (task != null) task.destroy();
++                    });
++        }
++    }
+ }

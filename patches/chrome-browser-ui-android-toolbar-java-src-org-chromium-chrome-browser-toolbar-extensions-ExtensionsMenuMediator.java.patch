@@ -1,0 +1,149 @@
+diff --git a/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/extensions/ExtensionsMenuMediator.java b/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/extensions/ExtensionsMenuMediator.java
+index 7cea64494e668ead84d4a29564d86b9fbf6c2426..c34e1c63d3f46d5030f35414d2cc8f9e2135d7da 100644
+--- a/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/extensions/ExtensionsMenuMediator.java
++++ b/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/extensions/ExtensionsMenuMediator.java
+@@ -52,6 +52,7 @@
+     private final ChromeAndroidTask mTask;
+     private final Profile mProfile;
+     private final TabCreator mTabCreator;
++    private boolean mDestroyed;
+ 
+     /**
+      * @param context The context to use.
+@@ -178,6 +179,8 @@
+     /** Destroys the mediator. */
+     @Override
+     public void destroy() {
++        if (mDestroyed) return;
++        mDestroyed = true;
+         mMenuBridge.destroy();
+     }
+ 
+@@ -258,17 +261,16 @@
+             return;
+         }
+ 
+-        // Do nothing when the site permissions page is opened for a different
+-        // extension.
+-        ExtensionsMenuTypes.MenuEntryState entry = mMenuBridge.getMenuEntry(actionIndex);
+-        if (!isSitePermissionsPageOpenedFor(entry)) {
+-            return;
+-        }
+-
+-        // Return to the main page when extension is removed and had the site permissions page
+-        // opened.
+-        mMainPageModel.set(
+-                ExtensionsMenuProperties.CURRENT_PAGE, ExtensionsMenuProperties.Page.MAIN);
++        // Native has already erased the action, so actionIndex no longer identifies the
++        // removed entry and may be out of bounds. Check whether the selected extension remains.
++        for (ExtensionsMenuTypes.MenuEntryState entry : mMenuBridge.getMenuEntries()) {
++            if (isSitePermissionsPageOpenedFor(entry)) {
++                return;
++            }
++        }
++
++        // Refresh the main page as well: its models were not updated while permissions were open.
++        onBackButtonClicked();
+     }
+ 
+     @Override
+@@ -369,6 +371,7 @@
+      */
+     @Override
+     public void onReady() {
++        if (mDestroyed) return;
+         onModelChanged();
+         mOnReady.run();
+     }
+@@ -391,15 +394,6 @@
+                                 ExtensionsMenuItemProperties.PRIMARY_ACTION_ON_CLICK,
+                                 (view) -> mMenuBridge.executeAction(entry.id))
+                         .with(
+-                                ExtensionsMenuItemProperties.SITE_ACCESS_TOGGLE_ON_CLICK,
+-                                (buttonView, isOn) -> {
+-                                    mMenuBridge.onExtensionToggleSelected(
+-                                            entry.id, entry.origin, isOn);
+-                                    if (!isOn) {
+-                                        mOnDismissMenu.run();
+-                                    }
+-                                })
+-                        .with(
+                                 ExtensionsMenuItemProperties.SITE_PERMISSIONS_BUTTON_ON_CLICK,
+                                 (view) -> onSitePermissionsButtonClicked(entry.id))
+                         .build();
+@@ -433,7 +427,9 @@
+     private void onSitePermissionsButtonClicked(String extensionId) {
+         mSitePermissionsPageModel.set(SitePermissionsPageProperties.EXTENSION_ID, extensionId);
+ 
+-        updateSitePermissionsPage(extensionId);
++        if (!updateSitePermissionsPage(extensionId)) {
++            return;
++        }
+ 
+         // Set current page to site permissions page.
+         mMainPageModel.set(
+@@ -444,8 +440,20 @@
+     private void openUrlFromMenu(String url) {
+         mOnDismissMenu.run();
+ 
++        // Dismissal may change or close the current tab. Only a live tab from this regular
++        // profile can be the parent of the new tab, so Back can return to it.
++        Tab parent = mCurrentTabSupplier.get();
++        if (parent != null
++                && (parent.isDestroyed()
++                        || parent.isClosing()
++                        || parent.getId() == Tab.INVALID_TAB_ID
++                        || parent.isOffTheRecord()
++                        || parent.getProfile() != mProfile)) {
++            parent = null;
++        }
++
+         LoadUrlParams params = new LoadUrlParams(url, PageTransition.AUTO_TOPLEVEL);
+-        mTabCreator.createNewTab(params, TabLaunchType.FROM_CHROME_UI, null);
++        mTabCreator.createNewTab(params, TabLaunchType.FROM_CHROME_UI, parent);
+     }
+ 
+     /**
+@@ -475,6 +483,15 @@
+         itemModel.set(
+                 ExtensionsMenuItemProperties.CONTEXT_MENU_BUTTON_ACCESSIBLE_NAME,
+                 itemState.contextMenuButton.accessibleName);
++        // Rows survive navigation, so the action must use the same origin as the refreshed state.
++        itemModel.set(
++                ExtensionsMenuItemProperties.SITE_ACCESS_TOGGLE_ON_CLICK,
++                (buttonView, isOn) -> {
++                    mMenuBridge.onExtensionToggleSelected(itemState.id, itemState.origin, isOn);
++                    if (!isOn) {
++                        mOnDismissMenu.run();
++                    }
++                });
+         itemModel.set(
+                 ExtensionsMenuItemProperties.SITE_ACCESS_TOGGLE_CHECKED,
+                 itemState.siteAccessToggle.isOn);
+@@ -542,13 +559,14 @@
+      *
+      * @param extensionId The ID of the extension to show permissions for.
+      */
+-    private void updateSitePermissionsPage(String extensionId) {
++    private boolean updateSitePermissionsPage(String extensionId) {
+         ExtensionsMenuTypes.ExtensionSitePermissionsState sitePermissionsState =
+                 mMenuBridge.getExtensionSitePermissionsState(extensionId);
+         if (sitePermissionsState == null) {
+-            mMainPageModel.set(
+-                    ExtensionsMenuProperties.CURRENT_PAGE, ExtensionsMenuProperties.Page.MAIN);
+-            return;
++            // Native eligibility can change during navigation or an extension update. Refresh
++            // changes deferred while this page was open before returning to the main page.
++            onBackButtonClicked();
++            return false;
+         }
+ 
+         mSitePermissionsPageModel.set(
+@@ -577,6 +595,7 @@
+                 SitePermissionsPageProperties.SHOW_REQUESTS_TOGGLE_CLICK_LISTENER,
+                 (buttonView, isChecked) ->
+                         mMenuBridge.onShowRequestsTogglePressed(extensionId, isChecked));
++        return true;
+     }
+ 
+     /** Updates the zero state visibility. */

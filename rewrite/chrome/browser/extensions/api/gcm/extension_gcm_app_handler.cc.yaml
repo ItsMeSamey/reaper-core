@@ -1,0 +1,27 @@
+# Android extension-only native GCM integration.
+substitutions:
+- description: Include the independent Android extension channel
+  regex:
+    re_pattern: static_assert\(BUILDFLAG\(ENABLE_EXTENSIONS_CORE\)\);
+    replace: '#if BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_DESKTOP_ANDROID_EXTENSIONS)
+
+      #include "brave/browser/extensions/api/gcm/android_extension_gcm_driver.h"
+
+      #endif
+
+
+      static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));'
+- description: Restore native extension handlers at profile startup independently of JS calls
+  regex:
+    re_pattern: \ \ js_event_router_\ =\ std::make_unique<GcmJsEventRouter>\(profile_\);
+    replace: "  js_event_router_ = std::make_unique<GcmJsEventRouter>(profile_);\n#if BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_DESKTOP_ANDROID_EXTENSIONS)\n  android_driver_ = std::make_unique<AndroidExtensionGCMDriver>(\n      profile_,\n      base::BindRepeating(&ExtensionGCMAppHandler::OnMessage,\n                          weak_factory_.GetWeakPtr()),\n      base::BindRepeating(&ExtensionGCMAppHandler::OnMessagesDeleted,\n                          weak_factory_.GetWeakPtr()));\n#endif"
+- description: Shut down native transport and cancel calls after platform handlers detach
+  regex:
+    re_pattern: '\ \ \ \ \ \ GetGCMDriver\(\)\->RemoveAppHandler\(\(\*extension\)\->id\(\)\);\
+
+      \ \ \ \ \}\
+
+      \ \ \}\
+
+      \}'
+    replace: "      GetGCMDriver()->RemoveAppHandler((*extension)->id());\n    }\n  }\n#if BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_DESKTOP_ANDROID_EXTENSIONS)\n  weak_factory_.InvalidateWeakPtrs();\n  // Retain the helper locally through reentrant pending-call completions.\n  auto driver = std::move(android_driver_);\n  if (driver) {\n    driver->Shutdown();\n  }\n#endif\n}"

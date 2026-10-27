@@ -1,22 +1,325 @@
 diff --git a/chrome/android/java/src/org/chromium/chrome/browser/notifications/NotificationPlatformBridge.java b/chrome/android/java/src/org/chromium/chrome/browser/notifications/NotificationPlatformBridge.java
-index 744a501c280d470d78ec729a425f95c934ca0435..76a9a7b70378e6a1d6e252a81a016662f010cb06 100644
 --- a/chrome/android/java/src/org/chromium/chrome/browser/notifications/NotificationPlatformBridge.java
 +++ b/chrome/android/java/src/org/chromium/chrome/browser/notifications/NotificationPlatformBridge.java
-@@ -147,7 +147,7 @@ public class NotificationPlatformBridge {
-     private static long sLastPreUnsubscribePreNativeTaskStartRealMillis = -1;
- 
-     /** Encapsulates attributes that identify a notification and where it originates from. */
--    private static class NotificationIdentifyingAttributes {
-+    public static class NotificationIdentifyingAttributes {
-         public final String notificationId;
-         public final @NotificationType int notificationType;
-         public final String origin;
-@@ -1032,7 +1032,7 @@ public class NotificationPlatformBridge {
-                 .storeNotificationResourcesIfSuspended(notification);
+@@ -114,6 +114,9 @@
+
+     private final long mNativeNotificationPlatformBridge;
+
++    // Only unfinished operations are retained. Replacing a token invalidates older callbacks.
++    private final Map<String, Object> mPendingNotificationOperations = new HashMap<>();
++
+     private final BaseNotificationManagerProxy mNotificationManager;
+
+     private final NotificationContentDetectionManager mNotificationContentDetectionManager;
+@@ -244,7 +247,23 @@
+     @CalledByNative
+     private void destroy() {
+         assert sInstance == this;
++        mPendingNotificationOperations.clear();
+         sInstance = null;
++    }
++
++    private Object beginNotificationOperation(String notificationId) {
++        Object operation = new Object();
++        mPendingNotificationOperations.put(notificationId, operation);
++        return operation;
++    }
++
++    private boolean isCurrentNotificationOperation(String notificationId, Object operation) {
++        return sInstance == this && mPendingNotificationOperations.get(notificationId) == operation;
++    }
++
++    private void finishNotificationOperation(String notificationId, Object operation) {
++        // A completed older operation must not remove its replacement.
++        mPendingNotificationOperations.remove(notificationId, operation);
      }
- 
--    private static NotificationBuilderBase prepareNotificationBuilder(
-+    protected static NotificationBuilderBase prepareNotificationBuilder(
+
+     /**
+@@ -739,21 +758,36 @@
+             final boolean silent,
+             @JniType("std::vector<message_center::ButtonInfo>") final ActionInfo[] actions,
+             final boolean isSuspicious,
+-            final boolean skipUAButtons) {
++            final boolean skipUAButtons,
++            final int extensionProgress,
++            @JniType("std::u16string") final String extensionContext,
++            @JniType("std::vector<std::u16string>") final String[] extensionItemTitles,
++            @JniType("std::vector<std::u16string>") final String[] extensionItemMessages) {
++        if (sInstance != this) return;
+         final boolean vibrateEnabled =
+                 UserPrefs.get(ProfileManager.getLastUsedRegularProfile())
+                         .getBoolean(NOTIFICATIONS_VIBRATE_ENABLED);
+         final boolean incognito = profile.isOffTheRecord();
+         // TODO(peter): by-pass this check for non-Web Notification types.
+
+-        CompletableFuture<String> webApkPackage = getWebApkPackage(scopeUrl);
+-        CompletableFuture<String> channelId = getChannelIdForOrigin(origin);
++        final Object operation = beginNotificationOperation(notificationId);
++        final CompletableFuture<String> webApkPackage;
++        final CompletableFuture<String> channelId;
++        try {
++            webApkPackage = getWebApkPackage(scopeUrl);
++            channelId = getChannelIdForOrigin(origin);
++        } catch (RuntimeException e) {
++            finishNotificationOperation(notificationId, operation);
++            throw e;
++        }
+
+         CompletableFuture.allOf(webApkPackage, channelId)
+                 .thenRun(
+                         () -> {
++                            if (!isCurrentNotificationOperation(notificationId, operation)) return;
+                             try {
+                                 displayNotificationInternal(
++                                        operation,
+                                         new NotificationIdentifyingAttributes(
+                                                 notificationId,
+                                                 notificationType,
+@@ -776,14 +810,23 @@
+                                         silent,
+                                         actions,
+                                         isSuspicious,
+-                                        skipUAButtons);
++                                        skipUAButtons,
++                                        extensionProgress,
++                                        extensionContext,
++                                        extensionItemTitles,
++                                        extensionItemMessages);
+                             } catch (Exception e) {
++                                finishNotificationOperation(notificationId, operation);
+                                 Log.e(TAG, "Failed to display notification.", e);
+                             }
+                         })
+                 .exceptionally(
+                         (Function<Throwable, @Nullable Void>)
+                                 error -> {
++                                    if (!isCurrentNotificationOperation(notificationId, operation)) {
++                                        return null;
++                                    }
++                                    finishNotificationOperation(notificationId, operation);
+                                     Log.e(
+                                             TAG,
+                                             "Error occured when displaying notification.",
+@@ -832,6 +875,7 @@
+
+     /** Called after querying whether the browser backs the given WebAPK. */
+     private void displayNotificationInternal(
++            Object operation,
              NotificationIdentifyingAttributes identifyingAttributes,
+             Profile profile,
              boolean vibrateEnabled,
-             String title,
+@@ -846,7 +890,11 @@
+             boolean silent,
+             ActionInfo[] actions,
+             boolean isSuspicious,
+-            boolean skipUAButtons) {
++            boolean skipUAButtons,
++            int extensionProgress,
++            String extensionContext,
++            String[] extensionItemTitles,
++            String[] extensionItemMessages) {
+         NotificationPlatformBridgeJni.get()
+                 .storeCachedWebApkPackageForNotificationId(
+                         mNativeNotificationPlatformBridge,
+@@ -870,6 +918,15 @@
+                         silent,
+                         actions);
+
++        if (identifyingAttributes.notificationType == NotificationType.EXTENSION) {
++            ((StandardNotificationBuilder) notificationBuilder)
++                    .setExtensionContent(
++                            extensionProgress,
++                            extensionContext,
++                            extensionItemTitles,
++                            extensionItemMessages);
++        }
++
+         notificationBuilder.setContentIntent(
+                 makePendingIntent(
+                         identifyingAttributes,
+@@ -893,6 +950,7 @@
+                             notificationBuilder,
+                             identifyingAttributes.notificationId,
+                             PLATFORM_ID);
++            finishNotificationOperation(identifyingAttributes.notificationId, operation);
+             return;
+         }
+
+@@ -906,6 +964,7 @@
+                             PLATFORM_ID,
+                             notificationBuilder,
+                             NotificationUmaTracker.getInstance());
++            finishNotificationOperation(identifyingAttributes.notificationId, operation);
+             return;
+         }
+
+@@ -958,11 +1017,17 @@
+         storeNotificationResourcesIfSuspended(identifyingAttributes, profile, notification)
+                 .then(
+                         (suspended) -> {
++                            if (!isCurrentNotificationOperation(
++                                    identifyingAttributes.notificationId, operation)) {
++                                return;
++                            }
+                             // If the origin's notifications are suspended and the notification is
+                             // not a confirmation notification from Chrome, return without sending
+                             // the notification. Note Chrome confirmation notifications have
+                             // `skipUAButtons` set to true.
+                             if (suspended && !skipUAButtons) {
++                                finishNotificationOperation(
++                                        identifyingAttributes.notificationId, operation);
+                                 return;
+                             }
+
+@@ -997,6 +1062,22 @@
+                                         TAG,
+                                         "Failed to send notification, the IPC message might be"
+                                                 + " corrupted.");
++                            } finally {
++                                finishNotificationOperation(
++                                        identifyingAttributes.notificationId, operation);
++                            }
++                        },
++                        (error) -> {
++                            if (!isCurrentNotificationOperation(
++                                    identifyingAttributes.notificationId, operation)) {
++                                return;
++                            }
++                            finishNotificationOperation(
++                                    identifyingAttributes.notificationId, operation);
++                            if (error != null) {
++                                Log.e(TAG, "Failed to check notification suspension.", error);
++                            } else {
++                                Log.e(TAG, "Failed to check notification suspension.");
+                             }
+                         });
+
+@@ -1391,56 +1472,72 @@
+             @JniType("std::string") String scopeUrl,
+             boolean hasQueriedWebApkPackage,
+             @JniType("std::string") String webApkPackage) {
+-        if (!hasQueriedWebApkPackage) {
+-            final String webApkPackageFound =
+-                    WebApkValidator.queryFirstWebApkPackage(
+-                            ContextUtils.getApplicationContext(), scopeUrl);
+-            if (webApkPackageFound != null) {
+-                WebApkIdentityServiceClient.CheckBrowserBacksWebApkCallback callback =
+-                        (doesBrowserBackWebApk, _) ->
+-                                closeNotificationInternal(
+-                                        notificationId,
+-                                        doesBrowserBackWebApk ? webApkPackageFound : null,
+-                                        scopeUrl);
+-                ChromeWebApkHost.checkChromeBacksWebApkAsync(webApkPackageFound, callback);
++        if (sInstance != this) return;
++        final Object operation = beginNotificationOperation(notificationId);
++        try {
++            if (!hasQueriedWebApkPackage) {
++                final String webApkPackageFound =
++                        WebApkValidator.queryFirstWebApkPackage(
++                                ContextUtils.getApplicationContext(), scopeUrl);
++                if (webApkPackageFound != null) {
++                    WebApkIdentityServiceClient.CheckBrowserBacksWebApkCallback callback =
++                            (doesBrowserBackWebApk, _) ->
++                                    closeNotificationInternal(
++                                            notificationId,
++                                            operation,
++                                            doesBrowserBackWebApk ? webApkPackageFound : null,
++                                            scopeUrl);
++                    ChromeWebApkHost.checkChromeBacksWebApkAsync(webApkPackageFound, callback);
++                    return;
++                }
++            }
++            closeNotificationInternal(notificationId, operation, webApkPackage, scopeUrl);
++        } catch (RuntimeException e) {
++            finishNotificationOperation(notificationId, operation);
++            throw e;
++        }
++    }
++
++    /** Called after querying whether the browser backs the given WebAPK. */
++    private void closeNotificationInternal(
++            String notificationId,
++            Object operation,
++            @Nullable String webApkPackage,
++            String scopeUrl) {
++        if (!isCurrentNotificationOperation(notificationId, operation)) return;
++        try {
++            if (!TextUtils.isEmpty(webApkPackage)) {
++                WebApkServiceClient.getInstance()
++                        .cancelNotification(webApkPackage, notificationId, PLATFORM_ID);
+                 return;
+             }
+-        }
+-        closeNotificationInternal(notificationId, webApkPackage, scopeUrl);
+-    }
+-
+-    /** Called after querying whether the browser backs the given WebAPK. */
+-    private void closeNotificationInternal(
+-            String notificationId, @Nullable String webApkPackage, String scopeUrl) {
+-        if (!TextUtils.isEmpty(webApkPackage)) {
+-            WebApkServiceClient.getInstance()
+-                    .cancelNotification(webApkPackage, notificationId, PLATFORM_ID);
+-            return;
+-        }
+-
+-        if (getTwaClient().twaExistsForScope(Uri.parse(scopeUrl))) {
+-            getTwaClient().cancelNotification(Uri.parse(scopeUrl), notificationId, PLATFORM_ID);
+-
+-            // There's an edge case where a notification was displayed by Chrome, a Trusted Web
+-            // Activity is then installed and run then the notification is cancelled by javascript.
+-            // Chrome will attempt to close the notification through the TWA client and not itself.
+-            // Since NotificationManager#cancel is safe to call if the requested notification
+-            // isn't being shown, we just call that as well to ensure notifications are cleared.
+-        }
+-
+-        // The "provisionally unsubscribed" service notification re-uses the tag of the organic
+-        // notification it has replaced. Do not let this service notification be canceled. If the
+-        // user clicks `UNDO_UNSUBSCRIBE`, we will still restore the cancelled notification for the
+-        // sake of tangibly demonstrating to the user that the unsubscribe action was undone.
+-        // TODO(crbug.com/359593412): The organic notification is at this point already deleted from
+-        // the NotificationDatabase in response to it being closed by the developer. If we end up
+-        // restoring it, user interactions other than "Unsubscribe" will not work. Fix this.
+-        String origin = getOriginFromNotificationTag(notificationId);
+-        if (origin != null && sOriginsWithProvisionallyRevokedPermissions.containsKey(origin)) {
+-            return;
+-        }
+-
+-        mNotificationManager.cancel(notificationId, PLATFORM_ID);
++
++            if (getTwaClient().twaExistsForScope(Uri.parse(scopeUrl))) {
++                getTwaClient().cancelNotification(Uri.parse(scopeUrl), notificationId, PLATFORM_ID);
++
++                // There's an edge case where a notification was displayed by Chrome, a Trusted Web
++                // Activity is then installed and run then the notification is cancelled by javascript.
++                // Chrome will attempt to close the notification through the TWA client and not itself.
++                // Since NotificationManager#cancel is safe to call if the requested notification
++                // isn't being shown, we just call that as well to ensure notifications are cleared.
++            }
++
++            // The "provisionally unsubscribed" service notification re-uses the tag of the organic
++            // notification it has replaced. Do not let this service notification be canceled. If the
++            // user clicks `UNDO_UNSUBSCRIBE`, we will still restore the cancelled notification for the
++            // sake of tangibly demonstrating to the user that the unsubscribe action was undone.
++            // TODO(crbug.com/359593412): The organic notification is at this point already deleted from
++            // the NotificationDatabase in response to it being closed by the developer. If we end up
++            // restoring it, user interactions other than "Unsubscribe" will not work. Fix this.
++            String origin = getOriginFromNotificationTag(notificationId);
++            if (origin != null && sOriginsWithProvisionallyRevokedPermissions.containsKey(origin)) {
++                return;
++            }
++
++            mNotificationManager.cancel(notificationId, PLATFORM_ID);
++        } finally {
++            finishNotificationOperation(notificationId, operation);
++        }
+     }
+
+     /**
+@@ -1492,6 +1589,7 @@
+      */
+     private void onNotificationClosed(
+             NotificationIdentifyingAttributes identifyingAttributes, boolean byUser) {
++        mPendingNotificationOperations.remove(identifyingAttributes.notificationId);
+         NotificationPlatformBridgeJni.get()
+                 .onNotificationClosed(
+                         mNativeNotificationPlatformBridge,

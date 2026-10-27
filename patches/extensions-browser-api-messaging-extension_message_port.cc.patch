@@ -1,0 +1,104 @@
+diff --git a/extensions/browser/api/messaging/extension_message_port.cc b/extensions/browser/api/messaging/extension_message_port.cc
+--- a/extensions/browser/api/messaging/extension_message_port.cc
++++ b/extensions/browser/api/messaging/extension_message_port.cc
+@@ -17,6 +17,7 @@
+ #include "base/strings/string_number_conversions.h"
+ #include "base/types/optional_util.h"
+ #include "base/types/pass_key.h"
++#include "build/build_config.h"
+ #include "components/back_forward_cache/back_forward_cache_disable.h"
+ #include "content/public/browser/browser_context.h"
+ #include "content/public/browser/navigation_handle.h"
+@@ -259,7 +260,16 @@
+                                                    base::UnguessableToken()));
+   } else {
+     port->context_tracker_->TrackExtensionContexts();
++#if BUILDFLAG(IS_ANDROID)
++    WorkerId worker_id = endpoint.GetWorkerId();
++    ProcessManager* pm = ProcessManager::Get(endpoint.browser_context());
++    if (auto running_worker = pm->GetServiceWorkerRunningInstance(worker_id)) {
++      worker_id = std::move(*running_worker);
++    }
++    auto& receiver = port->service_workers_[worker_id];
++#else
+     auto& receiver = port->service_workers_[endpoint.GetWorkerId()];
++#endif
+     receiver.Bind(std::move(message_port));
+     receiver.set_disconnect_handler(base::BindOnce(&ExtensionMessagePort::Prune,
+                                                    base::Unretained(port.get()),
+@@ -626,6 +636,11 @@
+ 
+ void ExtensionMessagePort::IncrementLazyKeepaliveCount(
+     Activity::Type activity_type) {
++#if BUILDFLAG(IS_ANDROID)
++  if (browser_context_->ShutdownStarted()) {
++    return;
++  }
++#endif
+   ProcessManager* pm = ProcessManager::Get(browser_context_);
+   ExtensionHost* host = pm->GetBackgroundHostForExtension(extension_id_);
+   if (host && BackgroundInfo::HasLazyBackgroundPage(host->extension())) {
+@@ -659,6 +674,11 @@
+ 
+ void ExtensionMessagePort::DecrementLazyKeepaliveCount(
+     Activity::Type activity_type) {
++#if BUILDFLAG(IS_ANDROID)
++  if (browser_context_->ShutdownStarted()) {
++    return;
++  }
++#endif
+   ProcessManager* pm = ProcessManager::Get(browser_context_);
+   ExtensionHost* host = pm->GetBackgroundHostForExtension(extension_id_);
+   if (host && host == background_host_ptr_) {
+@@ -683,6 +703,11 @@
+       // the time the message channel opened.
+       continue;
+     }
++#if BUILDFLAG(IS_ANDROID)
++    if (iter->first.start_token != worker_id.start_token) {
++      continue;
++    }
++#endif
+     base::Uuid request_uuid = std::move(iter->second.back());
+     iter->second.pop_back();
+     if (iter->second.empty()) {
+@@ -790,10 +815,39 @@
+ }
+ 
+ bool ExtensionMessagePort::UnregisterWorker(const WorkerId& worker_id) {
++#if BUILDFLAG(IS_ANDROID)
++  // RevalidatePort may pass a key in service_workers_; own the identity before
++  // removing that receiver.
++  const WorkerId captured_worker_id = worker_id;
++#endif
+   if (extension_id_ != worker_id.extension_id)
+     return false;
++#if BUILDFLAG(IS_ANDROID)
++  // A live remote disconnect still owns UUIDs until normal channel balancing.
++  // Only a retired incarnation or shutting-down context can drop them here.
++  const bool worker_retired =
++      browser_context_->ShutdownStarted() ||
++      !ProcessManager::Get(browser_context_)
++           ->GetServiceWorkerRunningInstance(captured_worker_id);
++  auto keepalives = pending_keepalive_uuids_.find(captured_worker_id);
++  if (worker_retired && keepalives != pending_keepalive_uuids_.end() &&
++      keepalives->first.start_token == captured_worker_id.start_token) {
++    pending_keepalive_uuids_.erase(keepalives);
++  }
++  auto receiver = service_workers_.find(captured_worker_id);
++  if (receiver != service_workers_.end() &&
++      receiver->first.start_token == captured_worker_id.start_token) {
++    service_workers_.erase(receiver);
++  }
++  auto pending = pending_service_workers_.find(captured_worker_id);
++  if (pending != pending_service_workers_.end() &&
++      pending->start_token == captured_worker_id.start_token) {
++    pending_service_workers_.erase(pending);
++  }
++#else
+   service_workers_.erase(worker_id);
+   pending_service_workers_.erase(worker_id);
++#endif
+ 
+   if (!IsValidPort()) {
+     CloseChannel();

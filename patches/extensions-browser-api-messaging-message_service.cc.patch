@@ -1,0 +1,91 @@
+diff --git a/extensions/browser/api/messaging/message_service.cc b/extensions/browser/api/messaging/message_service.cc
+--- a/extensions/browser/api/messaging/message_service.cc
++++ b/extensions/browser/api/messaging/message_service.cc
+@@ -62,6 +62,7 @@
+ #include "extensions/common/extension.h"
+ #include "extensions/common/extension_features.h"
+ #include "extensions/common/extension_id.h"
++#include "extensions/common/manifest.h"
+ #include "extensions/common/manifest_constants.h"
+ #include "extensions/common/manifest_handlers/background_info.h"
+ #include "extensions/common/manifest_handlers/externally_connectable.h"
+@@ -104,10 +105,8 @@
+ constexpr char kUnauthorizedExtensionError[] =
+     "Access to native messaging is unauthorized for this extension.";
+ 
+-// TODO(crbug.com/555299632): Currently native messaging on desktop Android is
+-// restricted to allowlisted extensions. This allowlist restriction will be
+-// removed once a library is added that would allow external app developers to
+-// securely audit the connection between Chrome/extensions and their app.
++// Existing gnubbyd companions retain their original, app-authorized contract.
++// Other extensions use the authenticated Android companion entry point.
+ constexpr auto kAndroidNativeMessagingAllowedExtensionIds =
+     base::MakeFixedFlatSet<std::string_view>({
+         // gnubbyd-v3 dev
+@@ -437,6 +436,14 @@
+ }
+ 
+ // static
++#if BUILDFLAG(IS_ANDROID)
++// static
++bool MessageService::IsAndroidLegacyNativeMessagingExtensionId(
++    const ExtensionId& extension_id) {
++  return kAndroidNativeMessagingAllowedExtensionIds.contains(extension_id);
++}
++#endif
++
+ MessageService* MessageService::Get(BrowserContext* context) {
+   return BrowserContextKeyedAPIFactory<MessageService>::Get(context);
+ }
+@@ -744,10 +751,12 @@
+   }
+ 
+ #if BUILDFLAG(IS_ANDROID)
+-  if (!base::FeatureList::IsEnabled(
+-          extensions_features::
+-              kApiDesktopAndroidNativeMessagingBypassExtensionAllowlist) &&
+-      !kAndroidNativeMessagingAllowedExtensionIds.contains(extension->id())) {
++  // Generic companions must authenticate the browser and extension through the
++  // authorized AIDL entry point. Require a declared target certificate even
++  // for unpacked extensions; packed legacy extensions have the same backstop.
++  if (android_certificates.empty() &&
++      (!Manifest::IsUnpackedLocation(extension->location()) ||
++       !IsAndroidLegacyNativeMessagingExtensionId(extension->id()))) {
+     opener_port->DispatchOnDisconnect(kUnauthorizedExtensionError);
+     return;
+   }
+@@ -765,6 +774,17 @@
+     return;
+   }
+ 
++#if BUILDFLAG(IS_ANDROID)
++  // Generic Android companions have no desktop system-host registration.
++  // Do not ignore a managed restriction on user-level native messaging hosts.
++  if (policy_permission ==
++          MessagingDelegate::PolicyPermission::ALLOW_SYSTEM_ONLY &&
++      !IsAndroidLegacyNativeMessagingExtensionId(extension->id())) {
++    opener_port->DispatchOnDisconnect(kProhibitedByPoliciesError);
++    return;
++  }
++#endif
++
+   std::unique_ptr<MessageChannel> channel = std::make_unique<MessageChannel>();
+   channel->opener = std::move(opener_port);
+   channel->opener->OpenPort(source.render_process_id(), source.port_context());
+@@ -779,9 +799,15 @@
+   // NOTE: We're creating |receiver| with nullptr |source_render_frame_host|,
+   // which seems to work for native messaging tests. This might need further
+   // checking in case any issues arise from it.
++  BrowserContext* receiver_context = context_;
++#if BUILDFLAG(IS_ANDROID)
++  if (!IsAndroidLegacyNativeMessagingExtensionId(extension->id())) {
++    receiver_context = source_context;
++  }
++#endif
+   std::unique_ptr<MessagePort> receiver(
+       messaging_delegate_->CreateReceiverForNativeApp(
+-          context_, weak_factory_.GetWeakPtr(), source_render_frame_host,
++          receiver_context, weak_factory_.GetWeakPtr(), source_render_frame_host,
+           extension->id(), receiver_port_id, native_app_name,
+           policy_permission == MessagingDelegate::PolicyPermission::ALLOW_ALL,
+           android_certificates, &error));

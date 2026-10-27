@@ -1,0 +1,106 @@
+diff --git a/chrome/browser/extensions/api/runtime/chrome_runtime_api_delegate.cc b/chrome/browser/extensions/api/runtime/chrome_runtime_api_delegate.cc
+--- a/chrome/browser/extensions/api/runtime/chrome_runtime_api_delegate.cc
++++ b/chrome/browser/extensions/api/runtime/chrome_runtime_api_delegate.cc
+@@ -14,6 +14,7 @@
+ #include "base/functional/bind.h"
+ #include "base/lazy_instance.h"
+ #include "base/location.h"
++#include "base/memory/weak_ptr.h"
+ #include "base/metrics/histogram_macros.h"
+ #include "base/notimplemented.h"
+ #include "base/task/single_thread_task_runner.h"
+@@ -67,6 +68,7 @@
+ #else
+ #include "chrome/browser/ui/android/tab_model/tab_model.h"
+ #include "chrome/browser/ui/android/tab_model/tab_model_list.h"
++#include "extensions/browser/extension_registry.h"
+ #endif
+
+ namespace {
+@@ -306,7 +308,8 @@
+ #else
+   TabModel* tab_model = nullptr;
+   for (TabModel* model : TabModelList::models()) {
+-    if (model->GetProfile() == profile) {
++    if (model->GetProfile() == profile &&
++        model->GetTabModelType() == TabModel::TabModelType::kStandard) {
+       tab_model = model;
+       break;
+     }
+@@ -318,15 +321,20 @@
+
+   std::unique_ptr<content::WebContents> contents = content::WebContents::Create(
+       content::WebContents::CreateParams(browser_context_));
+-  content::WebContents* raw_web_contents = contents.get();
+-  tab_model->CreateTab(nullptr, std::move(contents), TabModel::kInvalidIndex,
+-                       TabModel::TabLaunchType::FROM_RECENT_TABS_FOREGROUND,
+-                       /*should_pin=*/false);
++  base::WeakPtr<content::WebContents> weak_contents = contents->GetWeakPtr();
++  // Creation can reject the tab or synchronously destroy its contents.
++  auto* created_tab = tab_model->CreateTab(
++      nullptr, std::move(contents), TabModel::kInvalidIndex,
++      TabModel::TabLaunchType::FROM_RECENT_TABS_FOREGROUND,
++      /*should_pin=*/false);
++  if (!created_tab || !weak_contents || weak_contents->IsBeingDestroyed()) {
++    return;
++  }
+
+   content::NavigationController::LoadURLParams load_params(uninstall_url);
+   load_params.transition_type = ui::PAGE_TRANSITION_FROM_API;
+   base::WeakPtr<content::NavigationHandle> navigation_handle =
+-      raw_web_contents->GetController().LoadURLWithParams(load_params);
++      weak_contents->GetController().LoadURLWithParams(load_params);
+   // Navigation can fail for any number of reasons at the content layer.
+   // Unfortunately, we can't provide a detailed error message here, because
+   // there are too many possible triggers. At least add a log for diagnostics.
+@@ -468,10 +476,17 @@
+ #if BUILDFLAG(IS_ANDROID)
+     // Asynchronously create the window on Android, then open the options page.
+     auto creation_callback = base::BindOnce(
+-        [](scoped_refptr<const Extension> extension,
++        [](base::WeakPtr<Profile> profile,
++           scoped_refptr<const Extension> extension,
+            base::OnceCallback<void(bool)> complete_callback,
+            BrowserWindowInterface* new_browser) {
+-          if (!new_browser) {
++          if (!profile || profile->ShutdownStarted() || !new_browser ||
++              new_browser->IsDeleteScheduled() ||
++              new_browser->GetProfile() != profile.get() ||
++              extensions::ExtensionRegistry::Get(profile.get())
++                      ->enabled_extensions()
++                      .GetByID(extension->id()) != extension.get()) {
++            // Unloading or replacing an extension retires its pending request.
+             std::move(complete_callback).Run(false);
+             return;
+           }
+@@ -479,7 +494,8 @@
+               .Run(extensions::ExtensionTabUtil::OpenOptionsPage(
+                   extension.get(), new_browser));
+         },
+-        base::WrapRefCounted(extension), std::move(callback));
++        profile->GetWeakPtr(), base::WrapRefCounted(extension),
++        std::move(callback));
+     CreateBrowserWindow(std::move(params), std::move(creation_callback));
+
+     // Nothing to do here, the callback will open the options page eventually.
+@@ -518,9 +534,17 @@
+       is_docked ? inspected_web_contents : developer_tools_web_contents;
+   return extensions::ExtensionTabUtil::GetWindowIdOfTab(web_contents_to_use);
+ #else
+-  // TODO(crbug.com/383366125): Implement this function for desktop android.
+-  NOTIMPLEMENTED();
+-  return -1;
++  if (!developer_tools_web_contents ||
++      developer_tools_web_contents->IsBeingDestroyed()) {
++    return extension_misc::kUnknownWindowId;
++  }
++  CHECK_EQ(extensions::GetViewType(developer_tools_web_contents),
++           extensions::mojom::ViewType::kDeveloperTools);
++  // The caller has already selected this extension's accessible contexts.
++  // DevToolsActivity attaches the frontend to its own Android tab list, which
++  // sets the session window ID. Before attachment the helper returns unknown.
++  return extensions::ExtensionTabUtil::GetWindowIdOfTab(
++      developer_tools_web_contents);
+ #endif  // BUILDFLAG(ENABLE_EXTENSIONS)
+ }
+

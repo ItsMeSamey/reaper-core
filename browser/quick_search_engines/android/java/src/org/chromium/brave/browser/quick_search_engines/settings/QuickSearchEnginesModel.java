@@ -10,11 +10,9 @@ import androidx.annotation.IntDef;
 public class QuickSearchEnginesModel {
     @IntDef({
         QuickSearchEnginesModelType.SEARCH_ENGINE,
-        QuickSearchEnginesModelType.AI_ASSISTANT,
     })
     public @interface QuickSearchEnginesModelType {
         int SEARCH_ENGINE = 0;
-        int AI_ASSISTANT = 1;
     }
 
     private final String mShortName;

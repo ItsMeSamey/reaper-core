@@ -1,0 +1,122 @@
+diff --git a/content/browser/bluetooth/bluetooth_device_chooser_controller_unittest.cc b/content/browser/bluetooth/bluetooth_device_chooser_controller_unittest.cc
+--- a/content/browser/bluetooth/bluetooth_device_chooser_controller_unittest.cc
++++ b/content/browser/bluetooth/bluetooth_device_chooser_controller_unittest.cc
+@@ -2,8 +2,14 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
++#include "base/functional/bind.h"
++#include "base/run_loop.h"
++#include "base/test/bind.h"
+ #include "content/browser/bluetooth/bluetooth_device_chooser_controller.h"
++#include "content/public/browser/bluetooth_chooser.h"
++#include "content/public/test/test_renderer_host.h"
+ #include "device/bluetooth/bluetooth_discovery_filter.h"
++#include "device/bluetooth/test/mock_bluetooth_adapter.h"
+ #include "testing/gtest/include/gtest/gtest.h"
+ 
+ constexpr char kHeartRateUUIDString[] = "0000180d-0000-1000-8000-00805f9b34fb";
+@@ -13,6 +19,103 @@
+ namespace content {
+ 
+ class BluetoothDeviceChooserControllerTest : public testing::Test {};
++
++class BluetoothDeviceChooserSelectionTest : public RenderViewHostTestHarness {
++ public:
++  class Chooser final : public BluetoothChooser {
++   public:
++    explicit Chooser(base::OnceCallback<bool()> validator)
++        : validator_(std::move(validator)) {}
++    base::OnceCallback<bool()> TakeSelectionValidator() override {
++      return std::move(validator_);
++    }
++
++   private:
++    base::OnceCallback<bool()> validator_;
++  };
++  void QueueSelection(base::OnceCallback<bool()> validator,
++                      BluetoothDeviceChooserController::Callback callback) {
++    controller_ = std::make_unique<BluetoothDeviceChooserController>(
++        nullptr, *main_rfh(),
++        base::MakeRefCounted<
++            testing::NiceMock<device::MockBluetoothAdapter>>());
++    controller_->chooser_ = std::make_unique<Chooser>(std::move(validator));
++    controller_->options_ =
++        blink::mojom::WebBluetoothRequestDeviceOptions::New();
++    controller_->callback_ = std::move(callback);
++    controller_->OnBluetoothChooserEvent(BluetoothChooserEvent::SELECTED,
++                                         "chosen");
++    EXPECT_FALSE(controller_->chooser_);
++  }
++  void TearDown() override {
++    controller_.reset();
++    RenderViewHostTestHarness::TearDown();
++  }
++
++ private:
++  std::unique_ptr<BluetoothDeviceChooserController> controller_;
++};
++
++TEST_F(BluetoothDeviceChooserSelectionTest,
++       RejectInvalidatedSelectionAfterUiCloses) {
++  bool invalidated = false;
++  bool called = false;
++  QueueSelection(
++      base::BindLambdaForTesting([&] { return !invalidated; }),
++      base::BindLambdaForTesting(
++          [&](blink::mojom::WebBluetoothResult result,
++              blink::mojom::WebBluetoothRequestDeviceOptionsPtr options,
++              const std::string& address) {
++            called = true;
++            EXPECT_EQ(blink::mojom::WebBluetoothResult::CHOOSER_CANCELLED,
++                      result);
++            EXPECT_FALSE(options);
++            EXPECT_TRUE(address.empty());
++          }));
++  EXPECT_FALSE(called);
++  invalidated = true;
++  base::RunLoop().RunUntilIdle();
++  EXPECT_TRUE(called);
++}
++
++TEST_F(BluetoothDeviceChooserSelectionTest,
++       EmptyValidatorPreservesDesktopSelection) {
++  bool called = false;
++  QueueSelection(
++      {}, base::BindLambdaForTesting(
++              [&](blink::mojom::WebBluetoothResult result,
++                  blink::mojom::WebBluetoothRequestDeviceOptionsPtr options,
++                  const std::string& address) {
++                called = true;
++                EXPECT_EQ(blink::mojom::WebBluetoothResult::SUCCESS, result);
++                EXPECT_TRUE(options);
++                EXPECT_EQ("chosen", address);
++              }));
++  EXPECT_FALSE(called);
++  base::RunLoop().RunUntilIdle();
++  EXPECT_TRUE(called);
++}
++
++TEST_F(BluetoothDeviceChooserSelectionTest, ValidatedSelectionCompletesOnce) {
++  int calls = 0;
++  int validations = 0;
++  QueueSelection(
++      base::BindLambdaForTesting([&] {
++        ++validations;
++        return true;
++      }),
++      base::BindLambdaForTesting(
++          [&](blink::mojom::WebBluetoothResult result,
++              blink::mojom::WebBluetoothRequestDeviceOptionsPtr options,
++              const std::string& address) {
++            ++calls;
++            EXPECT_EQ(blink::mojom::WebBluetoothResult::SUCCESS, result);
++          }));
++  EXPECT_EQ(0, validations);
++  base::RunLoop().RunUntilIdle();
++  EXPECT_EQ(1, validations);
++  EXPECT_EQ(1, calls);
++}
+ 
+ TEST_F(BluetoothDeviceChooserControllerTest, CalculateSignalStrengthLevel) {
+   EXPECT_EQ(

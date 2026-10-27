@@ -1,0 +1,480 @@
+diff --git a/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/extensions/ExtensionsMenuMediatorTest.java b/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/extensions/ExtensionsMenuMediatorTest.java
+--- a/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/extensions/ExtensionsMenuMediatorTest.java
++++ b/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/extensions/ExtensionsMenuMediatorTest.java
+@@ -7,14 +7,20 @@
+ import static org.junit.Assert.assertEquals;
+ import static org.junit.Assert.assertFalse;
+ import static org.junit.Assert.assertNull;
++import static org.junit.Assert.assertSame;
+ import static org.junit.Assert.assertTrue;
++import static org.mockito.ArgumentMatchers.anyBoolean;
+ import static org.mockito.ArgumentMatchers.anyLong;
++import static org.mockito.ArgumentMatchers.isNull;
+ import static org.mockito.Mockito.any;
+ import static org.mockito.Mockito.anyInt;
+ import static org.mockito.Mockito.clearInvocations;
++import static org.mockito.Mockito.doAnswer;
+ import static org.mockito.Mockito.eq;
+ import static org.mockito.Mockito.mock;
+ import static org.mockito.Mockito.never;
++import static org.mockito.Mockito.same;
++import static org.mockito.Mockito.times;
+ import static org.mockito.Mockito.verify;
+ import static org.mockito.Mockito.when;
+
+@@ -45,6 +51,7 @@
+ import org.chromium.chrome.browser.profiles.Profile;
+ import org.chromium.chrome.browser.tab.MockTab;
+ import org.chromium.chrome.browser.tab.Tab;
++import org.chromium.chrome.browser.tab.TabLaunchType;
+ import org.chromium.chrome.browser.tabmodel.TabCreator;
+ import org.chromium.chrome.browser.ui.browser_window.ChromeAndroidTask;
+ import org.chromium.chrome.browser.ui.extensions.ExtensionActionContextMenuBridge;
+@@ -71,6 +78,7 @@
+
+ import java.util.ArrayList;
+ import java.util.List;
++import java.util.concurrent.atomic.AtomicInteger;
+
+ /** Tests for {@link ExtensionsMenuMediator}. */
+ @RunWith(BaseRobolectricTestRunner.class)
+@@ -476,6 +484,94 @@
+         verify(mMenuPropertyModel)
+                 .set(ExtensionsMenuProperties.SITE_SETTINGS_CONTAINER_VISIBLE, false);
+         verify(mMenuPropertyModel).set(ExtensionsMenuProperties.DISCOVER_EXTENSIONS_VISIBLE, false);
++    }
++
++    @Test
++    public void testOnActionRemoved_SelectedOnlyExtensionReturnsToEmptyMainPage() {
++        ExtensionsMenuTypes.MenuEntryState selected =
++                ExtensionTestUtils.createSimpleMenuEntry(
++                        "id_a", "Extension A", ICON_RED, /* isPinned= */ false);
++        when(mExtensionsMenuBridgeJniMock.getMenuEntries(anyLong())).thenReturn(List.of(selected));
++        mBridgeCaptor.getValue().onReady();
++        showSitePermissionsPageForRemovalTest("id_a");
++        when(mExtensionsMenuBridgeJniMock.getMenuEntries(anyLong())).thenReturn(List.of());
++
++        mBridgeCaptor.getValue().onActionRemoved(0);
++
++        verify(mExtensionsMenuBridgeJniMock, never()).getMenuEntry(anyLong(), anyInt());
++        verify(mMenuPropertyModel)
++                .set(ExtensionsMenuProperties.CURRENT_PAGE, ExtensionsMenuProperties.Page.MAIN);
++        assertTrue(mActionModels.isEmpty());
++        verify(mMenuPropertyModel).set(ExtensionsMenuProperties.IS_ZERO_STATE, true);
++    }
++
++    @Test
++    public void testOnActionRemoved_SelectedExtensionRefreshesShiftedSuccessor() {
++        ExtensionsMenuTypes.MenuEntryState selected =
++                ExtensionTestUtils.createSimpleMenuEntry(
++                        "id_a", "Extension A", ICON_RED, /* isPinned= */ false);
++        ExtensionsMenuTypes.MenuEntryState remaining =
++                ExtensionTestUtils.createSimpleMenuEntry(
++                        "id_b", "Extension B", ICON_BLUE, /* isPinned= */ false);
++        when(mExtensionsMenuBridgeJniMock.getMenuEntries(anyLong()))
++                .thenReturn(List.of(selected, remaining));
++        mBridgeCaptor.getValue().onReady();
++        showSitePermissionsPageForRemovalTest("id_a");
++        when(mExtensionsMenuBridgeJniMock.getMenuEntries(anyLong())).thenReturn(List.of(remaining));
++
++        mBridgeCaptor.getValue().onActionRemoved(0);
++
++        verify(mExtensionsMenuBridgeJniMock, never()).getMenuEntry(anyLong(), anyInt());
++        verify(mMenuPropertyModel)
++                .set(ExtensionsMenuProperties.CURRENT_PAGE, ExtensionsMenuProperties.Page.MAIN);
++        assertEquals(1, mActionModels.size());
++        assertItemAt(0, "Extension B", ICON_BLUE);
++    }
++
++    @Test
++    public void testOnActionRemoved_OtherLastExtensionKeepsSelectedPermissionsPage() {
++        ExtensionsMenuTypes.MenuEntryState selected =
++                ExtensionTestUtils.createSimpleMenuEntry(
++                        "id_a", "Extension A", ICON_RED, /* isPinned= */ false);
++        ExtensionsMenuTypes.MenuEntryState removed =
++                ExtensionTestUtils.createSimpleMenuEntry(
++                        "id_b", "Extension B", ICON_BLUE, /* isPinned= */ false);
++        when(mExtensionsMenuBridgeJniMock.getMenuEntries(anyLong()))
++                .thenReturn(List.of(selected, removed));
++        mBridgeCaptor.getValue().onReady();
++        showSitePermissionsPageForRemovalTest("id_a");
++        when(mExtensionsMenuBridgeJniMock.getMenuEntries(anyLong())).thenReturn(List.of(selected));
++
++        mBridgeCaptor.getValue().onActionRemoved(1);
++
++        verify(mExtensionsMenuBridgeJniMock, never()).getMenuEntry(anyLong(), anyInt());
++        verify(mMenuPropertyModel, never())
++                .set(ExtensionsMenuProperties.CURRENT_PAGE, ExtensionsMenuProperties.Page.MAIN);
++        mMenuMediator.onBackButtonClicked();
++        assertEquals(1, mActionModels.size());
++        assertItemAt(0, "Extension A", ICON_RED);
++    }
++
++    private void showSitePermissionsPageForRemovalTest(String extensionId) {
++        // Preserve real PropertyModel read-after-write behavior while retaining the existing
++        // fixture's mock model, so the back callback refreshes the newly selected main page.
++        AtomicInteger currentPage =
++                new AtomicInteger(ExtensionsMenuProperties.Page.SITE_PERMISSIONS);
++        when(mMenuPropertyModel.get(ExtensionsMenuProperties.CURRENT_PAGE))
++                .thenAnswer(invocation -> currentPage.get());
++        doAnswer(
++                        invocation -> {
++                            currentPage.set(invocation.getArgument(1));
++                            return null;
++                        })
++                .when(mMenuPropertyModel)
++                .set(eq(ExtensionsMenuProperties.CURRENT_PAGE), anyInt());
++        when(mSitePermissionsPropertyModel.get(SitePermissionsPageProperties.EXTENSION_ID))
++                .thenReturn(extensionId);
++        // Native GetMenuEntry CHECKs this stale index after removal. Any such lookup is a bug.
++        when(mExtensionsMenuBridgeJniMock.getMenuEntry(anyLong(), anyInt()))
++                .thenThrow(new AssertionError("Removed action index must not be queried"));
++        clearInvocations(mMenuPropertyModel, mExtensionsMenuBridgeJniMock);
+     }
+
+     /**
+@@ -1087,6 +1183,94 @@
+                         EXTENSIONS_MENU_BRIDGE_POINTER, "id_a", "https://example.com", true);
+     }
+
++    @Test
++    public void testMenuItemSiteAccessToggle_ModelRefresh_GrantUsesCurrentOrigin() {
++        assertSiteAccessToggleUsesRefreshedOrigin(
++                /* updateSingleAction= */ false, /* turnOn= */ true);
++    }
++
++    @Test
++    public void testMenuItemSiteAccessToggle_ModelRefresh_RevokeUsesCurrentOrigin() {
++        assertSiteAccessToggleUsesRefreshedOrigin(
++                /* updateSingleAction= */ false, /* turnOn= */ false);
++    }
++
++    @Test
++    public void testMenuItemSiteAccessToggle_ActionRefresh_GrantUsesCurrentOrigin() {
++        assertSiteAccessToggleUsesRefreshedOrigin(
++                /* updateSingleAction= */ true, /* turnOn= */ true);
++    }
++
++    @Test
++    public void testMenuItemSiteAccessToggle_ActionRefresh_RevokeUsesCurrentOrigin() {
++        assertSiteAccessToggleUsesRefreshedOrigin(
++                /* updateSingleAction= */ true, /* turnOn= */ false);
++    }
++
++    private void assertSiteAccessToggleUsesRefreshedOrigin(
++            boolean updateSingleAction, boolean turnOn) {
++        when(mMenuPropertyModel.get(ExtensionsMenuProperties.CURRENT_PAGE))
++                .thenReturn(ExtensionsMenuProperties.Page.MAIN);
++        ExtensionsMenuTypes.MenuEntryState initialEntry =
++                ExtensionTestUtils.createMenuEntryWithHostPermissions(
++                        "id_a", "Extension A", ICON_RED, /* isPinned= */ false);
++        when(mExtensionsMenuBridgeJniMock.getMenuEntries(anyLong()))
++                .thenReturn(List.of(initialEntry));
++        mBridgeCaptor.getValue().onReady();
++        assertEquals(1, mActionModels.size());
++        PropertyModel model = mActionModels.get(0).model;
++
++        String currentOrigin = "https://other.example";
++        assertFalse(currentOrigin.equals(initialEntry.origin));
++        ExtensionsMenuTypes.ControlState refreshedToggle =
++                new ExtensionsMenuTypes.ControlState(
++                        ExtensionsMenuTypes.ControlState.Status.ENABLED,
++                        /* text= */ "",
++                        /* accessibleName= */ "",
++                        /* tooltipText= */ currentOrigin,
++                        /* isOn= */ !turnOn,
++                        /* icon= */ null);
++        ExtensionsMenuTypes.MenuEntryState refreshedEntry =
++                new ExtensionsMenuTypes.MenuEntryState(
++                        initialEntry.id,
++                        initialEntry.actionButton,
++                        initialEntry.contextMenuButton,
++                        refreshedToggle,
++                        initialEntry.sitePermissionsButton,
++                        initialEntry.isEnterprise,
++                        currentOrigin);
++        if (updateSingleAction) {
++            when(mExtensionsMenuBridgeJniMock.getMenuEntry(anyLong(), eq(0)))
++                    .thenReturn(refreshedEntry);
++            mBridgeCaptor.getValue().onActionUpdated(0);
++        } else {
++            when(mExtensionsMenuBridgeJniMock.getMenuEntries(anyLong()))
++                    .thenReturn(List.of(refreshedEntry));
++            mMenuMediator.onModelChanged();
++        }
++
++        // Exercise the updated listener on the retained row, not a reconstructed model.
++        assertEquals(1, mActionModels.size());
++        assertSame(model, mActionModels.get(0).model);
++        assertEquals(
++                currentOrigin, model.get(ExtensionsMenuItemProperties.SITE_ACCESS_TOGGLE_TOOLTIP));
++        assertEquals(!turnOn, model.get(ExtensionsMenuItemProperties.SITE_ACCESS_TOGGLE_CHECKED));
++        CompoundButton.OnCheckedChangeListener listener =
++                model.get(ExtensionsMenuItemProperties.SITE_ACCESS_TOGGLE_ON_CLICK);
++        listener.onCheckedChanged(null, turnOn);
++
++        verify(mExtensionsMenuBridgeJniMock)
++                .onExtensionToggleSelected(
++                        EXTENSIONS_MENU_BRIDGE_POINTER, "id_a", currentOrigin, turnOn);
++        verify(mExtensionsMenuBridgeJniMock, never())
++                .onExtensionToggleSelected(
++                        eq(EXTENSIONS_MENU_BRIDGE_POINTER),
++                        eq("id_a"),
++                        eq(initialEntry.origin),
++                        anyBoolean());
++        verify(mOnDismissMenu, times(turnOn ? 0 : 1)).run();
++    }
++
+     /** Tests that the menu item's site permission button properties are correctly updated. */
+     @Test
+     public void testMenuItemSitePermissionsButton() {
+@@ -1346,7 +1530,11 @@
+         verify(mOnDismissMenu).run();
+
+         // Verify extension page was opened for the extension.
+-        verify(mTabCreator).createNewTab(mLoadUrlParamsCaptor.capture(), anyInt(), any());
++        verify(mTabCreator)
++                .createNewTab(
++                        mLoadUrlParamsCaptor.capture(),
++                        eq(TabLaunchType.FROM_CHROME_UI),
++                        same(mCurrentTabSupplier.get()));
+         assertEquals(
+                 UrlConstants.CHROME_EXTENSIONS_URL + "?id=id_a",
+                 mLoadUrlParamsCaptor.getValue().getUrl());
+@@ -1358,7 +1546,11 @@
+         mMenuMediator.onDiscoverExtensionsClicked();
+
+         verify(mOnDismissMenu).run();
+-        verify(mTabCreator).createNewTab(mLoadUrlParamsCaptor.capture(), anyInt(), any());
++        verify(mTabCreator)
++                .createNewTab(
++                        mLoadUrlParamsCaptor.capture(),
++                        eq(TabLaunchType.FROM_CHROME_UI),
++                        same(mCurrentTabSupplier.get()));
+         assertEquals(UrlConstants.CHROME_WEBSTORE_URL, mLoadUrlParamsCaptor.getValue().getUrl());
+     }
+
+@@ -1370,7 +1562,100 @@
+         mMenuMediator.onManageExtensionsClicked();
+
+         verify(mOnDismissMenu).run();
+-        verify(mTabCreator).createNewTab(mLoadUrlParamsCaptor.capture(), anyInt(), any());
++        verify(mTabCreator)
++                .createNewTab(
++                        mLoadUrlParamsCaptor.capture(),
++                        eq(TabLaunchType.FROM_CHROME_UI),
++                        same(mCurrentTabSupplier.get()));
++        assertEquals(UrlConstants.CHROME_EXTENSIONS_URL, mLoadUrlParamsCaptor.getValue().getUrl());
++    }
++
++    @Test
++    public void testOnManageExtensionsClicked_NoCurrentTab() {
++        mCurrentTabSupplier.set(null);
++
++        assertManageExtensionsOpenedWithoutParent();
++    }
++
++    @Test
++    public void testOnManageExtensionsClicked_OffTheRecordTab() {
++        Tab tab = mock(Tab.class);
++        when(tab.getId()).thenReturn(TAB_ID);
++        when(tab.isOffTheRecord()).thenReturn(true);
++        mCurrentTabSupplier.set(tab);
++
++        assertManageExtensionsOpenedWithoutParent();
++        verify(tab, never()).getProfile();
++    }
++
++    @Test
++    public void testOnManageExtensionsClicked_DifferentProfile() {
++        mCurrentTabSupplier.set(new MockTab(TAB_ID, mock(Profile.class)));
++
++        assertManageExtensionsOpenedWithoutParent();
++    }
++
++    @Test
++    public void testOnManageExtensionsClicked_InvalidTabId() {
++        Tab tab = mock(Tab.class);
++        when(tab.getId()).thenReturn(Tab.INVALID_TAB_ID);
++        mCurrentTabSupplier.set(tab);
++
++        assertManageExtensionsOpenedWithoutParent();
++    }
++
++    @Test
++    public void testOnManageExtensionsClicked_TabClosingDuringDismissal() {
++        Tab tab = mock(Tab.class);
++        mCurrentTabSupplier.set(tab);
++        doAnswer(
++                        invocation -> {
++                            when(tab.isClosing()).thenReturn(true);
++                            return null;
++                        })
++                .when(mOnDismissMenu)
++                .run();
++
++        assertManageExtensionsOpenedWithoutParent();
++        verify(tab, never()).getProfile();
++    }
++
++    @Test
++    public void testOnManageExtensionsClicked_TabDestroyedDuringDismissal() {
++        Tab tab = mock(Tab.class);
++        mCurrentTabSupplier.set(tab);
++        doAnswer(
++                        invocation -> {
++                            when(tab.isDestroyed()).thenReturn(true);
++                            return null;
++                        })
++                .when(mOnDismissMenu)
++                .run();
++
++        assertManageExtensionsOpenedWithoutParent();
++        verify(tab, never()).getProfile();
++    }
++
++    @Test
++    public void testOnManageExtensionsClicked_CurrentTabClearedDuringDismissal() {
++        doAnswer(
++                        invocation -> {
++                            mCurrentTabSupplier.set(null);
++                            return null;
++                        })
++                .when(mOnDismissMenu)
++                .run();
++
++        assertManageExtensionsOpenedWithoutParent();
++    }
++
++    private void assertManageExtensionsOpenedWithoutParent() {
++        mMenuMediator.onManageExtensionsClicked();
++
++        verify(mOnDismissMenu).run();
++        verify(mTabCreator)
++                .createNewTab(
++                        mLoadUrlParamsCaptor.capture(), eq(TabLaunchType.FROM_CHROME_UI), isNull());
+         assertEquals(UrlConstants.CHROME_EXTENSIONS_URL, mLoadUrlParamsCaptor.getValue().getUrl());
+     }
+
+@@ -1556,6 +1841,121 @@
+                 model.get(ExtensionsMenuItemProperties.IS_ENTERPRISE));
+     }
+
++    @Test
++    public void testSitePermissionsPage_BecomesUnavailableRefreshesMainPage() {
++        AtomicInteger currentPage = keepPageSelectionForEligibilityTest();
++        ExtensionsMenuTypes.MenuEntryState initialEntry =
++                ExtensionTestUtils.createMenuEntryWithHostPermissions(
++                        "id_a", "Extension A", ICON_RED, /* isPinned= */ false);
++        when(mExtensionsMenuBridgeJniMock.getMenuEntries(anyLong()))
++                .thenReturn(List.of(initialEntry));
++        when(mExtensionsMenuBridgeJniMock.getExtensionSitePermissionsState(anyLong(), eq("id_a")))
++                .thenReturn(
++                        ExtensionTestUtils.createExtensionSitePermissionsState(
++                                "Extension A", ICON_RED));
++        when(mSitePermissionsPropertyModel.get(SitePermissionsPageProperties.EXTENSION_ID))
++                .thenReturn("id_a");
++        when(mExtensionsMenuBridgeJniMock.getOptionalSection(anyLong()))
++                .thenReturn(ExtensionsMenuTypes.OptionalSectionType.HOST_ACCESS_REQUESTS);
++        when(mExtensionsMenuBridgeJniMock.getHostAccessRequests(anyLong()))
++                .thenReturn(
++                        List.of(new ExtensionsMenuTypes.HostAccessRequest("id_a", "Extension A", ICON_RED)));
++        when(mExtensionsMenuBridgeJniMock.getSiteSettings(anyLong()))
++                .thenReturn(
++                        createSiteSettingsState(
++                                "Initial site",
++                                ExtensionsMenuTypes.ControlState.Status.ENABLED,
++                                /* isOn= */ true,
++                                /* hasTooltip= */ false));
++        mBridgeCaptor.getValue().onReady();
++        mActionModels
++                .get(0)
++                .model
++                .get(ExtensionsMenuItemProperties.SITE_PERMISSIONS_BUTTON_ON_CLICK)
++                .onClick(null);
++        assertEquals(ExtensionsMenuProperties.Page.SITE_PERMISSIONS, currentPage.get());
++
++        // The page navigation notification is deferred by the hidden main page. Native now
++        // reports a restricted site, no access requests and no customizable permissions page.
++        when(mExtensionsMenuBridgeJniMock.getOptionalSection(anyLong()))
++                .thenReturn(ExtensionsMenuTypes.OptionalSectionType.NONE);
++        when(mExtensionsMenuBridgeJniMock.getSiteSettings(anyLong()))
++                .thenReturn(
++                        createSiteSettingsState(
++                                "Restricted site",
++                                ExtensionsMenuTypes.ControlState.Status.HIDDEN,
++                                /* isOn= */ false,
++                                /* hasTooltip= */ false));
++        when(mExtensionsMenuBridgeJniMock.getExtensionSitePermissionsState(anyLong(), eq("id_a")))
++                .thenReturn(null);
++        clearInvocations(mMenuPropertyModel, mExtensionsMenuBridgeJniMock);
++
++        mMenuMediator.onModelChanged();
++
++        assertEquals(ExtensionsMenuProperties.Page.MAIN, currentPage.get());
++        verify(mMenuPropertyModel)
++                .set(ExtensionsMenuProperties.SITE_SETTINGS_LABEL, "Restricted site");
++        verify(mMenuPropertyModel)
++                .set(ExtensionsMenuProperties.SITE_SETTINGS_TOGGLE_VISIBLE, false);
++        verify(mMenuPropertyModel)
++                .set(
++                        ExtensionsMenuProperties.OPTIONAL_SECTION_TYPE,
++                        ExtensionsMenuTypes.OptionalSectionType.NONE);
++        verify(mMenuPropertyModel)
++                .set(
++                        eq(ExtensionsMenuProperties.HOST_ACCESS_REQUESTS),
++                        mHostAccessRequestsCaptor.capture());
++        assertTrue(mHostAccessRequestsCaptor.getValue().isEmpty());
++    }
++
++    @Test
++    public void testSitePermissionsButton_UnavailablePageStaysOnRefreshedMainPage() {
++        AtomicInteger currentPage = keepPageSelectionForEligibilityTest();
++        ExtensionsMenuTypes.MenuEntryState initialEntry =
++                ExtensionTestUtils.createMenuEntryWithHostPermissions(
++                        "id_a", "Extension A", ICON_RED, /* isPinned= */ false);
++        when(mExtensionsMenuBridgeJniMock.getMenuEntries(anyLong()))
++                .thenReturn(List.of(initialEntry));
++        mBridgeCaptor.getValue().onReady();
++        View.OnClickListener oldListener =
++                mActionModels
++                        .get(0)
++                        .model
++                        .get(ExtensionsMenuItemProperties.SITE_PERMISSIONS_BUTTON_ON_CLICK);
++
++        // The selected extension still exists, but native eligibility changed before the click.
++        ExtensionsMenuTypes.MenuEntryState refreshedEntry =
++                ExtensionTestUtils.createSimpleMenuEntry(
++                        "id_a", "Extension A Updated", ICON_BLUE, /* isPinned= */ false);
++        when(mExtensionsMenuBridgeJniMock.getMenuEntries(anyLong()))
++                .thenReturn(List.of(refreshedEntry));
++        when(mExtensionsMenuBridgeJniMock.getExtensionSitePermissionsState(anyLong(), eq("id_a")))
++                .thenReturn(null);
++        clearInvocations(mMenuPropertyModel);
++        oldListener.onClick(null);
++
++        assertEquals(ExtensionsMenuProperties.Page.MAIN, currentPage.get());
++        assertItemAt(0, "Extension A Updated", ICON_BLUE);
++        verify(mMenuPropertyModel, never())
++                .set(
++                        ExtensionsMenuProperties.CURRENT_PAGE,
++                        ExtensionsMenuProperties.Page.SITE_PERMISSIONS);
++    }
++
++    private AtomicInteger keepPageSelectionForEligibilityTest() {
++        AtomicInteger currentPage = new AtomicInteger(ExtensionsMenuProperties.Page.MAIN);
++        when(mMenuPropertyModel.get(ExtensionsMenuProperties.CURRENT_PAGE))
++                .thenAnswer(invocation -> currentPage.get());
++        doAnswer(
++                        invocation -> {
++                            currentPage.set(invocation.getArgument(1));
++                            return null;
++                        })
++                .when(mMenuPropertyModel)
++                .set(eq(ExtensionsMenuProperties.CURRENT_PAGE), anyInt());
++        return currentPage;
++    }
++
+     /** Helper to assert that the item at the given index has the correct information. */
+     private void assertItemAt(int index, String title, @Nullable Bitmap icon) {
+         ListItem item = mActionModels.get(index);

@@ -1,0 +1,139 @@
+# Android extension notification policy and payload support.
+substitutions:
+- description: Inspect actual OS notification channel and group policy
+  regex:
+    re_pattern: import\ androidx\.annotation\.VisibleForTesting;
+    replace: 'import android.app.NotificationChannel;
+
+      import android.app.NotificationChannelGroup;
+
+      import android.app.NotificationManager;
+
+
+      import androidx.annotation.VisibleForTesting;'
+- description: Read current Android app notification policy
+  regex:
+    re_pattern: import\ androidx\.annotation\.VisibleForTesting;
+    replace: 'import androidx.annotation.VisibleForTesting;
+
+      import androidx.core.app.NotificationManagerCompat;'
+- description: Use typed JNI completion callbacks
+  regex:
+    re_pattern: import\ org\.jni_zero\.CalledByNative;
+    replace: 'import org.jni_zero.CalledByNative;
+
+      import org.jni_zero.JniType;'
+- description: Read effective notification channel policy
+  regex:
+    re_pattern: import\ org\.chromium\.base\.metrics\.RecordHistogram;
+    replace: 'import org.chromium.base.Callback;
+
+      import org.chromium.base.ContextUtils;
+
+      import org.chromium.base.task.AsyncTask;
+
+      import org.chromium.base.metrics.RecordHistogram;
+
+      import org.chromium.chrome.browser.notifications.channels.SiteChannelsManager;
+
+      import org.chromium.chrome.browser.notifications.channels.ChromeChannelDefinitions;
+
+      import org.chromium.components.browser_ui.site_settings.WebsiteAddress;'
+- description: Query uncached Android app permission and the effective channel status
+  regex:
+    re_pattern: '\ \ \ \ @CalledByNative\
+
+      \ \ \ \ @VisibleForTesting'
+    replace: "    /** Reads platform policy only. This never requests permission or creates channels. */\n    @CalledByNative\n    static void getExtensionNotificationStatus(\n            @JniType(\"std::string\") String origin,\n            @JniType(\"base::OnceCallback<void(int)>&&\") Callback<Integer> callback) {\n        try {\n            new AsyncTask<Integer>() {\n                @Override\n                protected Integer doInBackground() {\n                    return getExtensionNotificationStatusSync(origin);\n                }\n\n                @Override\n                protected void onPostExecute(Integer status) {\n                    callback.onResult(status);\n                }\n            }.executeOnExecutor(AsyncTask.SERIAL_EXECUTOR);\n        } catch (RuntimeException error) {\n            callback.onResult(APP_NOTIFICATIONS_STATUS_UNDETERMINABLE);\n        }\n    }\n\n    @VisibleForTesting\n    static int getExtensionNotificationStatusSync(String origin) {\n        try {\n            NotificationManagerCompat manager =\n                    NotificationManagerCompat.from(ContextUtils.getApplicationContext());\n            // Bypass the optional app-status cache after changes in Android settings.\n            if (!manager.areNotificationsEnabled()) return APP_NOTIFICATIONS_STATUS_DISABLED;\n            WebsiteAddress address = WebsiteAddress.create(origin);\n            if (address == null) return APP_NOTIFICATIONS_STATUS_UNDETERMINABLE;\n            String normalizedOrigin = address.getOrigin();\n            NotificationChannel effectiveChannel = null;\n            NotificationChannel fallbackChannel = null;\n            for (NotificationChannel channel : manager.getNotificationChannels()) {\n                String id = channel.getId();\n                if (id.equals(ChromeChannelDefinitions.ChannelId.SITES)) fallbackChannel = channel;\n                // Match the same first origin channel used by SiteChannelsManager, without\n                // calling its getter that may migrate channels and reset custom OS settings.\n                if (effectiveChannel == null && SiteChannelsManager.isValidSiteChannelId(id)\n                        && SiteChannelsManager.toSiteOrigin(id).equals(normalizedOrigin)) {\n                    effectiveChannel = channel;\n                }\n            }\n            if (effectiveChannel == null) effectiveChannel = fallbackChannel;\n            if (effectiveChannel != null\n                    && effectiveChannel.getImportance() == NotificationManager.IMPORTANCE_NONE) {\n                return APP_NOTIFICATIONS_STATUS_DISABLED;\n            }\n            // A not-yet-created fallback channel will be in GENERAL when displayed. Reading\n            // permission must not create it, and must still respect an existing group block.\n            String groupId = effectiveChannel == null\n                    ? ChromeChannelDefinitions.ChannelGroupId.GENERAL : effectiveChannel.getGroup();\n            if (groupId != null) {\n                NotificationChannelGroup group = manager.getNotificationChannelGroup(groupId);\n                if (group != null && group.isBlocked()) return APP_NOTIFICATIONS_STATUS_DISABLED;\n            }\n            return manager.areNotificationsEnabled()\n                    ? APP_NOTIFICATIONS_STATUS_ENABLED : APP_NOTIFICATIONS_STATUS_DISABLED;\n        } catch (RuntimeException error) {\n            return APP_NOTIFICATIONS_STATUS_UNDETERMINABLE;\n        }\n    }\n\n    @CalledByNative\n    @VisibleForTesting"
+- description: Format modified Android notification Java sources
+  regex:
+    re_pattern: 'import\ org\.jni_zero\.JniType;\
+
+      \
+
+      import\ org\.chromium\.base\.Callback;\
+
+      import\ org\.chromium\.base\.ContextUtils;\
+
+      import\ org\.chromium\.base\.task\.AsyncTask;\
+
+      import\ org\.chromium\.base\.metrics\.RecordHistogram;\
+
+      import\ org\.chromium\.chrome\.browser\.notifications\.channels\.SiteChannelsManager;\
+
+      import\ org\.chromium\.chrome\.browser\.notifications\.channels\.ChromeChannelDefinitions;\
+
+      import\ org\.chromium\.components\.browser_ui\.site_settings\.WebsiteAddress;\
+
+      import\ org\.chromium\.build\.annotations\.NullMarked;\
+
+      import\ org\.chromium\.components\.browser_ui\.notifications\.NotificationProxyUtils;\
+
+      \
+
+      /\*\*\
+
+      \ \*\ Utility\ for\ determining\ whether\ the\ user\ has\ disabled\ all\ of\ Chrome''s\ notifications\ using\ the\
+
+      \ \*\ system''s\ per\-application\ settings\.\
+
+      '
+    replace: "import org.jni_zero.JniType;\n\nimport org.chromium.base.Callback;\nimport org.chromium.base.ContextUtils;\nimport org.chromium.base.metrics.RecordHistogram;\nimport org.chromium.base.task.AsyncTask;\nimport org.chromium.build.annotations.NullMarked;\nimport org.chromium.chrome.browser.notifications.channels.ChromeChannelDefinitions;\nimport org.chromium.chrome.browser.notifications.channels.SiteChannelsManager;\nimport org.chromium.components.browser_ui.notifications.NotificationProxyUtils;\nimport org.chromium.components.browser_ui.site_settings.WebsiteAddress;\n\n/**\n * Utility for determining whether the user has disabled all of Chrome's notifications using the\n * system's per-application settings.\n"
+- description: Format modified Android notification Java sources
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ String\ id\ =\ channel\.getId\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ if\ \(id\.equals\(ChromeChannelDefinitions\.ChannelId\.SITES\)\)\ fallbackChannel\ =\ channel;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ //\ Match\ the\ same\ first\ origin\ channel\ used\ by\ SiteChannelsManager,\ without\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ //\ calling\ its\ getter\ that\ may\ migrate\ channels\ and\ reset\ custom\ OS\ settings\.\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ if\ \(effectiveChannel\ ==\ null\ \&\&\ SiteChannelsManager\.isValidSiteChannelId\(id\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \&\&\ SiteChannelsManager\.toSiteOrigin\(id\)\.equals\(normalizedOrigin\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ effectiveChannel\ =\ channel;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      '
+    replace: "                String id = channel.getId();\n                if (id.equals(ChromeChannelDefinitions.ChannelId.SITES)) fallbackChannel = channel;\n                // Match the same first origin channel used by SiteChannelsManager, without\n                // calling its getter that may migrate channels and reset custom OS settings.\n                if (effectiveChannel == null\n                        && SiteChannelsManager.isValidSiteChannelId(id)\n                        && SiteChannelsManager.toSiteOrigin(id).equals(normalizedOrigin)) {\n                    effectiveChannel = channel;\n                }\n            }\n"
+- description: Format modified Android notification Java sources
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ return\ APP_NOTIFICATIONS_STATUS_DISABLED;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ //\ A\ not\-yet\-created\ fallback\ channel\ will\ be\ in\ GENERAL\ when\ displayed\.\ Reading\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ //\ permission\ must\ not\ create\ it,\ and\ must\ still\ respect\ an\ existing\ group\ block\.\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ String\ groupId\ =\ effectiveChannel\ ==\ null\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \?\ ChromeChannelDefinitions\.ChannelGroupId\.GENERAL\ :\ effectiveChannel\.getGroup\(\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ if\ \(groupId\ !=\ null\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ NotificationChannelGroup\ group\ =\ manager\.getNotificationChannelGroup\(groupId\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ if\ \(group\ !=\ null\ \&\&\ group\.isBlocked\(\)\)\ return\ APP_NOTIFICATIONS_STATUS_DISABLED;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ return\ manager\.areNotificationsEnabled\(\)\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \?\ APP_NOTIFICATIONS_STATUS_ENABLED\ :\ APP_NOTIFICATIONS_STATUS_DISABLED;\
+
+      \ \ \ \ \ \ \ \ \}\ catch\ \(RuntimeException\ error\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ return\ APP_NOTIFICATIONS_STATUS_UNDETERMINABLE;\
+
+      \ \ \ \ \ \ \ \ \}\
+
+      \ \ \ \ \}\
+
+      '
+    replace: "                return APP_NOTIFICATIONS_STATUS_DISABLED;\n            }\n            // A not-yet-created fallback channel will be in GENERAL when displayed. Reading\n            // permission must not create it, and must still respect an existing group block.\n            String groupId =\n                    effectiveChannel == null\n                            ? ChromeChannelDefinitions.ChannelGroupId.GENERAL\n                            : effectiveChannel.getGroup();\n            if (groupId != null) {\n                NotificationChannelGroup group = manager.getNotificationChannelGroup(groupId);\n                if (group != null && group.isBlocked()) return APP_NOTIFICATIONS_STATUS_DISABLED;\n            }\n            return manager.areNotificationsEnabled()\n                    ? APP_NOTIFICATIONS_STATUS_ENABLED\n                    : APP_NOTIFICATIONS_STATUS_DISABLED;\n        } catch (RuntimeException error) {\n            return APP_NOTIFICATIONS_STATUS_UNDETERMINABLE;\n        }\n    }\n"

@@ -5,6 +5,8 @@
 
 #include "brave/components/brave_policy/brave_browser_policy_provider.h"
 
+#include "build/build_config.h"
+
 #include <memory>
 
 #include "base/test/task_environment.h"
@@ -39,9 +41,15 @@ TEST_F(BraveBrowserPolicyProviderTest, InitAndPolicyLoadComplete) {
   // Initialize the provider
   provider_.Init(&schema_registry_);
 
+#if BUILDFLAG(IS_ANDROID)
+  // The removed product must not leave browser policy initialization waiting.
+  EXPECT_TRUE(
+      provider_.IsFirstPolicyLoadComplete(policy::POLICY_DOMAIN_CHROME));
+#else
   // Policies should still not be loaded until observer event fires
   EXPECT_FALSE(
       provider_.IsFirstPolicyLoadComplete(policy::POLICY_DOMAIN_CHROME));
+#endif
 
   // Fire the observer event to trigger policy loading
   provider_.OnBravePoliciesReady();

@@ -6,13 +6,17 @@
 #ifndef BRAVE_COMPONENTS_BRAVE_POLICY_BRAVE_PROFILE_POLICY_PROVIDER_H_
 #define BRAVE_COMPONENTS_BRAVE_POLICY_BRAVE_PROFILE_POLICY_PROVIDER_H_
 
+#include "build/build_config.h"
+
 #include "base/containers/flat_set.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/scoped_observation.h"
 #include "base/values.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_origin/brave_origin_policy_info.h"
 #include "brave/components/brave_origin/brave_origin_policy_manager.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_policy/ad_block_only_mode/ad_block_only_mode_policy_manager.h"
 #include "brave/components/brave_policy/brave_policy_observer.h"
 #include "components/policy/core/common/configuration_policy_provider.h"
@@ -46,11 +50,13 @@ class BraveProfilePolicyProvider : public policy::ConfigurationPolicyProvider,
  private:
   policy::PolicyBundle LoadPolicies();
 
+#if !BUILDFLAG(IS_ANDROID)
   // Helper to load BraveOrigin profile policies
   void LoadBraveOriginPolicies(policy::PolicyBundle& bundle);
   void LoadBraveOriginPolicy(policy::PolicyMap& bundle_policy_map,
                              std::string_view policy_key,
                              bool enabled);
+#endif  // !BUILDFLAG(IS_ANDROID)
 
   void MaybeLoadAdBlockOnlyModePolicies(policy::PolicyBundle& bundle);
 
@@ -58,9 +64,11 @@ class BraveProfilePolicyProvider : public policy::ConfigurationPolicyProvider,
   bool policies_ready_ = false;
   std::string profile_id_;
 
+#if !BUILDFLAG(IS_ANDROID)
   base::ScopedObservation<brave_origin::BraveOriginPolicyManager,
                           BravePolicyObserver>
       brave_origin_observation_{this};
+#endif  // !BUILDFLAG(IS_ANDROID)
 
   base::ScopedObservation<AdBlockOnlyModePolicyManager, BravePolicyObserver>
       ad_block_only_mode_policy_observation_{this};

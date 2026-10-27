@@ -29,6 +29,11 @@ branding_replacements = [
 # Strings we want to replace but that we need to use Crowdin for
 # to translate the XTB files
 default_replacements = [
+    # IDS_NOTIFICATION_PERMISSION_RATIONALE_DIALOG_TITLE uses the app name.
+    (
+        r'^(\s*)Brave notifications make things easier(\s*)$',
+        r'\1Reaper notifications make things easier\2',
+    ),
     (r'Brave Web Store', r'Web Store'),
     (r'You\'re incognito', r'This is a private window'),
     (r'an incognito', r'a private'),

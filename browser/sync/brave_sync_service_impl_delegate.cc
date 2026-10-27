@@ -5,12 +5,16 @@
 
 #include "brave/browser/sync/brave_sync_service_impl_delegate.h"
 
+#if !BUILDFLAG(IS_ANDROID)
 #include <algorithm>
+#endif
 #include <utility>
 
 #include "base/check.h"
 #include "base/functional/callback_helpers.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "base/metrics/histogram_functions.h"
+#endif
 #include "base/task/single_thread_task_runner.h"
 #include "brave/components/sync/service/brave_sync_service_impl.h"
 #include "components/history/core/browser/history_service.h"
@@ -42,7 +46,9 @@ BraveSyncServiceImplDelegate::~BraveSyncServiceImplDelegate() = default;
 void BraveSyncServiceImplDelegate::OnDeviceInfoChange() {
   DCHECK(sync_service_impl_);
 
+#if !BUILDFLAG(IS_ANDROID)
   RecordP3ASyncStatus();
+#endif
 
   const syncer::DeviceInfo* local_device_info =
       local_device_info_provider_->GetLocalDeviceInfo();
@@ -92,6 +98,7 @@ void BraveSyncServiceImplDelegate::ResumeDeviceObserver() {
   }
 }
 
+#if !BUILDFLAG(IS_ANDROID)
 void BraveSyncServiceImplDelegate::RecordP3ASyncStatus() {
   int num_devices = device_info_tracker_->GetAllDeviceInfo().size();
 
@@ -103,6 +110,7 @@ void BraveSyncServiceImplDelegate::RecordP3ASyncStatus() {
 
   base::UmaHistogramExactLinear("Brave.Sync.Status.2", p3a_value, 3);
 }
+#endif
 
 void BraveSyncServiceImplDelegate::SetLocalDeviceAppearedCallback(
     base::OnceCallback<void()> local_device_appeared_callback) {

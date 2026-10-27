@@ -224,20 +224,14 @@ export function getBuildArgs(config: Config) {
   }
 
   if (config.targetOS === 'android') {
+    args.chrome_public_manifest_package = 'app.smallthingz.reaper'
     args.android_channel = config.channel
     if (!config.isReleaseBuild()) {
       args.android_channel = 'default'
-      args.chrome_public_manifest_package = 'com.brave.browser_default'
     } else if (config.channel === '') {
       args.android_channel = 'stable'
-      args.chrome_public_manifest_package = 'com.brave.browser'
-    } else if (config.channel === 'beta') {
-      args.chrome_public_manifest_package = 'com.brave.browser_beta'
-    } else if (config.channel === 'dev') {
-      args.chrome_public_manifest_package = 'com.brave.browser_dev'
     } else if (config.channel === 'nightly') {
       args.android_channel = 'canary'
-      args.chrome_public_manifest_package = 'com.brave.browser_nightly'
     }
     // exclude_unwind_tables is inherited form upstream and is false for any
     // Android build

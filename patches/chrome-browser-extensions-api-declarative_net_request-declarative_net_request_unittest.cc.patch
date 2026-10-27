@@ -1,0 +1,102 @@
+diff --git a/chrome/browser/extensions/api/declarative_net_request/declarative_net_request_unittest.cc b/chrome/browser/extensions/api/declarative_net_request/declarative_net_request_unittest.cc
+--- a/chrome/browser/extensions/api/declarative_net_request/declarative_net_request_unittest.cc
++++ b/chrome/browser/extensions/api/declarative_net_request/declarative_net_request_unittest.cc
+@@ -3354,6 +3354,98 @@
+                          {kDefaultRulesetID, dnr_api::DYNAMIC_RULESET_ID});
+ }
+ 
++#if BUILDFLAG(IS_ANDROID)
++// These are lifecycle tests of the app-owned root. The source remains a local
++// fixture; a genuinely read-only DocumentsProvider is separate device coverage.
++TEST_P(MultipleRulesetsTest_Unpacked, SafStaticCacheRemovedOnOrdinaryUninstall) {
++  AddRuleset(CreateRuleset(kId1, 1, 0, true));
++  RulesetManagerObserver waiter(manager());
++  LoadAndExpectSuccess(1);
++  waiter.WaitForExtensionsWithRulesetsCount(1);
++  const ExtensionId id = extension()->id();
++  const base::FilePath source = extension()->path();
++  const base::FilePath own =
++      FileBackedRulesetSource::GetSafStaticRulesCacheDirectory(
++          browser_context()->GetPath(), id);
++  const base::FilePath other_extension =
++      FileBackedRulesetSource::GetSafStaticRulesCacheDirectory(
++          browser_context()->GetPath(), std::string(32, 'b'));
++  const base::FilePath other_profile =
++      FileBackedRulesetSource::GetSafStaticRulesCacheDirectory(
++          temp_dir().GetPath().AppendASCII("other-profile"), id);
++  ASSERT_NE(own, other_extension);
++  for (const auto& root : {own, other_extension, other_profile}) {
++    ASSERT_TRUE(base::CreateDirectory(root.AppendASCII("source/rule")));
++    ASSERT_TRUE(base::WriteFile(root.AppendASCII("source/rule/123"), "index"));
++  }
++  std::string manifest_before;
++  std::string rules_before;
++  ASSERT_TRUE(base::ReadFileToString(source.AppendASCII("manifest.json"),
++                                   &manifest_before));
++  ASSERT_TRUE(base::ReadFileToString(source.AppendASCII(kId1), &rules_before));
++  int dynamic_checksum = 0;
++  ASSERT_FALSE(PrefsHelper(*ExtensionPrefs::Get(browser_context()))
++                   .GetDynamicRulesetChecksum(id, dynamic_checksum));
++  ASSERT_TRUE(registrar()->UninstallExtension(
++      id, UNINSTALL_REASON_FOR_TESTING, nullptr));
++  content::RunAllTasksUntilIdle();
++  EXPECT_FALSE(base::PathExists(own));
++  std::string preserved;
++  EXPECT_TRUE(base::ReadFileToString(
++      other_extension.AppendASCII("source/rule/123"), &preserved));
++  EXPECT_EQ("index", preserved);
++  preserved.clear();
++  EXPECT_TRUE(base::ReadFileToString(
++      other_profile.AppendASCII("source/rule/123"), &preserved));
++  EXPECT_EQ("index", preserved);
++  preserved.clear();
++  EXPECT_TRUE(base::ReadFileToString(source.AppendASCII("manifest.json"),
++                                   &preserved));
++  EXPECT_EQ(manifest_before, preserved);
++  preserved.clear();
++  EXPECT_TRUE(base::ReadFileToString(source.AppendASCII(kId1), &preserved));
++  EXPECT_EQ(rules_before, preserved);
++}
++
++TEST_P(MultipleRulesetsTest_Unpacked, SafStaticCacheRemovedOnOrphanPrefsDeletion) {
++  AddRuleset(CreateRuleset(kId1, 1, 0, true));
++  RulesetManagerObserver waiter(manager());
++  LoadAndExpectSuccess(1);
++  waiter.WaitForExtensionsWithRulesetsCount(1);
++  const ExtensionId id = extension()->id();
++  const base::FilePath own =
++      FileBackedRulesetSource::GetSafStaticRulesCacheDirectory(
++          browser_context()->GetPath(), id);
++  ASSERT_TRUE(base::CreateDirectory(own));
++  ASSERT_TRUE(base::WriteFile(own.AppendASCII("index"), "index"));
++  ASSERT_TRUE(base::DeletePathRecursively(extension()->path()));
++  ASSERT_TRUE(registry()->RemoveEnabled(id));
++  ExtensionGarbageCollector::Get(browser_context())
++      ->GarbageCollectExtensionsForTest();
++  content::RunAllTasksUntilIdle();
++  EXPECT_FALSE(base::PathExists(own));
++}
++
++TEST_P(MultipleRulesetsTest_Unpacked, SafStaticCachePreservedForReinstall) {
++  AddRuleset(CreateRuleset(kId1, 1, 0, true));
++  RulesetManagerObserver waiter(manager());
++  LoadAndExpectSuccess(1);
++  waiter.WaitForExtensionsWithRulesetsCount(1);
++  const ExtensionId id = extension()->id();
++  const base::FilePath own =
++      FileBackedRulesetSource::GetSafStaticRulesCacheDirectory(
++          browser_context()->GetPath(), id);
++  ASSERT_TRUE(base::CreateDirectory(own));
++  ASSERT_TRUE(base::WriteFile(own.AppendASCII("index"), "installed generation"));
++  ASSERT_TRUE(registrar()->UninstallExtension(
++      id, UNINSTALL_REASON_REINSTALL, nullptr));
++  content::RunAllTasksUntilIdle();
++  std::string bytes;
++  ASSERT_TRUE(base::ReadFileToString(own.AppendASCII("index"), &bytes));
++  EXPECT_EQ("installed generation", bytes);
++}
++#endif  // BUILDFLAG(IS_ANDROID)
++
+ INSTANTIATE_TEST_SUITE_P(All,
+                          SingleRulesetTest,
+                          ::testing::Values(ExtensionLoadType::PACKED,

@@ -7,9 +7,10 @@
 
 #include "base/test/scoped_feature_list.h"
 #include "brave/components/ai_chat/core/common/buildflags/buildflags.h"
-#include "brave/components/brave_origin/features.h"
 #include "brave/components/brave_vpn/common/buildflags/buildflags.h"
+#if BUILDFLAG(ENABLE_BRAVE_VPN)
 #include "brave/components/brave_vpn/common/features.h"
+#endif
 #include "brave/components/skus/common/features.h"
 #include "content/public/common/isolated_world_ids.h"
 #include "content/public/test/content_mock_cert_verifier.h"
@@ -28,11 +29,12 @@ class SubscriptionRenderFrameObserverBrowserTest
     scoped_feature_list_.InitWithFeatures(
         {
             skus::features::kSkusFeature,
+#if BUILDFLAG(ENABLE_BRAVE_VPN)
             brave_vpn::features::kBraveVPN,
+#endif
 #if BUILDFLAG(ENABLE_AI_CHAT)
             ai_chat::features::kAIChat,
 #endif
-            brave_origin::features::kBraveOrigin,
         },
         {});
   }
@@ -74,7 +76,16 @@ TEST_F(SubscriptionRenderFrameObserverBrowserTest, IsAllowed) {
       R"(<html><body></body></html>)",
       "https://account.brave.com/?intent=connect-receipt&product=vpn");
 
-  EXPECT_TRUE(observer.IsAllowed());
+  EXPECT_EQ(BUILDFLAG(ENABLE_BRAVE_VPN), observer.IsAllowed());
+
+#if !BUILDFLAG(ENABLE_BRAVE_VPN)
+  EXPECT_TRUE(ExecuteJavascript(u"Number(typeof linkResult === 'undefined')"));
+  LoadHTMLWithUrlOverride(
+      R"(<html><body></body></html>)",
+      "https://account.brave.com/order-link/?product=vpn");
+  EXPECT_FALSE(observer.IsAllowed());
+  EXPECT_TRUE(ExecuteJavascript(u"Number(typeof linkResult === 'undefined')"));
+#endif
 
   // Leo
   LoadHTMLWithUrlOverride(
@@ -83,71 +94,89 @@ TEST_F(SubscriptionRenderFrameObserverBrowserTest, IsAllowed) {
 
   EXPECT_TRUE(observer.IsAllowed());
 
-  // Origin
+  // The removed Origin product cannot receive receipt or status injection.
   LoadHTMLWithUrlOverride(
       R"(<html><body></body></html>)",
       "https://account.brave.com/?intent=link-order&product=origin");
 
+  EXPECT_FALSE(observer.IsAllowed());
+
+  LoadHTMLWithUrlOverride(
+      R"(<html><body></body></html>)",
+      "https://account.brave.com/order-link/?product=origin");
+  EXPECT_FALSE(observer.IsAllowed());
+  EXPECT_TRUE(ExecuteJavascript(u"Number(typeof linkResult === 'undefined')"));
+
+  // Route state belongs to the current document, including after a permitted
+  // result page. An unrelated account page must not inherit linkResult access.
+  LoadHTMLWithUrlOverride(
+      R"(<html><body></body></html>)",
+      "https://account.brave.com/order-link/?product=leo");
   EXPECT_TRUE(observer.IsAllowed());
+  LoadHTMLWithUrlOverride(
+      R"(<html><body></body></html>)",
+      "https://account.brave.com/unrelated/?product=leo");
+  EXPECT_FALSE(observer.IsAllowed());
+  EXPECT_TRUE(ExecuteJavascript(u"Number(typeof linkResult === 'undefined')"));
 
   // http
   LoadHTMLWithUrlOverride(
       R"(<html><body></body></html>)",
-      "http://account.brave.com/?intent=connect-receipt&product=vpn");
+      "http://account.brave.com/?intent=link-order&product=leo");
 
   EXPECT_FALSE(observer.IsAllowed());
 
   // https://account.bravesoftware.com
   LoadHTMLWithUrlOverride(
       R"(<html><body></body></html>)",
-      "https://account.bravesoftware.com/?intent=connect-receipt&product=vpn");
+      "https://account.bravesoftware.com/?intent=link-order&product=leo");
 
   EXPECT_TRUE(observer.IsAllowed());
 
   // https://account.brave.software
   LoadHTMLWithUrlOverride(
       R"(<html><body></body></html>)",
-      "https://account.brave.software/?intent=connect-receipt&product=vpn");
+      "https://account.brave.software/?intent=link-order&product=leo");
 
   EXPECT_TRUE(observer.IsAllowed());
 
   // no receipt
   LoadHTMLWithUrlOverride(
       R"(<html><body></body></html>)",
-      "https://account.brave.software/?intent=&product=vpn");
+      "https://account.brave.software/?intent=&product=leo");
 
   EXPECT_FALSE(observer.IsAllowed());
 
   // wrong receipt
   LoadHTMLWithUrlOverride(R"(<html><body></body></html>)",
-                          "https://account.brave.software/?product=vpn");
+                          "https://account.brave.software/?product=leo");
 
   EXPECT_FALSE(observer.IsAllowed());
 
   // wrong receipt
   LoadHTMLWithUrlOverride(
       R"(<html><body></body></html>)",
-      "https://account.brave.software/?intent=wrong&product=vpn");
+      "https://account.brave.software/?intent=wrong&product=leo");
 
   EXPECT_FALSE(observer.IsAllowed());
 
   // no product
   LoadHTMLWithUrlOverride(
       R"(<html><body></body></html>)",
-      "https://account.brave.software/?intent=connect-receipt&product=");
+      "https://account.brave.software/?intent=link-order&product=");
 
   EXPECT_FALSE(observer.IsAllowed());
 
   LoadHTMLWithUrlOverride(
       R"(<html><body></body></html>)",
-      "https://account.brave.software/?intent=connect-receipt");
+      "https://account.brave.software/?intent=link-order");
 
   EXPECT_FALSE(observer.IsAllowed());
 
   // wrong product
   LoadHTMLWithUrlOverride(
       R"(<html><body></body></html>)",
-      "https://account.brave.software/?intent=connect-receipt&product=wrong");
+      "https://account.brave.software/?intent=link-order&product=wrong");
 
   EXPECT_FALSE(observer.IsAllowed());
 }

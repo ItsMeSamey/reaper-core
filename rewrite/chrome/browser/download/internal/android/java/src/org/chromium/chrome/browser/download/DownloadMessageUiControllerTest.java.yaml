@@ -1,0 +1,54 @@
+# Android download UI policy and truthful transfer lifecycle.
+substitutions:
+- description: Track only test profile policy in the existing real controller fixture
+  regex:
+    re_pattern: import\ java\.util\.UUID;
+    replace: 'import java.util.UUID;
+
+      import java.util.HashSet;
+
+      import java.util.Set;'
+- description: Supply actual profile-scoped policy to existing controller tests
+  regex:
+    re_pattern: \ \ \ \ \ \ \ \ public\ boolean\ mMaybeSwitchToFocusedActivityCalled;
+    replace: "        public boolean mMaybeSwitchToFocusedActivityCalled;\n        public final Set<String> mSuppressedProfiles = new HashSet<>();\n\n        @Override\n        public boolean shouldSuppressDownloadUi(@Nullable String serializedOtrProfileId) {\n            return mSuppressedProfiles.contains(serializedOtrProfileId);\n        }"
+- description: Use real download namespace and regular/OTR identity instead of offline-page fixtures
+  regex:
+    re_pattern: \ \ \ \ private\ static\ void\ markItemComplete\(OfflineItem\ item\)\ \{
+    replace: "    private static OfflineItem createPolicyDownload(int state, @Nullable String otrProfileId) {\n        OfflineItem item = createOfflineItem(state);\n        item.id = LegacyHelpers.buildLegacyContentId(false, UUID.randomUUID().toString());\n        item.filePath = \"/data/local/tmp/download-policy-test.txt\";\n        item.otrProfileId = otrProfileId;\n        item.isOffTheRecord = otrProfileId != null;\n        return item;\n    }\n\n    private static void markItemComplete(OfflineItem item) {"
+- description: Exercise actual message state through policy transitions, terminal updates, restore and profile boundaries
+  regex:
+    re_pattern: '\ \ \ \ @Test\
+
+      \ \ \ \ @SmallTest\
+
+      \ \ \ \ @Feature\(\{"Download"\}\)\
+
+      \ \ \ \ public\ void\ testOfflinePageDownloadStarted\(\)'
+    replace: "    @Test\n    @SmallTest\n    @Feature({\"Download\"})\n    public void testPolicyDisableDuringProgressCompleteDoesNotResurrect() {\n        OfflineItem item = createPolicyDownload(OfflineItemState.IN_PROGRESS, null);\n        mTestController.onItemUpdated(item);\n        mTestController.verify(MESSAGE_DOWNLOADING_FILE, DESCRIPTION_DOWNLOADING);\n        mTestController.mDelegate.mSuppressedProfiles.add(null);\n        mTestController.onDownloadUiPolicyChanged();\n        mTestController.verifyMessageGone();\n        markItemComplete(item);\n        mTestController.onItemUpdated(item);\n        mTestController.mDelegate.mSuppressedProfiles.clear();\n        mTestController.onDownloadUiPolicyChanged();\n        mTestController.verifyMessageGone();\n    }\n\n    @Test\n    @SmallTest\n    @Feature({\"Download\"})\n    public void testPolicyDisableDuringProgressCancelDoesNotResurrect() {\n        OfflineItem item = createPolicyDownload(OfflineItemState.IN_PROGRESS, null);\n        mTestController.onItemUpdated(item);\n        mTestController.mDelegate.mSuppressedProfiles.add(null);\n        mTestController.onDownloadUiPolicyChanged();\n        item.state = OfflineItemState.CANCELLED;\n        mTestController.onItemUpdated(item);\n        mTestController.mDelegate.mSuppressedProfiles.clear();\n        mTestController.onDownloadUiPolicyChanged();\n        mTestController.verifyMessageGone();\n    }\n\n    @Test\n    @SmallTest\n    @Feature({\"Download\"})\n    public void testPolicyReenableRestoresOnlyStillActiveDownload() {\n        OfflineItem item = createPolicyDownload(OfflineItemState.IN_PROGRESS, null);\n        mTestController.mDelegate.mSuppressedProfiles.add(null);\n        mTestController.onItemUpdated(item);\n        mTestController.verifyMessageGone();\n        mTestController.mDelegate.mSuppressedProfiles.clear();\n        mTestController.onDownloadUiPolicyChanged();\n        mTestController.verify(MESSAGE_DOWNLOADING_FILE, DESCRIPTION_DOWNLOADING);\n        markItemComplete(item);\n        mTestController.onItemUpdated(item);\n        mTestController.verify(MESSAGE_SINGLE_DOWNLOAD_COMPLETE, DESCRIPTION_DOWNLOAD_COMPLETE);\n    }\n\n    @Test\n    @SmallTest\n    @Feature({\"Download\"})\n    public void testPolicyRegularAndOtrRemainIndependent() {\n        OfflineItem regular = createPolicyDownload(OfflineItemState.IN_PROGRESS, null);\n        OfflineItem otr = createPolicyDownload(OfflineItemState.IN_PROGRESS, \"otr-test\");\n        mTestController.onItemUpdated(regular);\n        mTestController.onItemUpdated(otr);\n        mTestController.verify(MESSAGE_DOWNLOADING_TWO_FILES, DESCRIPTION_DOWNLOADING);\n        mTestController.mDelegate.mSuppressedProfiles.add(null);\n        mTestController.onDownloadUiPolicyChanged();\n        mTestController.verify(MESSAGE_DOWNLOADING_FILE, DESCRIPTION_DOWNLOADING);\n        mTestController.mDelegate.mSuppressedProfiles.add(\"otr-test\");\n        mTestController.onDownloadUiPolicyChanged();\n        mTestController.verifyMessageGone();\n        mTestController.mDelegate.mSuppressedProfiles.remove(null);\n        mTestController.onDownloadUiPolicyChanged();\n        mTestController.verify(MESSAGE_DOWNLOADING_FILE, DESCRIPTION_DOWNLOADING);\n    }\n\n    @Test\n    @SmallTest\n    @Feature({\"Download\"})\n    public void testPolicyNeverSuppressesBlockedSecurityFeedback() {\n        OfflineItem ordinary = createPolicyDownload(OfflineItemState.IN_PROGRESS, null);\n        mTestController.onItemUpdated(ordinary);\n        OfflineItem item = createPolicyDownload(OfflineItemState.FAILED, null);\n        item.failState = FailState.FILE_BLOCKED;\n        mTestController.mDelegate.mSuppressedProfiles.add(null);\n        mTestController.onItemUpdated(item);\n        Assert.assertNotNull(mTestController.mInfo);\n        mTestController.onDownloadUiPolicyChanged();\n        Assert.assertNotNull(mTestController.mInfo);\n        Assert.assertEquals(0, mTestController.mInfo.downloadCount.inProgress);\n        Assert.assertEquals(1, mTestController.mInfo.downloadCount.blocked);\n    }\n\n    @Test\n    @SmallTest\n    @Feature({\"Download\"})\n    public void testPolicySuppressesEarlyProfileSpecificFeedback() {\n        OtrProfileId otr = OtrProfileId.getPrimaryOtrProfileId();\n        mTestController.mDelegate.mSuppressedProfiles.add(OtrProfileId.serialize(otr));\n        mTestController.onDownloadStarted(otr);\n        mTestController.verifyMessageGone();\n        mTestController.onDownloadStarted(null);\n        mTestController.verify(MESSAGE_DOWNLOADING_FILE, DESCRIPTION_DOWNLOADING);\n        mTestController.mDelegate.mSuppressedProfiles.add(null);\n        mTestController.onDownloadUiPolicyChanged();\n        mTestController.verifyMessageGone();\n    }\n\n    @Test\n    @SmallTest\n    @Feature({\"Download\"})\n    public void testOfflinePageDownloadStarted()"
+- description: Format modified Android download UI Java sources
+  regex:
+    re_pattern: 'import\ org\.chromium\.ui\.modaldialog\.ModalDialogManager;\
+
+      import\ org\.chromium\.url\.GURL;\
+
+      import\ org\.chromium\.url\.JUnitTestGURLs;\
+
+      \
+
+      import\ java\.util\.UUID;\
+
+      import\ java\.util\.HashSet;\
+
+      import\ java\.util\.Set;\
+
+      \
+
+      /\*\*\
+
+      \ \*\ Test\ class\ to\ validate\ that\ the\ \{@link\ DownloadMessageUiControllerImpl\}\ correctly\ represents\ the\
+
+      \ \*\ state\ of\ the\ downloads\ in\ the\ current\ chrome\ session\.\
+
+      '
+    replace: "import org.chromium.ui.modaldialog.ModalDialogManager;\nimport org.chromium.url.GURL;\nimport org.chromium.url.JUnitTestGURLs;\n\nimport java.util.HashSet;\nimport java.util.Set;\nimport java.util.UUID;\n\n/**\n * Test class to validate that the {@link DownloadMessageUiControllerImpl} correctly represents the\n * state of the downloads in the current chrome session.\n"

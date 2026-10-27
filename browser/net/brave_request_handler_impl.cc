@@ -49,7 +49,7 @@
 template <template <typename> class T>
 static bool IsInternalScheme(T<brave::BraveRequestInfo> ctx) {
   DCHECK(ctx);
-#if BUILDFLAG(ENABLE_EXTENSIONS)
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
   if (ctx->request_url().SchemeIs(extensions::kExtensionScheme)) {
     return true;
   }

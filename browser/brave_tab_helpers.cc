@@ -3,6 +3,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+#include "build/build_config.h"
+
 #include "brave/browser/brave_tab_helpers.h"
 
 #include <memory>
@@ -17,8 +19,12 @@
 #include "brave/browser/brave_browser_process.h"
 #include "brave/browser/brave_shields/brave_shields_web_contents_observer.h"
 #include "brave/browser/ephemeral_storage/ephemeral_storage_tab_helper.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/misc_metrics/page_metrics_tab_helper.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/serp_metrics/serp_metrics_tab_helper.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/ui/brave_ui_features.h"
 #include "brave/components/ai_chat/core/common/buildflags/buildflags.h"
 #include "brave/components/brave_ads/buildflags/buildflags.h"
@@ -29,11 +35,12 @@
 #include "brave/components/brave_wayback_machine/buildflags/buildflags.h"
 #include "brave/components/playlist/core/common/buildflags/buildflags.h"
 #include "brave/components/request_otr/common/buildflags/buildflags.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/serp_metrics/serp_metrics_feature.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/speedreader/common/buildflags/buildflags.h"
 #include "brave/components/tor/buildflags/buildflags.h"
 #include "brave/components/web_discovery/buildflags/buildflags.h"
-#include "build/build_config.h"
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/content_settings/host_content_settings_map_factory.h"
 #include "chrome/browser/content_settings/page_specific_content_settings_delegate.h"
@@ -184,9 +191,11 @@ void AttachTabHelpers(content::WebContents* web_contents) {
   brave_perf_predictor::PerfPredictorTabHelper::CreateForWebContents(
       web_contents);
 
+#if !BUILDFLAG(IS_ANDROID)
   if (base::FeatureList::IsEnabled(serp_metrics::kSerpMetricsFeature)) {
     serp_metrics::SerpMetricsTabHelper::MaybeCreateForWebContents(web_contents);
   }
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 #if BUILDFLAG(ENABLE_BRAVE_ADS)
   brave_ads::AdsTabHelper::CreateForWebContents(web_contents);
@@ -220,7 +229,9 @@ void AttachTabHelpers(content::WebContents* web_contents) {
   brave_wallet::BraveWalletTabHelper::CreateForWebContents(web_contents);
 #endif
 
+#if !BUILDFLAG(IS_ANDROID)
   misc_metrics::PageMetricsTabHelper::CreateForWebContents(web_contents);
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 #if BUILDFLAG(ENABLE_REQUEST_OTR)
   if (!web_contents->GetBrowserContext()->IsOffTheRecord() &&

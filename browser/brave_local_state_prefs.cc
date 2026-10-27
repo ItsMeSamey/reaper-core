@@ -3,7 +3,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+#include "build/build_config.h"
+
 #include "brave/browser/brave_local_state_prefs.h"
+
+#include "brave/components/ntp_background_images/buildflags/buildflags.h"
 
 #include <string>
 
@@ -12,45 +16,81 @@
 #include "brave/browser/brave_stats/buildflags.h"
 #include "brave/browser/metrics/buildflags/buildflags.h"
 #include "brave/browser/metrics/metrics_reporting_util.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/misc_metrics/fingerprint_frequency_metrics.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/misc_metrics/process_misc_metrics.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/misc_metrics/uptime_monitor_impl.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/search_engines/search_engine_tracker.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/updater/buildflags.h"
 #include "brave/components/ai_chat/core/common/buildflags/buildflags.h"
 #include "brave/components/brave_ads/buildflags/buildflags.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_origin/brave_origin_prefs.h"
 #include "brave/components/brave_referrals/browser/brave_referrals_service.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_search/browser/backup_results_metrics.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_search/common/pref_names.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_search_conversion/p3a.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_shields/content/browser/ad_block_service.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_shields/core/browser/brave_shields_p3a.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_vpn/common/buildflags/buildflags.h"
 #include "brave/components/brave_wallet/common/buildflags/buildflags.h"
 #include "brave/components/constants/pref_names.h"
 #include "brave/components/l10n/common/prefs.h"
 #include "brave/components/local_ai/buildflags/buildflags.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/misc_metrics/general_browser_usage.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/misc_metrics/page_metrics.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/misc_metrics/privacy_hub_metrics.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/misc_metrics/quick_search_metrics.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
 #include "brave/components/ntp_background_images/browser/ntp_background_images_service.h"
-#include "brave/components/ntp_background_images/common/view_counter_pref_registry.h"
+#endif  // BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/p3a/metric_log_store.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/p3a/p3a_service.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/p3a/rotation_scheduler.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/playlist/core/common/buildflags/buildflags.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/skus/browser/skus_utils.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/speedreader/common/buildflags/buildflags.h"
 #include "brave/components/tor/buildflags/buildflags.h"
 #include "brave/components/web_discovery/buildflags/buildflags.h"
-#include "build/build_config.h"
 #include "chrome/common/pref_names.h"
 #include "components/metrics/metrics_pref_names.h"
 #include "components/prefs/pref_registry_simple.h"
 #include "components/webui/chrome_urls/pref_names.h"
 #include "third_party/widevine/cdm/buildflags.h"
+
+#if !BUILDFLAG(IS_ANDROID) || BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
+#include "brave/components/ntp_background_images/common/view_counter_pref_registry.h"
+#endif
 
 #if BUILDFLAG(ENABLE_BRAVE_STATS_UPDATER)
 #include "brave/browser/brave_stats/brave_stats_updater.h"
@@ -66,12 +106,14 @@
 #endif
 
 #if BUILDFLAG(ENABLE_BRAVE_ADS)
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/brave_ads/analytics/p3a/brave_stats_helper.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_ads/core/public/prefs/obsolete_pref_util.h"
 #include "brave/components/brave_ads/core/public/prefs/pref_registry.h"
 #endif
 
-#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_ANDROID)
+#if BUILDFLAG(IS_WIN)
 #include "brave/browser/day_zero_browser_ui_expt/day_zero_browser_ui_expt_manager.h"
 #endif
 
@@ -83,10 +125,14 @@
 #include "brave/components/tor/tor_profile_service.h"
 #endif
 
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/ui/webui/new_tab_page/brave_new_tab_message_handler.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 #if !BUILDFLAG(IS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/p3a/p3a_core_metrics.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/browser/search_engines/pref_names.h"
 #include "brave/browser/themes/brave_dark_mode_utils.h"
 #include "brave/browser/ui/whats_new/whats_new_util.h"
@@ -143,19 +189,29 @@ void RegisterLocalStatePrefsForMigration(PrefRegistrySimple* registry) {
   dark_mode::RegisterBraveDarkModeLocalStatePrefs(registry);
 #endif
 
+#if !BUILDFLAG(IS_ANDROID)
   misc_metrics::UptimeMonitorImpl::RegisterPrefsForMigration(registry);
+#endif  // !BUILDFLAG(IS_ANDROID)
 #if BUILDFLAG(ENABLE_BRAVE_WALLET)
   brave_wallet::RegisterLocalStatePrefsForMigration(registry);
 #endif
+#if !BUILDFLAG(IS_ANDROID)
   brave_search::BackupResultsMetrics::RegisterLocalStatePrefsForMigration(
       registry);
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
   brave_search_conversion::p3a::RegisterLocalStatePrefsForMigration(registry);
+#endif  // !BUILDFLAG(IS_ANDROID)
   brave_shields::RegisterPrefsForAdBlockServiceForMigration(registry);
 #if BUILDFLAG(ENABLE_BRAVE_STATS_UPDATER)
   brave_stats::RegisterLocalStatePrefsForMigration(registry);
 #endif
+#if !BUILDFLAG(IS_ANDROID)
   p3a::MetricLogStore::RegisterLocalStatePrefsForMigration(registry);
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
   p3a::RotationScheduler::RegisterLocalStatePrefsForMigration(registry);
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 #if BUILDFLAG(ENABLE_BRAVE_ADS)
   brave_ads::RegisterLocalStatePrefsForMigration(registry);
@@ -165,8 +221,10 @@ void RegisterLocalStatePrefsForMigration(PrefRegistrySimple* registry) {
   brave_vpn::RegisterLocalStatePrefsForMigration(registry);
 #endif
 
+#if BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
   ntp_background_images::NTPBackgroundImagesService::
       RegisterLocalStatePrefsForMigration(registry);
+#endif  // BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
 }
 
 void RegisterLocalStatePrefs(PrefRegistrySimple* registry) {
@@ -180,12 +238,18 @@ void RegisterLocalStatePrefs(PrefRegistrySimple* registry) {
 #if BUILDFLAG(ENABLE_BRAVE_STATS_UPDATER)
   brave_stats::RegisterLocalStatePrefs(registry);
 #endif
+#if !BUILDFLAG(IS_ANDROID)
   brave_origin::RegisterLocalStatePrefs(registry);
+#endif  // !BUILDFLAG(IS_ANDROID)
 #if BUILDFLAG(ENABLE_LOCAL_AI)
   local_ai::prefs::RegisterLocalStatePrefs(registry);
 #endif
+#if !BUILDFLAG(IS_ANDROID) || BUILDFLAG(ENABLE_BRAVE_NTP_BACKGROUND_IMAGES)
   ntp_background_images::RegisterLocalStatePrefs(registry);
+#endif
+#if !BUILDFLAG(IS_ANDROID)
   RegisterPrefsForBraveReferralsService(registry);
+#endif  // !BUILDFLAG(IS_ANDROID)
   brave_l10n::RegisterLocalStatePrefsForMigration(registry);
 #if BUILDFLAG(IS_MAC)
   // Turn off super annoying 'Hold to quit'
@@ -199,16 +263,15 @@ void RegisterLocalStatePrefs(PrefRegistrySimple* registry) {
       metrics::prefs::kMetricsReportingEnabled,
       base::Value(GetDefaultPrefValueForMetricsReporting()));
 
-  p3a::P3AService::RegisterPrefs(registry,
 #if !BUILDFLAG(IS_ANDROID)
-                                 first_run::IsChromeFirstRun());
-#else
-                                 // BraveP3AService::RegisterPrefs
-                                 // doesn't use this arg on Android
-                                 false);
+#if !BUILDFLAG(IS_ANDROID)
+  p3a::P3AService::RegisterPrefs(registry, first_run::IsChromeFirstRun());
+#endif  // !BUILDFLAG(IS_ANDROID)
 #endif  // !BUILDFLAG(IS_ANDROID)
 
+#if !BUILDFLAG(IS_ANDROID)
   brave_shields::RegisterShieldsP3ALocalPrefs(registry);
+#endif  // !BUILDFLAG(IS_ANDROID)
 #if !BUILDFLAG(IS_ANDROID)
   BraveNewTabMessageHandler::RegisterLocalStatePrefs(registry);
   BraveWindowTracker::RegisterPrefs(registry);
@@ -238,8 +301,12 @@ void RegisterLocalStatePrefs(PrefRegistrySimple* registry) {
 
   RegisterLocalStatePrefsForMigration(registry);
 
+#if !BUILDFLAG(IS_ANDROID)
   brave_search_conversion::p3a::RegisterLocalStatePrefs(registry);
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
   SearchEngineTrackerFactory::RegisterLocalStatePrefs(registry);
+#endif  // !BUILDFLAG(IS_ANDROID)
   registry->RegisterBooleanPref(
       brave_search::prefs::kNewTabV1SourceEnabledAtFirstRun, false);
   registry->RegisterStringPref(brave_search::prefs::kNewTabV1SourceSuffix, "");
@@ -252,21 +319,31 @@ void RegisterLocalStatePrefs(PrefRegistrySimple* registry) {
   ai_chat::prefs::RegisterLocalStatePrefs(registry);
 #endif
 
+#if !BUILDFLAG(IS_ANDROID)
   skus::RegisterLocalStatePrefs(registry);
+#endif  // !BUILDFLAG(IS_ANDROID)
 
-#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_ANDROID)
+#if BUILDFLAG(IS_WIN)
   DayZeroBrowserUIExptManager::RegisterLocalStatePrefs(registry);
 #endif
 
+#if !BUILDFLAG(IS_ANDROID)
   registry->RegisterStringPref(::prefs::kBraveVpnDnsConfig, std::string());
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 #if BUILDFLAG(ENABLE_BRAVE_WALLET)
   brave_wallet::RegisterLocalStatePrefs(registry);
 #endif
 
+#if !BUILDFLAG(IS_ANDROID)
   misc_metrics::ProcessMiscMetrics::RegisterPrefs(registry);
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
   misc_metrics::PageMetrics::RegisterPrefs(registry);
+#endif  // !BUILDFLAG(IS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID)
   misc_metrics::FingerprintFrequencyMetrics::RegisterPrefs(registry);
+#endif  // !BUILDFLAG(IS_ANDROID)
 #if BUILDFLAG(ENABLE_AI_CHAT)
   ai_chat::AIChatMetrics::RegisterPrefs(registry);
 #endif
@@ -276,10 +353,9 @@ void RegisterLocalStatePrefs(PrefRegistrySimple* registry) {
   brave_ads::RegisterLocalStatePrefs(registry);
 #endif
 
+#if !BUILDFLAG(IS_ANDROID)
   misc_metrics::GeneralBrowserUsage::RegisterPrefs(registry);
-#if BUILDFLAG(IS_ANDROID)
-  misc_metrics::QuickSearchMetrics::RegisterPrefs(registry);
-#endif
+#endif  // !BUILDFLAG(IS_ANDROID)
   brave_search::BackupResultsServiceImpl::RegisterLocalStatePrefs(registry);
 
 #if BUILDFLAG(ENABLE_PLAYLIST)

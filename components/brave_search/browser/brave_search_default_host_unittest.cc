@@ -21,7 +21,9 @@
 #include "brave/components/brave_origin/buildflags/buildflags.h"
 #include "brave/components/brave_search/browser/prefs.h"
 #include "brave/components/brave_search/common/features.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_search_conversion/features.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_search_conversion/utils.h"
 #include "brave/components/l10n/common/test/scoped_default_locale.h"
 #include "components/prefs/pref_registry_simple.h"
@@ -162,8 +164,32 @@ TEST_F(BraveSearchDefaultHostTest, DisallowsAfterMaxTimesAsked) {
   host->GetCanSetDefaultSearchProvider(fourth.Get());
 }
 
+#if BUILDFLAG(IS_ANDROID)
+TEST_F(BraveSearchDefaultHostTest, PromotionRequestCannotBypassDailyLimit) {
+  auto host = GetAPIHost("search.test.com");
+  AddSearchProviderForHost("search.test.com");
+
+  MockGetCanSetCallback first, second, third, fourth, after_promotion_request;
+  EXPECT_CALL(first, Run(true));
+  EXPECT_CALL(second, Run(true));
+  EXPECT_CALL(third, Run(true));
+  EXPECT_CALL(fourth, Run(false));
+  EXPECT_CALL(after_promotion_request, Run(false));
+
+  // Ordinary eligibility still works before the daily quota is exhausted.
+  host->GetCanSetDefaultSearchProvider(first.Get());
+  host->GetCanSetDefaultSearchProvider(second.Get());
+  host->GetCanSetDefaultSearchProvider(third.Get());
+  host->GetCanSetDefaultSearchProvider(fourth.Get());
+
+  // The shared Mojo method cannot restore promotion-only bypass on Android.
+  host->SetCanAlwaysSetDefault();
+  host->GetCanSetDefaultSearchProvider(after_promotion_request.Get());
+}
+#endif  // BUILDFLAG(IS_ANDROID)
+
 // Brave Search conversion promotions are suppressed in branded builds.
-#if !BUILDFLAG(IS_BRAVE_ORIGIN_BRANDED)
+#if !BUILDFLAG(IS_ANDROID) && !BUILDFLAG(IS_BRAVE_ORIGIN_BRANDED)
 TEST_F(BraveSearchDefaultHostTest, CanSetDefaultAlwaysTestWithSearchPromotion) {
   base::test::ScopedFeatureList feature_list;
 
@@ -217,7 +243,7 @@ TEST_F(BraveSearchDefaultHostTest, CanSetDefaultAlwaysTestWithSearchPromotion) {
   EXPECT_CALL(seventh, Run(true));
   host->GetCanSetDefaultSearchProvider(seventh.Get());
 }
-#endif  // !BUILDFLAG(IS_BRAVE_ORIGIN_BRANDED)
+#endif  // !BUILDFLAG(IS_ANDROID) && !BUILDFLAG(IS_BRAVE_ORIGIN_BRANDED)
 
 }  // namespace
 }  // namespace brave_search

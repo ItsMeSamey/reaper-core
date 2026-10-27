@@ -1,0 +1,94 @@
+diff --git a/chrome/browser/ui/android/extensions/java/src/org/chromium/chrome/browser/ui/extensions/ExtensionInstallDialogBridge.java b/chrome/browser/ui/android/extensions/java/src/org/chromium/chrome/browser/ui/extensions/ExtensionInstallDialogBridge.java
+index b9b705521bc73d64fa22fc4df2b792b7b8815513..db5580e0c7876e01710503424577881f94c8fc01 100644
+--- a/chrome/browser/ui/android/extensions/java/src/org/chromium/chrome/browser/ui/extensions/ExtensionInstallDialogBridge.java
++++ b/chrome/browser/ui/android/extensions/java/src/org/chromium/chrome/browser/ui/extensions/ExtensionInstallDialogBridge.java
+@@ -6,6 +6,7 @@ package org.chromium.chrome.browser.ui.extensions;
+ 
+ import static org.chromium.build.NullUtil.assumeNonNull;
+ 
++import android.app.Activity;
+ import android.content.Context;
+ import android.graphics.Bitmap;
+ import android.graphics.drawable.BitmapDrawable;
+@@ -29,6 +30,7 @@ import org.jni_zero.NativeMethods;
+ 
+ import org.chromium.build.annotations.NullMarked;
+ import org.chromium.build.annotations.Nullable;
++import org.chromium.content_public.browser.WebContents;
+ import org.chromium.ui.UiUtils;
+ import org.chromium.ui.base.WindowAndroid;
+ import org.chromium.ui.modaldialog.DialogDismissalCause;
+@@ -72,17 +74,33 @@ public class ExtensionInstallDialogBridge implements ModalDialogProperties.Contr
+      *
+      * @param nativeExtensionInstallDialogView The pointer to the native object.
+      * @param windowAndroid The current {@link WindowAndroid} object.
++     * @param webContents The requesting contents, or null for a native-window-only prompt.
+      */
+     @CalledByNative
+-    private static @Nullable ExtensionInstallDialogBridge create(
+-            long nativeExtensionInstallDialogView, WindowAndroid windowAndroid) {
+-        Context context = windowAndroid.getActivity().get();
++    @VisibleForTesting
++    static @Nullable ExtensionInstallDialogBridge create(
++            long nativeExtensionInstallDialogView,
++            WindowAndroid windowAndroid,
++            @JniType("content::WebContents*") @Nullable WebContents webContents) {
++        Activity activity = windowAndroid.getActivity().get();
+         ModalDialogManager modalDialogManager = windowAndroid.getModalDialogManager();
+-        if (context == null || modalDialogManager == null) {
++        if (activity == null
++                || activity.isFinishing()
++                || activity.isDestroyed()
++                || modalDialogManager == null
++                || (webContents != null
++                        && (webContents.isDestroyed()
++                                || webContents.getTopLevelNativeWindow() != windowAndroid))) {
+             return null;
+         }
+-        return new ExtensionInstallDialogBridge(
+-                nativeExtensionInstallDialogView, context, modalDialogManager);
++        ExtensionInstallDialogBridge bridge =
++                new ExtensionInstallDialogBridge(
++                        nativeExtensionInstallDialogView, activity, modalDialogManager);
++        // Parsing and icon loading may finish after another tab becomes selected.
++        // The shared queue/presenter must follow the original requesting tab. A
++        // native-window-only prompt deliberately retains its selected-tab fallback.
++        bridge.mPropertyModelBuilder.with(ModalDialogProperties.TAB_MODAL_OWNER, webContents);
++        return bridge;
+     }
+ 
+     /**
+@@ -288,6 +306,10 @@ public class ExtensionInstallDialogBridge implements ModalDialogProperties.Contr
+     @Override
+     public void onDismiss(PropertyModel model, int dismissalCause) {
+         if (mNativeExtensionInstallDialogView == 0) return;
++        long nativeView = mNativeExtensionInstallDialogView;
++        // Completion can synchronously tear down UI. Stale or reentrant dismissal
++        // callbacks must neither complete again nor delete the native view twice.
++        mNativeExtensionInstallDialogView = 0;
+         switch (dismissalCause) {
+             case DialogDismissalCause.POSITIVE_BUTTON_CLICKED:
+                 String justificationText = "";
+@@ -298,18 +320,18 @@ public class ExtensionInstallDialogBridge implements ModalDialogProperties.Contr
+                     }
+                 }
+                 ExtensionInstallDialogBridgeJni.get()
+-                        .onDialogAccepted(mNativeExtensionInstallDialogView, justificationText);
++                        .onDialogAccepted(nativeView, justificationText);
+                 break;
+             case DialogDismissalCause.NEGATIVE_BUTTON_CLICKED:
+                 ExtensionInstallDialogBridgeJni.get()
+-                        .onDialogCanceled(mNativeExtensionInstallDialogView);
++                        .onDialogCanceled(nativeView);
+                 break;
+             default:
+                 ExtensionInstallDialogBridgeJni.get()
+-                        .onDialogDismissed(mNativeExtensionInstallDialogView);
++                        .onDialogDismissed(nativeView);
+                 break;
+         }
+-        ExtensionInstallDialogBridgeJni.get().destroy(mNativeExtensionInstallDialogView);
++        ExtensionInstallDialogBridgeJni.get().destroy(nativeView);
+     }
+ 
+     /** Enables or disables the positive button in the dialog. */

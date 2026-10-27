@@ -58,6 +58,14 @@ void ContainersService::RemoveObserver(ContainersServiceObserver* observer) {
   observers_.RemoveObserver(observer);
 }
 
+#if BUILDFLAG(IS_ANDROID)
+base::CallbackListSubscription
+ContainersService::RegisterContainerStorageRemovalCompletedCallback(
+    base::RepeatingClosure callback) {
+  return container_storage_removal_callbacks_.Add(std::move(callback));
+}
+#endif
+
 void ContainersService::MarkContainerUsed(std::string_view container_id) {
   CHECK(!container_id.empty());
 
@@ -126,6 +134,21 @@ std::vector<mojom::ContainerPtr> ContainersService::GetContainers() const {
   return GetContainersFromPrefs(*prefs_);
 }
 
+std::vector<std::string> ContainersService::GetRuntimeContainerIds() const {
+  base::flat_set<std::string> ids;
+  for (const auto& container : GetContainersFromPrefs(*prefs_)) {
+    if (!orphaned_containers_pending_removal_.contains(container->id)) {
+      ids.insert(container->id);
+    }
+  }
+  for (const auto& container : GetLocallyUsedContainersFromPrefs(*prefs_)) {
+    if (!orphaned_containers_pending_removal_.contains(container->id)) {
+      ids.insert(container->id);
+    }
+  }
+  return std::vector<std::string>(ids.begin(), ids.end());
+}
+
 std::vector<std::string> ContainersService::GetUsedContainerIds() const {
   if (orphaned_cleanup_state_ ==
       OrphanedContainersCleanupState::kDiscoveringOrphans) {
@@ -145,6 +168,11 @@ std::vector<std::string> ContainersService::GetUsedContainerIds() const {
 
 bool ContainersService::ShouldShowContainerControls() const {
   return prefs_->GetBoolean(prefs::kContainersEnabled);
+}
+
+bool ContainersService::IsContainerStorageRemovalPending(
+    std::string_view id) const {
+  return orphaned_containers_pending_removal_.contains(id);
 }
 
 void ContainersService::ScheduleOrphanedContainersCleanupForTesting() {
@@ -263,6 +291,9 @@ void ContainersService::OnContainerStorageDeleted(const std::string& id,
   if (!success) {
     LOG(WARNING) << "Failed to delete container storage for " << id
                  << " will retry on next launch";
+#if BUILDFLAG(IS_ANDROID)
+    container_storage_removal_callbacks_.Notify();
+#endif
     return;
   }
 
@@ -271,6 +302,9 @@ void ContainersService::OnContainerStorageDeleted(const std::string& id,
   if (!GetContainerFromPrefs(*prefs_, id)) {
     RemoveLocallyUsedContainerFromPrefs(id, *prefs_);
   }
+#if BUILDFLAG(IS_ANDROID)
+  container_storage_removal_callbacks_.Notify();
+#endif
 }
 
 }  // namespace containers

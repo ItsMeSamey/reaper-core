@@ -1,0 +1,51 @@
+substitutions:
+- description: Keep the new completion binder Android-only with a direct platform include
+  regex:
+    pattern: '#include "base/test/scoped_feature_list.h"
+
+      '
+    replace: '#include "base/test/scoped_feature_list.h"
+
+      #include "build/build_config.h"
+
+      #if BUILDFLAG(IS_ANDROID)
+
+      #include "base/functional/bind.h"
+
+      #endif
+
+      '
+  count: 1
+- description: Expose regression-only fixture accessors on Android
+  regex:
+    pattern: " private:\n  content::BrowserTaskEnvironment task_environment_;\n"
+    replace: "#if BUILDFLAG(IS_ANDROID)\n  ContextualNotificationPermissionUiSelector& selector() {\n    return contextual_selector_;\n\
+      \  }\n\n  content::WebContents* web_contents() { return web_contents_.get(); }\n\n  void RunUntilIdle() { task_environment_.RunUntilIdle();\
+      \ }\n\n#endif\n private:\n  content::BrowserTaskEnvironment task_environment_;\n"
+  count: 1
+- description: Add two Android-only cancellation/reuse lifetime regressions
+  regex:
+    pattern: "    histograms.ExpectBucketCount(\"Permissions.CrowdDeny.DidHoldbackQuietUi\",\n                           \
+      \      expected_bucket, 1);\n  }\n}\n"
+    replace: "    histograms.ExpectBucketCount(\"Permissions.CrowdDeny.DidHoldbackQuietUi\",\n                           \
+      \      expected_bucket, 1);\n  }\n}\n#if BUILDFLAG(IS_ANDROID)\nTEST_F(ContextualNotificationPermissionUiSelectorTest,\n\
+      \       CancelPendingPreloadLookupAndReuse) {\n  base::test::ScopedFeatureList feature_list;\n  feature_list.InitAndEnableFeature(features::kQuietNotificationPrompts);\n\
+      \  LoadTestPreloadData();\n  CrowdDenyPreloadData::GetInstance()->set_is_ready_to_use_for_testing(false);\n\n  permissions::MockPermissionRequest\
+      \ request(\n      GURL(kTestOriginNoData), permissions::RequestType::kNotifications);\n  base::MockCallback<\n     \
+      \ ContextualNotificationPermissionUiSelector::DecisionMadeCallback>\n      cancelled_callback;\n  EXPECT_CALL(cancelled_callback,\
+      \ Run).Times(0);\n  selector().SelectUiToUse(web_contents(), &request, cancelled_callback.Get());\n  selector().Cancel();\n\
+      \n  // Finishing the component load must not complete the cancelled selection.\n  LoadTestPreloadData();\n  RunUntilIdle();\n\
+      \n  // Invalidation must allow a subsequent selection to use fresh weak pointers.\n  QueryAndExpectDecisionForUrl(GURL(kTestOriginNoData),\n\
+      \                               Decision::UseNormalUiAndShowNoWarning());\n}\n\nTEST_F(ContextualNotificationPermissionUiSelectorTest,\n\
+      \       CancelPendingSafeBrowsingReleasesCompletionAndReuse) {\n  using Config = QuietNotificationPermissionUiConfig;\n\
+      \  base::test::ScopedFeatureList feature_list;\n  feature_list.InitWithFeaturesAndParameters(\n      {{features::kQuietNotificationPrompts,\n\
+      \        {{Config::kEnableCrowdDenyTriggering, \"true\"},\n         {Config::kCrowdDenyHoldBackChance, \"0.0\"}}}},\n\
+      \      {});\n  LoadTestPreloadData();\n  LoadTestSafeBrowsingBlocklist();\n\n  permissions::MockPermissionRequest request(\n\
+      \      GURL(kTestOriginSpammy), permissions::RequestType::kNotifications);\n  auto completion_state = std::make_shared<int>(0);\n\
+      \  std::weak_ptr<int> completion_lifetime = completion_state;\n  selector().SelectUiToUse(\n      web_contents(), &request,\n\
+      \      base::BindOnce(\n          [](std::shared_ptr<int>, const Decision&) {\n            ADD_FAILURE() << \"Cancelled\
+      \ selection completed\";\n          },\n          std::move(completion_state)));\n  ASSERT_FALSE(completion_lifetime.expired());\n\
+      \n  selector().Cancel();\n  EXPECT_TRUE(completion_lifetime.expired());\n  selector().Cancel();\n  RunUntilIdle();\n\
+      \n  QueryAndExpectDecisionForUrl(GURL(kTestOriginNoData),\n                               Decision::UseNormalUiAndShowNoWarning());\n\
+      }\n#endif  // BUILDFLAG(IS_ANDROID)\n"
+  count: 1

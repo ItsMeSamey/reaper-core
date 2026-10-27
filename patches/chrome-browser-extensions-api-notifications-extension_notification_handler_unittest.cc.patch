@@ -1,0 +1,206 @@
+diff --git a/chrome/browser/extensions/api/notifications/extension_notification_handler_unittest.cc b/chrome/browser/extensions/api/notifications/extension_notification_handler_unittest.cc
+--- a/chrome/browser/extensions/api/notifications/extension_notification_handler_unittest.cc
++++ b/chrome/browser/extensions/api/notifications/extension_notification_handler_unittest.cc
+@@ -6,9 +6,18 @@
+
+ #include <optional>
+ #include <string>
+-
++#include <utility>
++#include <vector>
++
++#include "base/files/scoped_temp_dir.h"
+ #include "base/functional/bind.h"
+ #include "base/functional/callback_helpers.h"
++#include "base/memory/raw_ptr.h"
++#include "base/values.h"
++#include "build/build_config.h"
++#include "chrome/browser/extensions/api/notifications/extension_notification_display_helper.h"
++#include "chrome/browser/extensions/api/notifications/extension_notification_display_helper_factory.h"
++#include "chrome/browser/notifications/notification_display_service_tester.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/test/base/testing_browser_process.h"
+ #include "chrome/test/base/testing_profile.h"
+@@ -17,6 +26,9 @@
+ #include "extensions/buildflags/buildflags.h"
+ #include "extensions/common/extension_id.h"
+ #include "testing/gtest/include/gtest/gtest.h"
++#include "ui/base/models/image_model.h"
++#include "ui/message_center/public/cpp/notification.h"
++#include "ui/message_center/public/cpp/notifier_id.h"
+
+ static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
+
+@@ -99,5 +111,172 @@
+                   std::nullopt /* reply */, base::DoNothing());
+ }
+
++#if BUILDFLAG(IS_ANDROID)
++class RecordingExtensionNotificationHandler : public ExtensionNotificationHandler {
++ public:
++  struct RecordedEvent {
++    raw_ptr<Profile> profile;
++    ExtensionId extension_id;
++    std::string name;
++    base::ListValue args;
++  };
++
++  const std::vector<RecordedEvent>& recorded_events() const { return events_; }
++
++ private:
++  void SendEvent(Profile* profile,
++                 const ExtensionId& extension_id,
++                 events::HistogramValue histogram_value,
++                 const std::string& event_name,
++                 EventRouter::UserGestureState user_gesture,
++                 base::ListValue args) override {
++    events_.push_back({profile, extension_id, event_name, std::move(args)});
++  }
++
++  std::vector<RecordedEvent> events_;
++};
++
++TEST_F(ExtensionNotificationHandlerTest, AndroidProfileScopedIdentityIsolation) {
++  base::ScopedTempDir profiles_dir;
++  ASSERT_TRUE(profiles_dir.CreateUniqueTempDir());
++  TestingProfile::Builder regular_builder;
++  regular_builder.SetPath(profiles_dir.GetPath().AppendASCII("Profile A"));
++  auto regular = regular_builder.Build();
++  TestingProfile::Builder other_builder;
++  other_builder.SetPath(profiles_dir.GetPath().AppendASCII("Profile B"));
++  auto other = other_builder.Build();
++  Profile* incognito = regular->GetPrimaryOTRProfile(/*create_if_needed=*/true);
++  ASSERT_TRUE(incognito);
++
++  const std::string public_id = "report:reaper-extension:v1:ordinary-id";
++  const std::string regular_id =
++      CreateProfileScopedNotificationId(regular.get(), kChromeExtensionId, public_id);
++  const std::string incognito_id =
++      CreateProfileScopedNotificationId(incognito, kChromeExtensionId, public_id);
++  const std::string other_id =
++      CreateProfileScopedNotificationId(other.get(), kChromeExtensionId, public_id);
++  EXPECT_NE(regular_id, incognito_id);
++  EXPECT_NE(regular_id, other_id);
++  EXPECT_NE(incognito_id, other_id);
++  EXPECT_EQ(regular_id,
++            CreateProfileScopedNotificationId(regular.get(), kChromeExtensionId,
++                                              public_id));
++  EXPECT_EQ(incognito_id,
++            CreateProfileScopedNotificationId(incognito, kChromeExtensionId,
++                                              public_id));
++  EXPECT_EQ(std::optional<std::string>(public_id),
++            GetUnscopedNotificationId(regular.get(), kChromeExtensionId, regular_id));
++  EXPECT_EQ(std::optional<std::string>(public_id),
++            GetUnscopedNotificationId(incognito, kChromeExtensionId, incognito_id));
++  EXPECT_FALSE(GetUnscopedNotificationId(regular.get(), kChromeExtensionId,
++                                         incognito_id));
++  EXPECT_FALSE(GetUnscopedNotificationId(incognito, kChromeExtensionId, regular_id));
++  EXPECT_FALSE(GetUnscopedNotificationId(other.get(), kChromeExtensionId, regular_id));
++  EXPECT_FALSE(GetUnscopedNotificationId(regular.get(),
++                                         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
++                                         regular_id));
++  EXPECT_FALSE(GetUnscopedNotificationId(regular.get(), kChromeExtensionId,
++                                         "reaper-extension:v1:"));
++  EXPECT_FALSE(GetUnscopedNotificationId(
++      regular.get(), kChromeExtensionId,
++      CreateProfileScopedNotificationId(regular.get(), kChromeExtensionId, "")));
++}
++
++TEST_F(ExtensionNotificationHandlerTest,
++       AndroidProfileScopedEventsPreserveCallerAndProfile) {
++  TestingProfile::Builder builder;
++  auto regular = builder.Build();
++  Profile* incognito = regular->GetPrimaryOTRProfile(/*create_if_needed=*/true);
++  ASSERT_TRUE(incognito);
++  NotificationDisplayServiceTester display_tester(regular.get());
++  auto* helper =
++      ExtensionNotificationDisplayHelperFactory::GetForProfile(regular.get());
++  ASSERT_TRUE(helper);
++  const std::string public_id = "same-notification-id";
++  const std::string regular_id =
++      CreateProfileScopedNotificationId(regular.get(), kChromeExtensionId, public_id);
++  const std::string incognito_id =
++      CreateProfileScopedNotificationId(incognito, kChromeExtensionId, public_id);
++  const GURL origin(kChromeExtensionOrigin);
++  message_center::Notification notification(
++      message_center::NOTIFICATION_TYPE_SIMPLE, regular_id, u"Title", u"Body",
++      ui::ImageModel(), u"Source", origin,
++      message_center::NotifierId(message_center::NotifierType::APPLICATION,
++                                 kChromeExtensionId),
++      message_center::RichNotificationData(), nullptr);
++  helper->Display(notification);
++  ASSERT_TRUE(helper->GetByNotificationId(regular_id));
++
++  RecordingExtensionNotificationHandler handler;
++  int completions = 0;
++  auto completed = [&completions]() {
++    return base::BindOnce([](int* count) { ++*count; }, &completions);
++  };
++  handler.OnClick(regular.get(), origin, incognito_id, std::nullopt, std::nullopt,
++                   completed());
++  handler.OnClose(regular.get(), origin, incognito_id, true, completed());
++  EXPECT_EQ(2, completions);
++  EXPECT_TRUE(handler.recorded_events().empty());
++  EXPECT_TRUE(helper->GetByNotificationId(regular_id));
++
++  handler.OnClick(regular.get(), origin, regular_id, std::nullopt, std::nullopt,
++                   completed());
++  handler.OnClick(incognito, origin, incognito_id, std::nullopt, std::nullopt,
++                   completed());
++  handler.OnClick(incognito, origin, incognito_id, 1, std::nullopt, completed());
++  handler.OnClose(regular.get(), origin, regular_id, false, completed());
++  handler.OnClose(incognito, origin, incognito_id, true, completed());
++  EXPECT_EQ(7, completions);
++  ASSERT_EQ(5u, handler.recorded_events().size());
++  const std::vector<Profile*> expected_profiles = {
++      regular.get(), incognito, incognito, regular.get(), incognito};
++  const std::vector<std::string> expected_names = {
++      "notifications.onClicked", "notifications.onClicked",
++      "notifications.onButtonClicked", "notifications.onClosed",
++      "notifications.onClosed"};
++  for (size_t i = 0; i < handler.recorded_events().size(); ++i) {
++    SCOPED_TRACE(i);
++    const auto& event = handler.recorded_events()[i];
++    EXPECT_EQ(expected_profiles[i], event.profile.get());
++    EXPECT_EQ(kChromeExtensionId, event.extension_id);
++    EXPECT_EQ(expected_names[i], event.name);
++    ASSERT_EQ(i < 2 ? 1u : 2u, event.args.size());
++    EXPECT_EQ(public_id, event.args[0].GetString());
++  }
++  EXPECT_EQ(1, handler.recorded_events()[2].args[1].GetInt());
++  EXPECT_FALSE(handler.recorded_events()[3].args[1].GetBool());
++  EXPECT_TRUE(handler.recorded_events()[4].args[1].GetBool());
++  EXPECT_FALSE(helper->GetByNotificationId(regular_id));
++}
++
++TEST_F(ExtensionNotificationHandlerTest,
++       AndroidLegacyNotificationEventsRemainReadable) {
++  TestingProfile::Builder builder;
++  auto regular = builder.Build();
++  Profile* incognito = regular->GetPrimaryOTRProfile(/*create_if_needed=*/true);
++  ASSERT_TRUE(incognito);
++  // The old format has no profile witness. Preserve event compatibility rather
++  // than claiming the new isolation guarantee for these persisted keys.
++  const std::string public_id = "reaper-extension:v1:legacy-caller-id";
++  const std::string legacy_id = std::string(kChromeExtensionId) + "-" + public_id;
++  EXPECT_EQ(std::optional<std::string>(public_id),
++            GetUnscopedNotificationId(regular.get(), kChromeExtensionId, legacy_id));
++  EXPECT_EQ(std::optional<std::string>(public_id),
++            GetUnscopedNotificationId(incognito, kChromeExtensionId, legacy_id));
++  RecordingExtensionNotificationHandler handler;
++  handler.OnClick(regular.get(), GURL(kChromeExtensionOrigin), legacy_id,
++                   std::nullopt, std::nullopt, base::DoNothing());
++  handler.OnClose(incognito, GURL(kChromeExtensionOrigin), legacy_id, false,
++                   base::DoNothing());
++  ASSERT_EQ(2u, handler.recorded_events().size());
++  EXPECT_EQ(regular.get(), handler.recorded_events()[0].profile.get());
++  EXPECT_EQ(incognito, handler.recorded_events()[1].profile.get());
++  EXPECT_EQ("notifications.onClicked", handler.recorded_events()[0].name);
++  EXPECT_EQ("notifications.onClosed", handler.recorded_events()[1].name);
++  EXPECT_EQ(public_id, handler.recorded_events()[0].args[0].GetString());
++  EXPECT_EQ(public_id, handler.recorded_events()[1].args[0].GetString());
++}
++#endif  // BUILDFLAG(IS_ANDROID)
++
+ }  // namespace
+ }  // namespace extensions

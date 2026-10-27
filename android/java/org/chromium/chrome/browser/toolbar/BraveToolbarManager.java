@@ -45,18 +45,15 @@ import org.chromium.chrome.browser.browser_controls.TopControlsStacker;
 import org.chromium.chrome.browser.compositor.CompositorViewHolder;
 import org.chromium.chrome.browser.compositor.layouts.LayoutManagerImpl;
 import org.chromium.chrome.browser.compositor.overlays.strip.StripLayoutHelperManager;
-import org.chromium.chrome.browser.customtabs.FullScreenCustomTabActivity;
 import org.chromium.chrome.browser.data_sharing.DataSharingTabManager;
 import org.chromium.chrome.browser.ephemeraltab.EphemeralTabCoordinator;
 import org.chromium.chrome.browser.findinpage.FindToolbarManager;
 import org.chromium.chrome.browser.fullscreen.FullscreenManager;
-import org.chromium.chrome.browser.glic.GlicButtonDelegate;
 import org.chromium.chrome.browser.homepage.HomepageManager;
 import org.chromium.chrome.browser.hub.HubManager;
 import org.chromium.chrome.browser.layouts.LayoutStateProvider;
 import org.chromium.chrome.browser.layouts.LayoutType;
 import org.chromium.chrome.browser.lifecycle.ActivityLifecycleDispatcher;
-import org.chromium.chrome.browser.merchant_viewer.MerchantTrustSignalsCoordinator;
 import org.chromium.chrome.browser.multiwindow.MultiWindowModeStateDispatcher;
 import org.chromium.chrome.browser.omnibox.LocationBar;
 import org.chromium.chrome.browser.omnibox.OmniboxChipManager;
@@ -113,7 +110,6 @@ import org.chromium.components.embedder_support.contextmenu.ContextMenuPopulator
 import org.chromium.components.embedder_support.util.UrlUtilities;
 import org.chromium.components.omnibox.AutocompleteInput;
 import org.chromium.content_public.browser.selection.SelectionDropdownMenuDelegate;
-import org.chromium.misc_metrics.mojom.MiscAndroidMetrics;
 import org.chromium.ui.base.ActivityResultTracker;
 import org.chromium.ui.base.WindowAndroid;
 import org.chromium.ui.modaldialog.ModalDialogManager;
@@ -254,8 +250,6 @@ public class BraveToolbarManager extends ToolbarManager
             DataSharingTabManager dataSharingTabManager,
             TabContentManager tabContentManager,
             TabCreatorManager tabCreatorManager,
-            MonotonicObservableSupplier<MerchantTrustSignalsCoordinator>
-                    merchantTrustSignalsCoordinatorSupplier,
             OmniboxActionDelegateImpl omniboxActionDelegate,
             MonotonicObservableSupplier<EphemeralTabCoordinator> ephemeralTabCoordinatorSupplier,
             boolean initializeWithIncognitoColors,
@@ -274,7 +268,6 @@ public class BraveToolbarManager extends ToolbarManager
             @Nullable BottomBarHostManager bottomBarHostManager,
             @Nullable ActionRegistry actionRegistry,
             @Nullable OneshotSupplier<String> countrySupplier,
-            GlicButtonDelegate toggleGlicCallback,
             boolean suppressTabStripAtStart,
             @Nullable OneshotSupplier<HubManager> hubManagerSupplier) {
         super(
@@ -319,7 +312,6 @@ public class BraveToolbarManager extends ToolbarManager
                 dataSharingTabManager,
                 tabContentManager,
                 tabCreatorManager,
-                merchantTrustSignalsCoordinatorSupplier,
                 omniboxActionDelegate,
                 ephemeralTabCoordinatorSupplier,
                 initializeWithIncognitoColors,
@@ -338,7 +330,6 @@ public class BraveToolbarManager extends ToolbarManager
                 bottomBarHostManager,
                 actionRegistry,
                 countrySupplier,
-                toggleGlicCallback,
                 suppressTabStripAtStart,
                 hubManagerSupplier);
 
@@ -452,7 +443,7 @@ public class BraveToolbarManager extends ToolbarManager
                         mActivityTabProvider,
                         mToolbarTabController::openHomepage,
                         mCallbackController.makeCancelable(
-                                (reason) -> beginFuseboxInput(new AutocompleteInput(reason))),
+                                (reason) -> beginInput(new AutocompleteInput(reason))),
                         mMenuButtonCoordinator.getMenuButtonHelperSupplier(),
                         mAppThemeColorProvider,
                         mBookmarkModelSupplier,
@@ -489,7 +480,6 @@ public class BraveToolbarManager extends ToolbarManager
             assert (mActivity instanceof ChromeActivity);
             OnClickListener wrappedNewTabClickHandler =
                     v -> {
-                        recordNewTabClick();
                         ((ChromeActivity) mActivity)
                                 .getMenuOrKeyboardActionController()
                                 .onMenuOrKeyboardAction(
@@ -525,12 +515,12 @@ public class BraveToolbarManager extends ToolbarManager
     }
 
     @Override
-    public void beginFuseboxInput(AutocompleteInput input) {
+    public void beginInput(AutocompleteInput input) {
         // Hub exposes the bottom search accelerator before its hide animation completes.
         // Starting input in that interval can leave Hub and omnibox UI visible together.
         if (mIsHubHiding) return;
 
-        super.beginFuseboxInput(input);
+        super.beginInput(input);
     }
 
     // The 3rd parameter at ToolbarManager.initializeWithNativ is
@@ -581,7 +571,7 @@ public class BraveToolbarManager extends ToolbarManager
                             mBraveActionRegistry,
                             mActivityTabProvider,
                             mCallbackController.makeCancelable(
-                                    (reason) -> beginFuseboxInput(new AutocompleteInput(reason))));
+                                    (reason) -> beginInput(new AutocompleteInput(reason))));
             updateBookmarkButtonStatus();
         }
 
@@ -628,6 +618,7 @@ public class BraveToolbarManager extends ToolbarManager
     @Override
     public void destroy() {
         unregisterHubLayoutObserver();
+        ContextUtils.getAppSharedPreferences().unregisterOnSharedPreferenceChangeListener(this);
         super.destroy();
         HomepageManager.getInstance().removeListener(mBraveHomepageStateListener);
         if (mBraveBottomBarActionCoordinator != null) {
@@ -664,18 +655,6 @@ public class BraveToolbarManager extends ToolbarManager
         mIsHubHiding = false;
     }
 
-    private void recordNewTabClick() {
-        if (!mIncognitoStateProvider.isIncognitoSelected()) {
-            if (mActivity instanceof BraveActivity) {
-                MiscAndroidMetrics miscAndroidMetrics =
-                        ((BraveActivity) mActivity).getMiscAndroidMetrics();
-                if (miscAndroidMetrics != null) {
-                    miscAndroidMetrics.recordTabSwitcherNewTab();
-                }
-            }
-        }
-    }
-
     protected void onOrientationChange() {
         if (mActionModeController != null) mActionModeController.showControlsOnOrientationChange();
 
@@ -683,12 +662,6 @@ public class BraveToolbarManager extends ToolbarManager
                 && mTabGroupUiBottomControlsCoordinatorSupplier.get() != null
                 && BottomToolbarConfiguration.isBraveBottomControlsEnabled()) {
             updateBraveBottomControlsVisibility();
-        }
-
-        if (mActivity instanceof FullScreenCustomTabActivity) {
-            // When rewards page is shown on rotated screen we don't care about
-            // the toolbar.
-            return;
         }
 
         if (mActivity instanceof BraveActivity) {

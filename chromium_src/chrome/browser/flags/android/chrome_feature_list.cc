@@ -6,19 +6,13 @@
 #include "brave/browser/android/safe_browsing/features.h"
 #include "brave/browser/android/youtube_script_injector/features.h"
 #include "brave/browser/brave_browser_features.h"
-#include "brave/components/ai_chat/core/common/features.h"
 #include "brave/components/brave_ads/buildflags/buildflags.h"
-#include "brave/components/brave_news/common/features.h"
-#include "brave/components/brave_origin/features.h"
-#include "brave/components/brave_rewards/core/features.h"
-#include "brave/components/brave_search_conversion/features.h"
 #include "brave/components/brave_shields/core/common/features.h"
 #include "brave/components/brave_vpn/common/buildflags/buildflags.h"
 #include "brave/components/brave_wallet/common/buildflags/buildflags.h"
 #include "brave/components/debounce/core/common/features.h"
 #include "brave/components/email_aliases/buildflags/buildflags.h"
 #include "brave/components/google_sign_in_permission/features.h"
-#include "brave/components/playlist/core/common/features.h"
 #include "brave/components/request_otr/common/features.h"
 #include "brave/components/web_discovery/buildflags/buildflags.h"
 #include "brave/components/webcompat/core/common/features.h"
@@ -40,11 +34,6 @@
 #if BUILDFLAG(ENABLE_EMAIL_ALIASES)
 #include "brave/components/email_aliases/features.h"
 #endif
-
-// CHROMIUM_SRC_INTERNAL_USE
-#define BRAVE_AI_CHAT_FLAGS                                        \
-  &ai_chat::features::kAIChat, &ai_chat::features::kAIChatHistory, \
-      &ai_chat::features::kBraveSyncAIChat,
 
 #if BUILDFLAG(ENABLE_BRAVE_ADS)
 // CHROMIUM_SRC_INTERNAL_USE
@@ -82,14 +71,10 @@
 
 // clang-format off
 #define kForceWebContentsDarkMode kForceWebContentsDarkMode,                   \
-    BRAVE_AI_CHAT_FLAGS                                                        \
     BRAVE_NEW_TAB_PAGE_AD_FLAG                                                 \
     BRAVE_WEB_DISCOVERY_FLAG                                                   \
     BRAVE_VPN_FLAG                                                             \
     EMAIL_ALIASES_FLAG                                                         \
-    &brave_rewards::features::kBraveRewards,                                   \
-    &brave_search_conversion::features::kOmniboxBanner,                        \
-    &playlist::features::kPlaylist,                                            \
     &download::features::kParallelDownloading,                                 \
     &preferences::features::kBraveBackgroundVideoPlayback,                     \
     &preferences::features::kBravePictureInPictureForYouTubeVideos,            \
@@ -107,7 +92,6 @@
     &features::kBraveAndroidDynamicColorsByDefault,                            \
     &features::kBraveFreshNtpAfterIdleExperiment,                              \
     &brave_shields::features::kBraveShredFeature,                              \
-    &brave_origin::features::kBraveOrigin,                                     \
     &features::kBraveCustomSearchEngines,                                      \
     &features::kBraveAndroidTabGroupsSettings
 
@@ -115,7 +99,6 @@
 
 #include <chrome/browser/flags/android/chrome_feature_list.cc>
 #undef kForceWebContentsDarkMode
-#undef BRAVE_AI_CHAT_FLAGS
 #undef BRAVE_NEW_TAB_PAGE_AD_FLAG
 #undef BRAVE_WEB_DISCOVERY_FLAG
 #undef BRAVE_VPN_FLAG

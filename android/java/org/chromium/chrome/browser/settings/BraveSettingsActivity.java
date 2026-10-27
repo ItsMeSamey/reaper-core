@@ -7,6 +7,8 @@ package org.chromium.chrome.browser.settings;
 
 import static org.chromium.build.NullUtil.assumeNonNull;
 
+import android.app.ActivityManager;
+import android.content.ComponentName;
 import android.content.Intent;
 import android.graphics.Color;
 import android.os.Bundle;
@@ -28,8 +30,10 @@ import org.chromium.build.annotations.NullMarked;
 import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.R;
 import org.chromium.chrome.browser.ChromeTabbedActivity;
+import org.chromium.chrome.browser.ChromeTabbedActivity2;
 import org.chromium.chrome.browser.ui.edge_to_edge.EdgeToEdgeUtils;
 import org.chromium.chrome.browser.ui.messages.snackbar.SnackbarManager;
+import org.chromium.chrome.browser.util.AndroidTaskUtils;
 import org.chromium.components.browser_ui.styles.SemanticColorUtils;
 import org.chromium.ui.edge_to_edge.EdgeToEdgeSystemBarColorHelper;
 import org.chromium.ui.util.ColorUtils;
@@ -151,13 +155,76 @@ public class BraveSettingsActivity extends SettingsActivity {
     @Override
     public boolean onOptionsItemSelected(MenuItem item) {
         if (item.getItemId() == R.id.close_menu_id) {
-            Intent intent = new Intent(this, ChromeTabbedActivity.class);
-            intent.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
-            intent.setAction(Intent.ACTION_VIEW);
-            startActivity(intent);
+            closeSettingsInTask(this);
             return true;
         }
         return super.onOptionsItemSelected(item);
+    }
+
+    /**
+     * Requests Up through this task's retained browser root, using Android task records rather
+     * than live Activity objects. Inconsistent metadata falls back to closing only this page.
+     */
+    static void closeSettingsInTask(SettingsActivity current) {
+        if (current.isFinishing() || current.isDestroyed()) return;
+
+        int taskId = current.getTaskId();
+        ActivityManager manager = current.getSystemService(ActivityManager.class);
+        if (taskId >= 0 && manager != null) {
+            for (ActivityManager.AppTask task : manager.getAppTasks()) {
+                ActivityManager.RecentTaskInfo info = AndroidTaskUtils.getTaskInfoFromTask(task);
+                if (info == null || info.taskId != taskId) continue;
+                Intent up = createBrowserRootUpIntent(taskId, current.getPackageName(), info);
+                if (up != null) {
+                    // Up is constrained to the current task. A false result can still have
+                    // unwound activities, so do not follow it with another navigation action.
+                    current.navigateUpTo(up);
+                    return;
+                }
+                break;
+            }
+        }
+        // Without an existing browser root, close only this page. Older settings pages may
+        // remain in a settings-only task; do not guess a browser destination or remove the task.
+        current.finish();
+    }
+
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    static @Nullable Intent createBrowserRootUpIntent(
+            int taskId, String packageName, ActivityManager.RecentTaskInfo info) {
+        ComponentName root = info.baseActivity;
+        if (taskId < 0
+                || info.taskId != taskId
+                || root == null
+                || !packageName.equals(root.getPackageName())
+                || info.baseIntent == null) {
+            return null;
+        }
+        ComponentName main =
+                new ComponentName(packageName, ChromeTabbedActivity.MAIN_LAUNCHER_ACTIVITY_NAME);
+        ComponentName tabbed = new ComponentName(packageName, ChromeTabbedActivity.class.getName());
+        ComponentName tabbed2 = new ComponentName(packageName, ChromeTabbedActivity2.class.getName());
+        ComponentName destination;
+        if (info.origActivity != null) {
+            // Android's Up search matches ActivityInfo.name, including the original alias.
+            // baseActivity may instead report its implementation. Do not normalize Main to CTA.
+            if (!main.equals(info.origActivity)
+                    || (!tabbed.equals(root) && !main.equals(root))
+                    || !main.equals(info.baseIntent.getComponent())) {
+                return null;
+            }
+            destination = main;
+        } else {
+            if ((!tabbed.equals(root) && !tabbed2.equals(root))
+                    || !root.equals(info.baseIntent.getComponent())) {
+                return null;
+            }
+            destination = root;
+        }
+        // Task identity can outlive root replacement; these checks support the retained browser
+        // root, not arbitrary reparented stacks. Never guess when current metadata disagrees.
+        // Do not replay baseIntent: its URL, extras or action may open another tab.
+        return new Intent().setComponent(destination).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
     }
 
     private void onSettingsFragmentViewReady(Fragment fragment, View fragmentView) {

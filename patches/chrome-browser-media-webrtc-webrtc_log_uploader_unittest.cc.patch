@@ -1,0 +1,100 @@
+diff --git a/chrome/browser/media/webrtc/webrtc_log_uploader_unittest.cc b/chrome/browser/media/webrtc/webrtc_log_uploader_unittest.cc
+--- a/chrome/browser/media/webrtc/webrtc_log_uploader_unittest.cc
++++ b/chrome/browser/media/webrtc/webrtc_log_uploader_unittest.cc
+@@ -11,6 +11,7 @@
+ 
+ #include "base/containers/span.h"
+ #include "base/files/file.h"
++#include "base/files/file_enumerator.h"
+ #include "base/files/file_path.h"
+ #include "base/files/file_util.h"
+ #include "base/files/scoped_temp_dir.h"
+@@ -24,8 +25,13 @@
+ #include "base/test/task_environment.h"
+ #include "base/test/test_future.h"
+ #include "base/time/time.h"
++#include "build/build_config.h"
+ #include "testing/gmock/include/gmock/gmock.h"
+ #include "testing/gtest/include/gtest/gtest.h"
++#if BUILDFLAG(IS_ANDROID)
++#include "base/test/bind.h"
++#include "third_party/zlib/google/compression_utils.h"
++#endif
+ 
+ const char kTestTime[] = "time";
+ const char kTestReportId[] = "report-id";
+@@ -552,3 +558,74 @@
+ 
+   EXPECT_EQ("0", GetValueFromMultipart(post_data, "guid"));
+ }
++
++#if BUILDFLAG(IS_ANDROID)
++TEST_F(WebRtcLogUploaderTest,
++       AndroidDisabledUploadCompletesAndReleasesSlot) {
++  for (bool upload_allowed : {false, true}) {
++    for (bool with_callback : {false, true}) {
++      SCOPED_TRACE(testing::Message() << "upload_allowed=" << upload_allowed
++                                     << " with_callback=" << with_callback);
++      base::ScopedTempDir temp_dir;
++      ASSERT_TRUE(temp_dir.CreateUniqueTempDir());
++      auto uploader = std::make_unique<WebRtcLogUploader>();
++      // Fill all slots so exactly one successful later reservation demonstrates
++      // that this operation releases one slot, including without a callback.
++      constexpr int kCapacity = 20;
++      for (int i = 0; i < kCapacity; ++i) {
++        EXPECT_TRUE(uploader->ApplyForStartLogging());
++      }
++      EXPECT_FALSE(uploader->ApplyForStartLogging());
++
++      int callbacks = 0;
++      auto main_runner = base::SequencedTaskRunner::GetCurrentDefault();
++      WebRtcLogUploader::UploadDoneData done;
++      done.paths.directory = temp_dir.GetPath();
++      done.web_app_id = 0;
++      if (with_callback) {
++        done.callback = base::BindLambdaForTesting(
++            [&](bool success, const std::string& report_id,
++                const std::string& error) {
++              ++callbacks;
++              EXPECT_TRUE(main_runner->RunsTasksInCurrentSequence());
++              EXPECT_FALSE(success);
++              EXPECT_TRUE(report_id.empty());
++              EXPECT_EQ(WebRtcLogUploader::kLogUploadDisabledMsg, error);
++            });
++      }
++      auto log = std::make_unique<WebRtcLogBuffer>();
++      log->Log("retained local diagnostic");
++      log->SetComplete();
++      // Do not use OverrideUploadWithBufferForTesting: that bypasses the
++      // production disabled-upload completion path exercised here.
++      uploader->background_task_runner()->PostTask(
++          FROM_HERE,
++          base::BindOnce(&WebRtcLogUploader::OnLoggingStopped,
++                         base::Unretained(uploader.get()),
++                         WebRtcLogUploadSite::kSameSite, std::move(log),
++                         std::make_unique<WebRtcLogMetaDataMap>(),
++                         std::move(done), upload_allowed));
++      task_environment_.RunUntilIdle();
++      EXPECT_EQ(with_callback ? 1 : 0, callbacks);
++      EXPECT_TRUE(uploader->ApplyForStartLogging());
++      EXPECT_FALSE(uploader->ApplyForStartLogging());
++
++      base::FileEnumerator files(temp_dir.GetPath(), false,
++                                 base::FileEnumerator::FILES,
++                                 FILE_PATH_LITERAL("*.gz"));
++      const base::FilePath stored_log = files.Next();
++      EXPECT_FALSE(stored_log.empty());
++      std::string compressed;
++      EXPECT_TRUE(base::ReadFileToString(stored_log, &compressed));
++      std::string decompressed;
++      EXPECT_TRUE(compression::GzipUncompress(compressed, &decompressed));
++      EXPECT_EQ("retained local diagnostic\n", decompressed);
++      EXPECT_TRUE(files.Next().empty());
++
++      uploader->Shutdown();
++      task_environment_.RunUntilIdle();
++      EXPECT_EQ(with_callback ? 1 : 0, callbacks);
++    }
++  }
++}
++#endif  // BUILDFLAG(IS_ANDROID)

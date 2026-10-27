@@ -1,0 +1,225 @@
+diff --git a/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/extensions/ExtensionsToolbarTest.java b/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/extensions/ExtensionsToolbarTest.java
+--- a/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/extensions/ExtensionsToolbarTest.java
++++ b/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/extensions/ExtensionsToolbarTest.java
+@@ -26,6 +26,8 @@
+ import static org.junit.Assert.assertArrayEquals;
+ import static org.junit.Assert.assertEquals;
+ import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertNotNull;
++import static org.junit.Assert.assertSame;
+ import static org.junit.Assert.assertTrue;
+ 
+ import static org.chromium.ui.test.util.ViewUtils.VIEW_GONE;
+@@ -33,8 +35,11 @@
+ import static org.chromium.ui.test.util.ViewUtils.withEventualExpectedViewState;
+ 
+ import android.app.Instrumentation;
++import android.graphics.Rect;
+ import android.os.SystemClock;
++import android.view.InputDevice;
+ import android.view.KeyEvent;
++import android.view.MotionEvent;
+ import android.view.View;
+ import android.view.ViewConfiguration;
+ import android.view.ViewGroup;
+@@ -64,6 +69,7 @@
+ import org.chromium.chrome.browser.profiles.Profile;
+ import org.chromium.chrome.browser.profiles.ProfileManager;
+ import org.chromium.chrome.browser.tabbed_mode.TabbedAppMenuPropertiesDelegate;
++import org.chromium.chrome.browser.toolbar.top.ToolbarPhone;
+ import org.chromium.chrome.browser.ui.extensions.ExtensionTestMessageListener;
+ import org.chromium.chrome.browser.ui.extensions.ExtensionTestUtils;
+ import org.chromium.chrome.test.ChromeJUnit4ClassRunner;
+@@ -73,6 +79,7 @@
+ import org.chromium.components.embedder_support.util.UrlConstants;
+ import org.chromium.components.embedder_support.view.ContentView;
+ import org.chromium.components.user_prefs.UserPrefs;
++import org.chromium.content_public.browser.LoadUrlParams;
+ import org.chromium.content_public.browser.WebContents;
+ import org.chromium.content_public.browser.test.NativeLibraryTestUtils;
+ import org.chromium.content_public.browser.test.util.TestTouchUtils;
+@@ -152,6 +159,46 @@
+ 
+     @Test
+     @LargeTest
++    @ImportantFormFactors({DeviceFormFactor.PHONE, DeviceFormFactor.DESKTOP})
++    public void testSitePermissionsPageRestrictedNavigationRefreshesMainMenu() throws IOException {
++        loadContentScriptExtension(
++                "permissions", "Permissions Extension", "Permissions Action", "<all_urls>");
++        ViewUtils.onViewWaiting(withId(R.id.extensions_menu_button)).perform(click());
++        ViewUtils.onViewWaiting(withId(R.id.extensions_menu_site_settings_toggle))
++                .check(matches(isDisplayed()));
++        ViewUtils.onViewWaiting(withId(R.id.extensions_menu_item_site_permissions_layout))
++                .perform(click());
++        ViewUtils.onViewWaiting(withId(R.id.extensions_menu_site_permissions_page))
++                .check(matches(isDisplayed()));
++
++        // Keep the same tab and open menu while native eligibility changes on a restricted URL.
++        String restrictedUrl = "chrome://version/";
++        ThreadUtils.runOnUiThreadBlocking(
++                () ->
++                        mActivityTestRule
++                                .getActivity()
++                                .getActivityTab()
++                                .loadUrl(new LoadUrlParams(restrictedUrl)));
++        CriteriaHelper.pollUiThread(
++                () ->
++                        restrictedUrl.equals(
++                                mActivityTestRule
++                                        .getActivity()
++                                        .getActivityTab()
++                                        .getWebContents()
++                                        .getLastCommittedUrl()
++                                        .getSpec()),
++                "Restricted navigation did not commit");
++
++        ViewUtils.onViewWaiting(withId(R.id.extensions_menu_items)).check(matches(isDisplayed()));
++        onView(withId(R.id.extensions_menu_site_permissions_page))
++                .check(matches(not(isDisplayed())));
++        onView(withId(R.id.extensions_menu_site_settings_toggle))
++                .check(matches(not(isDisplayed())));
++    }
++
++    @Test
++    @LargeTest
+     public void testPinnedActions() throws IOException {
+         String extension1Id = loadBasicExtension("extension1", "Test Extension 1", "Test Action 1");
+         String extension2Id = loadBasicExtension("extension2", "Test Extension 2", "Test Action 2");
+@@ -174,6 +221,48 @@
+                 .check(
+                         withEventualExpectedViewState(
+                                 withContentDescription("Test Action 2"), VIEW_GONE | VIEW_NULL));
++    }
++
++    @Test
++    @LargeTest
++    public void testReleaseRemovedActionDoesNotBlockRemainingActions() throws IOException {
++        String removedId =
++                loadPopupExtension(
++                        "removed", "Removed Extension", "Removed Action", "removed popup opened");
++        String remainingId =
++                loadPopupExtension(
++                        "remaining",
++                        "Remaining Extension",
++                        "Remaining Action",
++                        "remaining popup opened");
++        ExtensionTestUtils.setExtensionActionVisible(mProfile, removedId, true);
++        ExtensionTestUtils.setExtensionActionVisible(mProfile, remainingId, true);
++        ViewUtils.onViewWaiting(withContentDescription("Removed Action"))
++                .check(matches(isDisplayed()));
++        ViewUtils.onViewWaiting(withContentDescription("Remaining Action"))
++                .check(matches(isDisplayed()));
++
++        touchActionWithCallbackBeforeRelease(
++                "Removed Action",
++                () -> {
++                    ExtensionTestUtils.disableExtension(mProfile, removedId);
++                    assertFalse(ExtensionTestUtils.isExtensionEnabled(mProfile, removedId));
++                });
++        assertEquals(0, ExtensionTestUtils.getRenderFrameHostCount(mProfile, removedId));
++        onView(isRoot())
++                .check(
++                        withEventualExpectedViewState(
++                                withContentDescription("Removed Action"), VIEW_GONE | VIEW_NULL));
++
++        // The live action must still cross the same Java listener and native bridge.
++        try (ExtensionTestMessageListener listener =
++                new ExtensionTestMessageListener("remaining popup opened")) {
++            touchActionWithCallbackBeforeRelease("Remaining Action", () -> {});
++            assertTrue(listener.waitUntilSatisfied());
++        }
++        CriteriaHelper.pollInstrumentationThread(
++                () -> ExtensionTestUtils.getRenderFrameHostCount(mProfile, remainingId) == 1,
++                "Remaining action did not open its popup");
+     }
+ 
+     /**
+@@ -568,6 +657,42 @@
+                 });
+     }
+ 
++    private void touchActionWithCallbackBeforeRelease(
++            String contentDescription, Runnable beforeRelease) {
++        ThreadUtils.runOnUiThreadBlocking(
++                () -> {
++                    ViewGroup container =
++                            mActivityTestRule.getActivity().findViewById(R.id.extension_action_list);
++                    assertNotNull(container);
++                    View target = findViewWithContentDescription(container, contentDescription);
++                    assertNotNull(target);
++                    assertSame(container, target.getParent());
++                    float x = target.getX() + target.getWidth() / 2f;
++                    float y = target.getY() + target.getHeight() / 2f;
++                    long downTime = SystemClock.uptimeMillis();
++                    MotionEvent down =
++                            MotionEvent.obtain(downTime, downTime, MotionEvent.ACTION_DOWN, x, y, 0);
++                    MotionEvent up =
++                            MotionEvent.obtain(downTime, downTime + 1, MotionEvent.ACTION_UP, x, y, 0);
++                    down.setSource(InputDevice.SOURCE_TOUCHSCREEN);
++                    up.setSource(InputDevice.SOURCE_TOUCHSCREEN);
++                    try {
++                        assertTrue(container.dispatchTouchEvent(down));
++                        assertTrue(target.isPressed());
++                        // Removal updates the adapter synchronously, before the next layout.
++                        beforeRelease.run();
++                        assertSame(container, target.getParent());
++                        assertTrue(target.isAttachedToWindow());
++                        assertTrue(target.hasOnClickListeners());
++                        // Dispatch through RecyclerView and the installed ExtensionActionDragHelper.
++                        assertTrue(container.dispatchTouchEvent(up));
++                    } finally {
++                        down.recycle();
++                        up.recycle();
++                    }
++                });
++    }
++
+     private View findViewWithContentDescription(View view, String contentDescription) {
+         ThreadUtils.assertOnUiThread();
+         if (contentDescription.equals(view.getContentDescription())) {
+@@ -1089,8 +1214,14 @@
+ 
+     @Test
+     @LargeTest
++    @ImportantFormFactors({DeviceFormFactor.PHONE, DeviceFormFactor.DESKTOP})
+     public void testTriggerUnpinnedActionFromExtensionsMenu() throws IOException {
+         String extensionId = loadPopupExtension("extension", "Extension", "Action", "popup opened");
++        ExtensionTestUtils.setExtensionActionVisible(mProfile, extensionId, false);
++        onView(isRoot())
++                .check(
++                        withEventualExpectedViewState(
++                                withContentDescription("Action"), VIEW_GONE | VIEW_NULL));
+ 
+         // Open the extensions menu.
+         ViewUtils.onViewWaiting(withId(R.id.extensions_menu_button))
+@@ -1108,6 +1239,30 @@
+         CriteriaHelper.pollInstrumentationThread(
+                 () -> ExtensionTestUtils.getRenderFrameHostCount(mProfile, extensionId) == 1,
+                 "Popup did not open");
++
++        ThreadUtils.runOnUiThreadBlocking(
++                () -> {
++                    View toolbar = mActivityTestRule.getActivity().findViewById(R.id.toolbar);
++                    View anchor = findViewWithContentDescription(toolbar, "Action");
++                    assertNotNull("The unpinned popup must retain its toolbar anchor", anchor);
++                    Rect anchorBounds = new Rect();
++                    assertTrue(anchor.getGlobalVisibleRect(anchorBounds));
++                    assertEquals(anchor.getWidth(), anchorBounds.width());
++                    if (!(toolbar instanceof ToolbarPhone)) return;
++
++                    View locationBar = toolbar.findViewById(R.id.location_bar);
++                    Rect locationBounds = new Rect();
++                    assertTrue(locationBar.getGlobalVisibleRect(locationBounds));
++                    assertTrue("The URL bar must remain usable", locationBounds.width() > 0);
++                    assertFalse(Rect.intersects(locationBounds, anchorBounds));
++                    View menu = toolbar.findViewById(R.id.menu_button_wrapper);
++                    if (menu.getVisibility() != View.GONE) {
++                        Rect menuBounds = new Rect();
++                        assertTrue(menu.getGlobalVisibleRect(menuBounds));
++                        assertEquals(menu.getWidth(), menuBounds.width());
++                        assertFalse(Rect.intersects(menuBounds, anchorBounds));
++                    }
++                });
+     }
+ 
+     @Test

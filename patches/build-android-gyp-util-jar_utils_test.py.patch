@@ -1,0 +1,102 @@
+diff --git a/build/android/gyp/util/jar_utils_test.py b/build/android/gyp/util/jar_utils_test.py
+new file mode 100755
+--- /dev/null
++++ b/build/android/gyp/util/jar_utils_test.py
+@@ -0,0 +1,97 @@
++#!/usr/bin/env python3
++# Copyright 2026 The Chromium Authors
++# Use of this source code is governed by a BSD-style license that can be
++# found in the LICENSE file.
++
++import os
++import pathlib
++import subprocess
++import sys
++import tempfile
++import unittest
++from unittest import mock
++import zipfile
++
++sys.path.insert(1, os.path.join(os.path.dirname(__file__), '..'))
++from util import jar_utils as subject
++
++
++class JdepsFailureTests(unittest.TestCase):
++    def setUp(self):
++        self.directory = tempfile.TemporaryDirectory()
++        self.addCleanup(self.directory.cleanup)
++        self.jar = pathlib.Path(self.directory.name) / "input.jar"
++        with zipfile.ZipFile(self.jar, "w") as archive:
++            archive.writestr("module-info.class", b"module")
++            archive.writestr("example/Thing.class", b"class")
++        self.tool = pathlib.Path("/fixture/jdeps")
++
++    def run_result(self, code, stdout="", stderr=""):
++        def invoke(cmd, **kwargs):
++            return subprocess.CompletedProcess(cmd, code, stdout, stderr)
++        return invoke
++
++    def call(self):
++        return subject.run_jdeps(self.jar, jdeps_path=self.tool)
++
++    def test_success_keeps_real_graph(self):
++        graph = "    example.Thing -> java.lang.Object java.base\n"
++        with mock.patch.object(subject.subprocess, "run", side_effect=self.run_result(0, graph)):
++            self.assertEqual(self.call(), graph)
++
++    def test_empty_success_is_allowed(self):
++        with mock.patch.object(subject.subprocess, "run", side_effect=self.run_result(0)):
++            self.assertEqual(self.call(), "")
++
++    def test_failed_empty_output_is_rejected(self):
++        with mock.patch.object(subject.subprocess, "run", side_effect=self.run_result(1, stderr="cannot execute")):
++            with self.assertRaisesRegex(RuntimeError, "cannot execute"):
++                self.call()
++
++    def test_partial_graph_failure_is_rejected(self):
++        with mock.patch.object(subject.subprocess, "run", side_effect=self.run_result(2, "example.Thing -> java.lang.Object java.base", "truncated")):
++            with self.assertRaisesRegex(RuntimeError, "truncated"):
++                self.call()
++
++    def test_signal_exit_is_rejected(self):
++        with mock.patch.object(subject.subprocess, "run", side_effect=self.run_result(-9)):
++            with self.assertRaises(RuntimeError):
++                self.call()
++
++    def fallback(self, status):
++        commands = []
++        def invoke(cmd, **kwargs):
++            commands.append(cmd)
++            if len(commands) == 1:
++                return subprocess.CompletedProcess(cmd, 1, "Error: Module fixture not found", "")
++            with zipfile.ZipFile(cmd[-1]) as archive:
++                self.assertEqual(archive.namelist(), ["example/Thing.class"])
++            return subprocess.CompletedProcess(cmd, status, "recovered" if status == 0 else "", "fallback failed")
++        return commands, invoke
++
++    def test_module_recovery_preserves_filtered_fallback(self):
++        commands, invoke = self.fallback(0)
++        with mock.patch.object(subject.subprocess, "run", side_effect=invoke):
++            self.assertEqual(self.call(), "recovered")
++        self.assertEqual(len(commands), 2)
++
++    def test_failed_recovery_reports_actual_command(self):
++        commands, invoke = self.fallback(1)
++        with mock.patch.object(subject.subprocess, "run", side_effect=invoke):
++            with self.assertRaises(RuntimeError) as caught:
++                self.call()
++        self.assertIn("cmd:\n" + " ".join(commands[-1]) + "\n", str(caught.exception))
++        self.assertIn("fallback failed", str(caught.exception))
++
++    def test_missing_jar_still_skips(self):
++        with mock.patch.object(subject.subprocess, "run") as child:
++            self.assertIsNone(subject.run_jdeps(self.jar.parent / "absent.jar", jdeps_path=self.tool))
++        child.assert_not_called()
++
++    def test_known_ignored_jar_still_skips(self):
++        with mock.patch.object(subject, "_should_ignore", return_value=True), mock.patch.object(subject.subprocess, "run") as child:
++            self.assertIsNone(self.call())
++        child.assert_not_called()
++
++if __name__ == "__main__":
++    unittest.main(verbosity=2)

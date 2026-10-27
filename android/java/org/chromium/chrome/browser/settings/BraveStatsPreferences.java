@@ -30,11 +30,9 @@ public class BraveStatsPreferences extends BravePreferenceFragment
 
     // deprecated preferences from browser-android-tabs
     public static final String PREF_BRAVE_STATS = "brave_stats";
-    public static final String PREF_BRAVE_STATS_NOTIFICATION = "brave_stats_notification";
     public static final String PREF_CLEAR_BRAVE_STATS = "clear_brave_stats";
 
     private ChromeSwitchPreference mBraveStatsPref;
-    private ChromeSwitchPreference mBraveStatsNotificationPref;
 
     private final DatabaseHelper mDatabaseHelper = DatabaseHelper.getInstance();
 
@@ -110,14 +108,6 @@ public class BraveStatsPreferences extends BravePreferenceFragment
             mBraveStatsPref.setChecked(OnboardingPrefManager.getInstance().isBraveStatsEnabled());
             mBraveStatsPref.setOnPreferenceChangeListener(this);
         }
-        mBraveStatsNotificationPref =
-                (ChromeSwitchPreference) findPreference(PREF_BRAVE_STATS_NOTIFICATION);
-        if (mBraveStatsNotificationPref != null) {
-            mBraveStatsNotificationPref.setEnabled(true);
-            mBraveStatsNotificationPref.setChecked(
-                    OnboardingPrefManager.getInstance().isBraveStatsNotificationEnabled());
-            mBraveStatsNotificationPref.setOnPreferenceChangeListener(this);
-        }
     }
 
     @Override
@@ -129,9 +119,6 @@ public class BraveStatsPreferences extends BravePreferenceFragment
     public static void setOnPreferenceValue(String preferenceName, boolean newValue) {
         if (PREF_BRAVE_STATS.equals(preferenceName)) {
             OnboardingPrefManager.getInstance().setBraveStatsEnabled((boolean) newValue);
-        } else if (PREF_BRAVE_STATS_NOTIFICATION.equals(preferenceName)) {
-            OnboardingPrefManager.getInstance()
-                    .setBraveStatsNotificationEnabled((boolean) newValue);
         } else {
             assert false : "Unexpected preferenceName " + preferenceName;
         }

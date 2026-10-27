@@ -1,0 +1,107 @@
+diff --git a/extensions/browser/extension_user_script_loader.h b/extensions/browser/extension_user_script_loader.h
+--- a/extensions/browser/extension_user_script_loader.h
++++ b/extensions/browser/extension_user_script_loader.h
+@@ -5,9 +5,14 @@
+ #ifndef EXTENSIONS_BROWSER_EXTENSION_USER_SCRIPT_LOADER_H_
+ #define EXTENSIONS_BROWSER_EXTENSION_USER_SCRIPT_LOADER_H_
+
++#include <map>
++#include <memory>
+ #include <set>
+
+ #include "base/memory/raw_ptr.h"
++#include "base/memory/weak_ptr.h"
++#include "base/unguessable_token.h"
++#include "build/build_config.h"
+ #include "extensions/browser/user_script_loader.h"
+ #include "extensions/common/extension.h"
+ #include "extensions/common/extension_l10n_util.h"
+@@ -62,6 +67,41 @@
+
+   ~ExtensionUserScriptLoader() override;
+
++#if BUILDFLAG(IS_ANDROID)
++  // Validation replies belong to this activation's loader, including when the
++  // same Extension object is disabled and enabled again.
++  base::WeakPtr<ExtensionUserScriptLoader> GetWeakPtr() {
++    return weak_factory_.GetWeakPtr();
++  }
++#endif
++
++#if BUILDFLAG(IS_ANDROID)
++  // Each API operation owns reservations within the current registration epoch.
++  // Unregister retires the epoch; later same-ID admission cannot revive it.
++  using DynamicScriptOperation = base::UnguessableToken;
++  DynamicScriptOperation BeginDynamicScriptOperation(
++      const std::set<std::string>& script_ids, bool for_update = false);
++  bool IsDynamicScriptRegistrationCurrent(const std::string& id) const;
++  void FinishDynamicScriptOperation(const DynamicScriptOperation& operation);
++  const std::set<std::string>& GetPendingDynamicScriptIDsForTesting() const {
++    return pending_dynamic_script_ids_;
++  }
++  auto GetDynamicScriptStateCountForTesting() const {
++    return dynamic_script_states_.size();
++  }
++  bool IsInitialDynamicScriptReadPendingForTesting() const {
++    return initial_dynamic_scripts_read_pending_;
++  }
++  void AddOwnedDynamicScripts(DynamicScriptOperation operation,
++                              UserScriptList scripts,
++                              std::set<std::string> persistent_script_ids,
++                              DynamicScriptsModifiedCallback callback);
++  void UpdateOwnedDynamicScripts(DynamicScriptOperation operation,
++                                 UserScriptList scripts,
++                                 std::set<std::string> persistent_script_ids,
++                                 DynamicScriptsModifiedCallback callback);
++#endif
++
+   // Adds `script_ids` into `pending_dynamic_script_ids_` This is called before
+   // the scripts the ids belong to are verified to ensure a later call
+   // specifying the same script ids will be marked as a conflict.
+@@ -130,6 +170,46 @@
+   UserScriptList LoadScriptsForTest(UserScriptList user_scripts);
+
+  private:
++#if BUILDFLAG(IS_ANDROID)
++  struct DynamicScriptState {
++    base::UnguessableToken epoch;
++    std::set<DynamicScriptOperation> operations;
++    DynamicScriptOperation submitted;
++    base::UnguessableToken committed;
++    base::UnguessableToken retired_committed;
++    DynamicScriptOperation retirement;
++    std::unique_ptr<UserScript> submitted_script;
++    bool legacy_pending = false;
++    bool initial_restore_cancelled = false;
++  };
++  using DynamicScriptOwners = std::map<std::string, base::UnguessableToken>;
++  bool IsCurrentDynamicScriptOperation(
++      const DynamicScriptOperation& operation,
++      const std::string& id) const;
++  void PruneDynamicScriptStates();
++  DynamicScriptOwners CaptureDynamicScriptOwners(
++      const std::set<std::string>& ids);
++  void OnOwnedDynamicScriptsAdded(
++      DynamicScriptOperation operation,
++      UserScriptList scripts,
++      std::set<std::string> persistent_ids,
++      DynamicScriptsModifiedCallback callback,
++      const std::optional<std::string>& error,
++      bool restoring_persisted_scripts = false);
++  void OnOwnedDynamicScriptsRemoved(
++      DynamicScriptOwners owners,
++      DynamicScriptOperation retirement,
++      DynamicScriptsModifiedCallback callback,
++      UserScriptLoader* loader,
++      const std::optional<std::string>& error);
++
++  std::map<std::string, DynamicScriptState> dynamic_script_states_;
++  std::map<DynamicScriptOperation, DynamicScriptOwners>
++      dynamic_script_operations_;
++  std::set<UserScript::Source> cancelled_initial_script_sources_;
++  bool initial_dynamic_scripts_read_pending_ = false;
++#endif
++
+   // A helper class which handles getting/setting script metadata from the
+   // StateStore, and serializing/deserializing between base::Value and
+   // UserScript.

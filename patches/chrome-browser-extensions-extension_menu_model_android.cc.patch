@@ -1,0 +1,78 @@
+diff --git a/chrome/browser/extensions/extension_menu_model_android.cc b/chrome/browser/extensions/extension_menu_model_android.cc
+--- a/chrome/browser/extensions/extension_menu_model_android.cc
++++ b/chrome/browser/extensions/extension_menu_model_android.cc
+@@ -31,6 +31,39 @@
+ using blink::mojom::ContextMenuDataMediaType;
+
+ namespace extensions {
++namespace {
++
++void CollectVisibleExtensionIds(
++    ui::MenuModel& model,
++    const std::map<int, MenuItem::Id>& extension_items,
++    ExtensionIdSet& ids) {
++  for (size_t i = 0; i < model.GetItemCount(); ++i) {
++    if (!model.IsVisibleAt(i)) {
++      continue;
++    }
++    // Match the row types copied by MenuModelBridge::AddExtensionItems.
++    switch (model.GetTypeAt(i)) {
++      case ui::MenuModel::TYPE_COMMAND:
++      case ui::MenuModel::TYPE_HIGHLIGHTED:
++      case ui::MenuModel::TYPE_CHECK:
++      case ui::MenuModel::TYPE_RADIO:
++      case ui::MenuModel::TYPE_SUBMENU:
++        break;
++      default:
++        continue;
++    }
++    auto item = extension_items.find(model.GetCommandIdAt(i));
++    if (item != extension_items.end() &&
++        !item->second.extension_key.extension_id.empty()) {
++      ids.insert(item->second.extension_key.extension_id);
++    }
++    if (auto* submenu = model.GetSubmenuModelAt(i)) {
++      CollectVisibleExtensionIds(*submenu, extension_items, ids);
++    }
++  }
++}
++
++}  // namespace
+
+ ExtensionMenuModel::ExtensionMenuModel(
+     content::RenderFrameHost& render_frame_host,
+@@ -39,7 +72,7 @@
+       browser_context_(render_frame_host.GetBrowserContext()),
+       web_contents_(
+           content::WebContents::FromRenderFrameHost(&render_frame_host)),
+-      rfh_ptr_(&render_frame_host),
++      source_document_(render_frame_host.GetWeakDocumentPtr()),
+       params_(params),
+       matcher_(browser_context_,
+                this,  // Delegate for SimpleMenuModel
+@@ -57,6 +90,12 @@
+                                                matcher_);
+ }
+
++ExtensionIdSet ExtensionMenuModel::GetVisibleExtensionIds() {
++  ExtensionIdSet ids;
++  CollectVisibleExtensionIds(*this, matcher_.extension_item_map(), ids);
++  return ids;
++}
++
+ bool ExtensionMenuModel::IsCommandIdChecked(int command_id) const {
+   return matcher_.IsCommandIdChecked(command_id);
+ }
+@@ -70,9 +109,9 @@
+ }
+
+ void ExtensionMenuModel::ExecuteCommand(int command_id, int event_flags) {
+-  // Ensure rfh_ptr_ is valid before use.
+-  if (rfh_ptr_ && rfh_ptr_->IsRenderFrameLive()) {
+-    matcher_.ExecuteCommand(command_id, web_contents_, rfh_ptr_, params_);
++  content::RenderFrameHost* frame = source_document_.AsRenderFrameHostIfValid();
++  if (frame && frame->IsActive() && frame->IsRenderFrameLive()) {
++    matcher_.ExecuteCommand(command_id, web_contents_, frame, params_);
+   }
+ }
+

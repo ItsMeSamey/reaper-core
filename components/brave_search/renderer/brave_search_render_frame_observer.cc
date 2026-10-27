@@ -11,7 +11,9 @@
 #include "brave/components/brave_search/common/brave_search_utils.h"
 #include "brave/components/brave_search/renderer/brave_search_default_js_handler.h"
 #include "content/public/renderer/render_frame.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "net/base/url_util.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "third_party/blink/public/web/web_local_frame.h"
 #include "url/gurl.h"
 
@@ -37,12 +39,14 @@ void BraveSearchRenderFrameObserver::DidCreateScriptContext(
     return;
 
   bool can_always_set_default = false;
+#if !BUILDFLAG(IS_ANDROID)
   for (net::QueryIterator it(url_); !it.IsAtEnd(); it.Advance()) {
     if (it.GetKey() == "action" && it.GetValue() == "makeDefault") {
       can_always_set_default = true;
       break;
     }
   }
+#endif  // !BUILDFLAG(IS_ANDROID)
 
   if (!native_javascript_handle_) {
     native_javascript_handle_ = std::make_unique<BraveSearchDefaultJSHandler>(
@@ -54,11 +58,13 @@ void BraveSearchRenderFrameObserver::DidCreateScriptContext(
   native_javascript_handle_->AddJavaScriptObjectToFrame(context);
 }
 
+#if !BUILDFLAG(IS_ANDROID)
 void BraveSearchRenderFrameObserver::DidStartNavigation(
     const GURL& url,
     std::optional<blink::WebNavigationType> navigation_type) {
   url_ = url;
 }
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 void BraveSearchRenderFrameObserver::OnDestruct() {
   delete this;

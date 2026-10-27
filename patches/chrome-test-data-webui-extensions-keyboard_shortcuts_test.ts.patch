@@ -1,0 +1,308 @@
+diff --git a/chrome/test/data/webui/extensions/keyboard_shortcuts_test.ts b/chrome/test/data/webui/extensions/keyboard_shortcuts_test.ts
+index ab6d37021307b864067e60cc2734586f33823fde..8f8b7f2ca135a1f4193837d99e8e086a441bbad7 100644
+--- a/chrome/test/data/webui/extensions/keyboard_shortcuts_test.ts
++++ b/chrome/test/data/webui/extensions/keyboard_shortcuts_test.ts
+@@ -124,6 +124,141 @@
+     }
+   });
+ 
++  // <if expr="is_android">
++  test('AndroidWideCommandControlsStayOnOneRow', async function() {
++    keyboardShortcuts.style.display = 'block';
++    keyboardShortcuts.style.width = '680px';
++    keyboardShortcuts.items = [oneCommand];
++    await microtasksFinished();
++    const card = keyboardShortcuts.shadowRoot.querySelector<HTMLElement>(
++        '.shortcut-card')!;
++    const groups = card.querySelectorAll<HTMLElement>(
++        '.command-name, .shortcut-input-container, .shortcut-scope-container');
++    assertEquals(3, groups.length);
++    for (const direction of ['ltr', 'rtl']) {
++      keyboardShortcuts.dir = direction;
++      const bounds = card.getBoundingClientRect();
++      const rects = Array.from(groups, group => group.getBoundingClientRect());
++      // Ordinary controls must still share a row, not become a phone stack.
++      assertTrue(
++          Math.max(...rects.map(rect => rect.top)) <
++          Math.min(...rects.map(rect => rect.bottom)));
++      for (let i = 0; i < rects.length; ++i) {
++        const rect = rects[i]!;
++        assertTrue(rect.width > 0 && rect.height > 0);
++        assertTrue(rect.left >= bounds.left - 1);
++        assertTrue(rect.right <= bounds.right + 1);
++        if (i > 0) {
++          const previous = rects[i - 1]!;
++          if (direction === 'ltr') {
++            assertTrue(previous.right <= rect.left + 1);
++          } else {
++            assertTrue(previous.left >= rect.right - 1);
++          }
++        }
++      }
++    }
++  });
++
++  test('AndroidResponsiveCommandControls', async function() {
++    // The card is the query container, so this also exercises a narrow split
++    // window without depending on the WebUI test runner's viewport size.
++    keyboardShortcuts.style.display = 'block';
++    const longLabel = 'ExtensionCommandWithALongLocalizedLabel'.repeat(3);
++    oneCommand.name = longLabel;
++    oneCommand.commands[0]!.description = longLabel;
++    keyboardShortcuts.items = [oneCommand];
++    await microtasksFinished();
++    const card = keyboardShortcuts.shadowRoot.querySelector<HTMLElement>(
++        '.shortcut-card')!;
++    const command = card.querySelector<HTMLElement>('.command-entry')!;
++    const shortcutInput = command.querySelector('cr-shortcut-input')!;
++    const labels = command.querySelectorAll<HTMLElement>(
++        '.shortcut-input-label, .shortcut-scope-label');
++    for (const label of labels) {
++      label.textContent = longLabel;
++    }
++
++    const rootStyle = document.documentElement.style;
++    const originalRootFontSize = rootStyle.getPropertyValue('font-size');
++    const originalRootFontPriority = rootStyle.getPropertyPriority('font-size');
++    try {
++      // Include the inner input cap and both sides of the layout breakpoint.
++      for (const width of [200, 320, 360, 430, 600, 601, 680]) {
++        keyboardShortcuts.style.width = `${width}px`;
++        for (const fontSize of [13, 26]) {
++          keyboardShortcuts.style.fontSize = `${fontSize}px`;
++          let smallRootLabelSize = 0;
++          for (const rootFontSize of [16, 32]) {
++            rootStyle.setProperty('font-size', `${rootFontSize}px`, 'important');
++            const labelSize = Number.parseFloat(
++                getComputedStyle(labels[0]!).fontSize);
++            if (rootFontSize === 16) {
++              smallRootLabelSize = labelSize;
++            } else {
++              // Ensure this tests actual rem growth, not just inherited fonts.
++              assertTrue(labelSize > smallRootLabelSize);
++            }
++            for (const direction of ['ltr', 'rtl']) {
++              keyboardShortcuts.dir = direction;
++              const bounds = card.getBoundingClientRect();
++              const groups = command.querySelectorAll<HTMLElement>(
++                  '.command-name, .shortcut-input-container, ' +
++                  '.shortcut-scope-container');
++              const groupRects: DOMRect[] = [];
++              for (const group of groups) {
++                const rect = group.getBoundingClientRect();
++                assertTrue(rect.width > 0 && rect.height > 0);
++                assertTrue(rect.left >= bounds.left - 1);
++                assertTrue(rect.right <= bounds.right + 1);
++                assertTrue(rect.top >= bounds.top - 1);
++                assertTrue(rect.bottom <= bounds.bottom + 1);
++                assertTrue(group.scrollWidth <= group.clientWidth + 1);
++                for (const previous of groupRects) {
++                  if (width <= 600) {
++                    assertTrue(rect.top >= previous.bottom - 1);
++                  }
++                  // Both horizontal rows and vertical stacks must not overlap.
++                  assertTrue(
++                      rect.right <= previous.left + 1 ||
++                      rect.left >= previous.right - 1 ||
++                      rect.bottom <= previous.top + 1 ||
++                      rect.top >= previous.bottom - 1);
++                }
++                groupRects.push(rect);
++              }
++              const controls = [
++                shortcutInput.shadowRoot.querySelector<HTMLElement>('#main')!,
++                shortcutInput.$.input,
++                command.querySelector<HTMLElement>('select')!,
++                card.querySelector<HTMLElement>('.card-title span')!,
++                ...labels,
++              ];
++              for (const control of controls) {
++                const rect = control.getBoundingClientRect();
++                assertTrue(rect.width > 0 && rect.height > 0);
++                assertTrue(rect.left >= bounds.left - 1);
++                assertTrue(rect.right <= bounds.right + 1);
++                assertTrue(rect.top >= bounds.top - 1);
++                assertTrue(rect.bottom <= bounds.bottom + 1);
++                assertTrue(control.scrollWidth <= control.clientWidth + 1);
++              }
++              assertTrue(card.scrollWidth <= card.clientWidth + 1);
++            }
++          }
++        }
++      }
++    } finally {
++      if (originalRootFontSize) {
++        rootStyle.setProperty(
++            'font-size', originalRootFontSize, originalRootFontPriority);
++      } else {
++        rootStyle.removeProperty('font-size');
++      }
++    }
++  });
++  // </if>
++
+   test('ScopeChange', async function() {
+     const selectElement = keyboardShortcuts.shadowRoot.querySelector('select');
+     assertTrue(!!selectElement);
+@@ -228,4 +363,161 @@
+     arg = await testDelegate.whenCalled('setShortcutHandlingSuspended');
+     assertFalse(arg);
+   });
++  // <if expr="is_android">
++  test('AndroidLastCardRemovalReleasesCapture', async function() {
++    keyboardShortcuts.items = [oneCommand];
++    await microtasksFinished();
++    const input = keyboardShortcuts.shadowRoot.querySelector('cr-shortcut-input')!;
++    input.$.edit.click();
++    await microtasksFinished();
++    assertTrue(input.isCapturing());
++    assertTrue(await testDelegate.whenCalled('setShortcutHandlingSuspended'));
++    testDelegate.reset();
++
++    keyboardShortcuts.items = [];
++    await microtasksFinished();
++    assertFalse(input.isConnected);
++    assertFalse(input.isCapturing());
++    assertFalse(await testDelegate.whenCalled('setShortcutHandlingSuspended'));
++    assertEquals(1, testDelegate.getCallCount('setShortcutHandlingSuspended'));
++    assertEquals(0, testDelegate.getCallCount('updateExtensionCommandKeybinding'));
++  });
++
++  test('AndroidRemovedCommandCannotRetargetCapturedInput', async function() {
++    keyboardShortcuts.items = [twoCommands];
++    await microtasksFinished();
++    const input = keyboardShortcuts.shadowRoot.querySelector('cr-shortcut-input')!;
++    input.$.edit.click();
++    await microtasksFinished();
++    assertTrue(input.isCapturing());
++    testDelegate.reset();
++
++    keyboardShortcuts.items = [{
++      ...twoCommands,
++      commands: [twoCommands.commands[1]!],
++    }];
++    await microtasksFinished();
++    const remaining =
++        keyboardShortcuts.shadowRoot.querySelector('cr-shortcut-input')!;
++    assertFalse(input === remaining);
++    assertFalse(input.isConnected);
++    assertFalse(input.isCapturing());
++    assertFalse(remaining.isCapturing());
++    assertFalse(await testDelegate.whenCalled('setShortcutHandlingSuspended'));
++    assertEquals(0, testDelegate.getCallCount('updateExtensionCommandKeybinding'));
++  });
++
++  test('AndroidDisconnectCancelsPendingCaptureStart', async function() {
++    keyboardShortcuts.items = [oneCommand];
++    await microtasksFinished();
++    const input = keyboardShortcuts.shadowRoot.querySelector('cr-shortcut-input')!;
++    input.$.edit.click();
++    // Edit focuses synchronously; startCapture_ is now awaiting its update.
++    // Disconnect before that pending start can notify the page.
++    assertTrue(input.isCapturing());
++    assertEquals(0, testDelegate.getCallCount('setShortcutHandlingSuspended'));
++    keyboardShortcuts.remove();
++    await microtasksFinished();
++    assertFalse(input.isCapturing());
++    assertEquals(0, testDelegate.getCallCount('setShortcutHandlingSuspended'));
++    assertEquals(0, testDelegate.getCallCount('updateExtensionCommandKeybinding'));
++  });
++
++  test('AndroidLateEndCannotReleaseReplacementOrRecapturedInput', async function() {
++    keyboardShortcuts.items = [oneCommand, twoCommands];
++    await microtasksFinished();
++    const inputs = keyboardShortcuts.shadowRoot.querySelectorAll('cr-shortcut-input');
++    const first = inputs[0]!;
++    const second = inputs[1]!;
++    first.$.edit.click();
++    await microtasksFinished();
++    assertTrue(first.isCapturing());
++    testDelegate.reset();
++
++    second.$.edit.click();
++    assertTrue(second.isCapturing());
++    // Deliver the second real capture before the old blur's awaited end.
++    second.dispatchEvent(new CustomEvent('input-capture-change', {
++      bubbles: true, composed: true, detail: true,
++    }));
++    await microtasksFinished();
++    assertTrue(second.isCapturing());
++    assertDeepEquals([true], testDelegate.getArgs('setShortcutHandlingSuspended'));
++    testDelegate.reset();
++
++    first.dispatchEvent(new CustomEvent('input-capture-change', {
++      bubbles: true, composed: true, detail: false,
++    }));
++    await microtasksFinished();
++    assertTrue(second.isCapturing());
++    assertEquals(0, testDelegate.getCallCount('setShortcutHandlingSuspended'));
++
++    second.cancelCapture();
++    await microtasksFinished();
++    assertFalse(second.isCapturing());
++    assertDeepEquals([false], testDelegate.getArgs('setShortcutHandlingSuspended'));
++    testDelegate.reset();
++    second.$.edit.click();
++    await microtasksFinished();
++    assertTrue(second.isCapturing());
++    assertDeepEquals([true], testDelegate.getArgs('setShortcutHandlingSuspended'));
++    testDelegate.reset();
++    // A delayed duplicate end from its previous capture must not end this one.
++    second.dispatchEvent(new CustomEvent('input-capture-change', {
++      bubbles: true, composed: true, detail: false,
++    }));
++    await microtasksFinished();
++    assertTrue(second.isCapturing());
++    assertEquals(0, testDelegate.getCallCount('setShortcutHandlingSuspended'));
++    assertEquals(0, testDelegate.getCallCount('updateExtensionCommandKeybinding'));
++  });
++
++  test('AndroidDelegateReplacementReleasesOnlyOriginalOwner', async function() {
++    keyboardShortcuts.items = [oneCommand];
++    await microtasksFinished();
++    const input = keyboardShortcuts.shadowRoot.querySelector('cr-shortcut-input')!;
++    input.$.edit.click();
++    await microtasksFinished();
++    assertTrue(input.isCapturing());
++    testDelegate.reset();
++    const replacement = new TestService();
++
++    keyboardShortcuts.delegate = replacement;
++    await microtasksFinished();
++    assertFalse(input.isCapturing());
++    assertFalse(await testDelegate.whenCalled('setShortcutHandlingSuspended'));
++    assertEquals(1, testDelegate.getCallCount('setShortcutHandlingSuspended'));
++    assertEquals(0, replacement.getCallCount('setShortcutHandlingSuspended'));
++    assertEquals(0, replacement.getCallCount('updateExtensionCommandKeybinding'));
++  });
++
++  test('AndroidExitingViewRejectsCaptureUntilReentered', async function() {
++    keyboardShortcuts.items = [oneCommand];
++    await microtasksFinished();
++    const input = keyboardShortcuts.shadowRoot.querySelector('cr-shortcut-input')!;
++    input.$.edit.click();
++    await microtasksFinished();
++    assertTrue(input.isCapturing());
++    testDelegate.reset();
++
++    keyboardShortcuts.dispatchEvent(new CustomEvent('view-exit-start'));
++    await microtasksFinished();
++    assertFalse(input.isCapturing());
++    assertFalse(await testDelegate.whenCalled('setShortcutHandlingSuspended'));
++    testDelegate.reset();
++    // The outgoing view remains connected while its normal fade completes.
++    input.$.edit.click();
++    await microtasksFinished();
++    assertFalse(input.isCapturing());
++    assertEquals(0, testDelegate.getCallCount('setShortcutHandlingSuspended'));
++
++    keyboardShortcuts.dispatchEvent(new CustomEvent('view-enter-start'));
++    input.$.edit.click();
++    await microtasksFinished();
++    assertTrue(input.isCapturing());
++    assertTrue(await testDelegate.whenCalled('setShortcutHandlingSuspended'));
++    assertEquals(0, testDelegate.getCallCount('updateExtensionCommandKeybinding'));
++  });
++
++  // </if>
+ });

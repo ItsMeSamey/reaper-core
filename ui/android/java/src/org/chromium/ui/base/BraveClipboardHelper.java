@@ -79,7 +79,8 @@ public class BraveClipboardHelper {
         if (clipData != null
                 && clipData.getDescription().hasMimeType(MIMETYPE_TEXT_PLAIN)
                 && clipData.getItemCount() > 0) {
-            return clipData.getItemAt(0).getText().toString();
+            String text = Clipboard.getInstance().getCoercedText();
+            return text == null ? "" : text;
         }
 
         return "";

@@ -5,6 +5,8 @@
 
 #include "components/url_formatter/elide_url.h"
 
+#include "build/build_config.h"
+
 #define FormatOriginForSecurityDisplay \
   FormatOriginForSecurityDisplay_ChromiumImpl
 
@@ -16,11 +18,15 @@ namespace url_formatter {
 std::u16string FormatOriginForSecurityDisplay(
     const url::Origin& origin,
     const SchemeDisplay scheme_display) {
+#if BUILDFLAG(IS_ANDROID)
+  return FormatOriginForSecurityDisplay_ChromiumImpl(origin, scheme_display);
+#else
   const url::Origin updated_origin = url::Origin::CreateFromNormalizedTuple(
       origin.scheme() == "chrome" ? "brave" : origin.scheme(), origin.host(),
       origin.port());
   return FormatOriginForSecurityDisplay_ChromiumImpl(updated_origin,
                                                      scheme_display);
+#endif  // BUILDFLAG(IS_ANDROID)
 }
 
 }  // namespace url_formatter

@@ -1,0 +1,110 @@
+substitutions:
+- description: Complete Android worker registration failure lifecycle (1).
+  count: 1
+  regex:
+    re_pattern: '\#include\ "build/build_config\.h"\
+
+      '
+    replace: '#include "build/build_config.h"
+
+      #if BUILDFLAG(IS_ANDROID)
+
+      #include "base/functional/callback.h"
+
+      #endif
+
+      '
+- description: Complete Android worker registration failure lifecycle (2).
+  count: 1
+  regex:
+    re_pattern: '\ \ bool\ registration_delayed\(\)\ const\ \{\ return\ registration_delayed_;\ \}\
+
+      \
+
+      \ private:'
+    replace: "  bool registration_delayed() const { return registration_delayed_; }\n\n#if BUILDFLAG(IS_ANDROID)\n  void SetActivationCallback(base::RepeatingClosure\
+      \ callback) {\n    on_activation_ = std::move(callback);\n  }\n#endif\n private:"
+- description: Complete Android worker registration failure lifecycle (3).
+  count: 1
+  regex:
+    re_pattern: '\ \ void\ OnWorkerRegistrationDelayed\(const\ ExtensionId\&\ extension_id\)\ override\ \{\
+
+      \ \ \ \ if\ \(extension_id\ ==\ expected_extension_id_\)\ \{\
+
+      \ \ \ \ \ \ registration_delayed_\ =\ true;\
+
+      \ \ \ \ \}\
+
+      \ \ \}\
+
+      \
+
+      \ \ const\ ExtensionId\ expected_extension_id_;'
+    replace: "  void OnWorkerRegistrationDelayed(const ExtensionId& extension_id) override {\n    if (extension_id == expected_extension_id_)\
+      \ {\n      registration_delayed_ = true;\n    }\n  }\n\n#if BUILDFLAG(IS_ANDROID)\n  void OnActivateExtension(const\
+      \ ExtensionId& extension_id, bool) override {\n    if (extension_id == expected_extension_id_ && on_activation_) {\n\
+      \      on_activation_.Run();\n    }\n  }\n\n  base::RepeatingClosure on_activation_;\n#endif\n  const ExtensionId expected_extension_id_;"
+- description: Complete Android worker registration failure lifecycle (4).
+  count: 1
+  regex:
+    re_pattern: '\ \ ExtensionRegistrationAndUnregistrationWaiter\ registration_waiter\(\
+
+      \ \ \ \ \ \ test_extension_id\);\
+
+      \
+
+      \ \ ChromeTestExtensionLoader\(profile\(\)\)\.LoadUnpackedExtensionAsync\('
+    replace: "  ExtensionRegistrationAndUnregistrationWaiter registration_waiter(\n      test_extension_id);\n\n#if BUILDFLAG(IS_ANDROID)\n\
+      \  auto* task_queue = ServiceWorkerTaskQueue::Get(profile());\n  ASSERT_TRUE(task_queue);\n  const LazyContextId lazy_context\
+      \ =\n      LazyContextId::ForServiceWorker(profile(), test_extension_id);\n  int failed_callbacks = 0;\n  registration_waiter.SetActivationCallback(base::BindLambdaForTesting([&]\
+      \ {\n    task_queue->AddPendingTask(\n        lazy_context,\n        base::BindLambdaForTesting(\n            [&](std::unique_ptr<LazyContextTaskQueue::ContextInfo>\
+      \ context) {\n              EXPECT_FALSE(context);\n              ++failed_callbacks;\n            }));\n  }));\n#endif\n\
+      \  ChromeTestExtensionLoader(profile()).LoadUnpackedExtensionAsync("
+- description: Complete Android worker registration failure lifecycle (5).
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ \ \ /\*sample=\*/blink::ServiceWorkerStatusCode::kErrorScriptEvaluateFailed,\
+
+      \ \ \ \ \ \ /\*expected_count=\*/0\);\
+
+      \}'
+    replace: "      /*sample=*/blink::ServiceWorkerStatusCode::kErrorScriptEvaluateFailed,\n      /*expected_count=*/0);\n\
+      #if BUILDFLAG(IS_ANDROID)\n  EXPECT_EQ(1, failed_callbacks);\n  EXPECT_EQ(0u, task_queue->GetNumPendingTasksForTest(lazy_context));\n\
+      \n  base::test::TestFuture<std::unique_ptr<LazyContextTaskQueue::ContextInfo>>\n      later_request;\n  task_queue->AddPendingTask(lazy_context,\
+      \ later_request.GetCallback());\n  ASSERT_TRUE(later_request.IsReady());\n  EXPECT_FALSE(later_request.Get());\n  EXPECT_EQ(0u,\
+      \ task_queue->GetNumPendingTasksForTest(lazy_context));\n\n  // A normal reload with a valid worker creates a new activation\
+      \ and can\n  // service requests again. The original expected-error input above is kept.\n  registration_waiter.SetActivationCallback(base::RepeatingClosure());\n\
+      \  extension_dir.WriteFile(FILE_PATH_LITERAL(\"background.js\"), \"// Valid worker\");\n  ReloadExtension(test_extension_id);\n\
+      \  base::test::TestFuture<std::unique_ptr<LazyContextTaskQueue::ContextInfo>>\n      recovered_request;\n  task_queue->AddPendingTask(lazy_context,\
+      \ recovered_request.GetCallback());\n  ASSERT_TRUE(recovered_request.Wait());\n  EXPECT_TRUE(recovered_request.Get());\n\
+      #endif\n}"
+- description: Complete Android worker registration failure lifecycle (6).
+  count: 1
+  regex:
+    re_pattern: \ \ int\ failed_callbacks\ =\ 0;
+    replace: '  auto failed_callbacks = std::make_shared<int>(0);'
+- description: Complete Android worker registration failure lifecycle (7).
+  count: 1
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \[\&\]\(std::unique_ptr<LazyContextTaskQueue::ContextInfo>\ context\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ EXPECT_FALSE\(context\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \+\+failed_callbacks;'
+    replace: "            [failed_callbacks](\n                std::unique_ptr<LazyContextTaskQueue::ContextInfo> context)\
+      \ {\n              EXPECT_FALSE(context);\n              ++*failed_callbacks;"
+- description: Complete Android worker registration failure lifecycle (8).
+  count: 1
+  regex:
+    re_pattern: \ \ EXPECT_EQ\(1,\ failed_callbacks\);
+    replace: '  EXPECT_EQ(1, *failed_callbacks);'
+- description: "Require absent optional worker counts on Android while retaining desktop expectations."
+  regex:
+    re_pattern: "\\ \\ histogram_tester\\.ExpectBucketCount\\(histogram_name,\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ /\\*sample=\\*/true,\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ /\\*expected_count=\\*/true_count\\);\\\n\\ \\ histogram_tester\\.ExpectBucketCount\\(histogram_name,\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ /\\*sample=\\*/false,\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ /\\*expected_count=\\*/false_count\\);\\\n"
+    replace: "#if BUILDFLAG(IS_ANDROID)\n  histogram_tester.ExpectTotalCount(histogram_name, 0);\n#else\n  histogram_tester.ExpectBucketCount(histogram_name,\n                                     /*sample=*/true,\n                                     /*expected_count=*/true_count);\n  histogram_tester.ExpectBucketCount(histogram_name,\n                                     /*sample=*/false,\n                                     /*expected_count=*/false_count);\n#endif\n"
+  count: 1
+- description: "Require no optional registration timing count on Android."
+  regex:
+    re_pattern: "\\ \\ histogram_tester\\.ExpectTotalCount\\(\\\n\\ \\ \\ \\ \\ \\ \"Extensions\\.ServiceWorkerBackground\\.RegistrationTime\",\\\n\\ \\ \\ \\ \\ \\ /\\*expected_count=\\*/1\\);\\\n"
+    replace: "#if BUILDFLAG(IS_ANDROID)\n  histogram_tester.ExpectTotalCount(\n      \"Extensions.ServiceWorkerBackground.RegistrationTime\",\n      /*expected_count=*/0);\n#else\n  histogram_tester.ExpectTotalCount(\n      \"Extensions.ServiceWorkerBackground.RegistrationTime\",\n      /*expected_count=*/1);\n#endif\n"
+  count: 1

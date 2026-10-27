@@ -44,7 +44,6 @@ import org.chromium.base.test.util.Features.DisableFeatures;
 import org.chromium.base.test.util.Features.EnableFeatures;
 import org.chromium.brave.browser.customize_menu.CustomizeBraveMenu;
 import org.chromium.brave.browser.customize_menu.MenuItemData;
-import org.chromium.chrome.browser.BraveRewardsPolicy;
 import org.chromium.chrome.browser.flags.ChromeSwitches;
 import org.chromium.chrome.browser.tracing.settings.DeveloperSettings;
 import org.chromium.chrome.browser.widget.quickactionsearchandbookmark.utils.BraveSearchWidgetUtils;
@@ -90,7 +89,6 @@ public class BraveSettingsSearchTest {
     @Test
     @LargeTest
     @Feature({"Preferences"})
-    @EnableFeatures(BraveFeatureList.BRAVE_PLAYLIST)
     public void testBraveMainSettingsAreSearchable() {
         mSettingsActivityTestRule.startSettingsActivity();
 
@@ -100,19 +98,19 @@ public class BraveSettingsSearchTest {
         assertSearchResult("Brave Shields & privacy");
 
         clearAndTypeIntoSearch("Brave News");
-        assertSearchResult("Brave News");
+        assertSearchResultEmpty();
 
         clearAndTypeIntoSearch("Brave Wallet");
-        assertSearchResult("Brave Wallet");
+        assertSearchResultEmpty();
 
         clearAndTypeIntoSearch("Firewall");
-        assertSearchResult("Brave Firewall + VPN");
+        assertSearchResultEmpty();
 
         clearAndTypeIntoSearch("Leo AI");
-        assertSearchResult("Leo AI");
+        assertSearchResultEmpty();
 
         clearAndTypeIntoSearch("Brave Playlist");
-        assertSearchResult("Brave Playlist");
+        assertSearchResultEmpty();
 
         // General section
 
@@ -155,9 +153,6 @@ public class BraveSettingsSearchTest {
 
         clearAndTypeIntoSearch("Open external links in Brave");
         assertSearchResult("Open external links in Brave");
-
-        clearAndTypeIntoSearch("Brave Origin");
-        assertSearchResult("Brave Origin");
 
         // Display section
 
@@ -209,18 +204,16 @@ public class BraveSettingsSearchTest {
         // testDeveloperOptionsSearchable_WhenEnabled and
         // testDeveloperOptionsNotSearchable_WhenDisabled.
 
-        clearAndTypeIntoSearch("About Brave");
-        assertSearchResult("About Brave");
+        clearAndTypeIntoSearch("About Reaper");
+        assertSearchResult("About Reaper");
     }
 
     /**
-     * Verifies the counterpart of {@link #testBraveMainSettingsAreSearchable}: when the Playlist
-     * feature is disabled, the "Brave Playlist" entry is not indexed and cannot be found in search.
+     * Verifies that the compiled-out Playlist entry is absent from the settings index.
      */
     @Test
     @SmallTest
     @Feature({"Preferences"})
-    @DisableFeatures(BraveFeatureList.BRAVE_PLAYLIST)
     public void testBravePlaylistNotSearchable_FeatureDisabled() {
         mSettingsActivityTestRule.startSettingsActivity();
 
@@ -233,22 +226,28 @@ public class BraveSettingsSearchTest {
      * Settings search results.
      */
     @Test
-    @SmallTest
+    @LargeTest
     @Feature({"Preferences"})
     public void testBraveShieldsAndPrivacySettingsAreSearchable() {
         mSettingsActivityTestRule.startSettingsActivity();
 
-        typeIntoSearch("Unstoppable Domains");
-        assertSearchResult("Unstoppable Domains");
+        String adblockTitle =
+                mSettingsActivityTestRule.getActivity()
+                        .getString(org.chromium.chrome.R.string.block_trackers_ads_title);
+        typeIntoSearch(adblockTitle);
+        assertSearchResult(adblockTitle);
+
+        clearAndTypeIntoSearch("Unstoppable Domains");
+        assertSearchResultEmpty();
 
         clearAndTypeIntoSearch("Ethereum Name Service");
-        assertSearchResult("Ethereum Name Service");
+        assertSearchResultEmpty();
 
         clearAndTypeIntoSearch("Solana Name Service");
-        assertSearchResult("Solana Name Service");
+        assertSearchResultEmpty();
 
         clearAndTypeIntoSearch("Enable Sponsored Ads");
-        assertSearchResult("Enable Sponsored Ads");
+        assertSearchResultEmpty();
 
         // Disabled — see https://github.com/brave/brave-browser/issues/57186
         // typeIntoSearch("Safe Browsing");
@@ -261,116 +260,41 @@ public class BraveSettingsSearchTest {
     }
 
     /**
-     * Verifies that the Sponsored Ads entry is not searchable when Brave Rewards is disabled by
-     * policy.
+     * Verifies that the excluded Sponsored Ads entry is not searchable.
      */
     @Test
     @SmallTest
     @Feature({"Preferences"})
-    public void testSponsoredAdsNotSearchable_RewardsDisabledByPolicy() {
-        BraveRewardsPolicy.setDisabledByPolicyForTesting(true);
+    public void testSponsoredAdsNotSearchable() {
         mSettingsActivityTestRule.startSettingsActivity();
 
         typeIntoSearch("Enable Sponsored Ads");
         assertSearchResultEmpty();
     }
 
-    /**
-     * Verifies that key Brave-specific settings entries appear in the `Brave News` Settings search
-     * results.
-     */
+    /** Excluded product settings must not reappear in the global search index. */
     @Test
-    @SmallTest
+    @LargeTest
     @Feature({"Preferences"})
-    public void testBraveNewsSettingsAreSearchable() {
+    public void testRemovedProductSettingsAreNotSearchable() {
         mSettingsActivityTestRule.startSettingsActivity();
-
-        // Disabled — see https://github.com/brave/brave-browser/issues/57187
-        // typeIntoSearch("Show Brave News");
-        // assertSearchResult("Show Brave News");
+        typeIntoSearch("Brave News");
+        assertSearchResultEmpty();
+        for (String query :
+                new String[] {
+                    "Default Ethereum wallet", "Automatically lock Brave Wallet",
+                    "Display Web3 notifications", "Enable NFT discovery",
+                    "Reset and clear wallet data", "Brave Firewall + VPN",
+                    "Auto re-connect VPN", "Split tunneling", "VPN support",
+                    "Brave Origin", "Rate Brave"
+                }) {
+            clearAndTypeIntoSearch(query);
+            assertSearchResultEmpty();
+        }
     }
 
     /**
-     * Verifies that key Brave-specific settings entries appear in the `Brave Wallet` Settings
-     * search results.
-     */
-    @Test
-    @SmallTest
-    @Feature({"Preferences"})
-    public void testBraveWalletSettingsAreSearchable() {
-        mSettingsActivityTestRule.startSettingsActivity();
-
-        typeIntoSearch("Default Ethereum wallet");
-        assertSearchResult("Default Ethereum wallet");
-
-        clearAndTypeIntoSearch("Default Ethereum wallet");
-        assertSearchResult("Default Ethereum wallet");
-
-        clearAndTypeIntoSearch("Automatically lock Brave Wallet");
-        assertSearchResult("Automatically lock Brave Wallet");
-
-        clearAndTypeIntoSearch("Networks");
-        assertSearchResult("Networks");
-
-        clearAndTypeIntoSearch("Display Web3 notifications");
-        assertSearchResult("Display Web3 notifications");
-
-        clearAndTypeIntoSearch("Clear transaction & nonce info");
-        assertSearchResult("Clear transaction & nonce info");
-
-        clearAndTypeIntoSearch("Enable NFT discovery");
-        assertSearchResult("Enable NFT discovery");
-
-        // Disabled — see https://github.com/brave/brave-browser/issues/57188
-        // clearAndTypeIntoSearch("Automatically add NTFs");
-        // assertSearchResult("Automatically add NTFs you own to the Wallet using third party
-        // APIs");
-
-        clearAndTypeIntoSearch("Reset and clear wallet data");
-        assertSearchResult("Reset and clear wallet data");
-    }
-
-    /**
-     * Verifies that key Brave-specific settings entries appear in the `Brave Firewall + VPN`
-     * Settings search results.
-     */
-    @Test
-    @SmallTest
-    @Feature({"Preferences"})
-    public void testBraveFirewallVpnSettingsAreSearchable() {
-        mSettingsActivityTestRule.startSettingsActivity();
-
-        typeIntoSearch("Enabled");
-        assertSearchResult("Enabled", "Brave Firewall + VPN");
-
-        clearAndTypeIntoSearch("Status");
-        assertSearchResult("Status");
-
-        clearAndTypeIntoSearch("Expires");
-        assertSearchResult("Expires");
-
-        clearAndTypeIntoSearch("Manage subscription");
-        assertSearchResult("Manage subscription");
-
-        clearAndTypeIntoSearch("Auto re-connect VPN");
-        assertSearchResult("Auto re-connect VPN");
-
-        clearAndTypeIntoSearch("Split tunneling");
-        assertSearchResult("Split tunneling");
-
-        clearAndTypeIntoSearch("Reset Configuration");
-        assertSearchResult("Reset Configuration");
-
-        clearAndTypeIntoSearch("Contact Technical Support");
-        assertSearchResult("Contact Technical Support");
-
-        clearAndTypeIntoSearch("VPN support");
-        assertSearchResult("VPN support");
-    }
-
-    /**
-     * Verifies that key Brave-specific settings entries appear in the `Leo AI` Settings search
-     * results.
+     * Verifies that compiled-out Leo preferences are absent from settings search.
      */
     @Test
     @SmallTest
@@ -379,16 +303,16 @@ public class BraveSettingsSearchTest {
         mSettingsActivityTestRule.startSettingsActivity();
 
         typeIntoSearch("Show autocomplete suggestions");
-        assertSearchResult("Show autocomplete suggestions in address bar");
+        assertSearchResultEmpty();
 
         clearAndTypeIntoSearch("Show in quick search engines bar");
-        assertSearchResult("Show in quick search engines bar");
+        assertSearchResultEmpty();
 
         clearAndTypeIntoSearch("Store my conversation history");
-        assertSearchResult("Store my conversation history");
+        assertSearchResultEmpty();
 
         clearAndTypeIntoSearch("Default model");
-        assertSearchResult("Default model for new conversations");
+        assertSearchResultEmpty();
 
         // Disabled — go_premium in brave_leo_preferences.xml is marked
         // app:isPreferenceVisible="false", so it is excluded from the search index.
@@ -397,7 +321,7 @@ public class BraveSettingsSearchTest {
         // assertSearchResult("Go Premium");
 
         clearAndTypeIntoSearch("Delete all Leo AI");
-        assertSearchResult("Delete all Leo AI conversation data");
+        assertSearchResultEmpty();
     }
 
     /**
@@ -495,7 +419,6 @@ public class BraveSettingsSearchTest {
         clearAndTypeIntoSearch("notif");
         // There are notifications both at
         //  - Advanced
-        //  - Brave Wallet
         //  - Site settings
         assertOneOfSearchResultsIs("Notifications", "Site settings");
 
@@ -609,18 +532,6 @@ public class BraveSettingsSearchTest {
     //     clearAndTypeIntoSearch("Parallel Downloading");
     //     assertSearchResult("Parallel Downloading");
     // }
-
-    /**
-     * Verifies that key Brave-specific settings entries appear in the `Brave Origin` Settings
-     * search results.
-     */
-    @Test
-    @SmallTest
-    @Feature({"Preferences"})
-    public void testBraveOriginSettingsAreSearchable() {
-        mSettingsActivityTestRule.startSettingsActivity();
-        // TODO: needs to be enabled to test
-    }
 
     // Display section
 
@@ -791,10 +702,10 @@ public class BraveSettingsSearchTest {
         assertSearchResult("Bottom navigation toolbar");
 
         clearAndTypeIntoSearch("Brave Rewards icon");
-        assertSearchResult("Brave Rewards icon");
+        assertSearchResultEmpty();
 
         clearAndTypeIntoSearch("Brave Ads");
-        assertSearchResult("Brave Ads");
+        assertSearchResultEmpty();
 
         clearAndTypeIntoSearch("Night");
         assertSearchResult("Night Mode");
@@ -824,10 +735,10 @@ public class BraveSettingsSearchTest {
         assertSearchResult("Show Background Images");
 
         clearAndTypeIntoSearch("Show New Tab Page Ads");
-        assertSearchResult("Show New Tab Page Ads");
+        assertSearchResultEmpty();
 
         clearAndTypeIntoSearch("Learn more about new tab page ads");
-        assertSearchResult("Learn more about new tab page ads");
+        assertSearchResultEmpty();
 
         // Widgets
         clearAndTypeIntoSearch("Show Top Sites");
@@ -838,14 +749,13 @@ public class BraveSettingsSearchTest {
     }
 
     /**
-     * Verifies that the sponsored-images New Tab Page entries are not searchable when Brave Rewards
-     * is disabled by policy, while the remaining New Tab Page entries stay searchable.
+     * Verifies that excluded sponsored-image entries are absent while ordinary New Tab Page
+     * settings remain searchable.
      */
     @Test
     @SmallTest
     @Feature({"Preferences"})
-    public void testNewTabPageSponsoredContentNotSearchable_RewardsDisabledByPolicy() {
-        BraveRewardsPolicy.setDisabledByPolicyForTesting(true);
+    public void testNewTabPageSponsoredContentNotSearchable() {
         mSettingsActivityTestRule.startSettingsActivity();
 
         typeIntoSearch("Show New Tab Page Ads");
@@ -1049,7 +959,7 @@ public class BraveSettingsSearchTest {
         assertSearchResult("QA Preferences");
 
         clearAndTypeIntoSearch("Rewards Debug");
-        assertSearchResult("Rewards Debug");
+        assertSearchResultEmpty();
 
         clearAndTypeIntoSearch("Show Safe Browsing errors");
         assertSearchResult("Show Safe Browsing errors");

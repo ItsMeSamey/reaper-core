@@ -8,7 +8,9 @@ package org.chromium.chrome.browser.toolbar;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 
+import android.view.LayoutInflater;
 import android.view.View;
+import android.widget.FrameLayout;
 
 import androidx.test.filters.MediumTest;
 
@@ -64,6 +66,44 @@ public class BraveBottomBarToolbarTest {
         mOmnibox.clearFocus();
 
         assertTopToolbarButtonsHidden("after dismissing the omnibox");
+    }
+
+    @Test
+    @MediumTest
+    public void testBottomTabSwitcherDescribesTabCount() {
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    View toolbar =
+                            LayoutInflater.from(mActivityTestRule.getActivity())
+                                    .inflate(
+                                            R.layout.bottom_toolbar_browsing,
+                                            new FrameLayout(mActivityTestRule.getActivity()),
+                                            false);
+                    TabSwitcherButtonView tabSwitcher =
+                            toolbar.findViewById(R.id.bottom_tab_switcher_button);
+                    assertNotNull("The bottom toolbar tab switcher is missing.", tabSwitcher);
+                    assertEquals(
+                            "The initial tab description must not inherit the app menu label.",
+                            toolbar.getResources()
+                                    .getQuantityString(
+                                            R.plurals
+                                                    .accessibility_toolbar_btn_tabswitcher_toggle_default,
+                                            0,
+                                            0),
+                            tabSwitcher.getContentDescription());
+                    for (int count : new int[] {1, 2, 0, 100}) {
+                        tabSwitcher.updateTabCountVisuals(count);
+                        assertEquals(
+                                "The tab description must follow the visible tab count.",
+                                toolbar.getResources()
+                                        .getQuantityString(
+                                                R.plurals
+                                                        .accessibility_toolbar_btn_tabswitcher_toggle_default,
+                                                count,
+                                                count),
+                                tabSwitcher.getContentDescription());
+                    }
+                });
     }
 
     private void assertTopToolbarButtonsHidden(String when) {

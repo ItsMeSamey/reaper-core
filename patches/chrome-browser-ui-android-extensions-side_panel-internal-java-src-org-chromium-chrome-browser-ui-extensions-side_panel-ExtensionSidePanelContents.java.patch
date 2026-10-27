@@ -1,0 +1,123 @@
+diff --git a/chrome/browser/ui/android/extensions/side_panel/internal/java/src/org/chromium/chrome/browser/ui/extensions/side_panel/ExtensionSidePanelContents.java b/chrome/browser/ui/android/extensions/side_panel/internal/java/src/org/chromium/chrome/browser/ui/extensions/side_panel/ExtensionSidePanelContents.java
+--- a/chrome/browser/ui/android/extensions/side_panel/internal/java/src/org/chromium/chrome/browser/ui/extensions/side_panel/ExtensionSidePanelContents.java
++++ b/chrome/browser/ui/android/extensions/side_panel/internal/java/src/org/chromium/chrome/browser/ui/extensions/side_panel/ExtensionSidePanelContents.java
+@@ -4,6 +4,7 @@
+ 
+ package org.chromium.chrome.browser.ui.extensions.side_panel;
+ 
++import android.app.Activity;
+ import android.content.Context;
+ import android.view.View;
+ 
+@@ -23,9 +24,11 @@
+ import org.chromium.components.thinwebview.ThinWebViewFactory;
+ import org.chromium.content_public.browser.ViewEventSink;
+ import org.chromium.content_public.browser.WebContents;
++import org.chromium.ui.base.ActivityWindowAndroid;
+ import org.chromium.ui.base.IntentRequestTracker;
+ import org.chromium.ui.base.ViewAndroidDelegate;
+ import org.chromium.ui.base.WindowAndroid;
++import org.chromium.ui.modaldialog.ModalDialogManager;
+ 
+ /**
+  * Manages the Java-side representation and composition of an extension side panel's WebContents.
+@@ -40,6 +43,8 @@
+ 
+     private final WebContents mWebContents;
+     private final ThinWebView mThinWebView;
++    private final ActivityWindowAndroid mPanelWindowAndroid;
++    private boolean mDestroyed;
+ 
+     public static void setSkipViewEventSinkForTesting(boolean skip) {
+         sSkipViewEventSinkForTesting = skip;
+@@ -60,6 +65,31 @@
+             return null;
+         }
+ 
++        Activity activity = windowAndroid.getActivity().get();
++        if (windowAndroid.isDestroyed()
++                || activity == null
++                || activity.isFinishing()
++                || activity.isDestroyed()) {
++            return null;
++        }
++
++        // ThinWebView requires an isolated compositor window. As for action popups,
++        // share only the authorized Activity's intent tracker and dialog manager;
++        // reusing its main WindowAndroid could detach the browser compositor.
++        ActivityWindowAndroid panelWindowAndroid =
++                new ActivityWindowAndroid(
++                        context,
++                        /* listenToActivityState= */ true,
++                        intentRequestTracker,
++                        /* insetObserver= */ null,
++                        /* occlusionTrackingAllowed= */ true) {
++                    @Override
++                    public @Nullable ModalDialogManager getModalDialogManager() {
++                        return isDestroyed() || windowAndroid.isDestroyed()
++                                ? null
++                                : windowAndroid.getModalDialogManager();
++                    }
++                };
+         ContentView contentView = ContentView.createContentView(context, webContents);
+ 
+         ViewAndroidDelegate existingDelegate = webContents.getViewAndroidDelegate();
+@@ -68,10 +98,10 @@
+                     VersionInfo.getProductVersion(),
+                     ViewAndroidDelegate.createBasicDelegate(contentView),
+                     contentView,
+-                    windowAndroid,
++                    panelWindowAndroid,
+                     WebContents.createDefaultInternalsHolder());
+         } else {
+-            webContents.setTopLevelNativeWindow(windowAndroid);
++            webContents.setTopLevelNativeWindow(panelWindowAndroid);
+             existingDelegate.setContainerView(contentView);
+             if (!sSkipViewEventSinkForTesting) {
+                 ViewEventSink.from(webContents).setAccessDelegate(contentView);
+@@ -80,19 +110,20 @@
+ 
+         ThinWebView thinWebView =
+                 ThinWebViewFactory.create(
+-                        context,
+-                        new ThinWebViewConstraints(),
+-                        intentRequestTracker,
+-                        /* enablePermissionRequests= */ false);
++                        context, new ThinWebViewConstraints(), panelWindowAndroid);
+         thinWebView.attachWebContents(
+                 webContents, contentView, new ThinWebViewAttachParams.Builder().build());
+ 
+-        return new ExtensionSidePanelContents(webContents, thinWebView);
++        return new ExtensionSidePanelContents(webContents, thinWebView, panelWindowAndroid);
+     }
+ 
+-    private ExtensionSidePanelContents(WebContents webContents, ThinWebView thinWebView) {
++    private ExtensionSidePanelContents(
++            WebContents webContents,
++            ThinWebView thinWebView,
++            ActivityWindowAndroid panelWindowAndroid) {
+         mWebContents = webContents;
+         mThinWebView = thinWebView;
++        mPanelWindowAndroid = panelWindowAndroid;
+     }
+ 
+     @CalledByNative
+@@ -103,6 +134,8 @@
+     @Override
+     @CalledByNative
+     public void destroy() {
++        if (mDestroyed) return;
++        mDestroyed = true;
+         mThinWebView.destroy();
+         if (!mWebContents.isDestroyed()) {
+             mWebContents.setTopLevelNativeWindow(null);
+@@ -111,6 +144,9 @@
+                 viewDelegate.setContainerView(null);
+             }
+         }
++        // The supplied-window ThinWebView overload does not own this window.
++        // Never destroy the browser's shared WindowAndroid or dialog manager.
++        mPanelWindowAndroid.destroy();
+     }
+ 
+     public WebContents getWebContents() {

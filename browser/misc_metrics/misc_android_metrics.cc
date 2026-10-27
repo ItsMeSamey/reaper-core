@@ -8,7 +8,6 @@
 #include "base/metrics/histogram_macros.h"
 #include "brave/browser/misc_metrics/process_misc_metrics.h"
 #include "brave/browser/misc_metrics/uptime_monitor_impl.h"
-#include "brave/browser/search_engines/search_engine_tracker.h"
 #include "brave/components/misc_metrics/default_browser_monitor.h"
 #include "brave/components/misc_metrics/page_metrics.h"
 #include "brave/components/misc_metrics/privacy_hub_metrics.h"
@@ -28,11 +27,9 @@ namespace misc_metrics {
 MiscAndroidMetrics::MiscAndroidMetrics(
     PrefService* local_state,
     ProcessMiscMetrics* misc_metrics,
-    SearchEngineTracker* search_engine_tracker,
     TemplateURLService* template_url_service,
     PageMetrics* page_metrics)
     : misc_metrics_(misc_metrics),
-      search_engine_tracker_(search_engine_tracker),
       page_metrics_(page_metrics),
       quick_search_metrics_(
           std::make_unique<QuickSearchMetrics>(local_state,
@@ -56,10 +53,7 @@ void MiscAndroidMetrics::RecordPrivacyHubEnabledStatus(bool is_enabled) {
 }
 
 void MiscAndroidMetrics::RecordLocationBarChange(bool is_new_tab,
-                                                 bool is_search_query) {
-  if (is_search_query) {
-    search_engine_tracker_->RecordLocationBarQuery();
-  }
+                                                 bool /*is_search_query*/) {
   misc_metrics_->tab_metrics()->RecordLocationBarChange(is_new_tab);
 }
 

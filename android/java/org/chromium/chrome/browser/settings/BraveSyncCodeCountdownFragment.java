@@ -36,12 +36,15 @@ public class BraveSyncCodeCountdownFragment extends Fragment {
     @Override
     public View onCreateView(
             LayoutInflater inflater, ViewGroup container, Bundle savedInstanceState) {
+        mDestroyed = false;
         return inflater.inflate(R.layout.fragment_sync_code_countdown, container, false);
     }
 
     @Override
     public void onDestroyView() {
         mDestroyed = true;
+        cleanupTextUpdater();
+        mExpiredRunnable = null;
         super.onDestroyView();
     }
 
@@ -53,8 +56,11 @@ public class BraveSyncCodeCountdownFragment extends Fragment {
     void scheduleTextUpdate() {
         cleanupTextUpdater();
 
+        View countdownView = getView();
+        if (mDestroyed || countdownView == null) return;
+
         // There is no Chromium's option for repeating action, so using java.util.Timer.
-        mTextUpdater = new Timer();
+        mTextUpdater = createTextUpdater();
         mTextUpdater.schedule(
                 new TimerTask() {
                     @Override
@@ -65,7 +71,9 @@ public class BraveSyncCodeCountdownFragment extends Fragment {
                                     new Runnable() {
                                         @Override
                                         public void run() {
-                                            updateText();
+                                            if (!mDestroyed && getView() == countdownView) {
+                                                updateText();
+                                            }
                                         }
                                     });
                         }
@@ -118,6 +126,10 @@ public class BraveSyncCodeCountdownFragment extends Fragment {
 
     void setExpiredRunnable(Runnable expiredRunnable) {
         mExpiredRunnable = expiredRunnable;
+    }
+
+    Timer createTextUpdater() {
+        return new Timer();
     }
 
     private void cleanupTextUpdater() {

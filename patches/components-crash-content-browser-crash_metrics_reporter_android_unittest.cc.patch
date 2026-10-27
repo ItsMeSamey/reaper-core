@@ -1,0 +1,393 @@
+diff --git a/components/crash/content/browser/crash_metrics_reporter_android_unittest.cc b/components/crash/content/browser/crash_metrics_reporter_android_unittest.cc
+index ac2007d1ec..690de69d0e 100644
+--- a/components/crash/content/browser/crash_metrics_reporter_android_unittest.cc
++++ b/components/crash/content/browser/crash_metrics_reporter_android_unittest.cc
+@@ -28,6 +28,8 @@ class CrashMetricsReporterObserver : public CrashMetricsReporter::Observer {
+   void OnCrashDumpProcessed(int rph_id,
+                             const CrashMetricsReporter::ReportedCrashTypeSet&
+                                 reported_counts) override {
++    ++callback_count_;
++    process_host_id_ = rph_id;
+     recorded_crash_types_ = reported_counts;
+     wait_run_loop_.Quit();
+   }
+@@ -38,8 +40,12 @@ class CrashMetricsReporterObserver : public CrashMetricsReporter::Observer {
+   }
+ 
+   void WaitForProcessed() { wait_run_loop_.Run(); }
++  int callback_count() const { return callback_count_; }
++  int process_host_id() const { return process_host_id_; }
+ 
+  private:
++  int callback_count_ = 0;
++  int process_host_id_ = -1;
+   base::RunLoop wait_run_loop_;
+   CrashMetricsReporter::ReportedCrashTypeSet recorded_crash_types_;
+ };
+@@ -78,9 +84,7 @@ class CrashMetricsReporterTest : public testing::Test {
+     EXPECT_EQ(expected_crash_types, crash_dump_observer.recorded_crash_types());
+ 
+     if (histogram_name) {
+-      histogram_tester.ExpectUniqueSample(
+-          histogram_name, CrashMetricsReporter::EMPTY_MINIDUMP_WHILE_RUNNING,
+-          1);
++      histogram_tester.ExpectTotalCount(histogram_name, 0);
+     }
+     CrashMetricsReporter::GetInstance()->RemoveObserver(&crash_dump_observer);
+   }
+@@ -195,293 +199,72 @@ TEST_F(CrashMetricsReporterTest, RendererForegroundCrash) {
+   CrashMetricsReporter::GetInstance()->RemoveObserver(&crash_dump_observer);
+ }
+ 
+-TEST_F(CrashMetricsReporterTest, SpareRendererAvailabilityHistograms) {
+-  using SpareRendererAvailabilityWhenKilled =
+-      CrashMetricsReporter::SpareRendererAvailabilityWhenKilled;
+-  constexpr char kKillSpareRendererAvailabilityIntentionalKillUMAName[] =
+-      "Stability.Android.KillSpareRendererAvailability.IntentionalKill";
+-  constexpr char kKillSpareRendererAvailabilityOOMUMAName[] =
+-      "Stability.Android.KillSpareRendererAvailability.OOM";
+-
++TEST_F(CrashMetricsReporterTest, LocalForegroundCrashDoesNotRecordTelemetry) {
+   base::HistogramTester histogram_tester;
+-
+-  // Nothing recorded if the termination is not intentional kill or OOM.
+-  {
+-    ChildExitObserver::TerminationInfo term_info;
+-    CrashMetricsReporterObserver crash_dump_observer;
+-    CrashMetricsReporter::GetInstance()->AddObserver(&crash_dump_observer);
+-    term_info.normal_termination = true;
+-    CrashMetricsReporter::GetInstance()->ChildProcessExited(term_info);
+-    crash_dump_observer.WaitForProcessed();
+-    histogram_tester.ExpectTotalCount(
+-        kKillSpareRendererAvailabilityIntentionalKillUMAName, 0);
+-    histogram_tester.ExpectTotalCount(kKillSpareRendererAvailabilityOOMUMAName,
+-                                      0);
+-    CrashMetricsReporter::GetInstance()->RemoveObserver(&crash_dump_observer);
+-  }
+-
+-  // Intentional Kill - Spare killed
+-  {
+-    ChildExitObserver::TerminationInfo term_info;
+-    CrashMetricsReporterObserver crash_dump_observer;
+-    CrashMetricsReporter::GetInstance()->AddObserver(&crash_dump_observer);
+-    term_info = ChildExitObserver::TerminationInfo{};
+-    term_info.was_killed_intentionally_by_browser = true;
+-    term_info.is_spare_renderer = true;
+-    term_info.has_spare_renderer = true;
+-    CrashMetricsReporter::GetInstance()->ChildProcessExited(term_info);
+-    crash_dump_observer.WaitForProcessed();
+-    histogram_tester.ExpectBucketCount(
+-        kKillSpareRendererAvailabilityIntentionalKillUMAName,
+-        SpareRendererAvailabilityWhenKilled::kKillSpareRenderer, 1);
+-    histogram_tester.ExpectTotalCount(
+-        kKillSpareRendererAvailabilityIntentionalKillUMAName, 1);
+-    histogram_tester.ExpectTotalCount(kKillSpareRendererAvailabilityOOMUMAName,
+-                                      0);
+-    CrashMetricsReporter::GetInstance()->RemoveObserver(&crash_dump_observer);
+-  }
+-
+-  // Intentional Kill - Non-spare killed, spare available
+-  {
+-    ChildExitObserver::TerminationInfo term_info;
+-    CrashMetricsReporterObserver crash_dump_observer;
+-    CrashMetricsReporter::GetInstance()->AddObserver(&crash_dump_observer);
+-    term_info = ChildExitObserver::TerminationInfo{};
+-    term_info.was_killed_intentionally_by_browser = true;
+-    term_info.is_spare_renderer = false;
+-    term_info.has_spare_renderer = true;
+-    CrashMetricsReporter::GetInstance()->ChildProcessExited(term_info);
+-    crash_dump_observer.WaitForProcessed();
+-    histogram_tester.ExpectBucketCount(
+-        kKillSpareRendererAvailabilityIntentionalKillUMAName,
+-        SpareRendererAvailabilityWhenKilled::
+-            kKillNonSpareRendererWithSpareRender,
+-        1);
+-    histogram_tester.ExpectTotalCount(
+-        kKillSpareRendererAvailabilityIntentionalKillUMAName, 2);
+-    histogram_tester.ExpectTotalCount(kKillSpareRendererAvailabilityOOMUMAName,
+-                                      0);
+-    CrashMetricsReporter::GetInstance()->RemoveObserver(&crash_dump_observer);
+-  }
+-
+-  // Intentional Kill - Non-spare killed, No spare available
+-  {
+-    ChildExitObserver::TerminationInfo term_info;
+-    CrashMetricsReporterObserver crash_dump_observer;
+-    CrashMetricsReporter::GetInstance()->AddObserver(&crash_dump_observer);
+-    term_info = ChildExitObserver::TerminationInfo{};
+-    term_info.was_killed_intentionally_by_browser = true;
+-    term_info.is_spare_renderer = false;
+-    term_info.has_spare_renderer = false;
+-    CrashMetricsReporter::GetInstance()->ChildProcessExited(term_info);
+-    crash_dump_observer.WaitForProcessed();
+-    histogram_tester.ExpectBucketCount(
+-        kKillSpareRendererAvailabilityIntentionalKillUMAName,
+-        SpareRendererAvailabilityWhenKilled::
+-            kKillNonSpareRendererWithoutSpareRenderer,
+-        1);
+-    histogram_tester.ExpectTotalCount(
+-        kKillSpareRendererAvailabilityIntentionalKillUMAName, 3);
+-    histogram_tester.ExpectTotalCount(kKillSpareRendererAvailabilityOOMUMAName,
+-                                      0);
+-    CrashMetricsReporter::GetInstance()->RemoveObserver(&crash_dump_observer);
+-  }
+-
+-  // OOM Kill - Non-spare killed, spare available
+-  {
+-    ChildExitObserver::TerminationInfo term_info;
+-    CrashMetricsReporterObserver crash_dump_observer;
+-    CrashMetricsReporter::GetInstance()->AddObserver(&crash_dump_observer);
+-    term_info = ChildExitObserver::TerminationInfo{};
+-    term_info.was_killed_intentionally_by_browser = false;
+-    term_info.is_spare_renderer = false;
+-    term_info.has_spare_renderer = true;
+-    CrashMetricsReporter::GetInstance()->ChildProcessExited(term_info);
+-    crash_dump_observer.WaitForProcessed();
+-    histogram_tester.ExpectBucketCount(kKillSpareRendererAvailabilityOOMUMAName,
+-                                       SpareRendererAvailabilityWhenKilled::
+-                                           kKillNonSpareRendererWithSpareRender,
+-                                       1);
+-    histogram_tester.ExpectTotalCount(
+-        kKillSpareRendererAvailabilityIntentionalKillUMAName, 3);
+-    histogram_tester.ExpectTotalCount(kKillSpareRendererAvailabilityOOMUMAName,
+-                                      1);
+-    CrashMetricsReporter::GetInstance()->RemoveObserver(&crash_dump_observer);
+-  }
+-
+-  // OOM Kill - Spare killed
+-  {
+-    ChildExitObserver::TerminationInfo term_info;
+-    CrashMetricsReporterObserver crash_dump_observer;
+-    CrashMetricsReporter::GetInstance()->AddObserver(&crash_dump_observer);
+-    term_info = ChildExitObserver::TerminationInfo{};
+-    term_info.was_killed_intentionally_by_browser = false;
+-    term_info.is_spare_renderer = true;
+-    term_info.has_spare_renderer = true;
+-    CrashMetricsReporter::GetInstance()->ChildProcessExited(term_info);
+-    crash_dump_observer.WaitForProcessed();
+-    histogram_tester.ExpectBucketCount(
+-        kKillSpareRendererAvailabilityOOMUMAName,
+-        SpareRendererAvailabilityWhenKilled::kKillSpareRenderer, 1);
+-    histogram_tester.ExpectTotalCount(
+-        kKillSpareRendererAvailabilityIntentionalKillUMAName, 3);
+-    histogram_tester.ExpectTotalCount(kKillSpareRendererAvailabilityOOMUMAName,
+-                                      2);
+-    CrashMetricsReporter::GetInstance()->RemoveObserver(&crash_dump_observer);
+-  }
+-
+-  // OOM Kill - Non-spare killed, No spare available
+-  {
+-    ChildExitObserver::TerminationInfo term_info;
+-    CrashMetricsReporterObserver crash_dump_observer;
+-    CrashMetricsReporter::GetInstance()->AddObserver(&crash_dump_observer);
+-    term_info = ChildExitObserver::TerminationInfo{};
+-    term_info.was_killed_intentionally_by_browser = false;
+-    term_info.is_spare_renderer = false;
+-    term_info.has_spare_renderer = false;
+-    CrashMetricsReporter::GetInstance()->ChildProcessExited(term_info);
+-    crash_dump_observer.WaitForProcessed();
+-    histogram_tester.ExpectBucketCount(
+-        kKillSpareRendererAvailabilityIntentionalKillUMAName,
+-        SpareRendererAvailabilityWhenKilled::
+-            kKillNonSpareRendererWithoutSpareRenderer,
+-        1);
+-    histogram_tester.ExpectTotalCount(
+-        kKillSpareRendererAvailabilityIntentionalKillUMAName, 3);
+-    histogram_tester.ExpectTotalCount(kKillSpareRendererAvailabilityOOMUMAName,
+-                                      3);
+-    CrashMetricsReporter::GetInstance()->RemoveObserver(&crash_dump_observer);
+-  }
++  ChildExitObserver::TerminationInfo info;
++  info.process_host_id = 73;
++  info.process_type = content::PROCESS_TYPE_RENDERER;
++  info.app_state = base::android::APPLICATION_STATE_HAS_RUNNING_ACTIVITIES;
++  info.crash_signo = SIGSEGV;
++  info.was_killed_intentionally_by_browser = true;
++  info.renderer_has_visible_clients = true;
++  info.is_spare_renderer = true;
++  info.has_spare_renderer = true;
++  CrashMetricsReporterObserver observer;
++  auto* reporter = CrashMetricsReporter::GetInstance();
++  reporter->AddObserver(&observer);
++  reporter->ChildProcessExited(info);
++  observer.WaitForProcessed();
++  EXPECT_EQ(73, observer.process_host_id());
++  EXPECT_EQ(1, observer.callback_count());
++  EXPECT_EQ(
++      CrashMetricsReporter::ReportedCrashTypeSet(
++          {CrashMetricsReporter::ProcessedCrashCounts::
++               kRendererForegroundIntentionalKill,
++           CrashMetricsReporter::ProcessedCrashCounts::
++               kRendererForegroundVisibleCrash,
++           CrashMetricsReporter::ProcessedCrashCounts::kRendererCrashAll}),
++      observer.recorded_crash_types());
++  histogram_tester.ExpectTotalCount("Stability.Android.ProcessedCrashCounts",
++                                    0);
++  histogram_tester.ExpectTotalCount(
++      "Stability.Android.KillSpareRendererAvailability.IntentionalKill", 0);
++  reporter->RemoveObserver(&observer);
+ }
+ 
+-TEST_F(CrashMetricsReporterTest, ProcessKillSinceSpareCreationHistograms) {
+-  constexpr char kProcessKillWithin1s[] =
+-      "BrowserRenderProcessHost.AvailableMemory.SpareRenderer."
+-      "VisibleProcessKillWithin1s";
+-  constexpr char kProcessKillWithin5s[] =
+-      "BrowserRenderProcessHost.AvailableMemory.SpareRenderer."
+-      "VisibleProcessKillWithin5s";
+-  constexpr char kGpuProcessKillWithin1s[] =
+-      "BrowserRenderProcessHost.AvailableMemory.SpareRenderer."
+-      "GpuProcessKillWithin1s";
+-  constexpr char kGpuProcessKillWithin5s[] =
+-      "BrowserRenderProcessHost.AvailableMemory.SpareRenderer."
+-      "GpuProcessKillWithin5s";
+-  constexpr char kWaivedProcessKillWithin1s[] =
+-      "BrowserRenderProcessHost.AvailableMemory.SpareRenderer."
+-      "WaivedProcessKillWithin1s";
+-  constexpr char kWaivedProcessKillWithin5s[] =
+-      "BrowserRenderProcessHost.AvailableMemory.SpareRenderer."
+-      "WaivedProcessKillWithin5s";
+-
+-  // No UMA if last_spare_renderer_creation_info is not set.
+-  {
+-    base::HistogramTester histogram_tester;
+-    ChildExitObserver::TerminationInfo term_info;
+-    CrashMetricsReporterObserver crash_dump_observer;
+-    CrashMetricsReporter::GetInstance()->AddObserver(&crash_dump_observer);
+-    CrashMetricsReporter::GetInstance()->ChildProcessExited(term_info);
+-    crash_dump_observer.WaitForProcessed();
+-    histogram_tester.ExpectTotalCount(kProcessKillWithin1s, 0);
+-    histogram_tester.ExpectTotalCount(kProcessKillWithin5s, 0);
+-    CrashMetricsReporter::GetInstance()->RemoveObserver(&crash_dump_observer);
+-  }
+-
+-  // Visible renderer killed within 1s.
+-  {
+-    base::HistogramTester histogram_tester;
+-    ChildExitObserver::TerminationInfo term_info;
+-    CrashMetricsReporterObserver crash_dump_observer;
+-    CrashMetricsReporter::GetInstance()->AddObserver(&crash_dump_observer);
+-    term_info.process_type = content::PROCESS_TYPE_RENDERER;
+-    term_info.renderer_has_visible_clients = true;
+-    term_info.last_spare_renderer_creation_info =
+-        content::LastSpareRendererCreationInfo{
+-            .creation_time = base::TimeTicks::Now() - base::Milliseconds(500),
+-            .available_memory_mb = 123};
+-    CrashMetricsReporter::GetInstance()->ChildProcessExited(term_info);
+-    crash_dump_observer.WaitForProcessed();
+-    histogram_tester.ExpectUniqueSample(kProcessKillWithin1s, 123, 1);
+-    histogram_tester.ExpectUniqueSample(kProcessKillWithin5s, 123, 1);
+-    CrashMetricsReporter::GetInstance()->RemoveObserver(&crash_dump_observer);
+-  }
+-
+-  // Waived renderer killed between 1s and 5s.
+-  {
+-    base::HistogramTester histogram_tester;
+-    ChildExitObserver::TerminationInfo term_info;
+-    CrashMetricsReporterObserver crash_dump_observer;
+-    CrashMetricsReporter::GetInstance()->AddObserver(&crash_dump_observer);
+-    term_info.process_type = content::PROCESS_TYPE_RENDERER;
+-    term_info.binding_state = base::android::ChildBindingState::WAIVED;
+-    term_info.last_spare_renderer_creation_info =
+-        content::LastSpareRendererCreationInfo{
+-            .creation_time = base::TimeTicks::Now() - base::Seconds(3),
+-            .available_memory_mb = 456};
+-    CrashMetricsReporter::GetInstance()->ChildProcessExited(term_info);
+-    crash_dump_observer.WaitForProcessed();
+-    histogram_tester.ExpectTotalCount(kWaivedProcessKillWithin1s, 0);
+-    histogram_tester.ExpectUniqueSample(kWaivedProcessKillWithin5s, 456, 1);
+-    CrashMetricsReporter::GetInstance()->RemoveObserver(&crash_dump_observer);
+-  }
+-
+-  // GPU process killed within 1s.
+-  {
+-    base::HistogramTester histogram_tester;
+-    ChildExitObserver::TerminationInfo term_info;
+-    CrashMetricsReporterObserver crash_dump_observer;
+-    CrashMetricsReporter::GetInstance()->AddObserver(&crash_dump_observer);
+-    term_info.process_type = content::PROCESS_TYPE_GPU;
+-    term_info.last_spare_renderer_creation_info =
+-        content::LastSpareRendererCreationInfo{
+-            .creation_time = base::TimeTicks::Now() - base::Milliseconds(200),
+-            .available_memory_mb = 999};
+-    CrashMetricsReporter::GetInstance()->ChildProcessExited(term_info);
+-    crash_dump_observer.WaitForProcessed();
+-    histogram_tester.ExpectUniqueSample(kGpuProcessKillWithin1s, 999, 1);
+-    histogram_tester.ExpectUniqueSample(kGpuProcessKillWithin5s, 999, 1);
+-    CrashMetricsReporter::GetInstance()->RemoveObserver(&crash_dump_observer);
+-  }
+-
+-  // GPU process killed after 5s.
+-  {
+-    base::HistogramTester histogram_tester;
+-    ChildExitObserver::TerminationInfo term_info;
+-    CrashMetricsReporterObserver crash_dump_observer;
+-    CrashMetricsReporter::GetInstance()->AddObserver(&crash_dump_observer);
+-    term_info.process_type = content::PROCESS_TYPE_GPU;
+-    term_info.last_spare_renderer_creation_info =
+-        content::LastSpareRendererCreationInfo{
+-            .creation_time = base::TimeTicks::Now() - base::Seconds(10),
+-            .available_memory_mb = 789};
+-    CrashMetricsReporter::GetInstance()->ChildProcessExited(term_info);
+-    crash_dump_observer.WaitForProcessed();
+-    histogram_tester.ExpectTotalCount(kGpuProcessKillWithin1s, 0);
+-    histogram_tester.ExpectTotalCount(kGpuProcessKillWithin5s, 0);
+-    CrashMetricsReporter::GetInstance()->RemoveObserver(&crash_dump_observer);
+-  }
++TEST_F(CrashMetricsReporterTest, LocalForegroundOomDoesNotRecordTelemetry) {
++  base::HistogramTester histogram_tester;
++  ChildExitObserver::TerminationInfo info;
++  info.process_host_id = 74;
++  info.process_type = content::PROCESS_TYPE_RENDERER;
++  info.app_state = base::android::APPLICATION_STATE_HAS_RUNNING_ACTIVITIES;
++  info.normal_termination = false;
++  info.renderer_has_visible_clients = true;
++  TestOomCrashProcessing(info,
++                         {CrashMetricsReporter::ProcessedCrashCounts::
++                              kRendererForegroundVisibleOom},
++                         "Stability.Android.ProcessedCrashCounts");
++  histogram_tester.ExpectTotalCount(
++      "Memory.Experimental.Renderer.TotalMemoryAfterOOM", 0);
++  histogram_tester.ExpectTotalCount(
++      "Stability.Android.KillSpareRendererAvailability.OOM", 0);
++}
+ 
+-  // Other process type.
+-  {
+-    base::HistogramTester histogram_tester;
+-    ChildExitObserver::TerminationInfo term_info;
+-    CrashMetricsReporterObserver crash_dump_observer;
+-    CrashMetricsReporter::GetInstance()->AddObserver(&crash_dump_observer);
+-    term_info.process_type = content::PROCESS_TYPE_UTILITY;
+-    term_info.last_spare_renderer_creation_info =
+-        content::LastSpareRendererCreationInfo{
+-            .creation_time = base::TimeTicks::Now(),
+-            .available_memory_mb = 1024};
+-    CrashMetricsReporter::GetInstance()->ChildProcessExited(term_info);
+-    crash_dump_observer.WaitForProcessed();
+-    histogram_tester.ExpectTotalCount(kProcessKillWithin1s, 0);
+-    histogram_tester.ExpectTotalCount(kProcessKillWithin5s, 0);
+-    histogram_tester.ExpectTotalCount(kGpuProcessKillWithin1s, 0);
+-    histogram_tester.ExpectTotalCount(kGpuProcessKillWithin5s, 0);
+-    histogram_tester.ExpectTotalCount(kWaivedProcessKillWithin1s, 0);
+-    histogram_tester.ExpectTotalCount(kWaivedProcessKillWithin5s, 0);
+-    CrashMetricsReporter::GetInstance()->RemoveObserver(&crash_dump_observer);
+-  }
++TEST_F(CrashMetricsReporterTest,
++       RemovedObserverDoesNotReceiveDeferredNotification) {
++  ChildExitObserver::TerminationInfo info;
++  info.process_host_id = 75;
++  info.process_type = content::PROCESS_TYPE_UTILITY;
++  info.app_state = base::android::APPLICATION_STATE_HAS_RUNNING_ACTIVITIES;
++  info.normal_termination = true;
++  CrashMetricsReporterObserver observer;
++  auto* reporter = CrashMetricsReporter::GetInstance();
++  reporter->AddObserver(&observer);
++  reporter->ChildProcessExited(info);
++  reporter->RemoveObserver(&observer);
++  base::RunLoop().RunUntilIdle();
++  EXPECT_EQ(0, observer.callback_count());
++  EXPECT_EQ(-1, observer.process_host_id());
+ }
+ 
+ }  // namespace crash_reporter

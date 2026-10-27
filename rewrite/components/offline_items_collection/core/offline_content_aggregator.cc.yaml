@@ -1,0 +1,121 @@
+# Copyright (c) 2026 The Reaper Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+substitutions:
+- description: Android offline aggregate query teardown and regression coverage (1).
+  regex:
+    re_pattern: '\
+
+      \ \ OfflineContentProvider\*\ provider\ =\ provider_it\->second;\
+
+      \ \ providers_\.erase\(provider_it\);\
+
+      \ \ pending_providers_\.erase\(provider\);\
+
+      \
+
+      \ \ //\ Only\ clean\ up\ the\ connection\ to\ the\ provider\ if\ the\ provider\ isn''t\
+
+      \ \ //\ associated\ with\ any\ other\ namespace\.\
+
+      \ \ if\ \(!MapContainsValue\(providers_,\ provider\)\)\ \{\
+
+      \ \ \ \ provider\->RemoveObserver\(this\);\
+
+      \ \ \}\
+
+      \}\
+
+      \
+
+      '
+    replace: "\n  OfflineContentProvider* provider = provider_it->second;\n  providers_.erase(provider_it);\n#if !BUILDFLAG(IS_ANDROID)\n  pending_providers_.erase(provider);\n#endif\n\n  // Only clean up the connection to the provider if the provider isn't\n  // associated with any other namespace.\n  if (!MapContainsValue(providers_, provider)) {\n    provider->RemoveObserver(this);\n#if BUILDFLAG(IS_ANDROID)\n    // A provider can disappear without running its outstanding callback, e.g.\n    // when the OTR profile is destroyed while the original profile stays alive.\n    if (pending_providers_.erase(provider) && pending_providers_.empty()) {\n      base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(\n          FROM_HERE,\n          base::BindOnce(&OfflineContentAggregator::CompleteGetAllItems,\n                         get_all_items_weak_ptr_factory_.GetWeakPtr()));\n    }\n#endif\n  }\n}\n\n"
+- description: Android offline aggregate query teardown and regression coverage (2).
+  regex:
+    re_pattern: '\ \ for\ \(auto\ provider_it\ :\ providers_\)\ \{\
+
+      \ \ \ \ auto\*\ provider\ =\ provider_it\.second\.get\(\);\
+
+      \
+
+      \ \ \ \ provider\->GetAllItems\(\
+
+      \ \ \ \ \ \ \ \ base::BindOnce\(\&OfflineContentAggregator::OnGetAllItemsDone,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ weak_ptr_factory_\.GetWeakPtr\(\),\ provider\)\);\
+
+      \ \ \ \ pending_providers_\.insert\(provider\);\
+
+      \ \ \}\
+
+      \
+
+      \ \ if\ \(pending_providers_\.empty\(\)\)\ \{\
+
+      '
+    replace: "  for (auto provider_it : providers_) {\n    auto* provider = provider_it.second.get();\n\n#if BUILDFLAG(IS_ANDROID)\n    // Multiple namespaces can refer to the same provider. Query it once per\n    // batch, and retire all of this batch's replies together on completion.\n    if (!pending_providers_.insert(provider).second) {\n      continue;\n    }\n    provider->GetAllItems(base::BindOnce(\n        &OfflineContentAggregator::OnGetAllItemsDone,\n        get_all_items_weak_ptr_factory_.GetWeakPtr(), provider));\n#else\n    provider->GetAllItems(\n        base::BindOnce(&OfflineContentAggregator::OnGetAllItemsDone,\n                       weak_ptr_factory_.GetWeakPtr(), provider));\n    pending_providers_.insert(provider);\n#endif\n  }\n\n  if (pending_providers_.empty()) {\n"
+- description: Android offline aggregate query teardown and regression coverage (3).
+  regex:
+    re_pattern: '\ \ \ \ OfflineContentProvider\*\ provider,\
+
+      \ \ \ \ const\ OfflineItemList\&\ items\)\ \{\
+
+      \ \ DCHECK_CALLED_ON_VALID_SEQUENCE\(sequence_checker_\);\
+
+      \ \ aggregated_items_\.insert\(aggregated_items_\.end\(\),\ items\.begin\(\),\ items\.end\(\)\);\
+
+      \ \ pending_providers_\.erase\(provider\);\
+
+      \ \ if\ \(!pending_providers_\.empty\(\)\)\ \{\
+
+      \ \ \ \ return;\
+
+      \ \ \}\
+
+      \
+
+      \ \ auto\ item_vec\ =\ std::move\(aggregated_items_\);\
+
+      \ \ auto\ callbacks\ =\ std::move\(multiple_item_get_callbacks_\);\
+
+      \
+
+      '
+    replace: "    OfflineContentProvider* provider,\n    const OfflineItemList& items) {\n  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);\n#if BUILDFLAG(IS_ANDROID)\n  // Ignore a reply from a provider removed while another provider is pending.\n  if (!pending_providers_.erase(provider)) {\n    return;\n  }\n#else\n  pending_providers_.erase(provider);\n#endif\n  aggregated_items_.insert(aggregated_items_.end(), items.begin(), items.end());\n  if (!pending_providers_.empty()) {\n    return;\n  }\n\n  CompleteGetAllItems();\n}\n\nvoid OfflineContentAggregator::CompleteGetAllItems() {\n  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);\n#if BUILDFLAG(IS_ANDROID)\n  if (!pending_providers_.empty() || multiple_item_get_callbacks_.empty()) {\n    return;\n  }\n  // A removed provider may reply late, including after the same provider is\n  // registered again. Its old reply must never contribute to a new batch.\n  get_all_items_weak_ptr_factory_.InvalidateWeakPtrs();\n#endif\n  auto item_vec = std::move(aggregated_items_);\n  auto callbacks = std::move(multiple_item_get_callbacks_);\n\n"
+- description: Android offline aggregate query teardown and regression coverage (4).
+  regex:
+    re_pattern: 'void\ OfflineContentAggregator::OnItemRemoved\(const\ ContentId\&\ id\)\ \{\
+
+      \ \ DCHECK_CALLED_ON_VALID_SEQUENCE\(sequence_checker_\);\
+
+      \
+
+      \ \ if\ \(!pending_providers_\.empty\(\)\)\ \{\
+
+      \ \ \ \ auto\ item\ =\ std::ranges::find\(aggregated_items_,\ id,\ \&OfflineItem::id\);\
+
+      \ \ \ \ if\ \(item\ !=\ aggregated_items_\.end\(\)\)\
+
+      \ \ \ \ \ \ aggregated_items_\.erase\(item\);\
+
+      '
+    replace: "void OfflineContentAggregator::OnItemRemoved(const ContentId& id) {\n  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);\n\n#if BUILDFLAG(IS_ANDROID)\n  // The batch also remains active between final unregistration and its task.\n  if (!multiple_item_get_callbacks_.empty()) {\n#else\n  if (!pending_providers_.empty()) {\n#endif\n    auto item = std::ranges::find(aggregated_items_, id, &OfflineItem::id);\n    if (item != aggregated_items_.end())\n      aggregated_items_.erase(item);\n"
+- description: Android offline aggregate query teardown and regression coverage (5).
+  regex:
+    re_pattern: '\ \ \ \ const\ OfflineItem\&\ item,\
+
+      \ \ \ \ const\ std::optional<UpdateDelta>\&\ update_delta\)\ \{\
+
+      \ \ DCHECK_CALLED_ON_VALID_SEQUENCE\(sequence_checker_\);\
+
+      \ \ if\ \(!pending_providers_\.empty\(\)\)\ \{\
+
+      \ \ \ \ for\ \(auto\&\ offline_item\ :\ aggregated_items_\)\ \{\
+
+      \ \ \ \ \ \ if\ \(offline_item\.id\ ==\ item\.id\)\ \{\
+
+      \ \ \ \ \ \ \ \ offline_item\ =\ item;\
+
+      '
+    replace: "    const OfflineItem& item,\n    const std::optional<UpdateDelta>& update_delta) {\n  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);\n#if BUILDFLAG(IS_ANDROID)\n  // The batch also remains active between final unregistration and its task.\n  if (!multiple_item_get_callbacks_.empty()) {\n#else\n  if (!pending_providers_.empty()) {\n#endif\n    for (auto& offline_item : aggregated_items_) {\n      if (offline_item.id == item.id) {\n        offline_item = item;\n"

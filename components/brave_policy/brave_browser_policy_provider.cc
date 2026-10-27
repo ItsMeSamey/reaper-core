@@ -5,11 +5,15 @@
 
 #include "brave/components/brave_policy/brave_browser_policy_provider.h"
 
+#include "build/build_config.h"
+
 #include <utility>
 
 #include "base/logging.h"
 #include "base/values.h"
+#if !BUILDFLAG(IS_ANDROID)
 #include "brave/components/brave_origin/brave_origin_utils.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 #include "components/policy/core/common/policy_bundle.h"
 #include "components/policy/core/common/policy_map.h"
 #include "components/policy/core/common/policy_namespace.h"
@@ -26,11 +30,16 @@ void BraveBrowserPolicyProvider::Init(policy::SchemaRegistry* registry) {
   // Call base class Init first
   policy::ConfigurationPolicyProvider::Init(registry);
 
+#if BUILDFLAG(IS_ANDROID)
+  // No asynchronous browser policy source remains on Android.
+  RefreshPolicies(policy::PolicyFetchReason::kBrowserStart);
+#else
   // Register as BraveOriginPolicyManager observer.
   // This ensures feature flags and local state are available before policy
   // loading.
   policy_manager_observation_.Observe(
       brave_origin::BraveOriginPolicyManager::GetInstance());
+#endif
 }
 
 void BraveBrowserPolicyProvider::RefreshPolicies(
@@ -62,9 +71,11 @@ void BraveBrowserPolicyProvider::OnBrowserPolicyChanged(
 policy::PolicyBundle BraveBrowserPolicyProvider::LoadPolicies() {
   policy::PolicyBundle bundle;
 
+#if !BUILDFLAG(IS_ANDROID)
   if (brave_origin::IsBraveOriginPurchased()) {
     LoadBraveOriginPolicies(bundle);
   }
+#endif  // !BUILDFLAG(IS_ANDROID)
 
   return bundle;
 }
@@ -74,6 +85,7 @@ CreateBraveBrowserPolicyProvider() {
   return std::make_unique<BraveBrowserPolicyProvider>();
 }
 
+#if !BUILDFLAG(IS_ANDROID)
 void BraveBrowserPolicyProvider::LoadBraveOriginPolicies(
     policy::PolicyBundle& bundle) {
   // Create policy map for Chrome domain
@@ -99,5 +111,6 @@ void BraveBrowserPolicyProvider::LoadBraveOriginPolicy(
                         policy::POLICY_SCOPE_USER, policy::POLICY_SOURCE_BRAVE,
                         base::Value(enabled), nullptr);
 }
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 }  // namespace brave_policy

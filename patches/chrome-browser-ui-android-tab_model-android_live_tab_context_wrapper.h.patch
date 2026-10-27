@@ -1,0 +1,88 @@
+diff --git a/chrome/browser/ui/android/tab_model/android_live_tab_context_wrapper.h b/chrome/browser/ui/android/tab_model/android_live_tab_context_wrapper.h
+--- a/chrome/browser/ui/android/tab_model/android_live_tab_context_wrapper.h
++++ b/chrome/browser/ui/android/tab_model/android_live_tab_context_wrapper.h
+@@ -19,6 +19,7 @@
+ #include "chrome/browser/ui/android/tab_model/android_live_tab_context.h"
+ #include "components/sessions/core/live_tab.h"
+ #include "components/sessions/core/tab_restore_types.h"
++#include "components/split_tabs/split_tab_visual_data.h"
+ #include "components/tab_groups/tab_group_id.h"
+ #include "components/tab_groups/tab_group_visual_data.h"
+ 
+@@ -64,10 +65,9 @@
+ 
+   // Gets the sessions::LiveTab corresponding to the tab at
+   // `relative_index` into `closed_tabs`. If the TabAndroid is frozen a
+-  // temporary WebContents without a renderer will be created. Note that only
+-  // one sessions::LiveTab* vended from this delegate should be alive at any
+-  // time as the temporary WebContents may be deleted upon next call to this
+-  // method as it's lifetime is managed by this wrapper class.
++  // temporary WebContents without a renderer will be created. All temporary
++  // contents remain alive for this wrapper's lifetime, including both split
++  // members.
+   sessions::LiveTab* GetLiveTabAt(int relative_index) const override;
+ 
+   // Gets the TabGroupId for the Tab at `relative_index` into `closed_tabs` or
+@@ -87,8 +87,19 @@
+   const std::optional<tab_groups::TabGroupId> GetGroupIdForSavedGroup(
+       const base::Uuid& saved) const override;
+ 
++  bool IsTabPinned(int relative_index) const override;
++  std::map<std::string, std::string> GetExtraDataForTab(
++      int relative_index) const override;
++  std::optional<split_tabs::SplitTabId> GetSplitForTab(
++      int relative_index) const override;
++  const split_tabs::SplitTabVisualData* GetVisualDataForSplit(
++      const split_tabs::SplitTabId& split_id) const override;
++
+  private:
+   TabAndroid* GetTabAt(int relative_index) const;
++  base::flat_map<int, split_tabs::SplitTabId> tab_id_to_split_;
++  base::flat_map<split_tabs::SplitTabId, split_tabs::SplitTabVisualData>
++      split_visual_data_;
+ 
+   // List of indices to close for using BrowserClosing to proxy bulk
+   // closure.
+@@ -108,9 +119,9 @@
+   // List of webContentStates to close linked by tab index for bulk closure.
+   std::vector<WebContentsStateByteBuffer> web_contents_state_;
+ 
+-  // The most recently unfrozen web contents. Mutable as const signature methods
+-  // modify this field (constness inherited from LiveTabContext).
+-  mutable std::unique_ptr<historical_tab_saver::ScopedWebContents>
++  // Keep each frozen member alive while the session service builds history
++  // entries.
++  mutable std::vector<std::unique_ptr<historical_tab_saver::ScopedWebContents>>
+       scoped_web_contents_;
+ };
+ 
+@@ -157,10 +168,29 @@
+       bool is_restoring_group_or_window,
+       sessions::tab_restore::Type original_session_type) override;
+ 
++  void ReconstructSplit(
++      sessions::LiveTab* leading_tab,
++      sessions::LiveTab* trailing_tab,
++      split_tabs::SplitTabId split_id,
++      const split_tabs::SplitTabVisualData& visual_data) override;
++  // Reuse the same Java grouping path for Recent Tabs and extension sessions.
++  // Returns false if the destination model is destroyed during reconstruction.
++  bool RestoreTabGroups(TabModel* model);
++
++  // Call after the Java tab groups have been restored.
++  void RestoreSplits();
++
+   // Returns the TabGroup data aggregated via AddRestoredTab.
+   const std::map<tab_groups::TabGroupId, TabGroup>& GetTabGroups();
+ 
+  private:
++  struct PendingSplit {
++    std::vector<int> tab_ids;
++    split_tabs::SplitTabId id;
++    split_tabs::SplitTabVisualData visual_data;
++  };
++  std::vector<PendingSplit> pending_splits_;
++
+   // Mapping of restored tab group ids to Android tab groups.
+   std::map<tab_groups::TabGroupId, TabGroup> tab_groups_;
+ };

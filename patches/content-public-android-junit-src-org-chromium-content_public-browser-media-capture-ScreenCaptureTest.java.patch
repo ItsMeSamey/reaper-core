@@ -1,0 +1,848 @@
+diff --git a/content/public/android/junit/src/org/chromium/content_public/browser/media/capture/ScreenCaptureTest.java b/content/public/android/junit/src/org/chromium/content_public/browser/media/capture/ScreenCaptureTest.java
+--- a/content/public/android/junit/src/org/chromium/content_public/browser/media/capture/ScreenCaptureTest.java
++++ b/content/public/android/junit/src/org/chromium/content_public/browser/media/capture/ScreenCaptureTest.java
+@@ -7,13 +7,14 @@
+ import static org.junit.Assert.assertEquals;
+ import static org.junit.Assert.assertFalse;
+ import static org.junit.Assert.assertNotNull;
+-import static org.junit.Assert.assertThrows;
++import static org.junit.Assert.assertSame;
+ import static org.junit.Assert.assertTrue;
+ import static org.mockito.ArgumentMatchers.any;
+ import static org.mockito.ArgumentMatchers.anyInt;
+ import static org.mockito.ArgumentMatchers.anyLong;
+ import static org.mockito.ArgumentMatchers.eq;
+ import static org.mockito.Mockito.doAnswer;
++import static org.mockito.Mockito.doThrow;
+ import static org.mockito.Mockito.mock;
+ import static org.mockito.Mockito.never;
+ import static org.mockito.Mockito.spy;
+@@ -64,15 +65,20 @@
+ import org.robolectric.annotation.Resetter;
+ 
+ import org.chromium.base.test.BaseRobolectricTestRunner;
++import org.chromium.content_public.browser.NavigationHandle;
++import org.chromium.content_public.browser.Page;
++import org.chromium.content_public.browser.RenderFrameHost;
+ import org.chromium.content_public.browser.WebContentsObserver;
+ import org.chromium.content_public.browser.test.mock.MockWebContents;
+ import org.chromium.ui.base.WindowAndroid;
+ 
+ import java.lang.ref.WeakReference;
+ import java.nio.ByteBuffer;
++import java.time.Duration;
+ import java.util.ArrayDeque;
+ import java.util.ArrayList;
+ import java.util.Queue;
++import java.util.concurrent.atomic.AtomicInteger;
+ 
+ /** Unit tests for {@link ScreenCapture}. */
+ @RunWith(BaseRobolectricTestRunner.class)
+@@ -91,9 +97,12 @@
+     private static final int NEW_WIDTH_PX = 400;
+     private static final int NEW_HEIGHT_PX = 500;
+     private static final long NATIVE_POINTER = 1L;
++    private static final int SOURCE_ID = 17;
+ 
+     @Mock private MockWebContents mWebContents;
++    @Mock private RenderFrameHost mRequestingFrame;
+     @Mock private WindowAndroid mWindowAndroid;
++    @Mock private Activity mActivity;
+     @Mock private MediaProjection mMediaProjection;
+     @Mock private VirtualDisplay mVirtualDisplay;
+     @Mock private ScreenCapture.Natives mNativeMock;
+@@ -115,6 +124,8 @@
+     @Implements(MediaProjectionManager.class)
+     public static class ShadowMediaProjectionManager {
+         private static MediaProjection sMediaProjection;
++        private static Intent sLastData;
++        private static boolean sThrowSecurityException;
+ 
+         static void setMediaProjection(MediaProjection projection) {
+             sMediaProjection = projection;
+@@ -122,12 +133,16 @@
+ 
+         @Implementation
+         protected MediaProjection getMediaProjection(int resultCode, Intent resultData) {
++            if (sThrowSecurityException) throw new SecurityException("Consent revoked");
++            sLastData = resultData;
+             return resultCode == Activity.RESULT_OK ? sMediaProjection : null;
+         }
+ 
+         @Resetter
+         public static void reset() {
+             sMediaProjection = null;
++            sLastData = null;
++            sThrowSecurityException = false;
+         }
+     }
+ 
+@@ -180,9 +195,12 @@
+ 
+         mScreenCapture = spy(new ScreenCapture(NATIVE_POINTER, this::createTestImageHandler));
+         ScreenCaptureJni.setInstanceForTesting(mNativeMock);
++        when(mNativeMock.registerDocumentObserver(eq(mWebContents), eq(mRequestingFrame), anyInt()))
++                .thenReturn(true);
+ 
+         when(mWebContents.getTopLevelNativeWindow()).thenReturn(mWindowAndroid);
+         when(mWindowAndroid.getContext()).thenReturn(new WeakReference<>(mContext));
++        when(mWindowAndroid.getActivity()).thenReturn(new WeakReference<>(mActivity));
+ 
+         updateConfiguration(mContext, TEST_WIDTH_DP, TEST_HEIGHT_DP, TEST_DPI);
+ 
+@@ -274,10 +292,16 @@
+     @Test
+     public void testStartCapture() {
+         final ActivityResult activityResult = new ActivityResult(Activity.RESULT_OK, new Intent());
+-        ScreenCapture.onPick(mWebContents, activityResult);
+-        ScreenCapture.onForegroundServiceRunning(true);
+-
+-        assertTrue(mScreenCapture.startCapture());
++        ScreenCapture.onPick(
++                mWebContents,
++                mRequestingFrame,
++                mWindowAndroid,
++                activityResult,
++                SOURCE_ID,
++                () -> {});
++        ScreenCapture.onForegroundServiceRunning(true);
++
++        assertTrue(mScreenCapture.startCapture(SOURCE_ID));
+         assertEquals(1, mImageHandlerStates.size());
+ 
+         final Surface surface = mImageHandlerStates.get(0).imageHandler.getSurface();
+@@ -294,9 +318,9 @@
+     }
+ 
+     @Test
+-    public void testStartCaptureThrowsIfNoPickResult() {
+-        ScreenCapture.onForegroundServiceRunning(true);
+-        assertThrows(AssertionError.class, () -> mScreenCapture.startCapture());
++    public void testStartCaptureRejectsMissingSource() {
++        ScreenCapture.onForegroundServiceRunning(true);
++        assertFalse(mScreenCapture.startCapture(SOURCE_ID));
+         verify(mMediaProjection, never())
+                 .createVirtualDisplay(
+                         any(), anyInt(), anyInt(), anyInt(), anyInt(), any(), any(), any());
+@@ -306,10 +330,16 @@
+     public void testStartCaptureFailsIfResultCanceled() {
+         final ActivityResult canceledResult =
+                 new ActivityResult(Activity.RESULT_CANCELED, new Intent());
+-        ScreenCapture.onPick(mWebContents, canceledResult);
+-        ScreenCapture.onForegroundServiceRunning(true);
+-
+-        assertFalse(mScreenCapture.startCapture());
++        ScreenCapture.onPick(
++                mWebContents,
++                mRequestingFrame,
++                mWindowAndroid,
++                canceledResult,
++                SOURCE_ID,
++                () -> {});
++        ScreenCapture.onForegroundServiceRunning(true);
++
++        assertFalse(mScreenCapture.startCapture(SOURCE_ID));
+         assertTrue(mImageHandlerStates.isEmpty());
+         verify(mMediaProjection, never())
+                 .createVirtualDisplay(
+@@ -320,27 +350,293 @@
+     public void testStartCaptureFailsIfNoMediaProjection() {
+         final ActivityResult activityResult = new ActivityResult(Activity.RESULT_OK, new Intent());
+         ShadowMediaProjectionManager.setMediaProjection(null);
+-        ScreenCapture.onPick(mWebContents, activityResult);
+-        ScreenCapture.onForegroundServiceRunning(true);
+-
+-        assertFalse(mScreenCapture.startCapture());
++        ScreenCapture.onPick(
++                mWebContents,
++                mRequestingFrame,
++                mWindowAndroid,
++                activityResult,
++                SOURCE_ID,
++                () -> {});
++        ScreenCapture.onForegroundServiceRunning(true);
++
++        assertFalse(mScreenCapture.startCapture(SOURCE_ID));
+         assertTrue(mImageHandlerStates.isEmpty());
+     }
+ 
+     @Test
+-    public void testOnPickThrowsIfCalledTwice() {
+-        final ActivityResult activityResult = new ActivityResult(Activity.RESULT_OK, new Intent());
+-        ScreenCapture.onPick(mWebContents, activityResult);
+-        assertThrows(
+-                AssertionError.class, () -> ScreenCapture.onPick(mWebContents, activityResult));
++    public void testOnPickRejectsDuplicateSource() {
++        final ActivityResult activityResult = new ActivityResult(Activity.RESULT_OK, new Intent());
++        ScreenCapture.onPick(
++                mWebContents,
++                mRequestingFrame,
++                mWindowAndroid,
++                activityResult,
++                SOURCE_ID,
++                () -> {});
++        assertFalse(
++                ScreenCapture.onPick(
++                        mWebContents,
++                        mRequestingFrame,
++                        mWindowAndroid,
++                        activityResult,
++                        SOURCE_ID,
++                        () -> {}));
++    }
++
++    @Test
++    public void invalidRequesterDocumentCannotRegisterConsent() {
++        when(mNativeMock.registerDocumentObserver(any(), any(), anyInt())).thenReturn(false);
++        AtomicInteger finished = new AtomicInteger();
++        assertFalse(
++                ScreenCapture.onPick(
++                        mWebContents,
++                        mRequestingFrame,
++                        mWindowAndroid,
++                        new ActivityResult(Activity.RESULT_OK, new Intent()),
++                        SOURCE_ID,
++                        finished::incrementAndGet));
++        assertEquals(0, finished.get());
++        ScreenCapture.onForegroundServiceRunning(true);
++        assertFalse(mScreenCapture.startCapture(SOURCE_ID));
++    }
++
++    @Test
++    public void offscreenOwnerUsesAuthorizedParentWindow() {
++        when(mWebContents.getTopLevelNativeWindow()).thenReturn(null);
++        assertTrue(
++                ScreenCapture.onPick(
++                        mWebContents,
++                        mRequestingFrame,
++                        mWindowAndroid,
++                        new ActivityResult(Activity.RESULT_OK, new Intent()),
++                        SOURCE_ID,
++                        () -> {}));
++        ScreenCapture.onForegroundServiceRunning(true);
++        assertTrue(mScreenCapture.startCapture(SOURCE_ID));
++        assertEquals(1, mImageHandlerStates.size());
++    }
++
++    @Test
++    public void parentActivityDestructionRevokesPendingConsent() {
++        AtomicInteger finished = new AtomicInteger();
++        assertTrue(
++                ScreenCapture.onPick(
++                        mWebContents,
++                        mRequestingFrame,
++                        mWindowAndroid,
++                        new ActivityResult(Activity.RESULT_OK, new Intent()),
++                        SOURCE_ID,
++                        finished::incrementAndGet));
++        ArgumentCaptor<WindowAndroid.ActivityStateObserver> observer =
++                ArgumentCaptor.forClass(WindowAndroid.ActivityStateObserver.class);
++        verify(mWindowAndroid).addActivityStateObserver(observer.capture());
++        observer.getValue().onActivityDestroyed();
++        assertEquals(1, finished.get());
++        verify(mNativeMock).releaseDocumentObserver(SOURCE_ID);
++        ScreenCapture.onForegroundServiceRunning(true);
++        assertFalse(mScreenCapture.startCapture(SOURCE_ID));
++    }
++
++    @Test
++    public void displayReleaseFailureStillFinishesConsent() {
++        AtomicInteger finished = new AtomicInteger();
++        assertTrue(
++                ScreenCapture.onPick(
++                        mWebContents,
++                        mRequestingFrame,
++                        mWindowAndroid,
++                        new ActivityResult(Activity.RESULT_OK, new Intent()),
++                        SOURCE_ID,
++                        finished::incrementAndGet));
++        ScreenCapture.onForegroundServiceRunning(true);
++        assertTrue(mScreenCapture.startCapture(SOURCE_ID));
++        doThrow(new IllegalStateException("Display already revoked"))
++                .when(mVirtualDisplay)
++                .release();
++        mScreenCapture.destroy();
++        mScreenCapture.destroy();
++        assertEquals(1, finished.get());
++        verify(mVirtualDisplay).release();
++        verify(mMediaProjection).stop();
++        verify(mNativeMock).releaseDocumentObserver(SOURCE_ID);
++    }
++
++    @Test
++    public void differentSourcesConsumeTheirOwnConsent() {
++        Intent first = new Intent("first");
++        Intent second = new Intent("second");
++        AtomicInteger finished = new AtomicInteger();
++        assertTrue(
++                ScreenCapture.onPick(
++                        mWebContents,
++                        mRequestingFrame,
++                        mWindowAndroid,
++                        new ActivityResult(Activity.RESULT_OK, first),
++                        SOURCE_ID,
++                        finished::incrementAndGet));
++        assertTrue(
++                ScreenCapture.onPick(
++                        mWebContents,
++                        mRequestingFrame,
++                        mWindowAndroid,
++                        new ActivityResult(Activity.RESULT_OK, second),
++                        SOURCE_ID + 1,
++                        finished::incrementAndGet));
++        ScreenCapture.onForegroundServiceRunning(true);
++        ScreenCapture other = new ScreenCapture(NATIVE_POINTER + 1, this::createTestImageHandler);
++        assertTrue(other.startCapture(SOURCE_ID + 1));
++        assertSame(second, ShadowMediaProjectionManager.sLastData);
++        assertTrue(mScreenCapture.startCapture(SOURCE_ID));
++        assertSame(first, ShadowMediaProjectionManager.sLastData);
++        other.destroy();
++        mScreenCapture.destroy();
++        assertEquals(2, finished.get());
++    }
++
++    @Test
++    public void consumedSourceCannotStartAnotherCapturer() {
++        ActivityResult result = new ActivityResult(Activity.RESULT_OK, new Intent());
++        assertTrue(
++                ScreenCapture.onPick(
++                        mWebContents,
++                        mRequestingFrame,
++                        mWindowAndroid,
++                        result,
++                        SOURCE_ID,
++                        () -> {}));
++        ScreenCapture.onForegroundServiceRunning(true);
++        assertTrue(mScreenCapture.startCapture(SOURCE_ID));
++        ScreenCapture other = new ScreenCapture(NATIVE_POINTER + 1, this::createTestImageHandler);
++        assertFalse(other.startCapture(SOURCE_ID));
++        assertEquals(1, mImageHandlerStates.size());
++        other.destroy();
++    }
++
++    @Test
++    public void pendingConsentExpiresAndFinishesExactlyOnce() {
++        AtomicInteger finished = new AtomicInteger();
++        ActivityResult result = new ActivityResult(Activity.RESULT_OK, new Intent());
++        assertTrue(
++                ScreenCapture.onPick(
++                        mWebContents,
++                        mRequestingFrame,
++                        mWindowAndroid,
++                        result,
++                        SOURCE_ID,
++                        finished::incrementAndGet));
++        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(11));
++        ScreenCapture.cancelPick(SOURCE_ID);
++        assertEquals(1, finished.get());
++        ScreenCapture.onForegroundServiceRunning(true);
++        assertFalse(mScreenCapture.startCapture(SOURCE_ID));
++    }
++
++    @Test
++    public void ownerNavigationRevokesConsent() {
++        AtomicInteger finished = new AtomicInteger();
++        ActivityResult result = new ActivityResult(Activity.RESULT_OK, new Intent());
++        assertTrue(
++                ScreenCapture.onPick(
++                        mWebContents,
++                        mRequestingFrame,
++                        mWindowAndroid,
++                        result,
++                        SOURCE_ID,
++                        finished::incrementAndGet));
++        ArgumentCaptor<WebContentsObserver> observer =
++                ArgumentCaptor.forClass(WebContentsObserver.class);
++        verify(mWebContents).addObserver(observer.capture());
++        NavigationHandle sameDocument = mock(NavigationHandle.class);
++        when(sameDocument.isSameDocument()).thenReturn(true);
++        observer.getValue().didStartNavigationInPrimaryMainFrame(sameDocument);
++        assertEquals(0, finished.get());
++        observer.getValue().didStartNavigationInPrimaryMainFrame(mock(NavigationHandle.class));
++        assertEquals(1, finished.get());
++        ScreenCapture.onForegroundServiceRunning(true);
++        assertFalse(mScreenCapture.startCapture(SOURCE_ID));
++    }
++
++    @Test
++    public void primaryPageReplacementRevokesPendingConsent() {
++        AtomicInteger finished = new AtomicInteger();
++        ActivityResult result = new ActivityResult(Activity.RESULT_OK, new Intent());
++        assertTrue(
++                ScreenCapture.onPick(
++                        mWebContents,
++                        mRequestingFrame,
++                        mWindowAndroid,
++                        result,
++                        SOURCE_ID,
++                        finished::incrementAndGet));
++        ArgumentCaptor<WebContentsObserver> observer =
++                ArgumentCaptor.forClass(WebContentsObserver.class);
++        verify(mWebContents).addObserver(observer.capture());
++        observer.getValue().primaryPageChanged(mock(Page.class));
++        observer.getValue().primaryPageChanged(mock(Page.class));
++        assertEquals(1, finished.get());
++        ScreenCapture.onForegroundServiceRunning(true);
++        assertFalse(mScreenCapture.startCapture(SOURCE_ID));
++    }
++
++    @Test
++    public void ownerDestructionStopsActiveProjectionAndFinishesOnce() {
++        AtomicInteger finished = new AtomicInteger();
++        ActivityResult result = new ActivityResult(Activity.RESULT_OK, new Intent());
++        assertTrue(
++                ScreenCapture.onPick(
++                        mWebContents,
++                        mRequestingFrame,
++                        mWindowAndroid,
++                        result,
++                        SOURCE_ID,
++                        finished::incrementAndGet));
++        ScreenCapture.onForegroundServiceRunning(true);
++        assertTrue(mScreenCapture.startCapture(SOURCE_ID));
++        ArgumentCaptor<WebContentsObserver> observer =
++                ArgumentCaptor.forClass(WebContentsObserver.class);
++        verify(mWebContents).addObserver(observer.capture());
++        observer.getValue().webContentsDestroyed();
++        shadowOf(Looper.myLooper()).idle();
++        ScreenCapture.cancelPick(SOURCE_ID);
++        mScreenCapture.destroy();
++        assertEquals(1, finished.get());
++        verify(mNativeMock).onStop(NATIVE_POINTER);
++        verify(mMediaProjection).stop();
++        verify(mVirtualDisplay).release();
++    }
++
++    @Test
++    public void osPermissionRejectionCleansUpAcceptedConsent() {
++        AtomicInteger finished = new AtomicInteger();
++        ActivityResult result = new ActivityResult(Activity.RESULT_OK, new Intent());
++        assertTrue(
++                ScreenCapture.onPick(
++                        mWebContents,
++                        mRequestingFrame,
++                        mWindowAndroid,
++                        result,
++                        SOURCE_ID,
++                        finished::incrementAndGet));
++        ScreenCapture.onForegroundServiceRunning(true);
++        ShadowMediaProjectionManager.sThrowSecurityException = true;
++        assertFalse(mScreenCapture.startCapture(SOURCE_ID));
++        assertEquals(1, finished.get());
++        verify(mContext).unregisterComponentCallbacks(any());
++        assertTrue(mImageHandlerStates.isEmpty());
+     }
+ 
+     @Test
+     public void testDestroy() {
+         final ActivityResult activityResult = new ActivityResult(Activity.RESULT_OK, new Intent());
+-        ScreenCapture.onPick(mWebContents, activityResult);
+-        ScreenCapture.onForegroundServiceRunning(true);
+-        assertTrue(mScreenCapture.startCapture());
++        ScreenCapture.onPick(
++                mWebContents,
++                mRequestingFrame,
++                mWindowAndroid,
++                activityResult,
++                SOURCE_ID,
++                () -> {});
++        ScreenCapture.onForegroundServiceRunning(true);
++        assertTrue(mScreenCapture.startCapture(SOURCE_ID));
+         mScreenCapture.destroy();
+ 
+         assertEquals(1, mImageHandlerStates.size());
+@@ -352,9 +648,15 @@
+     @Test
+     public void testMediaProjectionOnStopAndDestroy() {
+         final ActivityResult activityResult = new ActivityResult(Activity.RESULT_OK, new Intent());
+-        ScreenCapture.onPick(mWebContents, activityResult);
+-        ScreenCapture.onForegroundServiceRunning(true);
+-        assertTrue(mScreenCapture.startCapture());
++        ScreenCapture.onPick(
++                mWebContents,
++                mRequestingFrame,
++                mWindowAndroid,
++                activityResult,
++                SOURCE_ID,
++                () -> {});
++        ScreenCapture.onForegroundServiceRunning(true);
++        assertTrue(mScreenCapture.startCapture(SOURCE_ID));
+ 
+         final MediaProjection.Callback callback = getMediaProjectionCallback();
+         callback.onStop();
+@@ -369,9 +671,15 @@
+     @Test
+     public void testMediaProjectionOnStopDoesNotStopNative() {
+         final ActivityResult activityResult = new ActivityResult(Activity.RESULT_OK, new Intent());
+-        ScreenCapture.onPick(mWebContents, activityResult);
+-        ScreenCapture.onForegroundServiceRunning(true);
+-        assertTrue(mScreenCapture.startCapture());
++        ScreenCapture.onPick(
++                mWebContents,
++                mRequestingFrame,
++                mWindowAndroid,
++                activityResult,
++                SOURCE_ID,
++                () -> {});
++        ScreenCapture.onForegroundServiceRunning(true);
++        assertTrue(mScreenCapture.startCapture(SOURCE_ID));
+ 
+         MediaProjection.Callback callback = getMediaProjectionCallback();
+         mScreenCapture.destroy();
+@@ -390,9 +698,15 @@
+     @Test
+     public void destroyClosesAllImageHandlers() {
+         final ActivityResult activityResult = new ActivityResult(Activity.RESULT_OK, new Intent());
+-        ScreenCapture.onPick(mWebContents, activityResult);
+-        ScreenCapture.onForegroundServiceRunning(true);
+-        assertTrue(mScreenCapture.startCapture());
++        ScreenCapture.onPick(
++                mWebContents,
++                mRequestingFrame,
++                mWindowAndroid,
++                activityResult,
++                SOURCE_ID,
++                () -> {});
++        ScreenCapture.onForegroundServiceRunning(true);
++        assertTrue(mScreenCapture.startCapture(SOURCE_ID));
+ 
+         MediaProjection.Callback callback = getMediaProjectionCallback();
+         callback.onCapturedContentResize(NEW_WIDTH_PX, NEW_HEIGHT_PX);
+@@ -407,9 +721,15 @@
+     @Test
+     public void testOnCapturedContentResizeDoesNothingAfterDestroy() {
+         final ActivityResult activityResult = new ActivityResult(Activity.RESULT_OK, new Intent());
+-        ScreenCapture.onPick(mWebContents, activityResult);
+-        ScreenCapture.onForegroundServiceRunning(true);
+-        assertTrue(mScreenCapture.startCapture());
++        ScreenCapture.onPick(
++                mWebContents,
++                mRequestingFrame,
++                mWindowAndroid,
++                activityResult,
++                SOURCE_ID,
++                () -> {});
++        ScreenCapture.onForegroundServiceRunning(true);
++        assertTrue(mScreenCapture.startCapture(SOURCE_ID));
+ 
+         MediaProjection.Callback callback = getMediaProjectionCallback();
+         mScreenCapture.destroy();
+@@ -422,9 +742,15 @@
+     @Test
+     public void testOnCapturedContentResizeRecreatesHandlerAndUpdatesVirtualDisplay() {
+         final ActivityResult activityResult = new ActivityResult(Activity.RESULT_OK, new Intent());
+-        ScreenCapture.onPick(mWebContents, activityResult);
+-        ScreenCapture.onForegroundServiceRunning(true);
+-        assertTrue(mScreenCapture.startCapture());
++        ScreenCapture.onPick(
++                mWebContents,
++                mRequestingFrame,
++                mWindowAndroid,
++                activityResult,
++                SOURCE_ID,
++                () -> {});
++        ScreenCapture.onForegroundServiceRunning(true);
++        assertTrue(mScreenCapture.startCapture(SOURCE_ID));
+ 
+         assertEquals(1, mImageHandlerStates.size());
+         final MediaProjection.Callback callback = getMediaProjectionCallback();
+@@ -442,9 +768,15 @@
+     @Test
+     public void testOnCapturedContentResizeDoesNothingIfSizeIsUnchanged() {
+         final ActivityResult activityResult = new ActivityResult(Activity.RESULT_OK, new Intent());
+-        ScreenCapture.onPick(mWebContents, activityResult);
+-        ScreenCapture.onForegroundServiceRunning(true);
+-        assertTrue(mScreenCapture.startCapture());
++        ScreenCapture.onPick(
++                mWebContents,
++                mRequestingFrame,
++                mWindowAndroid,
++                activityResult,
++                SOURCE_ID,
++                () -> {});
++        ScreenCapture.onForegroundServiceRunning(true);
++        assertTrue(mScreenCapture.startCapture(SOURCE_ID));
+ 
+         assertEquals(1, mImageHandlerStates.size());
+         final MediaProjection.Callback callback = getMediaProjectionCallback();
+@@ -461,9 +793,15 @@
+     @Test
+     public void testOnCapturedContentResizeDoesNothingIfContextIsMissing() {
+         final ActivityResult activityResult = new ActivityResult(Activity.RESULT_OK, new Intent());
+-        ScreenCapture.onPick(mWebContents, activityResult);
+-        ScreenCapture.onForegroundServiceRunning(true);
+-        assertTrue(mScreenCapture.startCapture());
++        ScreenCapture.onPick(
++                mWebContents,
++                mRequestingFrame,
++                mWindowAndroid,
++                activityResult,
++                SOURCE_ID,
++                () -> {});
++        ScreenCapture.onForegroundServiceRunning(true);
++        assertTrue(mScreenCapture.startCapture(SOURCE_ID));
+ 
+         final ArgumentCaptor<WebContentsObserver> observerCaptor =
+                 ArgumentCaptor.forClass(WebContentsObserver.class);
+@@ -487,9 +825,15 @@
+     @Test
+     public void testImageHandlerRecreatesOnFormatError() {
+         final ActivityResult activityResult = new ActivityResult(Activity.RESULT_OK, new Intent());
+-        ScreenCapture.onPick(mWebContents, activityResult);
+-        ScreenCapture.onForegroundServiceRunning(true);
+-        assertTrue(mScreenCapture.startCapture());
++        ScreenCapture.onPick(
++                mWebContents,
++                mRequestingFrame,
++                mWindowAndroid,
++                activityResult,
++                SOURCE_ID,
++                () -> {});
++        ScreenCapture.onForegroundServiceRunning(true);
++        assertTrue(mScreenCapture.startCapture(SOURCE_ID));
+ 
+         assertEquals(1, mImageHandlerStates.size());
+         final var state0 = mImageHandlerStates.get(0);
+@@ -513,9 +857,15 @@
+     @Test
+     public void testImageHandlerFormatFallbackPersistsAcrossResizes() {
+         final ActivityResult activityResult = new ActivityResult(Activity.RESULT_OK, new Intent());
+-        ScreenCapture.onPick(mWebContents, activityResult);
+-        ScreenCapture.onForegroundServiceRunning(true);
+-        assertTrue(mScreenCapture.startCapture());
++        ScreenCapture.onPick(
++                mWebContents,
++                mRequestingFrame,
++                mWindowAndroid,
++                activityResult,
++                SOURCE_ID,
++                () -> {});
++        ScreenCapture.onForegroundServiceRunning(true);
++        assertTrue(mScreenCapture.startCapture(SOURCE_ID));
+         MediaProjection.Callback callback = getMediaProjectionCallback();
+ 
+         final ImageReader reader0 = mImageHandlerStates.get(0).imageReader;
+@@ -543,9 +893,15 @@
+     @Test
+     public void testOnStopAfterDestroy() {
+         final ActivityResult activityResult = new ActivityResult(Activity.RESULT_OK, new Intent());
+-        ScreenCapture.onPick(mWebContents, activityResult);
+-        ScreenCapture.onForegroundServiceRunning(true);
+-        assertTrue(mScreenCapture.startCapture());
++        ScreenCapture.onPick(
++                mWebContents,
++                mRequestingFrame,
++                mWindowAndroid,
++                activityResult,
++                SOURCE_ID,
++                () -> {});
++        ScreenCapture.onForegroundServiceRunning(true);
++        assertTrue(mScreenCapture.startCapture(SOURCE_ID));
+         MediaProjection.Callback callback = getMediaProjectionCallback();
+ 
+         mScreenCapture.destroy();
+@@ -575,9 +931,15 @@
+                         anyInt());
+ 
+         final ActivityResult activityResult = new ActivityResult(Activity.RESULT_OK, new Intent());
+-        ScreenCapture.onPick(mWebContents, activityResult);
+-        ScreenCapture.onForegroundServiceRunning(true);
+-        assertTrue(mScreenCapture.startCapture());
++        ScreenCapture.onPick(
++                mWebContents,
++                mRequestingFrame,
++                mWindowAndroid,
++                activityResult,
++                SOURCE_ID,
++                () -> {});
++        ScreenCapture.onForegroundServiceRunning(true);
++        assertTrue(mScreenCapture.startCapture(SOURCE_ID));
+         final MediaProjection.Callback callback = getMediaProjectionCallback();
+ 
+         // Frame arrives for handler0.
+@@ -643,9 +1005,15 @@
+                         anyInt());
+ 
+         final ActivityResult activityResult = new ActivityResult(Activity.RESULT_OK, new Intent());
+-        ScreenCapture.onPick(mWebContents, activityResult);
+-        ScreenCapture.onForegroundServiceRunning(true);
+-        assertTrue(mScreenCapture.startCapture());
++        ScreenCapture.onPick(
++                mWebContents,
++                mRequestingFrame,
++                mWindowAndroid,
++                activityResult,
++                SOURCE_ID,
++                () -> {});
++        ScreenCapture.onForegroundServiceRunning(true);
++        assertTrue(mScreenCapture.startCapture(SOURCE_ID));
+ 
+         final ImageHandler handler = mImageHandlerStates.get(0).imageHandler;
+         final ImageReader reader = mImageHandlerStates.get(0).imageReader;
+@@ -709,9 +1077,15 @@
+                         anyInt());
+ 
+         final ActivityResult activityResult = new ActivityResult(Activity.RESULT_OK, new Intent());
+-        ScreenCapture.onPick(mWebContents, activityResult);
+-        ScreenCapture.onForegroundServiceRunning(true);
+-        assertTrue(mScreenCapture.startCapture());
++        ScreenCapture.onPick(
++                mWebContents,
++                mRequestingFrame,
++                mWindowAndroid,
++                activityResult,
++                SOURCE_ID,
++                () -> {});
++        ScreenCapture.onForegroundServiceRunning(true);
++        assertTrue(mScreenCapture.startCapture(SOURCE_ID));
+ 
+         final ImageHandler handler = mImageHandlerStates.get(0).imageHandler;
+         final ImageReader reader = mImageHandlerStates.get(0).imageReader;
+@@ -765,9 +1139,15 @@
+                         anyInt());
+ 
+         final ActivityResult activityResult = new ActivityResult(Activity.RESULT_OK, new Intent());
+-        ScreenCapture.onPick(mWebContents, activityResult);
+-        ScreenCapture.onForegroundServiceRunning(true);
+-        assertTrue(mScreenCapture.startCapture());
++        ScreenCapture.onPick(
++                mWebContents,
++                mRequestingFrame,
++                mWindowAndroid,
++                activityResult,
++                SOURCE_ID,
++                () -> {});
++        ScreenCapture.onForegroundServiceRunning(true);
++        assertTrue(mScreenCapture.startCapture(SOURCE_ID));
+         final MediaProjection.Callback callback = getMediaProjectionCallback();
+ 
+         // Resize twice before sending any frames.
+@@ -806,10 +1186,16 @@
+     @Test
+     public void testOnTopLevelNativeWindowChanged() {
+         final ActivityResult activityResult = new ActivityResult(Activity.RESULT_OK, new Intent());
+-        ScreenCapture.onPick(mWebContents, activityResult);
+-        ScreenCapture.onForegroundServiceRunning(true);
+-
+-        assertTrue(mScreenCapture.startCapture());
++        ScreenCapture.onPick(
++                mWebContents,
++                mRequestingFrame,
++                mWindowAndroid,
++                activityResult,
++                SOURCE_ID,
++                () -> {});
++        ScreenCapture.onForegroundServiceRunning(true);
++
++        assertTrue(mScreenCapture.startCapture(SOURCE_ID));
+         assertEquals(1, mImageHandlerStates.size());
+ 
+         final ArgumentCaptor<WebContentsObserver> observerCaptor =
+@@ -841,10 +1227,16 @@
+     @Test
+     public void testOnConfigurationChanged() {
+         final ActivityResult activityResult = new ActivityResult(Activity.RESULT_OK, new Intent());
+-        ScreenCapture.onPick(mWebContents, activityResult);
+-        ScreenCapture.onForegroundServiceRunning(true);
+-
+-        assertTrue(mScreenCapture.startCapture());
++        ScreenCapture.onPick(
++                mWebContents,
++                mRequestingFrame,
++                mWindowAndroid,
++                activityResult,
++                SOURCE_ID,
++                () -> {});
++        ScreenCapture.onForegroundServiceRunning(true);
++
++        assertTrue(mScreenCapture.startCapture(SOURCE_ID));
+         assertEquals(1, mImageHandlerStates.size());
+ 
+         final ArgumentCaptor<ComponentCallbacks> callbackCaptor =
+@@ -876,10 +1268,16 @@
+     @Test
+     public void testOnI420FrameAvailable() {
+         final ActivityResult activityResult = new ActivityResult(Activity.RESULT_OK, new Intent());
+-        ScreenCapture.onPick(mWebContents, activityResult);
+-        ScreenCapture.onForegroundServiceRunning(true);
+-
+-        assertTrue(mScreenCapture.startCapture());
++        ScreenCapture.onPick(
++                mWebContents,
++                mRequestingFrame,
++                mWindowAndroid,
++                activityResult,
++                SOURCE_ID,
++                () -> {});
++        ScreenCapture.onForegroundServiceRunning(true);
++
++        assertTrue(mScreenCapture.startCapture(SOURCE_ID));
+         assertEquals(1, mImageHandlerStates.size());
+ 
+         // Fallback to YUV first.
+@@ -944,10 +1342,16 @@
+     @Test
+     public void testOnI420FrameAvailableAfterDestroy() {
+         final ActivityResult activityResult = new ActivityResult(Activity.RESULT_OK, new Intent());
+-        ScreenCapture.onPick(mWebContents, activityResult);
+-        ScreenCapture.onForegroundServiceRunning(true);
+-
+-        assertTrue(mScreenCapture.startCapture());
++        ScreenCapture.onPick(
++                mWebContents,
++                mRequestingFrame,
++                mWindowAndroid,
++                activityResult,
++                SOURCE_ID,
++                () -> {});
++        ScreenCapture.onForegroundServiceRunning(true);
++
++        assertTrue(mScreenCapture.startCapture(SOURCE_ID));
+         assertEquals(1, mImageHandlerStates.size());
+ 
+         // Fallback to YUV first.
+@@ -991,20 +1395,32 @@
+     @Test
+     public void testStartCaptureFailsIfWebContentsDestroyed() {
+         final ActivityResult activityResult = new ActivityResult(Activity.RESULT_OK, new Intent());
+-        ScreenCapture.onPick(mWebContents, activityResult);
++        ScreenCapture.onPick(
++                mWebContents,
++                mRequestingFrame,
++                mWindowAndroid,
++                activityResult,
++                SOURCE_ID,
++                () -> {});
+         ScreenCapture.onForegroundServiceRunning(true);
+ 
+         // Simulate WebContents destroyed before UI thread block runs.
+         when(mWebContents.isDestroyed()).thenReturn(true);
+ 
+-        assertFalse(mScreenCapture.startCapture());
++        assertFalse(mScreenCapture.startCapture(SOURCE_ID));
+         assertTrue(mImageHandlerStates.isEmpty());
+     }
+ 
+     @Test
+     public void testStartCaptureFailsIfDestroyedConcurrently() {
+         final ActivityResult activityResult = new ActivityResult(Activity.RESULT_OK, new Intent());
+-        ScreenCapture.onPick(mWebContents, activityResult);
++        ScreenCapture.onPick(
++                mWebContents,
++                mRequestingFrame,
++                mWindowAndroid,
++                activityResult,
++                SOURCE_ID,
++                () -> {});
+         ScreenCapture.onForegroundServiceRunning(true);
+ 
+         // Simulate destroy() called concurrently (sets native pointer to 0) during UI block.
+@@ -1017,7 +1433,7 @@
+                 .when(mWebContents)
+                 .addObserver(any());
+ 
+-        assertFalse(mScreenCapture.startCapture());
++        assertFalse(mScreenCapture.startCapture(SOURCE_ID));
+         assertTrue(mImageHandlerStates.isEmpty());
+     }
+ }

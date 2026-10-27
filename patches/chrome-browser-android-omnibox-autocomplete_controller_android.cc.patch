@@ -1,0 +1,206 @@
+diff --git a/chrome/browser/android/omnibox/autocomplete_controller_android.cc b/chrome/browser/android/omnibox/autocomplete_controller_android.cc
+index 5f19f7126affa35c3b93737c9bd7404e2244c53b..e9cf23bd8fe348c43fdce28791e5601b9815e529 100644
+--- a/chrome/browser/android/omnibox/autocomplete_controller_android.cc
++++ b/chrome/browser/android/omnibox/autocomplete_controller_android.cc
+@@ -32,7 +32,6 @@
+ #include "chrome/browser/autocomplete/chrome_autocomplete_provider_client.h"
+ #include "chrome/browser/autocomplete/chrome_autocomplete_scheme_classifier.h"
+ #include "chrome/browser/autocomplete/shortcuts_backend_factory.h"
+-#include "chrome/browser/contextual_tasks/contextual_tasks_utils.h"
+ #include "chrome/browser/omnibox/autocomplete_controller_emitter_factory.h"
+ #include "chrome/browser/page_load_metrics/chrome_initiator_location.h"
+ #include "chrome/browser/predictors/autocomplete_action_predictor.h"
+@@ -61,7 +60,6 @@
+ #include "components/omnibox/browser/geolocation_header_service.h"
+ #include "components/omnibox/browser/history_fuzzy_provider.h"
+ #include "components/omnibox/browser/keyword_provider.h"
+-#include "components/omnibox/browser/lens_suggest_inputs_utils.h"
+ #include "components/omnibox/browser/omnibox_event_global_tracker.h"
+ #include "components/omnibox/browser/omnibox_field_trial.h"
+ #include "components/omnibox/browser/omnibox_log.h"
+@@ -122,10 +120,10 @@ void RecordClipboardMetrics(AutocompleteMatchType::Type match_type) {
+   }
+ }
+ 
+-content::WebContents* GetContextualTaskSpecificWebContents(
++content::WebContents* GetAutocompleteRequestWebContents(
+     base::WeakPtr<AutocompleteControllerAndroid> weak_ptr) {
+   if (weak_ptr.MaybeValid()) {
+-    return weak_ptr->GetContextualTasksWebContents();
++    return weak_ptr->GetRequestWebContents();
+   }
+ 
+   return nullptr;
+@@ -143,7 +141,7 @@ AutocompleteControllerAndroid::AutocompleteControllerAndroid(
+           reinterpret_cast<intptr_t>(this))} {
+   auto autocomplete_provider_client =
+       std::make_unique<ChromeAutocompleteProviderClient>(
+-          profile, base::BindRepeating(&GetContextualTaskSpecificWebContents,
++          profile, base::BindRepeating(&GetAutocompleteRequestWebContents,
+                                        weak_ptr_factory_.GetWeakPtr()));
+ 
+   autocomplete_controller_ = std::make_unique<AutocompleteController>(
+@@ -167,7 +165,6 @@ void AutocompleteControllerAndroid::Start(
+     const std::string& desired_tld,
+     const GURL& current_url,
+     ::metrics::OmniboxEventProto::PageClassification page_classification,
+-    ::omnibox::ToolMode tool_mode,
+     bool prevent_inline_autocomplete,
+     bool in_keyword_mode,
+     bool allow_exact_keyword_match,
+@@ -175,7 +172,7 @@ void AutocompleteControllerAndroid::Start(
+   autocomplete_controller_->result().DestroyJavaObject();
+ 
+   if (web_contents) {
+-    contextual_tasks_web_contents_ = web_contents->GetWeakPtr();
++    request_web_contents_ = web_contents->GetWeakPtr();
+   }
+ 
+   size_t actual_cursor_pos =
+@@ -189,20 +186,6 @@ void AutocompleteControllerAndroid::Start(
+   input_.set_allow_exact_keyword_match(allow_exact_keyword_match);
+   input_.set_omit_asynchronous_matches(!want_asynchronous_matches);
+ 
+-  auto* bridge = composebox_query_controller_bridge_.get();
+-  if (bridge) {
+-    AndroidComposeboxNonZPSSection::num_attachments_ =
+-        bridge->GetAttachmentCount();
+-
+-    std::unique_ptr<lens::proto::LensOverlaySuggestInputs> inputs =
+-        bridge->CreateLensOverlaySuggestInputs();
+-    if (AreLensSuggestInputsReady(*inputs)) {
+-      input_.set_lens_overlay_suggest_inputs(std::move(inputs));
+-    }
+-    omnibox::InputState input_state;
+-    input_state.active_tool = tool_mode;
+-    input_.set_input_state(input_state);
+-  }
+   autocomplete_controller_->Start(input_);
+ }
+ 
+@@ -230,12 +213,11 @@ ScopedJavaLocalRef<jobject> AutocompleteControllerAndroid::Classify(
+ 
+   inside_synchronous_start_ = true;
+   Start(nullptr, text, -1, "", GURL(), ::metrics::OmniboxEventProto::OTHER,
+-        omnibox::TOOL_MODE_UNSPECIFIED, true, false, false, false);
++        true, false, false, false);
+   inside_synchronous_start_ = false;
+   DCHECK(autocomplete_controller_->done());
+   AutocompleteResult& result =
+       const_cast<AutocompleteResult&>(autocomplete_controller_->result());
+-  PostProcessResult(result);
+   if (result.empty()) {
+     return ScopedJavaLocalRef<jobject>();
+   }
+@@ -251,7 +233,6 @@ void AutocompleteControllerAndroid::OnOmniboxFocused(
+     const std::u16string& omnibox_text_in,
+     const GURL& current_url,
+     ::metrics::OmniboxEventProto::PageClassification page_classification,
+-    ::omnibox::ToolMode tool_mode,
+     const std::u16string& current_title) {
+   using OFT = metrics::OmniboxFocusType;
+ 
+@@ -262,7 +243,7 @@ void AutocompleteControllerAndroid::OnOmniboxFocused(
+   }
+ 
+   if (web_contents) {
+-    contextual_tasks_web_contents_ = web_contents->GetWeakPtr();
++    request_web_contents_ = web_contents->GetWeakPtr();
+   }
+ 
+   std::u16string url_u16 = base::UTF8ToUTF16(current_url.spec());
+@@ -303,26 +284,6 @@ void AutocompleteControllerAndroid::OnOmniboxFocused(
+   input_.set_current_title(current_title);
+   input_.set_focus_type(OFT::INTERACTION_FOCUS);
+ 
+-  // Apply any AI Modes and Tools.
+-  auto* bridge = composebox_query_controller_bridge_.get();
+-  if (bridge) {
+-    AndroidComposeboxZpsSection::num_attachments_ =
+-        bridge->GetAttachmentCount();
+-    AndroidComposeboxNonZPSSection::tool_mode_ = tool_mode;
+-
+-    std::unique_ptr<lens::proto::LensOverlaySuggestInputs> inputs =
+-        bridge->CreateLensOverlaySuggestInputs();
+-    // Don't set lens params if in "Create Image" mode. This prevents the
+-    // contextual client from being used in this tool mode.
+-    if (AreLensSuggestInputsReady(*inputs) &&
+-        tool_mode != omnibox::TOOL_MODE_IMAGE_GEN_UPLOAD) {
+-      input_.set_lens_overlay_suggest_inputs(std::move(inputs));
+-    }
+-    omnibox::InputState input_state;
+-    input_state.active_tool = tool_mode;
+-    input_.set_input_state(input_state);
+-  }
+-
+   autocomplete_controller_->Start(input_);
+ }
+ 
+@@ -330,7 +291,7 @@ void AutocompleteControllerAndroid::Stop(AutocompleteStopReason reason) {
+   autocomplete_controller_->Stop(reason);
+ 
+   if (reason == AutocompleteStopReason::kClobbered) {
+-    contextual_tasks_web_contents_.reset();
++    request_web_contents_.reset();
+   }
+ }
+ 
+@@ -521,19 +482,6 @@ void AutocompleteControllerAndroid::EnsureFactoryBuilt() {
+   AutocompleteControllerAndroid::Factory::GetInstance();
+ }
+ 
+-void AutocompleteControllerAndroid::SetComposeboxQueryControllerBridge(
+-    uintptr_t composebox_controller_ptr) {
+-  if (!composebox_controller_ptr) {
+-    composebox_query_controller_bridge_.reset();
+-    return;
+-  }
+-
+-  composebox_query_controller_bridge_ =
+-      reinterpret_cast<ComposeboxQueryControllerBridge*>(
+-          composebox_controller_ptr)
+-          ->AsWeakPtr();
+-}
+-
+ void AutocompleteControllerAndroid::SetVoiceMatches(
+     const std::vector<std::u16string>& voice_matches,
+     const std::vector<float>& confidence_scores) {
+@@ -635,7 +583,6 @@ void AutocompleteControllerAndroid::OnResultChanged(
+   if (!inside_synchronous_start_) {
+     AutocompleteResult& result =
+         const_cast<AutocompleteResult&>(controller->result());
+-    PostProcessResult(result);
+     NotifySuggestionsReceived(result);
+   }
+ }
+@@ -664,27 +611,10 @@ void AutocompleteControllerAndroid::WarmUpRenderProcess() const {
+   content::SpareRenderProcessHostManager::Get().WarmupSpare(profile_);
+ }
+ 
+-void AutocompleteControllerAndroid::PostProcessResult(
+-    AutocompleteResult& result) {
+-  if (auto* web_contents = GetContextualTasksWebContents()) {
+-    for (auto& match : result) {
+-      if (contextual_tasks::IsContextualTasksUrl(match.destination_url)) {
+-        GURL pretty_url =
+-            contextual_tasks::GetContextualTasksDisplayURL(web_contents);
+-        if (pretty_url.is_valid()) {
+-          match.contents = base::UTF8ToUTF16(pretty_url.spec());
+-          match.contents_class.clear();
+-          match.contents_class.emplace_back(0, ACMatchClassification::URL);
+-        }
+-      }
+-    }
+-  }
+-}
+-
+ content::WebContents*
+-AutocompleteControllerAndroid::GetContextualTasksWebContents() const {
+-  if (contextual_tasks_web_contents_.MaybeValid()) {
+-    return contextual_tasks_web_contents_.get();
++AutocompleteControllerAndroid::GetRequestWebContents() const {
++  if (request_web_contents_.MaybeValid()) {
++    return request_web_contents_.get();
+   }
+   return nullptr;
+ }

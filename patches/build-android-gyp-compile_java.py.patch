@@ -1,0 +1,79 @@
+diff --git a/build/android/gyp/compile_java.py b/build/android/gyp/compile_java.py
+--- a/build/android/gyp/compile_java.py
++++ b/build/android/gyp/compile_java.py
+@@ -366,6 +366,57 @@
+     logging.info('Completed all steps in _OnStaleMd5')
+ 
+ 
++def _ApplyReaperJavacBudget(cmd, environment):
++    # This private hint comes from Reaper's selected aggregate-RSS budget. Keep
++    # upstream behavior unchanged outside those controllers and for JavaCmd
++    # callers such as Kythe, which already specify their own JVM heap limit.
++    budget = environment.get('REAPER_INTERNAL_SELECTED_RSS_MIB', '')
++    heap_mib = {'4096': 1024, '6144': 1024, '8192': 2048}.get(budget)
++    if budget.isascii() and budget.isdecimal() and int(budget) >= 10240:
++        heap_mib = 1024
++    if heap_mib is None or cmd[0] != build_utils.JAVAC_PATH:
++        return cmd, None
++
++    heap_bytes = heap_mib * 1024 * 1024
++    heap_arg = f'-J-Xmx{heap_mib}m'
++    initial_bytes = 16 * 1024 * 1024
++    initial_arg = '-J-Xms16m'
++    bounded_cmd = []
++    for arg in cmd:
++        # Bound JVM startup threads as well as heap within Reaper's budget.
++        if re.fullmatch(
++                r'-J-XX:(?:[+-]Use(?:Serial|Parallel|ParallelOld|ConcMarkSweep|'
++                r'ParNew|G1|Z|Shenandoah|Epsilon)GC|'
++                r'ActiveProcessorCount=[+-]?[0-9]+)', arg):
++            continue
++        match = re.fullmatch(r'-J-Xm([xs])([0-9]+)([kKmMgG]?)', arg)
++        if match:
++            scale = {'': 1, 'k': 1024, 'm': 1024**2, 'g': 1024**3}
++            size = int(match[2]) * scale[match[3].lower()]
++            if match[1] == 'x' and size < heap_bytes:
++                heap_bytes, heap_arg = size, arg
++            elif match[1] == 's' and size < initial_bytes:
++                initial_bytes, initial_arg = size, arg
++        else:
++            bounded_cmd.append(arg)
++    if initial_bytes > heap_bytes:
++        initial_arg = f'-J-Xms{heap_bytes}'
++    bounded_cmd.extend([heap_arg, initial_arg,
++                        '-J-XX:+UseSerialGC', '-J-XX:ActiveProcessorCount=1'])
++    env = dict(environment)
++    # JVM environment flags can override explicit maxima or inject warning
++    # output. Do not alter these variables for other build tools or the host.
++    for key in ('JAVA_TOOL_OPTIONS', 'JDK_JAVA_OPTIONS', '_JAVA_OPTIONS',
++                'JDK_JAVAC_OPTIONS'):
++        env.pop(key, None)
++    explicit_flags = build_utils.ReaperExplicitCgroupJvmFlags(
++        str(heap_bytes), prefix='-J', environment=env)
++    # Retain the smaller explicit initial heap already chosen above.
++    bounded_cmd.extend(flag for flag in explicit_flags
++                       if not flag.startswith('-J-Xms'))
++    return bounded_cmd, env
++
++
+ def _RunCompiler(
+     changes,
+     options,
+@@ -477,7 +528,8 @@
+         if java_files:
+             # Don't include the output directory in the initial set of args since it
+             # being in a temp dir makes it unstable (breaks md5 stamping).
+-            cmd = list(javac_cmd)
++            cmd, compiler_env = _ApplyReaperJavacBudget(
++                list(javac_cmd), os.environ)
+             cmd += ['-d', classes_dir]
+ 
+             if options.classpath:
+@@ -510,6 +562,7 @@
+ 
+             build_utils.CheckOutput(
+                 cmd,
++                env=compiler_env,
+                 print_stdout=options.chromium_code,
+                 stdout_filter=process_javac_output_partial,
+                 stderr_filter=process_javac_output_partial,

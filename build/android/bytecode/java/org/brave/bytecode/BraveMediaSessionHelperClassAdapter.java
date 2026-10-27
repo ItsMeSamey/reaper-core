@@ -21,10 +21,6 @@ public class BraveMediaSessionHelperClassAdapter extends BraveClassVisitor {
 
         changeMethodOwner(
                 sMediaSessionHelperClassName,
-                "showNotification",
-                sBraveMediaSessionHelperClassName);
-        changeMethodOwner(
-                sMediaSessionHelperClassName,
                 "createMediaSessionObserver",
                 sBraveMediaSessionHelperClassName);
     }

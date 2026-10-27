@@ -1,0 +1,57 @@
+diff --git a/extensions/browser/api/declarative_net_request/file_sequence_helper.cc b/extensions/browser/api/declarative_net_request/file_sequence_helper.cc
+--- a/extensions/browser/api/declarative_net_request/file_sequence_helper.cc
++++ b/extensions/browser/api/declarative_net_request/file_sequence_helper.cc
+@@ -34,6 +34,10 @@
+ namespace {
+ 
+ namespace dnr_api = extensions::api::declarative_net_request;
++
++#if BUILDFLAG(IS_ANDROID)
++base::TimeDelta g_indexing_time_slice = kMaxTimeSlice;
++#endif
+ 
+ 
+ UpdateDynamicRulesStatus GetUpdateDynamicRuleStatus(LoadRulesetResult result) {
+@@ -300,6 +304,14 @@
+ 
+   for (size_t i = start_index; i < load_data.rulesets.size(); ++i) {
+     RulesetInfo& ruleset = load_data.rulesets[i];
++#if BUILDFLAG(IS_ANDROID)
++    if (ruleset.source().is_saf_cache() && load_data.saf_cache_cancelled &&
++        load_data.saf_cache_cancelled->data.IsSet()) {
++      // An unload may precede a queued time-slice continuation. Leave callback
++      // settlement to the existing request-id check, but do not recreate cache.
++      continue;
++    }
++#endif
+     if (ruleset.did_load_successfully()) {
+       continue;
+     }
+@@ -309,7 +321,12 @@
+     constexpr auto parse_flags = RulesetSource::kNone;
+     LoadRuleset(ruleset, parse_flags);
+ 
+-    if (i + 1 < load_data.rulesets.size() && timer.Elapsed() >= kMaxTimeSlice) {
++#if BUILDFLAG(IS_ANDROID)
++    const base::TimeDelta time_slice = g_indexing_time_slice;
++#else
++    constexpr base::TimeDelta time_slice = kMaxTimeSlice;
++#endif
++    if (i + 1 < load_data.rulesets.size() && timer.Elapsed() >= time_slice) {
+       base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
+           FROM_HERE,
+           base::BindOnce(&IndexRulesetsTimeSliced, std::move(load_data),
+@@ -367,6 +384,13 @@
+ LoadRequestData::LoadRequestData(LoadRequestData&&) = default;
+ LoadRequestData& LoadRequestData::operator=(LoadRequestData&&) = default;
+ 
++#if BUILDFLAG(IS_ANDROID)
++base::AutoReset<base::TimeDelta>
++FileSequenceHelper::SetIndexingTimeSliceForTesting(base::TimeDelta time_slice) {
++  return base::AutoReset<base::TimeDelta>(&g_indexing_time_slice, time_slice);
++}
++#endif
++
+ FileSequenceHelper::FileSequenceHelper() = default;
+ 
+ FileSequenceHelper::~FileSequenceHelper() {

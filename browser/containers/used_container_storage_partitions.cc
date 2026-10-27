@@ -8,6 +8,10 @@
 #include <string>
 
 #include "base/check.h"
+#include "build/build_config.h"
+#if BUILDFLAG(IS_ANDROID)
+#include "brave/browser/containers/android/containers_bridge.h"
+#endif
 #include "base/containers/to_vector.h"
 #include "brave/browser/containers/containers_service_factory.h"
 #include "brave/components/containers/content/browser/storage_partition_utils.h"
@@ -31,12 +35,22 @@ GetUsedContainerStoragePartitionConfigs(Profile* profile) {
     return {};
   }
 
+#if BUILDFLAG(IS_ANDROID)
+  std::vector<content::StoragePartitionConfig> configs;
+  for (const auto& id : service->GetRuntimeContainerIds()) {
+    if (auto config = android::ResolveContainerStoragePartition(profile, id)) {
+      configs.push_back(*config);
+    }
+  }
+  return configs;
+#else
   return base::ToVector(service->GetUsedContainerIds(),
                         [&](const std::string& id) {
                           return content::StoragePartitionConfig::Create(
                               profile, kContainersStoragePartitionDomain, id,
                               profile->IsOffTheRecord());
                         });
+#endif
 }
 
 }  // namespace containers

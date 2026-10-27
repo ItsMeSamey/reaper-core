@@ -7,10 +7,10 @@
 
 #include "base/test/simple_test_clock.h"
 #include "brave/browser/brave_local_state_prefs.h"
-#include "brave/browser/web_discovery/web_discovery_cta_util.h"
 #include "brave/browser/web_discovery/web_discovery_tab_helper.h"
 #include "brave/components/constants/pref_names.h"
 #include "brave/components/search_engines/brave_prepopulated_engines.h"
+#include "build/build_config.h"
 #include "chrome/browser/prefs/browser_prefs.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/search_engines/template_url_service_test_util.h"
@@ -25,6 +25,10 @@
 #include "content/public/test/test_renderer_host.h"
 #include "content/public/test/web_contents_tester.h"
 #include "testing/gtest/include/gtest/gtest.h"
+
+#if !BUILDFLAG(IS_ANDROID)
+#include "brave/browser/web_discovery/web_discovery_cta_util.h"
+#endif
 
 namespace web_discovery {
 
@@ -76,6 +80,7 @@ class WebDiscoveryCTATest : public testing::Test {
            TemplateURLPrepopulateData::PREPOPULATED_ENGINE_ID_BRAVE;
   }
 
+#if !BUILDFLAG(IS_ANDROID)
   WebDiscoveryCTAState GetCurrentCTAState() {
     return GetWebDiscoveryCTAState(prefs(), GetWebDiscoveryCurrentCTAId());
   }
@@ -84,6 +89,7 @@ class WebDiscoveryCTATest : public testing::Test {
     return ::ShouldShowWebDiscoveryInfoBar(service(), prefs(),
                                            GetCurrentCTAState(), &test_clock_);
   }
+#endif
 
   TemplateURLServiceTestUtil* test_util() { return test_util_.get(); }
   TemplateURLService* service() { return test_util()->model(); }
@@ -121,6 +127,7 @@ TEST_F(WebDiscoveryCTATest, ShouldCreateTabHelperWithPrivateProfileTest) {
   EXPECT_FALSE(WebDiscoveryTabHelper::FromWebContents(web_contents.get()));
 }
 
+#if !BUILDFLAG(IS_ANDROID)
 TEST_F(WebDiscoveryCTATest, ShouldShowInfoBarTest) {
   // Test with search provider change.
   // Set Non as a default provider.
@@ -187,5 +194,6 @@ TEST_F(WebDiscoveryCTATest, ShouldNotShowInfoBarWhenManagedByPolicy) {
       kWebDiscoveryEnabled);
   EXPECT_TRUE(ShouldShowWebDiscoveryInfoBar());
 }
+#endif
 
 }  // namespace web_discovery

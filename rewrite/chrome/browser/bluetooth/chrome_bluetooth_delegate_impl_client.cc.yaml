@@ -1,0 +1,134 @@
+# Android selected-tab device chooser lifetime.
+substitutions:
+- description: Reuse guarded Android chooser lifetime without a Chrome dependency in components
+  regex:
+    re_pattern: '\#if\ BUILDFLAG\(IS_ANDROID\)\
+
+      \#include'
+    replace: '#if BUILDFLAG(IS_ANDROID)
+
+      #include "base/functional/bind.h"
+
+      #include "brave/browser/ui/android/device_chooser/active_device_chooser_request.h"
+
+      #include'
+- description: Cancel Bluetooth UI on exact-document or active-tab loss and validate late selections
+  regex:
+    re_pattern: ChromeBluetoothDelegateImplClient::ChromeBluetoothDelegateImplClient\(\)\ =
+    replace: "#if BUILDFLAG(IS_ANDROID)\nnamespace {\nclass ActiveTabBluetoothChooser final : public content::BluetoothChooser {\n public:\n  ActiveTabBluetoothChooser(content::RenderFrameHost* frame,\n                            const EventHandler& event_handler)\n      : event_handler_(event_handler) {\n    request_ = std::make_unique<ActiveDeviceChooserRequest>(\n        frame, base::BindOnce(&ActiveTabBluetoothChooser::Cancel,\n                             weak_factory_.GetWeakPtr()));\n    if (!request_->IsValid()) return;\n    chooser_ = std::make_unique<permissions::BluetoothChooserAndroid>(\n        frame, base::BindRepeating(&ActiveTabBluetoothChooser::OnEvent,\n                                   weak_factory_.GetWeakPtr()),\n        std::make_unique<ChromeBluetoothChooserAndroidDelegate>(\n            Profile::FromBrowserContext(frame->GetBrowserContext())));\n  }\n\n  bool CanAskForScanningPermission() override {\n    return request_->IsValid() && chooser_ &&\n           chooser_->CanAskForScanningPermission();\n  }\n  void SetAdapterPresence(AdapterPresence presence) override {\n    if (chooser_) chooser_->SetAdapterPresence(presence);\n  }\n  void ShowDiscoveryState(DiscoveryState state) override {\n    if (chooser_) chooser_->ShowDiscoveryState(state);\n  }\n  void AddOrUpdateDevice(const std::string& id, bool update_name,\n                         const std::u16string& name, bool connected,\n                         bool paired, int signal) override {\n    if (chooser_) chooser_->AddOrUpdateDevice(id, update_name, name, connected,\n                                             paired, signal);\n  }\n  base::OnceCallback<bool()> TakeSelectionValidator() override {\n    request_->ClearCancellationCallback();\n    return base::BindOnce(\n        [](std::unique_ptr<ActiveDeviceChooserRequest> request) {\n          return request->IsValid();\n        }, std::move(request_));\n  }\n\n private:\n  void Cancel() { OnEvent(content::BluetoothChooserEvent::CANCELLED, \"\"); }\n  void OnEvent(content::BluetoothChooserEvent event, const std::string& id) {\n    if (finished_) return;\n    if (!request_->IsValid()) event = content::BluetoothChooserEvent::CANCELLED;\n    if (event != content::BluetoothChooserEvent::RESCAN) finished_ = true;\n    // The delegate may synchronously destroy this wrapper and the Java chooser.\n    auto handler = event_handler_;\n    handler.Run(event, event == content::BluetoothChooserEvent::SELECTED ? id : \"\");\n  }\n  const EventHandler event_handler_;\n  bool finished_ = false;\n  std::unique_ptr<ActiveDeviceChooserRequest> request_;\n  std::unique_ptr<permissions::BluetoothChooserAndroid> chooser_;\n  base::WeakPtrFactory<ActiveTabBluetoothChooser> weak_factory_{this};\n};\n}  // namespace\n#endif\n\nChromeBluetoothDelegateImplClient::ChromeBluetoothDelegateImplClient() ="
+- description: Keep the existing Android chooser inside the selected-tab lifetime wrapper
+  regex:
+    re_pattern: '\ \ return\ std::make_unique<permissions::BluetoothChooserAndroid>\(\
+
+      \ \ \ \ \ \ frame,\ event_handler,\
+
+      \ \ \ \ \ \ std::make_unique<ChromeBluetoothChooserAndroidDelegate>\(\
+
+      \ \ \ \ \ \ \ \ \ \ Profile::FromBrowserContext\(frame\->GetBrowserContext\(\)\)\)\);'
+    replace: '  return std::make_unique<ActiveTabBluetoothChooser>(frame, event_handler);'
+- description: Format Android chooser lifetime changes
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ const\ EventHandler\&\ event_handler\)\
+
+      \ \ \ \ \ \ :\ event_handler_\(event_handler\)\ \{\
+
+      \ \ \ \ request_\ =\ std::make_unique<ActiveDeviceChooserRequest>\(\
+
+      \ \ \ \ \ \ \ \ frame,\ base::BindOnce\(\&ActiveTabBluetoothChooser::Cancel,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ weak_factory_\.GetWeakPtr\(\)\)\);\
+
+      \ \ \ \ if\ \(!request_\->IsValid\(\)\)\ return;\
+
+      \ \ \ \ chooser_\ =\ std::make_unique<permissions::BluetoothChooserAndroid>\(\
+
+      \ \ \ \ \ \ \ \ frame,\ base::BindRepeating\(\&ActiveTabBluetoothChooser::OnEvent,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ weak_factory_\.GetWeakPtr\(\)\),\
+
+      \ \ \ \ \ \ \ \ std::make_unique<ChromeBluetoothChooserAndroidDelegate>\(\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ Profile::FromBrowserContext\(frame\->GetBrowserContext\(\)\)\)\);\
+
+      \ \ \}\
+
+      \
+
+      '
+    replace: "                            const EventHandler& event_handler)\n      : event_handler_(event_handler) {\n    request_ = std::make_unique<ActiveDeviceChooserRequest>(\n        frame, base::BindOnce(&ActiveTabBluetoothChooser::Cancel,\n                              weak_factory_.GetWeakPtr()));\n    if (!request_->IsValid())\n      return;\n    chooser_ = std::make_unique<permissions::BluetoothChooserAndroid>(\n        frame,\n        base::BindRepeating(&ActiveTabBluetoothChooser::OnEvent,\n                            weak_factory_.GetWeakPtr()),\n        std::make_unique<ChromeBluetoothChooserAndroidDelegate>(\n            Profile::FromBrowserContext(frame->GetBrowserContext())));\n  }\n\n"
+- description: Format Android chooser lifetime changes
+  regex:
+    re_pattern: '\ \ \ \ return\ request_\->IsValid\(\)\ \&\&\ chooser_\ \&\&\
+
+      \ \ \ \ \ \ \ \ \ \ \ chooser_\->CanAskForScanningPermission\(\);\
+
+      \ \ \}\
+
+      \ \ void\ SetAdapterPresence\(AdapterPresence\ presence\)\ override\ \{\
+
+      \ \ \ \ if\ \(chooser_\)\ chooser_\->SetAdapterPresence\(presence\);\
+
+      \ \ \}\
+
+      \ \ void\ ShowDiscoveryState\(DiscoveryState\ state\)\ override\ \{\
+
+      \ \ \ \ if\ \(chooser_\)\ chooser_\->ShowDiscoveryState\(state\);\
+
+      \ \ \}\
+
+      \ \ void\ AddOrUpdateDevice\(const\ std::string\&\ id,\ bool\ update_name,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ const\ std::u16string\&\ name,\ bool\ connected,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ bool\ paired,\ int\ signal\)\ override\ \{\
+
+      \ \ \ \ if\ \(chooser_\)\ chooser_\->AddOrUpdateDevice\(id,\ update_name,\ name,\ connected,\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ paired,\ signal\);\
+
+      \ \ \}\
+
+      \ \ base::OnceCallback<bool\(\)>\ TakeSelectionValidator\(\)\ override\ \{\
+
+      \ \ \ \ request_\->ClearCancellationCallback\(\);\
+
+      \ \ \ \ return\ base::BindOnce\(\
+
+      \ \ \ \ \ \ \ \ \[\]\(std::unique_ptr<ActiveDeviceChooserRequest>\ request\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ return\ request\->IsValid\(\);\
+
+      \ \ \ \ \ \ \ \ \},\ std::move\(request_\)\);\
+
+      \ \ \}\
+
+      \
+
+      \ private:\
+
+      \ \ void\ Cancel\(\)\ \{\ OnEvent\(content::BluetoothChooserEvent::CANCELLED,\ ""\);\ \}\
+
+      \ \ void\ OnEvent\(content::BluetoothChooserEvent\ event,\ const\ std::string\&\ id\)\ \{\
+
+      \ \ \ \ if\ \(finished_\)\ return;\
+
+      \ \ \ \ if\ \(!request_\->IsValid\(\)\)\ event\ =\ content::BluetoothChooserEvent::CANCELLED;\
+
+      \ \ \ \ if\ \(event\ !=\ content::BluetoothChooserEvent::RESCAN\)\ finished_\ =\ true;\
+
+      \ \ \ \ //\ The\ delegate\ may\ synchronously\ destroy\ this\ wrapper\ and\ the\ Java\ chooser\.\
+
+      \ \ \ \ auto\ handler\ =\ event_handler_;\
+
+      \ \ \ \ handler\.Run\(event,\ event\ ==\ content::BluetoothChooserEvent::SELECTED\ \?\ id\ :\ ""\);\
+
+      \ \ \}\
+
+      \ \ const\ EventHandler\ event_handler_;\
+
+      \ \ bool\ finished_\ =\ false;\
+
+      \ \ std::unique_ptr<ActiveDeviceChooserRequest>\ request_;\
+
+      '
+    replace: "    return request_->IsValid() && chooser_ &&\n           chooser_->CanAskForScanningPermission();\n  }\n  void SetAdapterPresence(AdapterPresence presence) override {\n    if (chooser_)\n      chooser_->SetAdapterPresence(presence);\n  }\n  void ShowDiscoveryState(DiscoveryState state) override {\n    if (chooser_)\n      chooser_->ShowDiscoveryState(state);\n  }\n  void AddOrUpdateDevice(const std::string& id,\n                         bool update_name,\n                         const std::u16string& name,\n                         bool connected,\n                         bool paired,\n                         int signal) override {\n    if (chooser_)\n      chooser_->AddOrUpdateDevice(id, update_name, name, connected, paired,\n                                  signal);\n  }\n  base::OnceCallback<bool()> TakeSelectionValidator() override {\n    request_->ClearCancellationCallback();\n    return base::BindOnce(\n        [](std::unique_ptr<ActiveDeviceChooserRequest> request) {\n          return request->IsValid();\n        },\n        std::move(request_));\n  }\n\n private:\n  void Cancel() { OnEvent(content::BluetoothChooserEvent::CANCELLED, \"\"); }\n  void OnEvent(content::BluetoothChooserEvent event, const std::string& id) {\n    if (finished_)\n      return;\n    if (!request_->IsValid())\n      event = content::BluetoothChooserEvent::CANCELLED;\n    if (event != content::BluetoothChooserEvent::RESCAN)\n      finished_ = true;\n    // The delegate may synchronously destroy this wrapper and the Java chooser.\n    auto handler = event_handler_;\n    handler.Run(event,\n                event == content::BluetoothChooserEvent::SELECTED ? id : \"\");\n  }\n  const EventHandler event_handler_;\n  bool finished_ = false;\n  std::unique_ptr<ActiveDeviceChooserRequest> request_;\n"

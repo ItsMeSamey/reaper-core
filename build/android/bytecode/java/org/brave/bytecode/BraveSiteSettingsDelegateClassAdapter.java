@@ -20,7 +20,6 @@ public class BraveSiteSettingsDelegateClassAdapter extends BraveClassVisitor {
         redirectConstructor(
                 sChromeSiteSettingsDelegateClassName, sBraveSiteSettingsDelegateClassName);
 
-        deleteField(sBraveSiteSettingsDelegateClassName, "mProfile");
         makeProtectedField(sChromeSiteSettingsDelegateClassName, "mProfile");
     }
 }

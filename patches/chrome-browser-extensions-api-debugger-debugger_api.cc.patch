@@ -1,0 +1,384 @@
+diff --git a/chrome/browser/extensions/api/debugger/debugger_api.cc b/chrome/browser/extensions/api/debugger/debugger_api.cc
+index 4f4153a4bddcc078fbe70c78accc7c746c4fc1fc..cb1b5ae728059634a4c101f22481a7c7061f6137 100644
+--- a/chrome/browser/extensions/api/debugger/debugger_api.cc
++++ b/chrome/browser/extensions/api/debugger/debugger_api.cc
+@@ -28,6 +28,7 @@
+ #include "base/strings/utf_string_conversions.h"
+ #include "base/types/optional_util.h"
+ #include "base/values.h"
++#include "build/build_config.h"
+ #include "chrome/browser/extensions/extension_service.h"
+ #include "chrome/browser/extensions/extension_tab_util.h"
+ #include "chrome/browser/lifetime/termination_notification.h"
+@@ -66,7 +67,17 @@
+ #include "url/url_constants.h"
+ 
+ #if BUILDFLAG(IS_ANDROID)
++#include "base/android/jni_android.h"
++#include "base/android/scoped_java_ref.h"
++#include "base/memory/weak_ptr.h"
++#include "base/task/single_thread_task_runner.h"
+ #include "chrome/browser/extensions/api/debugger/extension_dev_tools_message_delegate.h"
++#include "chrome/browser/ui/browser_window/public/browser_collection_observer.h"
++#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
++#include "chrome/browser/ui/browser_window/public/profile_browser_collection.h"
++#include "components/messages/android/message_dispatcher_bridge.h"
++#include "ui/android/window_android.h"
++#include "ui/base/base_window.h"
+ #else
+ #include "chrome/browser/browser_process.h"
+ #include "chrome/browser/extensions/api/debugger/extension_dev_tools_infobar_delegate.h"
+@@ -110,6 +121,21 @@
+ class ExtensionDevToolsClientHost;
+ 
+ namespace {
++
++#if BUILDFLAG(IS_ANDROID)
++std::optional<WorkerId> CaptureDebuggerWorkerInstance(
++    Profile* profile,
++    std::optional<WorkerId> worker_id) {
++  if (worker_id) {
++    ProcessManager* pm = ProcessManager::Get(profile);
++    CHECK(pm);
++    if (auto running_worker = pm->GetServiceWorkerRunningInstance(*worker_id)) {
++      return running_worker;
++    }
++  }
++  return worker_id;
++}
++#endif
+ 
+ constexpr char kAlreadyAttachedError[] =
+     "Another debugger is already attached to the * with id: *.";
+@@ -465,7 +491,12 @@
+ 
+ class ExtensionDevToolsClientHost : public content::DevToolsAgentHostClient,
+                                     public ExtensionRegistryObserver,
+-                                    public ProfileObserver {
++                                    public ProfileObserver
++#if BUILDFLAG(IS_ANDROID)
++    ,
++                                    public BrowserCollectionObserver
++#endif
++{
+  public:
+   ExtensionDevToolsClientHost(
+       Profile* profile,
+@@ -487,6 +518,15 @@
+   // Creates the "Foo started debugging this browser" warning. Android uses
+   // the messages API for this.
+   void CreateWarningMessage();
++  void ScheduleWarningMessageUpdate();
++  void UpdateWarningMessage();
++  void StopWarningMessage();
++  base::android::ScopedJavaLocalRef<jobject> FindWarningWindow();
++
++  void OnBrowserCreated(BrowserWindowInterface* browser) override;
++  void OnBrowserClosed(BrowserWindowInterface* browser) override;
++  void OnBrowserActivated(BrowserWindowInterface* browser) override;
++  void OnBrowserDeactivated(BrowserWindowInterface* browser) override;
+ #else
+   // Creates the "Foo started debugging this browser" warning.
+   // Win/Mac/Linux/Chrome OS use the infobar API for this.
+@@ -545,6 +585,16 @@
+ #if BUILDFLAG(IS_ANDROID)
+   // Android uses the messages API for warnings.
+   std::unique_ptr<ExtensionDevToolsMessageDelegate> warning_message_;
++  base::android::ScopedJavaGlobalRef<jobject> warning_window_;
++  base::android::ScopedJavaGlobalRef<jobject> warning_dispatcher_;
++  base::WeakPtr<Profile> warning_profile_;
++  bool warning_requested_ = false;
++  bool warning_update_pending_ = false;
++  base::CallbackListSubscription message_dispatcher_subscription_;
++  base::ScopedObservation<ProfileBrowserCollection, BrowserCollectionObserver>
++      warning_browser_observation_{this};
++  base::ScopedObservation<Profile, ProfileObserver>
++      warning_profile_observation_{this};
+ #else
+   // Win/Mac/Linux/Chrome OS use the infobar API for warnings.
+   base::CallbackListSubscription warning_infobar_subscription_;
+@@ -561,6 +611,9 @@
+   base::ScopedObservation<ExtensionRegistry, ExtensionRegistryObserver>
+       extension_registry_observation_{this};
+   base::ScopedObservation<Profile, ProfileObserver> profile_observation_{this};
++#if BUILDFLAG(IS_ANDROID)
++  base::WeakPtrFactory<ExtensionDevToolsClientHost> weak_factory_{this};
++#endif
+ };
+ 
+ ExtensionDevToolsClientHost::ExtensionDevToolsClientHost(
+@@ -572,7 +625,12 @@
+     : profile_(profile),
+       agent_host_(agent_host),
+       extension_(std::move(extension)),
++#if BUILDFLAG(IS_ANDROID)
++      extension_service_worker_id_(CaptureDebuggerWorkerInstance(
++          profile, std::move(extension_service_worker_id))) {
++#else
+       extension_service_worker_id_(std::move(extension_service_worker_id)) {
++#endif
+   CopyDebuggee(&debuggee_, debuggee);
+ 
+   GetAttachedClientHosts().insert(this);
+@@ -616,7 +674,13 @@
+     ProcessManager* process_manager = ProcessManager::Get(profile_);
+     CHECK(process_manager);
+     // The service worker should definitely be registered at this point.
++#if BUILDFLAG(IS_ANDROID)
++    CHECK(extension_service_worker_id_->start_token);
++    CHECK(process_manager->GetServiceWorkerRunningInstance(
++        *extension_service_worker_id_));
++#else
+     CHECK(process_manager->HasServiceWorker(*extension_service_worker_id_));
++#endif
+     service_worker_keepalive_ =
+         process_manager->IncrementServiceWorkerKeepaliveCount(
+             *extension_service_worker_id_,
+@@ -630,23 +694,174 @@
+ #if BUILDFLAG(IS_ANDROID)
+ // Android uses the messages API for the warning message.
+ void ExtensionDevToolsClientHost::CreateWarningMessage() {
+-  if (warning_message_) {
+-    // Already open.
++  if (warning_requested_) {
+     return;
+   }
+-  WebContents* web_contents = agent_host_->GetWebContents();
+-  if (!web_contents) {
++  Profile* target_profile =
++      Profile::FromBrowserContext(agent_host_->GetBrowserContext());
++  // The deliberately authorized browser target has no per-target context.
++  if (!target_profile &&
++      agent_host_->GetType() == DevToolsAgentHost::kTypeBrowser) {
++    target_profile = profile_;
++  }
++  if (!target_profile || target_profile->ShutdownStarted()) {
+     return;
+   }
+-  ui::WindowAndroid* window = web_contents->GetTopLevelNativeWindow();
++  warning_requested_ = true;
++  warning_profile_ = target_profile->GetWeakPtr();
++  if (target_profile != profile_) {
++    warning_profile_observation_.Observe(target_profile);
++  }
++  if (auto* browsers =
++          ProfileBrowserCollection::GetForProfile(target_profile)) {
++    warning_browser_observation_.Observe(browsers);
++  }
++  message_dispatcher_subscription_ =
++      messages::MessageDispatcherBridge::Get()->AddDispatcherChangedCallback(
++          base::BindRepeating(
++              &ExtensionDevToolsClientHost::ScheduleWarningMessageUpdate,
++              weak_factory_.GetWeakPtr()));
++  // Finish Attach's existing worker keepalive setup before invoking Messages.
++  ScheduleWarningMessageUpdate();
++}
++
++void ExtensionDevToolsClientHost::ScheduleWarningMessageUpdate() {
++  if (!warning_requested_ || warning_update_pending_) {
++    return;
++  }
++  warning_update_pending_ = true;
++  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
++      FROM_HERE,
++      base::BindOnce(&ExtensionDevToolsClientHost::UpdateWarningMessage,
++                     weak_factory_.GetWeakPtr()));
++}
++
++base::android::ScopedJavaLocalRef<jobject>
++ExtensionDevToolsClientHost::FindWarningWindow() {
++  Profile* target_profile = warning_profile_.get();
++  if (!target_profile || target_profile->ShutdownStarted()) {
++    return {};
++  }
++  if (WebContents* contents = agent_host_->GetWebContents();
++      contents && Profile::FromBrowserContext(contents->GetBrowserContext()) ==
++                      target_profile) {
++    if (auto* window = contents->GetTopLevelNativeWindow()) {
++      auto java_window = window->GetJavaObject();
++      if (!messages::MessageDispatcherBridge::Get()
++               ->GetMessageDispatcher(java_window)
++               .is_null()) {
++        return java_window;
++      }
++    }
++  }
++  auto* browsers = ProfileBrowserCollection::GetForProfile(target_profile);
++  if (!browsers) {
++    return {};
++  }
++  base::android::ScopedJavaLocalRef<jobject> result;
++  browsers->ForEach(
++      [target_profile, &result](BrowserWindowInterface* browser) {
++        if (browser->GetProfile() != target_profile ||
++            browser->IsDeleteScheduled()) {
++          return true;
++        }
++        auto* base_window = browser->GetWindow();
++        if (!base_window) {
++          return true;
++        }
++        auto* window = base_window->GetNativeWindow();
++        if (!window) {
++          // A pending BWI does not yet guarantee an Android OS window.
++          return true;
++        }
++        auto java_window = window->GetJavaObject();
++        if (java_window.is_null() || messages::MessageDispatcherBridge::Get()
++                                         ->GetMessageDispatcher(java_window)
++                                         .is_null()) {
++          return true;
++        }
++        result = std::move(java_window);
++        return false;
++      },
++      BrowserCollection::Order::kActivation);
++  return result;
++}
++
++void ExtensionDevToolsClientHost::UpdateWarningMessage() {
++  warning_update_pending_ = false;
++  if (!warning_requested_ || !warning_profile_ ||
++      warning_profile_->ShutdownStarted()) {
++    return;
++  }
++  auto weak_this = weak_factory_.GetWeakPtr();
++  auto java_window = FindWarningWindow();
++  if (!weak_this) {
++    return;
++  }
++  auto* dispatcher = messages::MessageDispatcherBridge::Get();
++  auto java_dispatcher = dispatcher->GetMessageDispatcher(java_window);
++  const bool ready = !java_dispatcher.is_null();
++  if (!weak_this) {
++    return;
++  }
++  JNIEnv* env = base::android::AttachCurrentThread();
++  if (warning_message_ && ready &&
++      env->IsSameObject(warning_window_.obj(), java_window.obj()) &&
++      env->IsSameObject(warning_dispatcher_.obj(), java_dispatcher.obj())) {
++    return;
++  }
++  warning_window_.Reset();
++  warning_dispatcher_.Reset();
++  warning_message_.reset();
++  if (!weak_this || !ready) {
++    // A real provider/browser transition will retry; do not poll or claim UI.
++    return;
++  }
++  auto* window = ui::WindowAndroid::FromJavaWindowAndroid(java_window);
+   if (!window) {
+     return;
+   }
+-  warning_message_ = std::make_unique<ExtensionDevToolsMessageDelegate>(
++  auto message = std::make_unique<ExtensionDevToolsMessageDelegate>(
+       extension_->name(),
+       base::BindOnce(&ExtensionDevToolsClientHost::WarningUiDestroyed,
+-                     base::Unretained(this)));
+-  warning_message_->Show(window);
++                     weak_this));
++  const bool enqueued = message->Show(window);
++  if (!weak_this || !enqueued) {
++    return;
++  }
++  warning_window_.Reset(java_window);
++  warning_dispatcher_.Reset(java_dispatcher);
++  warning_message_ = std::move(message);
++}
++
++void ExtensionDevToolsClientHost::StopWarningMessage() {
++  warning_requested_ = false;
++  warning_update_pending_ = false;
++  weak_factory_.InvalidateWeakPtrs();
++  warning_browser_observation_.Reset();
++  warning_profile_observation_.Reset();
++  message_dispatcher_subscription_ = {};
++  warning_window_.Reset();
++  warning_dispatcher_.Reset();
++  warning_message_.reset();
++  warning_profile_.reset();
++}
++
++void ExtensionDevToolsClientHost::OnBrowserCreated(BrowserWindowInterface*) {
++  ScheduleWarningMessageUpdate();
++}
++
++void ExtensionDevToolsClientHost::OnBrowserClosed(BrowserWindowInterface*) {
++  ScheduleWarningMessageUpdate();
++}
++
++void ExtensionDevToolsClientHost::OnBrowserActivated(BrowserWindowInterface*) {
++  ScheduleWarningMessageUpdate();
++}
++
++void ExtensionDevToolsClientHost::OnBrowserDeactivated(
++    BrowserWindowInterface*) {
++  ScheduleWarningMessageUpdate();
+ }
+ #else
+ // Win/Mac/Linux/Chrome OS use the infobar API for the warning message.
+@@ -665,6 +880,9 @@
+ #endif  // BUILDFLAG(IS_ANDROID)
+ 
+ ExtensionDevToolsClientHost::~ExtensionDevToolsClientHost() {
++#if BUILDFLAG(IS_ANDROID)
++  StopWarningMessage();
++#endif
+   GetAttachedClientHosts().erase(this);
+ 
+ #if !BUILDFLAG(IS_ANDROID)
+@@ -678,11 +896,22 @@
+   // Decrement the associated worker keepalive, if any.
+   if (service_worker_keepalive_) {
+     CHECK(extension_service_worker_id_);
++#if BUILDFLAG(IS_ANDROID)
++    if (profile_->ShutdownStarted()) {
++      return;
++    }
++#endif
+     ProcessManager* process_manager = ProcessManager::Get(profile_);
+     CHECK(process_manager);
+     // The worker may have terminated for other reasons. Only decrement the
+     // keepalive if it's still around.
++#if BUILDFLAG(IS_ANDROID)
++    if (extension_service_worker_id_->start_token &&
++        process_manager->GetServiceWorkerRunningInstance(
++            *extension_service_worker_id_)) {
++#else
+     if (process_manager->HasServiceWorker(*extension_service_worker_id_)) {
++#endif
+       process_manager->DecrementServiceWorkerKeepaliveCount(
+           *extension_service_worker_id_, *service_worker_keepalive_,
+           Activity::DEBUGGER, /*extra_data=*/std::string());
+@@ -694,12 +923,18 @@
+ void ExtensionDevToolsClientHost::AgentHostClosed(
+     DevToolsAgentHost* agent_host) {
+   DCHECK(agent_host == agent_host_.get());
++#if BUILDFLAG(IS_ANDROID)
++  StopWarningMessage();
++#endif
+   RespondDetachedToPendingRequests();
+   SendDetachedEvent();
+   delete this;
+ }
+ 
+ void ExtensionDevToolsClientHost::Close() {
++#if BUILDFLAG(IS_ANDROID)
++  StopWarningMessage();
++#endif
+   agent_host_->DetachClient(this);
+   delete this;
+ }
+@@ -754,7 +989,11 @@
+ }
+ 
+ void ExtensionDevToolsClientHost::OnProfileWillBeDestroyed(Profile* profile) {
+-  if (profile == profile_) {
++  if (profile == profile_
++#if BUILDFLAG(IS_ANDROID)
++      || profile == warning_profile_.get()
++#endif
++  ) {
+     Close();
+   }
+ }

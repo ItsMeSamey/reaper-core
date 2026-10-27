@@ -1,0 +1,224 @@
+diff --git a/content/browser/speech/tts_android.cc b/content/browser/speech/tts_android.cc
+--- a/content/browser/speech/tts_android.cc
++++ b/content/browser/speech/tts_android.cc
+@@ -24,7 +24,7 @@
+ 
+ namespace content {
+ 
+-TtsPlatformImplAndroid::TtsPlatformImplAndroid() : utterance_id_(0) {
++TtsPlatformImplAndroid::TtsPlatformImplAndroid() : utterance_id_(-1) {
+   environment_android_ =
+       GetContentClient()->browser()->CreateTtsEnvironmentAndroid();
+   if (!environment_android_)
+@@ -39,8 +39,15 @@
+ }
+ 
+ TtsPlatformImplAndroid::~TtsPlatformImplAndroid() {
+-  JNIEnv* env = AttachCurrentThread();
+-  Java_TtsPlatformImpl_destroy(env, java_ref_);
++  Shutdown();
++}
++
++void TtsPlatformImplAndroid::Shutdown() {
++  StopSpeaking();
++  if (!java_ref_.is_null()) {
++    Java_TtsPlatformImpl_destroy(AttachCurrentThread(), java_ref_);
++    java_ref_.Reset();
++  }
+ }
+ 
+ bool TtsPlatformImplAndroid::PlatformImplSupported() {
+@@ -58,6 +65,18 @@
+     const VoiceData& voice,
+     const UtteranceContinuousParameters& params,
+     base::OnceCallback<void(bool)> did_start_speaking_callback) {
++  if (java_ref_.is_null()) {
++    std::move(did_start_speaking_callback).Run(false);
++    return;
++  }
++
++  // Cancel stale parsing before accepting a new utterance. A pause can arrive
++  // while the isolated XML parser is still running.
++  weak_factory_.InvalidateWeakPtrs();
++  utterance_id_ = utterance_id;
++  utterance_.clear();
++  requested_paused_ = false;
++
+   // Parse SSML and process speech.
+   TtsController::GetInstance()->StripSSML(
+       utterance,
+@@ -73,9 +92,15 @@
+     const UtteranceContinuousParameters& params,
+     base::OnceCallback<void(bool)> did_start_speaking_callback,
+     const std::string& parsed_utterance) {
+-  std::move(did_start_speaking_callback)
+-      .Run(StartSpeakingNow(utterance_id, lang, params, parsed_utterance,
+-                            voice.engine_id));
++  const bool started = StartSpeakingNow(utterance_id, lang, params,
++                                        parsed_utterance, voice.engine_id);
++  if (!started && utterance_id_ == utterance_id) {
++    utterance_id_ = -1;
++    utterance_.clear();
++    requested_paused_ = false;
++  }
++  // The callback can immediately advance the controller's queue.
++  std::move(did_start_speaking_callback).Run(started);
+ }
+ 
+ bool TtsPlatformImplAndroid::StartSpeakingNow(
+@@ -84,45 +109,60 @@
+     const UtteranceContinuousParameters& params,
+     const std::string& parsed_utterance,
+     const std::string& engine_id) {
+-  if (!environment_android_->CanSpeakNow())
++  if (java_ref_.is_null() || utterance_id_ != utterance_id ||
++      !environment_android_->CanSpeakNow())
+     return false;
+ 
++  utterance_ = parsed_utterance;
+   JNIEnv* env = AttachCurrentThread();
+   const bool did_start = Java_TtsPlatformImpl_speak(
+       env, java_ref_, utterance_id,
+       base::android::ConvertUTF8ToJavaString(env, parsed_utterance),
+       base::android::ConvertUTF8ToJavaString(env, lang),
+       base::android::ConvertUTF8ToJavaString(env, engine_id), params.rate,
+-      params.pitch, params.volume);
+-  if (!did_start)
+-    return false;
+-
+-  utterance_ = parsed_utterance;
+-  utterance_id_ = utterance_id;
++      params.pitch, params.volume, requested_paused_);
++  return did_start;
++}
++
++bool TtsPlatformImplAndroid::StopSpeaking() {
++  weak_factory_.InvalidateWeakPtrs();
++  utterance_id_ = -1;
++  utterance_.clear();
++  requested_paused_ = false;
++  if (!java_ref_.is_null()) {
++    Java_TtsPlatformImpl_stop(AttachCurrentThread(), java_ref_);
++  }
+   return true;
+ }
+ 
+-bool TtsPlatformImplAndroid::StopSpeaking() {
+-  JNIEnv* env = AttachCurrentThread();
+-  Java_TtsPlatformImpl_stop(env, java_ref_);
+-  utterance_id_ = 0;
+-  utterance_.clear();
+-  return true;
+-}
+-
+ void TtsPlatformImplAndroid::Pause() {
+-  StopSpeaking();
+-}
+-
+-void TtsPlatformImplAndroid::Resume() {}
++  if (utterance_id_ < 0) {
++    return;
++  }
++  requested_paused_ = true;
++  Java_TtsPlatformImpl_pause(AttachCurrentThread(), java_ref_);
++}
++
++void TtsPlatformImplAndroid::Resume() {
++  if (utterance_id_ < 0) {
++    return;
++  }
++  if (!environment_android_->CanSpeakNow()) {
++    TtsController::GetInstance()->Stop();
++    return;
++  }
++  requested_paused_ = false;
++  Java_TtsPlatformImpl_resume(AttachCurrentThread(), java_ref_);
++}
+ 
+ bool TtsPlatformImplAndroid::IsSpeaking() {
+-  return (utterance_id_ != 0);
++  return utterance_id_ >= 0;
+ }
+ 
+ void TtsPlatformImplAndroid::GetVoices(std::vector<VoiceData>* out_voices) {
+   JNIEnv* env = AttachCurrentThread();
+-  if (!Java_TtsPlatformImpl_isInitialized(env, java_ref_))
++  if (java_ref_.is_null() ||
++      !Java_TtsPlatformImpl_isInitialized(env, java_ref_))
+     return;
+ 
+   int count = Java_TtsPlatformImpl_getVoiceCount(env, java_ref_);
+@@ -137,16 +177,20 @@
+     data.events.insert(TTS_EVENT_START);
+     data.events.insert(TTS_EVENT_END);
+     data.events.insert(TTS_EVENT_ERROR);
++    data.events.insert(TTS_EVENT_PAUSE);
++    data.events.insert(TTS_EVENT_RESUME);
+   }
+ }
+ 
+ void TtsPlatformImplAndroid::VoicesChanged(JNIEnv* env) {
+-  TtsController::GetInstance()->VoicesChanged();
++  if (!java_ref_.is_null()) {
++    TtsController::GetInstance()->VoicesChanged();
++  }
+ }
+ 
+ void TtsPlatformImplAndroid::OnEndEvent(JNIEnv* env, int32_t utterance_id) {
+   SendFinalTtsEvent(utterance_id, TTS_EVENT_END,
+-                    static_cast<int>(utterance_.size()));
++                    static_cast<int>(base::UTF8ToUTF16(utterance_).size()));
+ }
+ 
+ void TtsPlatformImplAndroid::OnErrorEvent(JNIEnv* env, int32_t utterance_id) {
+@@ -157,8 +201,31 @@
+   if (utterance_id != utterance_id_)
+     return;
+ 
+-  TtsController::GetInstance()->OnTtsEvent(utterance_id_, TTS_EVENT_START, 0,
+-                                           utterance_.size(), std::string());
++  TtsController::GetInstance()->OnTtsEvent(
++      utterance_id_, TTS_EVENT_START, 0,
++      static_cast<int>(base::UTF8ToUTF16(utterance_).size()), std::string());
++}
++
++void TtsPlatformImplAndroid::OnPauseEvent(JNIEnv* env, int32_t utterance_id) {
++  if (utterance_id != utterance_id_) {
++    return;
++  }
++  TtsController::GetInstance()->OnTtsEvent(utterance_id, TTS_EVENT_PAUSE, -1,
++                                           -1, std::string());
++}
++
++void TtsPlatformImplAndroid::OnResumeEvent(JNIEnv* env, int32_t utterance_id) {
++  if (utterance_id != utterance_id_) {
++    return;
++  }
++  TtsController::GetInstance()->OnTtsEvent(utterance_id, TTS_EVENT_RESUME, -1,
++                                           -1, std::string());
++}
++
++bool TtsPlatformImplAndroid::CanSpeakNow(JNIEnv* env, int32_t utterance_id) {
++  return !java_ref_.is_null() && utterance_id >= 0 &&
++         utterance_id == utterance_id_ && !requested_paused_ &&
++         environment_android_->CanSpeakNow();
+ }
+ 
+ void TtsPlatformImplAndroid::SendFinalTtsEvent(int utterance_id,
+@@ -167,10 +234,13 @@
+   if (utterance_id != utterance_id_)
+     return;
+ 
+-  TtsController::GetInstance()->OnTtsEvent(utterance_id_, event_type,
+-                                           char_index, -1, std::string());
+-  utterance_id_ = 0;
++  // OnTtsEvent may synchronously start the next queued utterance. Retire the
++  // completed one first so its cleanup cannot erase the new utterance's state.
++  utterance_id_ = -1;
+   utterance_.clear();
++  requested_paused_ = false;
++  TtsController::GetInstance()->OnTtsEvent(utterance_id, event_type, char_index,
++                                           -1, std::string());
+ }
+ 
+ // static

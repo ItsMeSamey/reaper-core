@@ -7,9 +7,11 @@
 #define BRAVE_CHROMIUM_SRC_EXTENSIONS_COMMON_CONSTANTS_H_
 
 #include "build/build_config.h"
+#include "extensions/buildflags/buildflags.h"
 
-#if BUILDFLAG(IS_IOS) || BUILDFLAG(IS_ANDROID)
-// ios and android cannot include extensions deps
+#if BUILDFLAG(IS_IOS) || \
+    (BUILDFLAG(IS_ANDROID) && !BUILDFLAG(ENABLE_EXTENSIONS_CORE))
+// Ordinary mobile builds do not include the extensions system.
 namespace extensions {
 inline constexpr char kExtensionScheme[] = "chrome-extension";
 }

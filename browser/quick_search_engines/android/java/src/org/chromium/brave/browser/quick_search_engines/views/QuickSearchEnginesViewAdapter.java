@@ -38,11 +38,7 @@ public class QuickSearchEnginesViewAdapter
         QuickSearchEnginesModel quickSearchEnginesModel = mSearchEngines.get(position);
         String keyword = quickSearchEnginesModel.getKeyword();
 
-        if (position == 0
-                && quickSearchEnginesModel.getType()
-                        == QuickSearchEnginesModel.QuickSearchEnginesModelType.AI_ASSISTANT) {
-            quickSearchViewHolder.mSearchEngineLogo.setImageResource(R.drawable.ic_leo_icon);
-        } else if (QuickSearchEnginesUtil.YOUTUBE_SEARCH_ENGINE_KEYWORD.equals(keyword)) {
+        if (QuickSearchEnginesUtil.YOUTUBE_SEARCH_ENGINE_KEYWORD.equals(keyword)) {
             quickSearchViewHolder.mSearchEngineLogo.setImageResource(R.drawable.ic_social_youtube);
         } else if (QuickSearchEnginesUtil.BING_SEARCH_ENGINE_KEYWORD.equals(keyword)) {
             quickSearchViewHolder.mSearchEngineLogo.setImageResource(R.drawable.ic_microsoft_color);

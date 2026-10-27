@@ -1,44 +1,408 @@
 diff --git a/components/omnibox/browser/BUILD.gn b/components/omnibox/browser/BUILD.gn
-index d193e3c7c08bfe1d5989f4ad49597faa9ccff976..0651dd0eb233c4fcf58c94964373d715f3a39e13 100644
+index d193e3c7c08bfe1d5989f4ad49597faa9ccff976..b281d517c4cee881daaf8efcbf3609d39fb7226c 100644
 --- a/components/omnibox/browser/BUILD.gn
 +++ b/components/omnibox/browser/BUILD.gn
-@@ -376,6 +376,7 @@ static_library("browser") {
+@@ -14,6 +14,7 @@
+ import("//ui/webui/webui_features.gni")
+ 
+ if (is_android) {
++  import("//build/config/android/copy_ex.gni")
+   import("//build/config/android/rules.gni")
+   import("//third_party/jni_zero/jni_zero.gni")
+ }
+@@ -376,6 +377,19 @@
      "zero_suggest_verbatim_match_provider.cc",
      "zero_suggest_verbatim_match_provider.h",
    ]
++  if (is_android) {
++    sources -= [
++      "history_embeddings_provider.cc",
++      "history_embeddings_provider.h",
++    ]
++  }
++  if (is_android) {
++    sources -= [
++      "aim_eligibility_service.cc",
++      "aim_eligibility_service.h",
++    ]
++  }
 +  sources += brave_components_omnibox_browser_sources
  
    public_deps = [
      ":aim_eligibility_service_features",
-@@ -403,6 +404,7 @@ static_library("browser") {
+@@ -403,6 +417,10 @@
      "//third_party/tflite_support:tflite_support_proto",
      "//url",
    ]
++  if (is_android) {
++    public_deps -= [ ":aim_eligibility_service_features" ]
++  }
 +  public_deps += brave_components_omnibox_browser_public_deps
  
    deps = [
      "//build:android_buildflags",
-@@ -450,6 +452,7 @@ static_library("browser") {
+@@ -450,6 +468,15 @@
      "//ui/base",
      "//ui/gfx",
    ]
++  if (is_android) {
++    deps -= [
++      "//components/history_embeddings/core",
++    ]
++  }
++  if (is_android) {
++    deps -= [ "//components/contextual_tasks/public:feature_list" ]
++  }
 +  deps += brave_components_omnibox_browser_deps
  
    configs += [ "//build/config/compiler:wexit_time_destructors" ]
  
-@@ -1142,6 +1145,7 @@ mojom("mojo_bindings") {
+@@ -530,12 +557,20 @@
+   deps = [ "//base" ]
+ }
+ 
+-source_set("aim_eligibility_service_features") {
+-  sources = [
+-    "aim_eligibility_service_features.cc",
+-    "aim_eligibility_service_features.h",
+-  ]
+-  deps = [ "//base" ]
++if (!is_android) {
++  source_set("aim_eligibility_service_features") {
++    sources = [
++      "aim_eligibility_service_features.cc",
++      "aim_eligibility_service_features.h",
++    ]
++    if (is_android) {
++      sources -= [
++        "aim_eligibility_service_features.cc",
++        "aim_eligibility_service_features.h",
++      ]
++    }
++    deps = [ "//base" ]
++  }
+ }
+ 
+ # A target that contains the minimal amount of code necessary for displaying a
+@@ -578,6 +613,9 @@
+     "//ui/base",
+     "//ui/gfx",
+   ]
++  if (is_android) {
++    deps -= [ "//components/contextual_tasks/public:feature_list" ]
++  }
+ 
+   if (is_chromeos) {
+     deps += [ "//chromeos/constants" ]
+@@ -606,7 +644,7 @@
+     deps = [ "//third_party/omnibox_proto:omnibox_proto_java" ]
+   }
+ 
+-  android_resources("java_resources") {
++  _omnibox_browser_resource_spec = {
+     sources = [
+       "android/java/res/color-night/omnibox_popover_suggestion_bg_color.xml",
+       "android/java/res/color-night/omnibox_suggestion_dropdown_bg.xml",
+@@ -634,10 +672,52 @@
+       "android/java/res/values/dimens.xml",
+       "android/java/res/values/drawables.xml",
+     ]
++    if (is_android) {
++      sources -= [
++        "android/java/res/color-night/omnibox_popover_suggestion_bg_color.xml",
++        "android/java/res/color/omnibox_popover_suggestion_bg_color.xml",
++      ]
++    }
++  }
++
++  _omnibox_browser_resource_sources = _omnibox_browser_resource_spec.sources
++  _omnibox_browser_resource_copy_deps = []
++  if (is_android) {
++    _omnibox_browser_resource_sources = []
++    _omnibox_browser_resource_directories = []
++    foreach(_source, _omnibox_browser_resource_spec.sources) {
++      _directory = get_path_info(_source, "dir")
++      if (filter_include(_omnibox_browser_resource_directories, [ _directory ]) == []) {
++        _omnibox_browser_resource_directories += [ _directory ]
++      }
++      _root = "$target_gen_dir/omnibox_browser_resources_selected/" +
++              string_replace(_directory, "/", "_")
++      _qualifier = get_path_info(_directory, "file")
++      _file = get_path_info(_source, "file")
++      _omnibox_browser_resource_sources += [ "$_root/$_qualifier/$_file" ]
++    }
++    foreach(_directory, _omnibox_browser_resource_directories) {
++      _qualifier = get_path_info(_directory, "file")
++      _copy_target = "copy_selected_omnibox_browser_$_qualifier"
++      copy_ex(_copy_target) {
++        sources = filter_include(_omnibox_browser_resource_spec.sources, [ "$_directory/*" ])
++        _root = "$target_gen_dir/omnibox_browser_resources_selected/" +
++                string_replace(_directory, "/", "_")
++        dest = "$_root/$_qualifier"
++        outputs = process_file_template(sources, [ "$dest/{{source_file_part}}" ])
++        args = [ "--clear" ]
++      }
++      _omnibox_browser_resource_copy_deps += [ ":$_copy_target" ]
++    }
++  }
++
++  android_resources("java_resources") {
++    sources = _omnibox_browser_resource_sources
+     deps = [
+       "//components/browser_ui/strings/android:browser_ui_strings_grd",
+       "//ui/android:ui_java_resources",
+     ]
++    deps += _omnibox_browser_resource_copy_deps
+   }
+ 
+   generate_jni("scheme_classifier_jni") {
+@@ -682,6 +762,11 @@
+       "android/java/src/org/chromium/components/omnibox/action/OmniboxActionDelegate.java",
+       "android/java/src/org/chromium/components/omnibox/suggestions/OmniboxSuggestionUiType.java",
+     ]
++    if (is_android) {
++      sources -= [
++        "android/java/src/org/chromium/components/omnibox/ToolModeUtils.java",
++      ]
++    }
+ 
+     resources_package = "org.chromium.components.omnibox"
+     deps = [
+@@ -730,6 +815,9 @@
+       "android/java/src/org/chromium/components/omnibox/SecurityStatusIconUnitTest.java",
+       "android/java/src/org/chromium/components/omnibox/ToolModeUtilsUnitTest.java",
+     ]
++    if (is_android) {
++      sources -= [ "android/java/src/org/chromium/components/omnibox/ToolModeUtilsUnitTest.java" ]
++    }
+     deps = [
+       ":browser_java",
+       ":java_resources",
+@@ -829,6 +917,12 @@
+     "test_scheme_classifier.cc",
+     "test_scheme_classifier.h",
+   ]
++  if (is_android) {
++    sources -= [
++      "mock_aim_eligibility_service.cc",
++      "mock_aim_eligibility_service.h",
++    ]
++  }
+ 
+   if (!is_ios) {
+     sources += [ "geolocation_header_service_test_api.h" ]
+@@ -862,6 +956,11 @@
+     "//ui/base",
+     "//ui/gfx",
+   ]
++  if (is_android) {
++    deps -= [
++      "//components/history_embeddings/core",
++    ]
++  }
+ 
+   if (toolkit_views) {
+     # Needed to get the TOOLKIT_VIEWS define.
+@@ -971,6 +1070,14 @@
+     "zero_suggest_provider_unittest.cc",
+     "zero_suggest_verbatim_match_provider_unittest.cc",
+   ]
++  if (is_android) {
++    sources -= [
++      "history_embeddings_provider_unittest.cc",
++    ]
++  }
++  if (is_android) {
++    sources -= [ "aim_eligibility_service_unittest.cc" ]
++  }
+ 
+   deps = [
+     ":browser",
+@@ -1032,6 +1139,19 @@
+     "//ui/gfx:test_support",
+     "//url",
+   ]
++  if (is_android) {
++    deps -= [
++      "//components/history_embeddings/core",
++      "//components/passage_embeddings/core",
++      "//components/passage_embeddings/core:test_support",
++    ]
++  }
++  if (is_android) {
++    deps -= [
++      "//components/contextual_tasks/public:feature_list",
++      "//components/omnibox/composebox:unit_tests",
++    ]
++  }
+ 
+   if (!is_android) {
+     sources += [ "suggest_inventory_fallback_utils_unittest.cc" ]
+@@ -1054,6 +1174,9 @@
+       "geolocation_header_service_unittest.cc",
+       "history_cluster_provider_unittest.cc",
+     ]
++    if (is_android) {
++      sources -= [ "fusebox_action_mojo_utils_unittest.cc" ]
++    }
+     deps += [
+       ":fusebox_action_mojo_bindings",
+       ":fusebox_action_mojo_test_utils",
+@@ -1064,6 +1187,13 @@
+       "//services/device/public/mojom",
+       "//ui/base/clipboard:clipboard_test_support",
+     ]
++    if (is_android) {
++      deps -= [
++        ":fusebox_action_mojo_bindings",
++        ":fusebox_action_mojo_test_utils",
++        ":fusebox_action_mojo_utils",
++      ]
++    }
+   }
+ 
+   if (is_chromeos) {
+@@ -1135,56 +1265,100 @@
+     "//ui/gfx/mojom",
+     "//url/mojom:url_mojom_gurl",
+   ]
++  if (is_android) {
++    public_deps -= [ "//components/omnibox/composebox:mojo_bindings" ]
++  }
+ 
+   cpp_typemaps = []
+ 
+   if (!is_ios) {
      sources += [ "searchbox.mojom" ]
      public_deps += [ ":fusebox_action_mojo_bindings" ]
-   }
+-  }
++    if (is_android) {
++      public_deps -= [ ":fusebox_action_mojo_bindings" ]
++    }
++  }
 +  generate_legacy_js_bindings = true
  }
  
  if (!is_ios) {
-@@ -1162,6 +1166,7 @@ if (!is_ios) {
-         traits_deps = [ "//third_party/omnibox_proto" ]
-       },
-     ]
-+    generate_legacy_js_bindings = true
-   }
- 
-   source_set("fusebox_action_mojo_utils") {
+-  mojom("fusebox_action_mojo_bindings") {
+-    sources = [ "fusebox_action.mojom" ]
+-    webui_module_path = "chrome://resources/mojo/components/omnibox/browser"
+-    public_deps = [ "//components/omnibox/composebox:mojo_bindings" ]
+-    cpp_typemaps = [
+-      {
+-        types = [
+-          {
+-            mojom = "fusebox_action.mojom.SuggestInventory"
+-            cpp = "::omnibox::SuggestInventory"
+-          },
++  if (!is_android) {
++    mojom("fusebox_action_mojo_bindings") {
++      sources = [ "fusebox_action.mojom" ]
++      if (is_android) {
++        sources -= [ "fusebox_action.mojom" ]
++      }
++      webui_module_path = "chrome://resources/mojo/components/omnibox/browser"
++      public_deps = [ "//components/omnibox/composebox:mojo_bindings" ]
++      if (is_android) {
++        public_deps -= [ "//components/omnibox/composebox:mojo_bindings" ]
++      }
++      cpp_typemaps = [
++        {
++          types = [
++            {
++              mojom = "fusebox_action.mojom.SuggestInventory"
++              cpp = "::omnibox::SuggestInventory"
++            },
++          ]
++          traits_headers = [ "fusebox_action_mojom_traits.h" ]
++          if (is_android) {
++            traits_headers -= [ "fusebox_action_mojom_traits.h" ]
++          }
++          traits_sources = [ "fusebox_action_mojom_traits.cc" ]
++          if (is_android) {
++            traits_sources -= [ "fusebox_action_mojom_traits.cc" ]
++          }
++          traits_deps = [ "//third_party/omnibox_proto" ]
++        },
++      ]
++      generate_legacy_js_bindings = true
++    }
++  }
++
++  if (!is_android) {
++    source_set("fusebox_action_mojo_utils") {
++      sources = [
++        "fusebox_action_mojo_utils.cc",
++        "fusebox_action_mojo_utils.h",
++      ]
++      if (is_android) {
++        sources -= [
++          "fusebox_action_mojo_utils.cc",
++          "fusebox_action_mojo_utils.h",
+         ]
+-        traits_headers = [ "fusebox_action_mojom_traits.h" ]
+-        traits_sources = [ "fusebox_action_mojom_traits.cc" ]
+-        traits_deps = [ "//third_party/omnibox_proto" ]
+-      },
+-    ]
+-  }
+-
+-  source_set("fusebox_action_mojo_utils") {
+-    sources = [
+-      "fusebox_action_mojo_utils.cc",
+-      "fusebox_action_mojo_utils.h",
+-    ]
+-    deps = [
+-      ":fusebox_action_mojo_bindings",
+-      ":mojo_bindings",
+-      "//third_party/omnibox_proto",
+-    ]
+-  }
+-
+-  source_set("fusebox_action_mojo_test_utils") {
+-    testonly = true
+-    sources = [
+-      "fusebox_action_mojo_test_utils.cc",
+-      "fusebox_action_mojo_test_utils.h",
+-    ]
+-    deps = [
+-      ":fusebox_action_mojo_bindings",
+-      ":mojo_bindings",
+-    ]
+-  }
+-}
++      }
++      deps = [
++        ":fusebox_action_mojo_bindings",
++        ":mojo_bindings",
++        "//third_party/omnibox_proto",
++      ]
++      if (is_android) {
++        deps -= [ ":fusebox_action_mojo_bindings" ]
++      }
++    }
++  }
++
++  if (!is_android) {
++    source_set("fusebox_action_mojo_test_utils") {
++      testonly = true
++      sources = [
++        "fusebox_action_mojo_test_utils.cc",
++        "fusebox_action_mojo_test_utils.h",
++      ]
++      if (is_android) {
++        sources -= [
++          "fusebox_action_mojo_test_utils.cc",
++          "fusebox_action_mojo_test_utils.h",
++        ]
++      }
++      deps = [
++        ":fusebox_action_mojo_bindings",
++        ":mojo_bindings",
++      ]
++      if (is_android) {
++        deps -= [ ":fusebox_action_mojo_bindings" ]
++      }
++    }
++  }
++}

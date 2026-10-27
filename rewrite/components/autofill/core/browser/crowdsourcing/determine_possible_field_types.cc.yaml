@@ -1,0 +1,150 @@
+substitutions:
+- description: Bind Android build flags directly
+  regex:
+    pattern: '#include "components/autofill/core/browser/crowdsourcing/determine_possible_field_types.h"
+
+      '
+    replace: '#include "build/build_config.h"
+
+      #include "components/autofill/core/browser/crowdsourcing/determine_possible_field_types.h"
+
+      '
+  count: 1
+- description: Exclude Android entity, masked/affix and AI date matching implementation
+  regex:
+    pattern: "// Returns the FieldTypes for which the given EntityInstance defines a non-empty\n// value.\nFieldTypeSet GetAvailableAutofillAiFieldTypes(\n\
+      \    base::span<const EntityInstance> entities,\n    const std::string& app_locale) {\n  CHECK(base::FeatureList::IsEnabled(features::kAutofillAiWithDataSchema));\n\
+      \  FieldTypeSet types;\n  for (const EntityInstance& entity : entities) {\n    for (const AttributeInstance& attribute\
+      \ : entity.attributes()) {\n      for (FieldType field_type : attribute.type().field_subtypes()) {\n        bool is_empty\
+      \ = normalization::HasOnlySkippableCharacters(\n            attribute.GetInfo(field_type, app_locale, std::nullopt));\n\
+      \        if (!is_empty) {\n          types.insert(field_type);\n        }\n      }\n    }\n  }\n  return types;\n}\n\
+      \nbool QualifiesForAffixFormatStringVote(FieldType field_type,\n                                       std::u16string_view\
+      \ value_in_field) {\n  return IsAffixFormatStringEnabledForType(field_type) &&\n         value_in_field.size() >= data_util::kMinAffixLengthForFormatString\
+      \ &&\n         value_in_field.size() <= data_util::kMaxAffixLengthForFormatString;\n}\n\n// Adds all applicable votes\
+      \ for `field_type` to `pt` for an unmasked\n// `value_on_file`, given that `value_in_field` was submitted.\nvoid AddPossibleAutofillAiTypesForUnmaskedValue(\n\
+      \    std::u16string_view value_in_field,\n    std::u16string_view value_on_file,\n    FieldType field_type,\n    PossibleTypes&\
+      \ pt) {\n  // Test if `value_in_field` and `value_on_file` match.\n  bool full_match = AutofillProfileComparator::Compare(\n\
+      \      value_in_field, value_on_file, normalization::WhitespaceSpec::kDiscard);\n  if (full_match) {\n    pt.types.insert(field_type);\n\
+      \    if (IsAffixFormatStringEnabledForType(field_type)) {\n      pt.formats.emplace(FormatString_Type_AFFIX, u\"0\"\
+      );\n    }\n    if (field_type == FLIGHT_RESERVATION_FLIGHT_NUMBER &&\n        base::FeatureList::IsEnabled(\n      \
+      \      features::kAutofillAiVoteForFormatStringsForFlightNumbers)) {\n      pt.formats.emplace(FormatString_Type_FLIGHT_NUMBER,\
+      \ u\"F\");\n    }\n  }\n\n  // Test if `value_in_field` is an affix of `value_on_file`.\n  if (QualifiesForAffixFormatStringVote(field_type,\
+      \ value_in_field) &&\n      value_in_field.size() < value_on_file.size()) {\n    if (value_on_file.starts_with(value_in_field))\
+      \ {\n      pt.types.insert(field_type);\n      pt.formats.emplace(FormatString_Type_AFFIX,\n                       \
+      \  base::NumberToString16(value_in_field.size()));\n    }\n    if (value_on_file.ends_with(value_in_field)) {\n    \
+      \  pt.types.insert(field_type);\n      pt.formats.emplace(\n          FormatString_Type_AFFIX,\n          base::NumberToString16(-1\
+      \ * static_cast<int>(value_in_field.size())));\n    }\n  }\n\n  if (field_type == FLIGHT_RESERVATION_FLIGHT_NUMBER &&\n\
+      \      base::FeatureList::IsEnabled(\n          features::kAutofillAiVoteForFormatStringsForFlightNumbers)) {\n    if\
+      \ (value_in_field.size() == 2 &&\n        value_on_file.starts_with(value_in_field)) {\n      pt.types.insert(field_type);\n\
+      \      pt.formats.emplace(FormatString_Type_FLIGHT_NUMBER, u\"A\");\n    } else if (value_on_file.size() > 3 &&\n  \
+      \             value_on_file.substr(2) == value_in_field) {\n      pt.types.insert(field_type);\n      pt.formats.emplace(FormatString_Type_FLIGHT_NUMBER,\
+      \ u\"N\");\n    }\n  }\n}\n\n// Adds all applicable votes for `field_type` to `pt` for a\n// `masked_value_on_file`,\
+      \ given that `value_in_field` was submitted.\nvoid AddPossibleAutofillAiTypesForMaskedValue(\n    std::u16string_view\
+      \ value_in_field,\n    std::u16string_view masked_value_on_file,\n    FieldType field_type,\n    PossibleTypes& pt)\
+      \ {\n  // Since the full value is not available on file, look for a suffix match.\n  if (value_in_field.ends_with(masked_value_on_file))\
+      \ {\n    pt.types.insert(field_type);\n    // No \"full match\" FormatString_Type_AFFIX vote is created. With a masked\n\
+      \    // value on file, the logic cannot distinguish between full and suffix\n    // matches.\n  }\n  // For FormatString_Type_AFFIX\
+      \ votes, only suffixes matches are possible for\n  // masked values. If the `masked_value_on_file` is shorter than the\
+      \ suffix\n  // filled into `value_in_field`, the vote will be missed.\n  if (QualifiesForAffixFormatStringVote(field_type,\
+      \ value_in_field) &&\n      masked_value_on_file.ends_with(value_in_field)) {\n    pt.types.insert(field_type);\n  \
+      \  pt.formats.emplace(\n        FormatString_Type_AFFIX,\n        base::NumberToString16(-1 * static_cast<int>(value_in_field.size())));\n\
+      \  }\n}\n\n// Scans the given `entities` for values that match `value_u16`. It adds the\n// matching `FieldType` to\
+      \ `PossibleTypes::types` and, if applicable, a format\n// string to `PossibleTypes::format`.\nvoid AddPossibleAutofillAiTypes(base::span<const\
+      \ EntityInstance> entities,\n                                std::u16string_view value_u16,\n                      \
+      \          const std::string& app_locale,\n                                PossibleTypes& pt) {\n  CHECK(base::FeatureList::IsEnabled(features::kAutofillAiWithDataSchema));\n\
+      \n  if (normalization::HasOnlySkippableCharacters(value_u16)) {\n    return;\n  }\n\n  const std::u16string& value_in_field\
+      \ =\n      normalization::NormalizeForComparison(value_u16);\n  for (const EntityInstance& entity : entities) {\n  \
+      \  for (const AttributeInstance& attribute : entity.attributes()) {\n      for (const FieldType field_type : attribute.type().field_subtypes())\
+      \ {\n        const std::u16string& value_on_file =\n            normalization::NormalizeForComparison(\n           \
+      \     attribute.GetInfo(field_type, app_locale, std::nullopt));\n        if (attribute.masked()) {\n          AddPossibleAutofillAiTypesForMaskedValue(\n\
+      \              value_in_field, value_on_file, field_type, pt);\n        } else {\n          AddPossibleAutofillAiTypesForUnmaskedValue(\n\
+      \              value_in_field, value_on_file, field_type, pt);\n        }\n      }\n    }\n  }\n}\n\nvoid FindAndSetPossibleDateFieldTypesAndFormatStrings(\n\
+      \    base::span<const EntityInstance> entities,\n    const std::string& app_locale,\n    base::span<const std::unique_ptr<AutofillField>>\
+      \ fields,\n    base::span<PossibleTypes> possible_types) {\n  base::flat_set<std::pair<data_util::Date, PossibleTypes*>>\
+      \ dates =\n      FindDatesAndSetFormatStrings(fields, possible_types);\n\n  for (const EntityInstance& entity : entities)\
+      \ {\n    for (const AttributeInstance& attribute : entity.attributes()) {\n      for (const FieldType field_type : attribute.type().field_subtypes())\
+      \ {\n        if (!IsDateFieldType(field_type)) {\n          continue;\n        }\n        data_util::Date date;\n  \
+      \      if (data_util::ParseDate(attribute.GetCompleteInfo(app_locale),\n                                 u\"YYYY-MM-DD\"\
+      , date)) {\n          auto get_date = [](const auto& p) { return p.first; };\n          for (auto& [same_date, pt] :\n\
+      \               std::ranges::equal_range(dates, date, {}, get_date)) {\n            pt->types.insert(field_type);\n\
+      \          }\n        }\n      }\n    }\n  }\n}\n\n"
+    replace: "#if !BUILDFLAG(IS_ANDROID)\n// Returns the FieldTypes for which the given EntityInstance defines a non-empty\n\
+      // value.\nFieldTypeSet GetAvailableAutofillAiFieldTypes(\n    base::span<const EntityInstance> entities,\n    const\
+      \ std::string& app_locale) {\n  CHECK(base::FeatureList::IsEnabled(features::kAutofillAiWithDataSchema));\n  FieldTypeSet\
+      \ types;\n  for (const EntityInstance& entity : entities) {\n    for (const AttributeInstance& attribute : entity.attributes())\
+      \ {\n      for (FieldType field_type : attribute.type().field_subtypes()) {\n        bool is_empty = normalization::HasOnlySkippableCharacters(\n\
+      \            attribute.GetInfo(field_type, app_locale, std::nullopt));\n        if (!is_empty) {\n          types.insert(field_type);\n\
+      \        }\n      }\n    }\n  }\n  return types;\n}\n\nbool QualifiesForAffixFormatStringVote(FieldType field_type,\n\
+      \                                       std::u16string_view value_in_field) {\n  return IsAffixFormatStringEnabledForType(field_type)\
+      \ &&\n         value_in_field.size() >= data_util::kMinAffixLengthForFormatString &&\n         value_in_field.size()\
+      \ <= data_util::kMaxAffixLengthForFormatString;\n}\n\n// Adds all applicable votes for `field_type` to `pt` for an unmasked\n\
+      // `value_on_file`, given that `value_in_field` was submitted.\nvoid AddPossibleAutofillAiTypesForUnmaskedValue(\n \
+      \   std::u16string_view value_in_field,\n    std::u16string_view value_on_file,\n    FieldType field_type,\n    PossibleTypes&\
+      \ pt) {\n  // Test if `value_in_field` and `value_on_file` match.\n  bool full_match = AutofillProfileComparator::Compare(\n\
+      \      value_in_field, value_on_file, normalization::WhitespaceSpec::kDiscard);\n  if (full_match) {\n    pt.types.insert(field_type);\n\
+      \    if (IsAffixFormatStringEnabledForType(field_type)) {\n      pt.formats.emplace(FormatString_Type_AFFIX, u\"0\"\
+      );\n    }\n    if (field_type == FLIGHT_RESERVATION_FLIGHT_NUMBER &&\n        base::FeatureList::IsEnabled(\n      \
+      \      features::kAutofillAiVoteForFormatStringsForFlightNumbers)) {\n      pt.formats.emplace(FormatString_Type_FLIGHT_NUMBER,\
+      \ u\"F\");\n    }\n  }\n\n  // Test if `value_in_field` is an affix of `value_on_file`.\n  if (QualifiesForAffixFormatStringVote(field_type,\
+      \ value_in_field) &&\n      value_in_field.size() < value_on_file.size()) {\n    if (value_on_file.starts_with(value_in_field))\
+      \ {\n      pt.types.insert(field_type);\n      pt.formats.emplace(FormatString_Type_AFFIX,\n                       \
+      \  base::NumberToString16(value_in_field.size()));\n    }\n    if (value_on_file.ends_with(value_in_field)) {\n    \
+      \  pt.types.insert(field_type);\n      pt.formats.emplace(\n          FormatString_Type_AFFIX,\n          base::NumberToString16(-1\
+      \ * static_cast<int>(value_in_field.size())));\n    }\n  }\n\n  if (field_type == FLIGHT_RESERVATION_FLIGHT_NUMBER &&\n\
+      \      base::FeatureList::IsEnabled(\n          features::kAutofillAiVoteForFormatStringsForFlightNumbers)) {\n    if\
+      \ (value_in_field.size() == 2 &&\n        value_on_file.starts_with(value_in_field)) {\n      pt.types.insert(field_type);\n\
+      \      pt.formats.emplace(FormatString_Type_FLIGHT_NUMBER, u\"A\");\n    } else if (value_on_file.size() > 3 &&\n  \
+      \             value_on_file.substr(2) == value_in_field) {\n      pt.types.insert(field_type);\n      pt.formats.emplace(FormatString_Type_FLIGHT_NUMBER,\
+      \ u\"N\");\n    }\n  }\n}\n\n// Adds all applicable votes for `field_type` to `pt` for a\n// `masked_value_on_file`,\
+      \ given that `value_in_field` was submitted.\nvoid AddPossibleAutofillAiTypesForMaskedValue(\n    std::u16string_view\
+      \ value_in_field,\n    std::u16string_view masked_value_on_file,\n    FieldType field_type,\n    PossibleTypes& pt)\
+      \ {\n  // Since the full value is not available on file, look for a suffix match.\n  if (value_in_field.ends_with(masked_value_on_file))\
+      \ {\n    pt.types.insert(field_type);\n    // No \"full match\" FormatString_Type_AFFIX vote is created. With a masked\n\
+      \    // value on file, the logic cannot distinguish between full and suffix\n    // matches.\n  }\n  // For FormatString_Type_AFFIX\
+      \ votes, only suffixes matches are possible for\n  // masked values. If the `masked_value_on_file` is shorter than the\
+      \ suffix\n  // filled into `value_in_field`, the vote will be missed.\n  if (QualifiesForAffixFormatStringVote(field_type,\
+      \ value_in_field) &&\n      masked_value_on_file.ends_with(value_in_field)) {\n    pt.types.insert(field_type);\n  \
+      \  pt.formats.emplace(\n        FormatString_Type_AFFIX,\n        base::NumberToString16(-1 * static_cast<int>(value_in_field.size())));\n\
+      \  }\n}\n\n// Scans the given `entities` for values that match `value_u16`. It adds the\n// matching `FieldType` to\
+      \ `PossibleTypes::types` and, if applicable, a format\n// string to `PossibleTypes::format`.\nvoid AddPossibleAutofillAiTypes(base::span<const\
+      \ EntityInstance> entities,\n                                std::u16string_view value_u16,\n                      \
+      \          const std::string& app_locale,\n                                PossibleTypes& pt) {\n  CHECK(base::FeatureList::IsEnabled(features::kAutofillAiWithDataSchema));\n\
+      \n  if (normalization::HasOnlySkippableCharacters(value_u16)) {\n    return;\n  }\n\n  const std::u16string& value_in_field\
+      \ =\n      normalization::NormalizeForComparison(value_u16);\n  for (const EntityInstance& entity : entities) {\n  \
+      \  for (const AttributeInstance& attribute : entity.attributes()) {\n      for (const FieldType field_type : attribute.type().field_subtypes())\
+      \ {\n        const std::u16string& value_on_file =\n            normalization::NormalizeForComparison(\n           \
+      \     attribute.GetInfo(field_type, app_locale, std::nullopt));\n        if (attribute.masked()) {\n          AddPossibleAutofillAiTypesForMaskedValue(\n\
+      \              value_in_field, value_on_file, field_type, pt);\n        } else {\n          AddPossibleAutofillAiTypesForUnmaskedValue(\n\
+      \              value_in_field, value_on_file, field_type, pt);\n        }\n      }\n    }\n  }\n}\n\nvoid FindAndSetPossibleDateFieldTypesAndFormatStrings(\n\
+      \    base::span<const EntityInstance> entities,\n    const std::string& app_locale,\n    base::span<const std::unique_ptr<AutofillField>>\
+      \ fields,\n    base::span<PossibleTypes> possible_types) {\n  base::flat_set<std::pair<data_util::Date, PossibleTypes*>>\
+      \ dates =\n      FindDatesAndSetFormatStrings(fields, possible_types);\n\n  for (const EntityInstance& entity : entities)\
+      \ {\n    for (const AttributeInstance& attribute : entity.attributes()) {\n      for (const FieldType field_type : attribute.type().field_subtypes())\
+      \ {\n        if (!IsDateFieldType(field_type)) {\n          continue;\n        }\n        data_util::Date date;\n  \
+      \      if (data_util::ParseDate(attribute.GetCompleteInfo(app_locale),\n                                 u\"YYYY-MM-DD\"\
+      , date)) {\n          auto get_date = [](const auto& p) { return p.first; };\n          for (auto& [same_date, pt] :\n\
+      \               std::ranges::equal_range(dates, date, {}, get_date)) {\n            pt->types.insert(field_type);\n\
+      \          }\n        }\n      }\n    }\n  }\n}\n\n#endif  // !BUILDFLAG(IS_ANDROID)\n"
+  count: 1
+- description: Exclude Android AI matching call while retaining generic voting
+  regex:
+    pattern: "  if (base::FeatureList::IsEnabled(features::kAutofillAiWithDataSchema)) {\n    AddPossibleAutofillAiTypes(entities,\
+      \ value_u16, app_locale, pt);\n  }\n"
+    replace: "#if !BUILDFLAG(IS_ANDROID)\n  if (base::FeatureList::IsEnabled(features::kAutofillAiWithDataSchema)) {\n   \
+      \ AddPossibleAutofillAiTypes(entities, value_u16, app_locale, pt);\n  }\n#endif  // !BUILDFLAG(IS_ANDROID)\n"
+  count: 1
+- description: Exclude Android AI matching call while retaining generic voting
+  regex:
+    pattern: "  if (base::FeatureList::IsEnabled(features::kAutofillAiWithDataSchema)) {\n    FindAndSetPossibleDateFieldTypesAndFormatStrings(entities,\
+      \ app_locale,\n                                                     fields, possible_types);\n  }\n"
+    replace: "#if !BUILDFLAG(IS_ANDROID)\n  if (base::FeatureList::IsEnabled(features::kAutofillAiWithDataSchema)) {\n   \
+      \ FindAndSetPossibleDateFieldTypesAndFormatStrings(entities, app_locale,\n                                         \
+      \            fields, possible_types);\n  }\n#endif  // !BUILDFLAG(IS_ANDROID)\n"
+  count: 1
+- description: Exclude Android AI matching call while retaining generic voting
+  regex:
+    pattern: "  if (base::FeatureList::IsEnabled(features::kAutofillAiWithDataSchema)) {\n    types.insert_all(GetAvailableAutofillAiFieldTypes(entities,\
+      \ app_locale));\n  }\n"
+    replace: "#if !BUILDFLAG(IS_ANDROID)\n  if (base::FeatureList::IsEnabled(features::kAutofillAiWithDataSchema)) {\n   \
+      \ types.insert_all(GetAvailableAutofillAiFieldTypes(entities, app_locale));\n  }\n#endif  // !BUILDFLAG(IS_ANDROID)\n"
+  count: 1

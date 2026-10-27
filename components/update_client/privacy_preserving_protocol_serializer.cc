@@ -3,6 +3,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+#include "build/build_config.h"
 #include "brave/components/update_client/privacy_preserving_protocol_serializer.h"
 
 #include <string>
@@ -21,6 +22,9 @@ namespace update_client {
 std::string PrivacyPreservingProtocolSerializer::Serialize(
     const protocol_request::Request& request) const {
   std::string upstream_result = ProtocolSerializerJSON().Serialize(request);
+#if BUILDFLAG(IS_ANDROID)
+  return upstream_result;
+#else
   std::optional<base::Value> root = base::JSONReader::Read(
       upstream_result, base::JSON_PARSE_CHROMIUM_EXTENSIONS);
   if (!root.has_value() || !root->is_dict()) {
@@ -61,6 +65,7 @@ std::string PrivacyPreservingProtocolSerializer::Serialize(
   }
 
   return base::WriteJson(*root).value_or(std::move(upstream_result));
+#endif  // BUILDFLAG(IS_ANDROID)
 }
 
 }  // namespace update_client

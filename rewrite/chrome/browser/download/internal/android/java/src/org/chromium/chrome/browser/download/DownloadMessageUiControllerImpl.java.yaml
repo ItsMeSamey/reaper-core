@@ -1,0 +1,40 @@
+# Android download UI policy and truthful transfer lifecycle.
+substitutions:
+- description: Retain only live transfer snapshots for a later optional-UI re-enable
+  regex:
+    re_pattern: \ \ \ \ private\ final\ LinkedHashMap<ContentId,\ OfflineItem>\ mTrackedItems\ =\ new\ LinkedHashMap<>\(\);
+    replace: "    private final LinkedHashMap<ContentId, OfflineItem> mTrackedItems = new LinkedHashMap<>();\n\n    // Keep only real in-progress items while optional UI is suppressed. Terminal\n    // updates remove these entries; enabling UI must not resurrect completed work.\n    private final Map<ContentId, OfflineItem> mPolicySuppressedItems = new HashMap<>();\n    private @Nullable String mEarlyDownloadOtrProfileId;"
+- description: Immediately refresh affected messages and restore only still-active hidden transfers
+  regex:
+    re_pattern: '\ \ \ \ public\ void\ onDownloadStarted\(\)\ \{\
+
+      \ \ \ \ \ \ \ \ computeNextStepForUpdate\(null,\ true,\ false,\ false\);\
+
+      \ \ \ \ \}'
+    replace: "    public void onDownloadStarted() {\n        onDownloadStarted(null);\n    }\n\n    @Override\n    public void onDownloadStarted(@Nullable OtrProfileId otrProfileId) {\n        mEarlyDownloadOtrProfileId = OtrProfileId.serialize(otrProfileId);\n        if (mDelegate.shouldSuppressDownloadUi(mEarlyDownloadOtrProfileId)) return;\n        computeNextStepForUpdate(null, true, false, false);\n    }\n\n    @Override\n    public void onDownloadUiPolicyChanged() {\n        // Replay retained real state, not a provider removal or a synthetic completion.\n        List<OfflineItem> items = new ArrayList<>(mTrackedItems.values());\n        items.addAll(mPolicySuppressedItems.values());\n        for (OfflineItem item : items) onItemUpdated(item, null);\n        if (mTrackedItems.isEmpty()\n                && mDelegate.shouldSuppressDownloadUi(mEarlyDownloadOtrProfileId)) {\n            moveToState(UiState.INITIAL);\n        }\n    }"
+- description: Apply profile policy to initial aggregator items without filtering the data source
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ \ \ \ \ if\ \(!isVisibleToUser\(item\)\)\ continue;\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ computeNextStepForUpdate\(item\);'
+    replace: "            if (isSuppressedByExtension(item)) {\n                updateSuppressedItem(item);\n                continue;\n            }\n            if (!isVisibleToUser(item)) continue;\n            computeNextStepForUpdate(item);"
+- description: Discard retained suppressed state when its real item is removed
+  regex:
+    re_pattern: '\ \ \ \ public\ void\ onItemRemoved\(@Nullable\ ContentId\ id\)\ \{\
+
+      \ \ \ \ \ \ \ \ if\ \(!mSeenItems\.contains\(id\)\)\ return;'
+    replace: "    public void onItemRemoved(@Nullable ContentId id) {\n        mPolicySuppressedItems.remove(id);\n        if (!mSeenItems.contains(id)) return;"
+- description: Remove optional message state while continuing to receive genuine terminal updates
+  regex:
+    re_pattern: '\ \ \ \ \ \ \ \ if\ \(!isVisibleToUser\(item\)\)\ \{\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ onItemRemoved\(item\.id\);\
+
+      \ \ \ \ \ \ \ \ \ \ \ \ return;\
+
+      \ \ \ \ \ \ \ \ \}'
+    replace: "        if (isSuppressedByExtension(item)) {\n            updateSuppressedItem(item);\n            return;\n        }\n        if (mPolicySuppressedItems.remove(item.id) != null) {\n            // A live transfer returning to the UI is new to its visible state.\n            mSeenItems.remove(item.id);\n        }\n        if (!isVisibleToUser(item)) {\n            onItemRemoved(item.id);\n            return;\n        }"
+- description: Keep mandatory security feedback and keep completed/canceled downloads out of re-enable state
+  regex:
+    re_pattern: \ \ \ \ /\*\*\ @return\ Whether\ the\ message\ is\ currently\ showing\.\ \*/
+    replace: "    private boolean isSuppressedByExtension(OfflineItem item) {\n        // Security warnings and blocked-download feedback remain visible.\n        if (item.isDangerous\n                || shouldDisplayItemAsDangerousInMessage(item)\n                || shouldDisplayItemAsBlockedSensitiveInMessage(item)\n                || (item.state == OfflineItemState.FAILED\n                        && item.failState == FailState.FILE_BLOCKED)) {\n            return false;\n        }\n        return LegacyHelpers.isLegacyDownload(item.id)\n                && mDelegate.shouldSuppressDownloadUi(item.otrProfileId);\n    }\n\n    private void updateSuppressedItem(OfflineItem item) {\n        onItemRemoved(item.id);\n        if (item.state == OfflineItemState.IN_PROGRESS) {\n            mPolicySuppressedItems.put(item.id, item.clone());\n        }\n    }\n\n    /** @return Whether the message is currently showing. */"

@@ -1,0 +1,549 @@
+diff --git a/chrome/browser/extensions/api/downloads/downloads_api.cc b/chrome/browser/extensions/api/downloads/downloads_api.cc
+index f49f09595a77205fb7025155471fdd14a72d313d..b9e58925966c8169999cbfb959e00a7bf7990b75 100644
+--- a/chrome/browser/extensions/api/downloads/downloads_api.cc
++++ b/chrome/browser/extensions/api/downloads/downloads_api.cc
+@@ -37,6 +37,10 @@
+ #include "base/values.h"
+ #include "build/build_config.h"
+ #include "chrome/browser/browser_process.h"
++#if BUILDFLAG(IS_ANDROID)
++#include "chrome/browser/download/android/download_manager_service.h"
++#include "chrome/browser/download/android/download_message_bridge.h"
++#endif
+ #include "chrome/browser/download/download_core_service.h"
+ #include "chrome/browser/download/download_core_service_factory.h"
+ #include "chrome/browser/download/download_danger_prompt.h"
+@@ -69,6 +73,7 @@
+ #include "content/public/browser/web_contents.h"
+ #include "extensions/browser/event_router.h"
+ #include "extensions/browser/extension_function_dispatcher.h"
++#include "extensions/browser/extension_registry.h"
+ #include "extensions/browser/extension_prefs.h"
+ #include "extensions/browser/install_prefs_helper.h"
+ #include "extensions/browser/warning_service.h"
+@@ -85,6 +90,15 @@
+ #include "ui/base/webui/web_ui_util.h"
+ #include "ui/gfx/image/image_skia.h"
+ #include "ui/gfx/image/image_skia_rep.h"
++
++#if BUILDFLAG(IS_ANDROID)
++#include "chrome/browser/android/tab_android.h"
++#include "chrome/browser/extensions/api/tabs/windows_util.h"
++#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
++#include "content/public/browser/download_item_utils.h"
++#include "extensions/browser/extension_util.h"
++#include "ui/base/base_window.h"
++#endif
+
+ #if !BUILDFLAG(IS_ANDROID)
+ #include "chrome/browser/download/download_item_warning_data.h"
+@@ -594,6 +608,93 @@
+   return download_item;
+ }
+
++#if BUILDFLAG(IS_ANDROID)
++// Re-read permission and incognito access when an asynchronous reveal finishes.
++// GetDownload() still supplies the API's normal ID/visibility authorization.
++bool CanRevealAndroidDownload(ExtensionFunction* function,
++                              Profile* item_profile) {
++  content::BrowserContext* context = function->browser_context();
++  if (!context || context->ShutdownStarted() || !item_profile ||
++      item_profile->ShutdownStarted()) {
++    return false;
++  }
++  Profile* caller_profile = Profile::FromBrowserContext(context);
++  if (item_profile->GetOriginalProfile() !=
++          caller_profile->GetOriginalProfile() ||
++      (item_profile->IsOffTheRecord() &&
++       !item_profile->IsPrimaryOTRProfile())) {
++    return false;
++  }
++  const Extension* current_extension =
++      ExtensionRegistry::Get(context)->enabled_extensions().GetByID(
++          function->extension_id());
++  if (!current_extension || current_extension != function->extension() ||
++      !current_extension->permissions_data()->HasAPIPermission(
++          APIPermissionID::kDownloads)) {
++    return false;
++  }
++  return !item_profile->IsOffTheRecord() ||
++         ((caller_profile->IsOffTheRecord() ||
++           function->include_incognito_information()) &&
++          util::IsIncognitoEnabled(current_extension, context) &&
++          item_profile->GetOriginalProfile()->GetPrimaryOTRProfile(false) ==
++              item_profile);
++}
++
++TabAndroid* GetAndroidDownloadRevealHost(ExtensionFunction* function,
++                                         Profile* item_profile) {
++  const auto usable_tab = [item_profile](content::WebContents* contents) {
++    TabAndroid* tab =
++        contents ? TabAndroid::FromWebContents(contents) : nullptr;
++    return tab && DownloadManagerService::CanShowDownloadItemForExtension(
++                      tab->GetJavaObject(), item_profile)
++               ? tab
++               : nullptr;
++  };
++  const auto usable_window = [function,
++                              item_profile](WindowController* window) {
++    if (!window || !window->GetBrowserWindowInterface() ||
++        window->GetBrowserWindowInterface()->IsDeleteScheduled() ||
++        window->profile()->GetOriginalProfile() !=
++            item_profile->GetOriginalProfile()) {
++      return false;
++    }
++    return windows_util::CanOperateOnWindow(function, window,
++                                            WindowController::kNoWindowFilter);
++  };
++
++  // Prefer the caller's tab, subject to the same window/profile access checks.
++  content::WebContents* sender = function->GetSenderWebContents();
++  for (WindowController* window : *WindowControllerList::GetInstance()) {
++    if (usable_window(window) && window->GetActiveTab() == sender) {
++      if (TabAndroid* tab = usable_tab(sender)) {
++        return tab;
++      }
++    }
++  }
++  WindowController* associated =
++      function->dispatcher()
++          ? function->dispatcher()->GetExtensionWindowController()
++          : nullptr;
++  if (usable_window(associated)) {
++    if (TabAndroid* tab = usable_tab(associated->GetActiveTab())) {
++      return tab;
++    }
++  }
++  // MV3 workers have no sender tab. Only a currently active, accessible browser
++  // window in the item's original profile may anchor the new Downloads surface.
++  for (WindowController* window : *WindowControllerList::GetInstance()) {
++    if (usable_window(window) && window->window()->IsActive()) {
++      if (TabAndroid* tab = usable_tab(window->GetActiveTab())) {
++        return tab;
++      }
++    }
++  }
++  return nullptr;
++}
++#endif
++
++#if !BUILDFLAG(IS_ANDROID)
+ // Corresponds to |DownloadFunctions| enumeration in histograms.xml. Please
+ // keep these in sync.
+ enum class DownloadsFunctionName {
+@@ -622,6 +723,7 @@
+   UMA_HISTOGRAM_ENUMERATION("Download.ApiFunctions", function,
+                             DownloadsFunctionName::kDownloadsFunctionLast);
+ }
++#endif  // !BUILDFLAG(IS_ANDROID)
+
+ SortTypeMap& GetSortTypeMap() {
+   static base::NoDestructor<SortTypeMap> map;
+@@ -1254,7 +1356,9 @@
+
+   DownloadManager* manager = browser_context()->GetDownloadManager();
+   manager->DownloadUrl(std::move(download_params));
++#if !BUILDFLAG(IS_ANDROID)
+   RecordApiFunctions(DownloadsFunctionName::kDownloadsFunctionDownload);
++#endif  // !BUILDFLAG(IS_ANDROID)
+   return RespondLater();
+ }
+
+@@ -1333,7 +1437,9 @@
+                     : profile->GetOriginalProfile());
+     json_results.Append(std::move(json_item));
+   }
++#if !BUILDFLAG(IS_ANDROID)
+   RecordApiFunctions(DownloadsFunctionName::kDownloadsFunctionSearch);
++#endif  // !BUILDFLAG(IS_ANDROID)
+   return RespondNow(WithArguments(std::move(json_results)));
+ }
+
+@@ -1356,7 +1462,9 @@
+   // If the item is already paused, this is a no-op and the operation will
+   // silently succeed.
+   download_item->Pause();
++#if !BUILDFLAG(IS_ANDROID)
+   RecordApiFunctions(DownloadsFunctionName::kDownloadsFunctionPause);
++#endif  // !BUILDFLAG(IS_ANDROID)
+   return RespondNow(NoArguments());
+ }
+
+@@ -1381,7 +1489,9 @@
+   // Note that if the item isn't paused, this will be a no-op, and the extension
+   // call will seem successful.
+   download_item->Resume(user_gesture());
++#if !BUILDFLAG(IS_ANDROID)
+   RecordApiFunctions(DownloadsFunctionName::kDownloadsFunctionResume);
++#endif  // !BUILDFLAG(IS_ANDROID)
+   return RespondNow(NoArguments());
+ }
+
+@@ -1401,7 +1511,9 @@
+   }
+   // |download_item| can be NULL if the download ID was invalid or if the
+   // download is not currently active.  Either way, it's not a failure.
++#if !BUILDFLAG(IS_ANDROID)
+   RecordApiFunctions(DownloadsFunctionName::kDownloadsFunctionCancel);
++#endif  // !BUILDFLAG(IS_ANDROID)
+   return RespondNow(NoArguments());
+ }
+
+@@ -1428,7 +1540,9 @@
+     json_results.Append(static_cast<int>(result->GetId()));
+     result->Remove();
+   }
++#if !BUILDFLAG(IS_ANDROID)
+   RecordApiFunctions(DownloadsFunctionName::kDownloadsFunctionErase);
++#endif  // !BUILDFLAG(IS_ANDROID)
+   return RespondNow(WithArguments(std::move(json_results)));
+ }
+
+@@ -1449,7 +1563,9 @@
+       Fault(download_item->GetFileExternallyRemoved(),
+             download_extension_errors::kFileAlreadyDeleted, &error))
+     return RespondNow(Error(std::move(error)));
++#if !BUILDFLAG(IS_ANDROID)
+   RecordApiFunctions(DownloadsFunctionName::kDownloadsFunctionRemoveFile);
++#endif  // !BUILDFLAG(IS_ANDROID)
+   download_item->DeleteFile(
+       base::BindOnce(&DownloadsRemoveFileFunction::Done, this));
+   return RespondLater();
+@@ -1473,7 +1589,11 @@
+       downloads::AcceptDanger::Params::Create(args());
+   EXTENSION_FUNCTION_VALIDATE(params);
+   PromptOrWait(params->download_id, 10);
++#if BUILDFLAG(IS_ANDROID)
++  return did_respond() ? AlreadyResponded() : RespondLater();
++#else
+   return RespondLater();
++#endif
+ }
+
+ // static
+@@ -1494,7 +1614,13 @@
+   ExtensionFunctionDispatcher* const extension_dispatcher = dispatcher();
+   content::WebContents* web_contents = GetSenderWebContents();
+   if (!extension_dispatcher || !web_contents) {
++#if BUILDFLAG(IS_ANDROID)
++    if (download_item) {
++      download_item->Remove();
++    }
++#else
+     download_item->Remove();
++#endif
+     Respond(NoArguments());
+     return;
+   }
+@@ -1522,7 +1648,9 @@
+     Respond(Error(download_extension_errors::kInvisibleContext));
+     return;
+   }
++#if !BUILDFLAG(IS_ANDROID)
+   RecordApiFunctions(DownloadsFunctionName::kDownloadsFunctionAcceptDanger);
++#endif  // !BUILDFLAG(IS_ANDROID)
+
+   // For testing, callers can use TriggerDangerPromptActionForTesting() to
+   // pre-determine the dialog's result. This bypasses showing the dialog.
+@@ -1605,10 +1733,92 @@
+   if (InvalidId(download_item, &error)) {
+     return RespondNow(Error(std::move(error)));
+   }
++#if BUILDFLAG(IS_ANDROID)
++  content::BrowserContext* item_context =
++      content::DownloadItemUtils::GetBrowserContext(download_item);
++  Profile* item_profile =
++      item_context ? Profile::FromBrowserContext(item_context) : nullptr;
++  if (!CanRevealAndroidDownload(this, item_profile)) {
++    return RespondNow(Error(download_extension_errors::kInvalidId));
++  }
++  TabAndroid* tab = GetAndroidDownloadRevealHost(this, item_profile);
++  if (!tab) {
++    return RespondNow(Error(download_extension_errors::kInvisibleContext));
++  }
++  // No user gesture is required by downloads.show. This selects a row in
++  // Downloads; it never opens the downloaded file.
++  waiting_for_android_show_ = true;
++  android_download_id_ = params->download_id;
++  android_download_guid_ = download_item->GetGuid();
++  android_item_profile_ = item_profile->GetWeakPtr();
++  AddRef();  // Balanced by FinishAndroidShow(), including timeout/shutdown.
++  android_show_timeout_.Start(
++      FROM_HERE, base::Seconds(10),
++      base::BindOnce(&DownloadsShowFunction::OnAndroidDownloadShown,
++                     weak_factory_.GetWeakPtr(), false));
++  const int64_t token = DownloadManagerService::ShowDownloadItemForExtension(
++      tab->GetJavaObject(), download_item,
++      base::BindOnce(&DownloadsShowFunction::OnAndroidDownloadShown,
++                     weak_factory_.GetWeakPtr()));
++  if (waiting_for_android_show_) {
++    android_show_token_ = token;
++    if (!token) {
++      OnAndroidDownloadShown(false);
++    }
++  } else if (token) {
++    // A synchronous callback may finish before Java returns its request token.
++    DownloadManagerService::CancelDownloadItemForExtension(token);
++  }
++  return did_respond() ? AlreadyResponded() : RespondLater();
++#else
+   download_item->ShowDownloadInShell();
+   RecordApiFunctions(DownloadsFunctionName::kDownloadsFunctionShow);
+   return RespondNow(NoArguments());
+-}
++#endif
++}
++
++#if BUILDFLAG(IS_ANDROID)
++void DownloadsShowFunction::OnAndroidDownloadShown(bool shown) {
++  if (!waiting_for_android_show_) {
++    return;
++  }
++  if (!shown || !CanRevealAndroidDownload(this, android_item_profile_.get())) {
++    FinishAndroidShow(Error(download_extension_errors::kInvisibleContext));
++    return;
++  }
++  DownloadItem* item = GetDownload(
++      browser_context(), include_incognito_information(), android_download_id_);
++  if (!item || item->GetGuid() != android_download_guid_ ||
++      content::DownloadItemUtils::GetBrowserContext(item) !=
++          android_item_profile_.get()) {
++    FinishAndroidShow(Error(download_extension_errors::kInvalidId));
++    return;
++  }
++  FinishAndroidShow(NoArguments());
++}
++
++void DownloadsShowFunction::FinishAndroidShow(ResponseValue response) {
++  if (!waiting_for_android_show_) {
++    return;
++  }
++  waiting_for_android_show_ = false;
++  android_show_timeout_.Stop();
++  weak_factory_.InvalidateWeakPtrs();
++  const int64_t token = std::exchange(android_show_token_, 0);
++  android_item_profile_.reset();
++  if (token) {
++    DownloadManagerService::CancelDownloadItemForExtension(token);
++  }
++  Respond(std::move(response));
++  Release();
++}
++
++void DownloadsShowFunction::OnBrowserContextShutdown() {
++  if (waiting_for_android_show_) {
++    FinishAndroidShow(Error(download_extension_errors::kInvisibleContext));
++  }
++}
++#endif
+
+ DownloadsShowDefaultFolderFunction::DownloadsShowDefaultFolderFunction() =
+     default;
+@@ -1617,6 +1827,17 @@
+     default;
+
+ ExtensionFunction::ResponseAction DownloadsShowDefaultFolderFunction::Run() {
++#if BUILDFLAG(IS_ANDROID)
++  WindowController* window_controller =
++      ChromeExtensionFunctionDetails(this).GetCurrentWindowController();
++  content::WebContents* contents =
++      window_controller ? window_controller->GetActiveTab() : nullptr;
++  TabAndroid* tab = contents ? TabAndroid::FromWebContents(contents) : nullptr;
++  if (!tab || !DownloadManagerService::ShowDownloadsForExtension(
++                  tab->GetJavaObject())) {
++    return RespondNow(Error(download_extension_errors::kInvisibleContext));
++  }
++#else
+   DownloadManager* manager = nullptr;
+   DownloadManager* incognito_manager = nullptr;
+   GetManagers(browser_context(), include_incognito_information(), &manager,
+@@ -1625,14 +1846,25 @@
+       Profile::FromBrowserContext(browser_context()),
+       DownloadPrefs::FromDownloadManager(manager)->DownloadPath(),
+       platform_util::OPEN_FOLDER, platform_util::OpenOperationCallback());
++#endif
++#if !BUILDFLAG(IS_ANDROID)
+   RecordApiFunctions(
+       DownloadsFunctionName::kDownloadsFunctionShowDefaultFolder);
++#endif  // !BUILDFLAG(IS_ANDROID)
+   return RespondNow(NoArguments());
+ }
+
+ DownloadsOpenFunction::DownloadsOpenFunction() = default;
+
+ DownloadsOpenFunction::~DownloadsOpenFunction() = default;
++
++#if BUILDFLAG(IS_ANDROID)
++bool DownloadsOpenFunction::ShouldKeepWorkerAliveIndefinitely() {
++  // Worker calls can wait for explicit user confirmation. The request must
++  // outlive the ordinary worker timeout while that dialog remains pending.
++  return true;
++}
++#endif
+
+ ExtensionFunction::ResponseAction DownloadsOpenFunction::RunInternal() {
+   std::optional<downloads::Open::Params> params =
+@@ -1678,20 +1910,33 @@
+   // extension, or check the recent user gesture on the originating webcontents
+   // to avoid showing the prompt.
+
++#if BUILDFLAG(IS_ANDROID)
++  pending_open_prompt_ = true;
++#endif
+   // For testing, callers can use AcceptDialogForTesting() to pre-determine
+   // the dialog's result. This bypasses showing the dialog.
+   if (g_accept_open_dialog_for_testing) {
+     CHECK_IS_TEST();
+     OpenPromptDone(params->download_id, /*accept=*/true);
++#if BUILDFLAG(IS_ANDROID)
++    return AlreadyResponded();
++#else
+     return RespondLater();
++#endif
+   }
+
+   extensions::ShowDownloadOpenConfirmationDialog(
+       active_contents, extension()->name(), download_item->GetFullPath(),
+       base::BindOnce(&DownloadsOpenFunction::OpenPromptDone, this,
+                      params->download_id));
++#if !BUILDFLAG(IS_ANDROID)
+   RecordApiFunctions(DownloadsFunctionName::kDownloadsFunctionOpen);
++#endif  // !BUILDFLAG(IS_ANDROID)
++#if BUILDFLAG(IS_ANDROID)
++  return did_respond() ? AlreadyResponded() : RespondLater();
++#else
+   return RespondLater();
++#endif
+ }
+
+ // static
+@@ -1701,11 +1946,37 @@
+
+ void DownloadsOpenFunction::OpenPromptDone(int download_id, bool accept) {
+   DCHECK_CURRENTLY_ON(BrowserThread::UI);
++#if BUILDFLAG(IS_ANDROID)
++  if (!pending_open_prompt_) {
++    return;
++  }
++  pending_open_prompt_ = false;
++  if (!browser_context()) {
++    Respond(Error(download_extension_errors::kInvisibleContext));
++    return;
++  }
++#endif
+   std::string error;
+   if (Fault(!accept, download_extension_errors::kOpenPermission, &error)) {
+     Respond(Error(std::move(error)));
+     return;
+   }
++#if BUILDFLAG(IS_ANDROID)
++  // Consent can arrive after optional permissions are revoked or the extension
++  // is disabled/reloaded. A replacement with the same ID cannot authorize this
++  // older function's pending request.
++  const Extension* current_extension = ExtensionRegistry::Get(browser_context())
++                                           ->enabled_extensions()
++                                           .GetByID(extension_id());
++  if (!current_extension || current_extension != extension() ||
++      !current_extension->permissions_data()->HasAPIPermission(
++          APIPermissionID::kDownloads) ||
++      !current_extension->permissions_data()->HasAPIPermission(
++          APIPermissionID::kDownloadsOpen)) {
++    Respond(Error(download_extension_errors::kOpenPermission));
++    return;
++  }
++#endif
+   DownloadItem* download_item = GetDownload(
+       browser_context(), include_incognito_information(), download_id);
+   if (Fault(!download_item, download_extension_errors::kFileAlreadyDeleted,
+@@ -1716,6 +1987,15 @@
+   download_item->OpenDownload();
+   Respond(NoArguments());
+ }
++
++#if BUILDFLAG(IS_ANDROID)
++void DownloadsOpenFunction::OnBrowserContextShutdown() {
++  if (pending_open_prompt_) {
++    pending_open_prompt_ = false;
++    Respond(Error(download_extension_errors::kOpenPermission));
++  }
++}
++#endif
+
+ DownloadsSetShelfEnabledFunction::DownloadsSetShelfEnabledFunction() = default;
+
+@@ -1731,7 +2011,9 @@
+     return RespondNow(Error(download_extension_errors::kShelfPermission));
+   }
+
++#if !BUILDFLAG(IS_ANDROID)
+   RecordApiFunctions(DownloadsFunctionName::kDownloadsFunctionSetShelfEnabled);
++#endif  // !BUILDFLAG(IS_ANDROID)
+   DownloadCoreService* service = nullptr;
+   DownloadCoreService* incognito_service = nullptr;
+   GetDownloadCoreServices(browser_context(), include_incognito_information(),
+@@ -1785,7 +2067,9 @@
+     return RespondNow(Error(download_extension_errors::kUiPermission));
+   }
+
++#if !BUILDFLAG(IS_ANDROID)
+   RecordApiFunctions(DownloadsFunctionName::kDownloadsFunctionSetUiOptions);
++#endif  // !BUILDFLAG(IS_ANDROID)
+   DownloadCoreService* service = nullptr;
+   DownloadCoreService* incognito_service = nullptr;
+   GetDownloadCoreServices(browser_context(), include_incognito_information(),
+@@ -1878,7 +2162,9 @@
+     Respond(Error(std::move(error)));
+     return;
+   }
++#if !BUILDFLAG(IS_ANDROID)
+   RecordApiFunctions(DownloadsFunctionName::kDownloadsFunctionGetFileIcon);
++#endif  // !BUILDFLAG(IS_ANDROID)
+   Respond(WithArguments(url));
+ }
+
+@@ -1935,6 +2221,9 @@
+
+ void ExtensionDownloadsEventRouter::SetUiEnabled(const Extension* extension,
+                                                  bool enabled) {
++#if BUILDFLAG(IS_ANDROID)
++  const bool was_enabled = IsUiEnabled();
++#endif
+   auto iter = ui_disabling_extensions_.find(extension);
+   if (iter == ui_disabling_extensions_.end()) {
+     if (!enabled) {
+@@ -1943,6 +2232,11 @@
+   } else if (enabled) {
+     ui_disabling_extensions_.erase(extension);
+   }
++#if BUILDFLAG(IS_ANDROID)
++  if (was_enabled != IsUiEnabled()) {
++    DownloadMessageBridge::NotifyDownloadUiPolicyChanged();
++  }
++#endif
+ }
+
+ bool ExtensionDownloadsEventRouter::IsUiEnabled() const {
+@@ -2048,8 +2342,10 @@
+     downloads::FilenameConflictAction conflict_action,
+     std::string* error) {
+   DCHECK_CURRENTLY_ON(BrowserThread::UI);
++#if !BUILDFLAG(IS_ANDROID)
+   RecordApiFunctions(
+       DownloadsFunctionName::kDownloadsFunctionDetermineFilename);
++#endif  // !BUILDFLAG(IS_ANDROID)
+   DownloadItem* item =
+       GetDownload(browser_context, include_incognito, download_id);
+   ExtensionDownloadsEventRouterData* data =
+@@ -2294,10 +2590,8 @@
+     const Extension* extension,
+     UnloadedExtensionReason reason) {
+   DCHECK_CURRENTLY_ON(BrowserThread::UI);
+-  auto iter = ui_disabling_extensions_.find(extension);
+-  if (iter != ui_disabling_extensions_.end()) {
+-    ui_disabling_extensions_.erase(iter);
+-  }
++  // Removing the last disabling extension also refreshes Android messages.
++  SetUiEnabled(extension, true);
+ }
+
+ void ExtensionDownloadsEventRouter::CheckForHistoryFilesRemoval() {

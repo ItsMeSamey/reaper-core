@@ -1,16 +1,42 @@
 diff --git a/components/permissions/permission_request_manager.cc b/components/permissions/permission_request_manager.cc
-index 1d736c9c31486887a9647f9901fa0d4cc803fab5..7818e7a4c465b21e684b85fd496dd4d7973c947c 100644
 --- a/components/permissions/permission_request_manager.cc
 +++ b/components/permissions/permission_request_manager.cc
-@@ -604,6 +604,7 @@ void PermissionRequestManager::OnVisibilityChanged(
+@@ -179,11 +179,7 @@
+ }
+
+ tabs::TabInterface* GetTabInterface(content::WebContents* web_contents) {
+-#if BUILDFLAG(IS_ANDROID)
+-  return nullptr;
+-#else
+   return tabs::TabInterface::MaybeGetFromContents(web_contents);
+-#endif  // BUILDFLAG(IS_ANDROID)
+ }
+
+ }  // namespace
+@@ -598,12 +594,22 @@
+
+ void PermissionRequestManager::OnVisibilityChanged(
+     content::Visibility visibility) {
++#if !BUILDFLAG(IS_ANDROID)
+   // If `tab_subscriptions_` isn't empty, defer to those listeners instead.
+   if (!tab_subscriptions_.empty()) {
+     return;
    }
++#endif
    bool prior_tab_is_active_ = tab_is_active_;
    tab_is_active_ = visibility != content::Visibility::HIDDEN;
++#if BUILDFLAG(IS_ANDROID)
++  // Both panes may be visible, while only one tab is activated. Conversely,
++  // an inactive regular/incognito model can retain its current tab.
++  tab_is_active_ = tab_is_active_ &&
++                   (tab_subscriptions_.empty() || android_native_tab_active_) &&
++                   android_tab_model_active_;
++#endif
 +  BRAVE_PERMISSION_REQUEST_MANAGER_ON_VISIBILITY_CHANGED
    if (prior_tab_is_active_ != tab_is_active_) {
      OnTabActiveChanged();
    }
-@@ -623,6 +624,7 @@ GURL PermissionRequestManager::GetRequestingOrigin() const {
+@@ -623,6 +629,7 @@
    GURL origin = requests_.front()->requesting_origin();
    if (DCHECK_IS_ON()) {
      for (const auto& request : requests_) {
@@ -18,7 +44,7 @@ index 1d736c9c31486887a9647f9901fa0d4cc803fab5..7818e7a4c465b21e684b85fd496dd4d7
        DCHECK_EQ(origin, request->requesting_origin());
      }
    }
-@@ -913,7 +915,7 @@ bool PermissionRequestManager::RecreateView() {
+@@ -913,7 +920,7 @@
    // has an initiated permission prompt. If a flow model is not created even
    // though a permission prompt has been requested, it will cause a crash.
    if (PermissionUtil::ShouldCurrentRequestUsePermissionElementSecondaryUI(
@@ -27,7 +53,16 @@ index 1d736c9c31486887a9647f9901fa0d4cc803fab5..7818e7a4c465b21e684b85fd496dd4d7
      if (!embedded_prompt_flow_model_) {
        embedded_prompt_flow_model_ =
            std::make_unique<EmbeddedPermissionPromptFlowModel>(web_contents(),
-@@ -1049,7 +1051,7 @@ void PermissionRequestManager::DequeueRequestIfNeeded() {
+@@ -1034,7 +1041,7 @@
+       permission_ui_selectors_(
+           PermissionsClient::Get()->CreatePermissionUiSelectors(
+               web_contents->GetBrowserContext())) {
+-  // Only register TabInterface observers on desktop to support Split View.
++  // A visible split pane is not necessarily the activated tab.
+   AdoptTabInterfaceIfNeeded(GetTabInterface(web_contents));
+   if (!tab_insert_subscription_) {
+     tab_is_active_ =
+@@ -1049,7 +1056,7 @@
    // only after the camera request is resolved. This is caused by code in
    // PermissionBubbleMediaAccessHandler and UserMediaClient. We probably don't
    // need two permission queues, so resolve the duplication.
@@ -36,21 +71,200 @@ index 1d736c9c31486887a9647f9901fa0d4cc803fab5..7818e7a4c465b21e684b85fd496dd4d7
        IsRequestInProgress()) {
      return;
    }
-@@ -1187,7 +1189,7 @@ void PermissionRequestManager::ShowPrompt() {
+@@ -1187,7 +1194,7 @@
      return;
    }
- 
+
 -  DCHECK(!web_contents()->HasUncommittedNavigationInPrimaryMainFrame());
 +  DCHECK(web_contents()->IsDocumentOnLoadCompletedInPrimaryMainFrame());
    DCHECK(current_request_ui_to_use_);
- 
+
    if (!tab_is_active_) {
-@@ -2095,7 +2097,7 @@ void PermissionRequestManager::OnTabActiveChanged() {
+@@ -1273,6 +1280,7 @@
+           "Notifications.Quiet.PermissionRequestShown"));
+     }
+
++#if !BUILDFLAG(IS_ANDROID)
+     PermissionsClient::Get()->TriggerPromptHatsSurveyIfEnabled(
+         web_contents(), requests_[0]->request_type(), std::nullopt,
+         DetermineCurrentRequestUIDisposition(),
+@@ -1291,6 +1299,7 @@
+         /*prompt_options=*/std::monostate());
+
+     hats_shown_callback_.reset();
++#endif  // !BUILDFLAG(IS_ANDROID)
+   }
+   current_request_already_displayed_ = true;
+   current_request_first_display_time_ = base::Time::Now();
+@@ -1309,10 +1318,12 @@
+   }
+ }
+
++#if !BUILDFLAG(IS_ANDROID)
+ void PermissionRequestManager::SetHatsShownCallback(
+     base::OnceCallback<void()> callback) {
+   hats_shown_callback_ = std::move(callback);
+ }
++#endif  // !BUILDFLAG(IS_ANDROID)
+
+ void PermissionRequestManager::DeletePrompt() {
+   DCHECK(view_);
+@@ -1342,7 +1353,9 @@
+   did_show_prompt_ = false;
+   did_click_manage_ = false;
+   did_click_learn_more_ = false;
++#if !BUILDFLAG(IS_ANDROID)
+   hats_shown_callback_.reset();
++#endif  // !BUILDFLAG(IS_ANDROID)
+   current_request_pepc_prompt_position_.reset();
+   current_requests_initial_statuses_.clear();
+   if (view_) {
+@@ -1994,12 +2007,23 @@
      return;
    }
- 
+   tab_is_active_ = tab_interface->IsActivated();
++#if BUILDFLAG(IS_ANDROID)
++  android_native_tab_active_ = tab_is_active_;
++  tab_is_active_ = tab_is_active_ && web_contents()->GetVisibility() !=
++                                         content::Visibility::HIDDEN;
++#endif
+   tab_insert_subscription_ = tab_interface->RegisterDidInsert(
+       base::BindRepeating(&PermissionRequestManager::OnTabAttached,
+                           weak_factory_.GetWeakPtr()));
++#if BUILDFLAG(IS_ANDROID)
++  // Ordinary Android tabs need not have a BrowserWindowInterface.
++  RegisterTabSubscriptions(tab_interface);
++  RefreshAndroidTabModelObserver(tab_interface);
++#else
+   if (tab_interface->GetBrowserWindowInterface()) {
+     RegisterTabSubscriptions(tab_interface);
+   }
++#endif
+ }
+
+ void PermissionRequestManager::RegisterTabSubscriptions(
+@@ -2026,7 +2050,28 @@
+     bool is_active,
+     tabs::TabInterface* tab_interface) {
+   const bool prior_tab_is_active_ = tab_is_active_;
++#if BUILDFLAG(IS_ANDROID)
++  // WillDeactivate runs before the Java model commits its new selection.
++  // The callback value, rather than IsActivated(), is authoritative here.
++  android_native_tab_active_ = is_active;
++  tab_is_active_ =
++      is_active && android_tab_model_active_ &&
++      web_contents()->GetVisibility() != content::Visibility::HIDDEN;
++  // An OS permission activity only changes visibility and must retain its
++  // native prompt for the result. Actual tab deactivation retires that prompt,
++  // including when the OS activity already hid the WebContents.
++  if (!is_active && view_ &&
++      view_->GetTabSwitchingBehavior() ==
++          PermissionPrompt::TabSwitchingBehavior::kKeepPromptAlive) {
++    auto weak_this = weak_factory_.GetWeakPtr();
++    DeletePrompt();
++    if (!weak_this) {
++      return;
++    }
++  }
++#else
+   tab_is_active_ = is_active;
++#endif
+   if (prior_tab_is_active_ != tab_is_active_) {
+     OnTabActiveChanged();
+   }
+@@ -2035,6 +2080,15 @@
+ void PermissionRequestManager::OnTabDetached(
+     tabs::TabInterface* tab_interface,
+     tabs::TabInterface::DetachReason reason) {
++#if BUILDFLAG(IS_ANDROID)
++  auto weak_this = weak_factory_.GetWeakPtr();
++  OnTabActiveStatusChanged(false, tab_interface);
++  if (!weak_this) {
++    return;
++  }
++  android_tab_model_observation_.RunAndReset();
++  android_tab_model_active_ = true;
++#endif
+   // Clear the existing tab subscriptions while the tab is detached from a tab
+   // strip. This might mean the TabInterface will become part of a PWA which
+   // should fall back to the OnVisibilityChanged listeners.
+@@ -2058,6 +2112,15 @@
+     new_manager->AdoptTabInterfaceIfNeeded(tab_interface);
+   }
+
++#if BUILDFLAG(IS_ANDROID)
++  auto weak_this = weak_factory_.GetWeakPtr();
++  OnTabActiveStatusChanged(false, tab_interface);
++  if (!weak_this) {
++    return;
++  }
++  android_tab_model_observation_.RunAndReset();
++  android_tab_model_active_ = true;
++#endif
+   // This WebContents is leaving the tab: drop the tab wiring and fall back
+   // to visibility-only gating, like OnTabDetached(). Cancelling a
+   // subscription from inside its own notification is supported by
+@@ -2069,7 +2132,53 @@
+ void PermissionRequestManager::OnTabAttached(
+     tabs::TabInterface* tab_interface) {
+   RegisterTabSubscriptions(tab_interface);
+-}
++#if BUILDFLAG(IS_ANDROID)
++  auto weak_this = weak_factory_.GetWeakPtr();
++  RefreshAndroidTabModelObserver(tab_interface);
++  if (!weak_this) {
++    return;
++  }
++  OnTabActiveStatusChanged(tab_interface->IsActivated(), tab_interface);
++#endif
++}
++
++#if BUILDFLAG(IS_ANDROID)
++void PermissionRequestManager::RefreshAndroidTabModelObserver(
++    tabs::TabInterface* tab_interface) {
++  android_tab_model_observation_.RunAndReset();
++  android_tab_model_observation_ =
++      PermissionsClient::Get()->ObserveAndroidTabModel(
++          tab_interface,
++          base::BindRepeating(
++              &PermissionRequestManager::OnAndroidTabModelActiveChanged,
++              weak_factory_.GetWeakPtr()));
++  OnAndroidTabModelActiveChanged(
++      PermissionsClient::Get()->IsAndroidTabModelActive(tab_interface));
++}
++
++void PermissionRequestManager::OnAndroidTabModelActiveChanged(bool active) {
++  const bool previously_active = tab_is_active_;
++  android_tab_model_active_ = active;
++  tab_is_active_ =
++      active && (tab_subscriptions_.empty() || android_native_tab_active_) &&
++      web_contents()->GetVisibility() != content::Visibility::HIDDEN;
++  // Model deselection is not an OS permission Activity hiding Chrome. Keep the
++  // underlying request pending, but prevent an outstanding OS callback from
++  // resolving a prompt for a model the user has left.
++  if (!active && view_ &&
++      view_->GetTabSwitchingBehavior() ==
++          PermissionPrompt::TabSwitchingBehavior::kKeepPromptAlive) {
++    auto weak_this = weak_factory_.GetWeakPtr();
++    DeletePrompt();
++    if (!weak_this) {
++      return;
++    }
++  }
++  if (previously_active != tab_is_active_) {
++    OnTabActiveChanged();
++  }
++}
++#endif
+
+ void PermissionRequestManager::OnTabActiveChanged() {
+   NotifyTabActiveChanged(tab_is_active_);
+@@ -2095,7 +2204,7 @@
+     return;
+   }
+
 -  if (web_contents()->HasUncommittedNavigationInPrimaryMainFrame()) {
 +  if (!web_contents()->IsDocumentOnLoadCompletedInPrimaryMainFrame()) {
      return;
    }
- 
+

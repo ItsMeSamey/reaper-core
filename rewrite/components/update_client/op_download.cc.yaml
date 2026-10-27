@@ -1,0 +1,102 @@
+substitutions:
+- description: Exclude Android download event formatting
+  regex:
+    pattern: "const char* DownloaderToString(CrxDownloader::DownloadMetrics::Downloader d) {\n  switch (d) {\n    case CrxDownloader::DownloadMetrics::kUrlFetcher:\n\
+      \      return \"direct\";\n    case CrxDownloader::DownloadMetrics::kBits:\n      return \"bits\";\n    case CrxDownloader::DownloadMetrics::kBackgroundMac:\n\
+      \      return \"nsurlsession_background\";\n    default:\n      return \"unknown\";\n  }\n}\n"
+    replace: "#if !BUILDFLAG(IS_ANDROID)\nconst char* DownloaderToString(CrxDownloader::DownloadMetrics::Downloader d) {\n\
+      \  switch (d) {\n    case CrxDownloader::DownloadMetrics::kUrlFetcher:\n      return \"direct\";\n    case CrxDownloader::DownloadMetrics::kBits:\n\
+      \      return \"bits\";\n    case CrxDownloader::DownloadMetrics::kBackgroundMac:\n      return \"nsurlsession_background\"\
+      ;\n    default:\n      return \"unknown\";\n  }\n}\n#endif  // !BUILDFLAG(IS_ANDROID)\n"
+  count: 1
+- description: Exclude Android download event payloads
+  regex:
+    pattern: "base::DictValue MakeEvent(const CrxDownloader::DownloadMetrics& dm) {\n  base::DictValue event;\n  event.Set(\"\
+      eventtype\", protocol_request::kEventDownload);\n  event.Set(\"eventresult\", static_cast<int>(dm.error == 0));\n  event.Set(\"\
+      downloader\", DownloaderToString(dm.downloader));\n  if (dm.error) {\n    event.Set(\"errorcode\", dm.error);\n  }\n\
+      \  if (dm.extra_code1) {\n    event.Set(\"extracode1\", dm.extra_code1);\n  }\n  event.Set(\"url\", dm.url.spec());\n\
+      \n  // -1 means that the  byte counts are not known.\n  if (dm.total_bytes >= 0 &&\n      dm.total_bytes < protocol_request::kProtocolMaxInt)\
+      \ {\n    event.Set(\"total\", static_cast<double>(dm.total_bytes));\n  }\n  if (dm.downloaded_bytes >= 0 &&\n      dm.downloaded_bytes\
+      \ < protocol_request::kProtocolMaxInt) {\n    event.Set(\"downloaded\", static_cast<double>(dm.downloaded_bytes));\n\
+      \  }\n  if (dm.download_time_ms >= 0 &&\n      dm.download_time_ms < protocol_request::kProtocolMaxInt) {\n    event.Set(\"\
+      download_time_ms\", static_cast<double>(dm.download_time_ms));\n  }\n  return event;\n}\n"
+    replace: "#if !BUILDFLAG(IS_ANDROID)\nbase::DictValue MakeEvent(const CrxDownloader::DownloadMetrics& dm) {\n  base::DictValue\
+      \ event;\n  event.Set(\"eventtype\", protocol_request::kEventDownload);\n  event.Set(\"eventresult\", static_cast<int>(dm.error\
+      \ == 0));\n  event.Set(\"downloader\", DownloaderToString(dm.downloader));\n  if (dm.error) {\n    event.Set(\"errorcode\"\
+      , dm.error);\n  }\n  if (dm.extra_code1) {\n    event.Set(\"extracode1\", dm.extra_code1);\n  }\n  event.Set(\"url\"\
+      , dm.url.spec());\n\n  // -1 means that the  byte counts are not known.\n  if (dm.total_bytes >= 0 &&\n      dm.total_bytes\
+      \ < protocol_request::kProtocolMaxInt) {\n    event.Set(\"total\", static_cast<double>(dm.total_bytes));\n  }\n  if\
+      \ (dm.downloaded_bytes >= 0 &&\n      dm.downloaded_bytes < protocol_request::kProtocolMaxInt) {\n    event.Set(\"downloaded\"\
+      , static_cast<double>(dm.downloaded_bytes));\n  }\n  if (dm.download_time_ms >= 0 &&\n      dm.download_time_ms < protocol_request::kProtocolMaxInt)\
+      \ {\n    event.Set(\"download_time_ms\", static_cast<double>(dm.download_time_ms));\n  }\n  return event;\n}\n#endif\
+      \  // !BUILDFLAG(IS_ANDROID)\n"
+  count: 1
+- description: Exclude optional Android download-event and timing reporting
+  regex:
+    pattern: "  for (const auto& metric : crx_downloader->download_metrics()) {\n    event_adder.Run(MakeEvent(metric));\n\
+      \    if (metric.error == 0) {\n      metrics::RecordCRXDownloadTime(\n          base::Milliseconds(metric.download_time_ms),\
+      \ id);\n    }\n  }\n"
+    replace: "#if !BUILDFLAG(IS_ANDROID)\n  for (const auto& metric : crx_downloader->download_metrics()) {\n    event_adder.Run(MakeEvent(metric));\n\
+      \    if (metric.error == 0) {\n      metrics::RecordCRXDownloadTime(\n          base::Milliseconds(metric.download_time_ms),\
+      \ id);\n    }\n  }\n#endif  // !BUILDFLAG(IS_ANDROID)\n"
+  count: 1
+- description: Admit only Android worker cleanup helper declarations
+  regex:
+    pattern: '#include "build/build_config.h"
+
+      '
+    replace: '#include "build/build_config.h"
+
+      #if BUILDFLAG(IS_ANDROID)
+
+      #include "base/task/thread_pool.h"
+
+      #include "components/update_client/task_traits.h"
+
+      #include "components/update_client/utils.h"
+
+      #endif
+
+      '
+  count: 1
+- description: Own the Android downloaded result through its queued delivery and clean it on cancellation
+  regex:
+    pattern: 'void DownloadComplete(
+
+      '
+    replace: "#if BUILDFLAG(IS_ANDROID)\nvoid DeliverAndroidDownloadResult(\n    scoped_refptr<Cancellation> cancellation,\n\
+      \    base::OnceCallback<void(base::expected<base::FilePath, CategorizedError>)>\n        callback,\n    const CrxDownloader::Result&\
+      \ result) {\n  // Check on the delivery sequence: cancellation can also arrive after hash\n  // verification completed\
+      \ but before this queued result reaches the pipeline.\n  if (cancellation->IsCancelled()) {\n    auto complete = base::BindOnce(\n\
+      \        std::move(callback),\n        base::unexpected<CategorizedError>(\n            {.category = ErrorCategory::kService,\n\
+      \             .code = std::to_underlying(ServiceError::CANCELLED)}));\n    if (result.response.empty()) {\n      std::move(complete).Run();\n\
+      \      return;\n    }\n    base::ThreadPool::PostTaskAndReply(\n        FROM_HERE, kTaskTraits,\n        base::BindOnce(\n\
+      \            [](const base::FilePath& path) {\n              DeleteFileAndEmptyParentDirectory(path);\n            },\n\
+      \            result.response),\n        std::move(complete));\n    return;\n  }\n  if (result.error) {\n    CHECK(result.response.empty());\n\
+      \    std::move(callback).Run(base::unexpected<CategorizedError>(\n        {.category = ErrorCategory::kDownload,\n \
+      \        .code = result.error,\n         .extra = result.extra_code1}));\n    return;\n  }\n  std::move(callback).Run(result.response);\n\
+      }\n#endif  // BUILDFLAG(IS_ANDROID)\n\nvoid DownloadComplete(\n"
+  count: 1
+- description: Check Android cancellation at actual delivery; keep original desktop completion body verbatim
+  regex:
+    pattern: "  if (cancellation->IsCancelled()) {\n    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(\n      \
+      \  FROM_HERE,\n        base::BindOnce(\n            std::move(callback),\n            base::unexpected<CategorizedError>(\n\
+      \                {.category = ErrorCategory::kService,\n                 .code = std::to_underlying(ServiceError::CANCELLED)})));\n\
+      \    return;\n  }\n\n  if (download_result.error) {\n    CHECK(download_result.response.empty());\n    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(\n\
+      \        FROM_HERE, base::BindOnce(std::move(callback),\n                                  base::unexpected<CategorizedError>(\n\
+      \                                      {.category = ErrorCategory::kDownload,\n                                    \
+      \   .code = download_result.error,\n                                       .extra = download_result.extra_code1})));\n\
+      \    return;\n  }\n  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(\n      FROM_HERE, base::BindOnce(std::move(callback),\
+      \ download_result.response));"
+    replace: "#if BUILDFLAG(IS_ANDROID)\n  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(\n      FROM_HERE,\n \
+      \     base::BindOnce(&DeliverAndroidDownloadResult, cancellation,\n                     std::move(callback), download_result));\n\
+      #else\n  if (cancellation->IsCancelled()) {\n    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(\n       \
+      \ FROM_HERE,\n        base::BindOnce(\n            std::move(callback),\n            base::unexpected<CategorizedError>(\n\
+      \                {.category = ErrorCategory::kService,\n                 .code = std::to_underlying(ServiceError::CANCELLED)})));\n\
+      \    return;\n  }\n\n  if (download_result.error) {\n    CHECK(download_result.response.empty());\n    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(\n\
+      \        FROM_HERE, base::BindOnce(std::move(callback),\n                                  base::unexpected<CategorizedError>(\n\
+      \                                      {.category = ErrorCategory::kDownload,\n                                    \
+      \   .code = download_result.error,\n                                       .extra = download_result.extra_code1})));\n\
+      \    return;\n  }\n  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(\n      FROM_HERE, base::BindOnce(std::move(callback),\
+      \ download_result.response));\n#endif  // BUILDFLAG(IS_ANDROID)"
+  count: 1

@@ -1,0 +1,556 @@
+# Android split pane request ownership and dialog placement.
+substitutions:
+- description: observe actual Chrome Android model selection for permissions
+  regex:
+    re_pattern: \#include\ "chrome/browser/android/resource_mapper\.h"
+    replace: '#include "base/functional/bind.h"
+
+      #include "base/memory/raw_ptr.h"
+
+      #include "chrome/browser/android/resource_mapper.h"
+
+      #include "chrome/browser/android/tab_android.h"
+
+      #include "chrome/browser/ui/android/tab_model/tab_model.h"
+
+      #include "chrome/browser/ui/android/tab_model/tab_model_list.h"
+
+      #include "chrome/browser/ui/android/tab_model/tab_model_observer.h"'
+- description: retain an RAII permission model observer with reentrant-safe callbacks
+  regex:
+    re_pattern: '\#if\ BUILDFLAG\(IS_ANDROID\)\
+
+      bool\ ShouldUseQuietUI'
+    replace: "#if BUILDFLAG(IS_ANDROID)\nclass AndroidPermissionModelObserver : public TabModelObserver {\n public:\n  AndroidPermissionModelObserver(TabModel* model,\n                                 base::RepeatingCallback<void(bool)> callback)\n      : model_(model), callback_(std::move(callback)) {\n    model_->AddObserver(this);\n  }\n  ~AndroidPermissionModelObserver() override {\n    if (model_) {\n      model_->RemoveObserver(this);\n    }\n  }\n\n  void OnWillActiveStateChange(TabModel& model, bool active) override {\n    if (!active) {\n      auto callback = callback_;\n      callback.Run(false);\n    }\n  }\n  void OnDidActiveStateChange(TabModel& model, bool active) override {\n    if (active) {\n      auto callback = callback_;\n      callback.Run(true);\n    }\n  }\n  void OnTabModelDestroyed(TabModel& model) override {\n    // Removing the last observer here can destroy the JNI bridge currently\n    // dispatching model shutdown. Normal RAII teardown still unregisters.\n    model_ = nullptr;\n    auto callback = callback_;\n    callback.Run(false);\n  }\n\n private:\n  raw_ptr<TabModel> model_;\n  base::RepeatingCallback<void(bool)> callback_;\n};\n\nbool ShouldUseQuietUI"
+- description: bind permission model state to exact original Android tab membership
+  regex:
+    re_pattern: '\#if\ BUILDFLAG\(IS_ANDROID\)\
+
+      bool\ ChromePermissionsClient::IsDseOrigin'
+    replace: "#if BUILDFLAG(IS_ANDROID)\nbool ChromePermissionsClient::IsAndroidTabModelActive(tabs::TabInterface* tab) {\n  auto* model = TabModelList::GetTabModelForTabAndroid(\n      TabAndroid::FromTabInterface(tab));\n  return model && model->IsActiveModel();\n}\n\nbase::ScopedClosureRunner ChromePermissionsClient::ObserveAndroidTabModel(\n    tabs::TabInterface* tab,\n    base::RepeatingCallback<void(bool)> callback) {\n  auto* model = TabModelList::GetTabModelForTabAndroid(\n      TabAndroid::FromTabInterface(tab));\n  if (!model) {\n    return {};\n  }\n  auto observer =\n      std::make_unique<AndroidPermissionModelObserver>(model, std::move(callback));\n  return base::ScopedClosureRunner(base::BindOnce(\n      [](std::unique_ptr<AndroidPermissionModelObserver>) {}, std::move(observer)));\n}\n\nbool ChromePermissionsClient::IsDseOrigin"
+- description: Format modified Android split dialog code
+  regex:
+    re_pattern: '\#if\ BUILDFLAG\(IS_ANDROID\)\
+
+      \#include\ "base/functional/bind\.h"\
+
+      \#include\ "base/memory/raw_ptr\.h"\
+
+      \#include\ "chrome/browser/android/resource_mapper\.h"\
+
+      \#include\ "chrome/browser/android/tab_android\.h"\
+
+      \#include\ "chrome/browser/ui/android/tab_model/tab_model\.h"\
+
+      \#include\ "chrome/browser/ui/android/tab_model/tab_model_list\.h"\
+
+      \#include\ "chrome/browser/ui/android/tab_model/tab_model_observer\.h"\
+
+      \#include\ "chrome/browser/android/search_permissions/search_permissions_service\.h"\
+
+      \#include\ "chrome/browser/favicon/favicon_service_factory\.h"\
+
+      \#include\ "chrome/browser/permissions/permission_blocked_message_delegate_android\.h"\
+
+      \#include\ "chrome/browser/permissions/permission_update_message_controller_android\.h"\
+
+      \#include\ "components/permissions/android/permissions_android_feature_map\.h"\
+
+      \#include\ "components/permissions/permission_request_manager\.h"\
+
+      \#else\
+
+      \#include\ "chrome/browser/ui/browser_window/public/browser_window_interface\.h"\
+
+      '
+    replace: '#if BUILDFLAG(IS_ANDROID)
+
+      #include "base/functional/bind.h"
+
+      #include "base/memory/raw_ptr.h"
+
+      #include "chrome/browser/android/resource_mapper.h"
+
+      #include "chrome/browser/android/search_permissions/search_permissions_service.h"
+
+      #include "chrome/browser/android/tab_android.h"
+
+      #include "chrome/browser/favicon/favicon_service_factory.h"
+
+      #include "chrome/browser/permissions/permission_blocked_message_delegate_android.h"
+
+      #include "chrome/browser/permissions/permission_update_message_controller_android.h"
+
+      #include "chrome/browser/ui/android/tab_model/tab_model.h"
+
+      #include "chrome/browser/ui/android/tab_model/tab_model_list.h"
+
+      #include "chrome/browser/ui/android/tab_model/tab_model_observer.h"
+
+      #include "components/permissions/android/permissions_android_feature_map.h"
+
+      #include "components/permissions/permission_request_manager.h"
+
+      #else
+
+      #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+
+      '
+- description: Format modified Android split dialog code
+  regex:
+    re_pattern: '\}\
+
+      \
+
+      \#if\ BUILDFLAG\(IS_ANDROID\)\
+
+      bool\ ChromePermissionsClient::IsAndroidTabModelActive\(tabs::TabInterface\*\ tab\)\ \{\
+
+      \ \ auto\*\ model\ =\ TabModelList::GetTabModelForTabAndroid\(\
+
+      \ \ \ \ \ \ TabAndroid::FromTabInterface\(tab\)\);\
+
+      \ \ return\ model\ \&\&\ model\->IsActiveModel\(\);\
+
+      \}\
+
+      \
+
+      base::ScopedClosureRunner\ ChromePermissionsClient::ObserveAndroidTabModel\(\
+
+      \ \ \ \ tabs::TabInterface\*\ tab,\
+
+      \ \ \ \ base::RepeatingCallback<void\(bool\)>\ callback\)\ \{\
+
+      \ \ auto\*\ model\ =\ TabModelList::GetTabModelForTabAndroid\(\
+
+      \ \ \ \ \ \ TabAndroid::FromTabInterface\(tab\)\);\
+
+      \ \ if\ \(!model\)\ \{\
+
+      \ \ \ \ return\ \{\};\
+
+      \ \ \}\
+
+      \ \ auto\ observer\ =\
+
+      \ \ \ \ \ \ std::make_unique<AndroidPermissionModelObserver>\(model,\ std::move\(callback\)\);\
+
+      \ \ return\ base::ScopedClosureRunner\(base::BindOnce\(\
+
+      \ \ \ \ \ \ \[\]\(std::unique_ptr<AndroidPermissionModelObserver>\)\ \{\},\ std::move\(observer\)\)\);\
+
+      \}\
+
+      \
+
+      bool\ ChromePermissionsClient::IsDseOrigin\(\
+
+      \ \ \ \ content::BrowserContext\*\ browser_context,\
+
+      '
+    replace: "}\n\n#if BUILDFLAG(IS_ANDROID)\nbool ChromePermissionsClient::IsAndroidTabModelActive(tabs::TabInterface* tab) {\n  auto* model =\n      TabModelList::GetTabModelForTabAndroid(TabAndroid::FromTabInterface(tab));\n  return model && model->IsActiveModel();\n}\n\nbase::ScopedClosureRunner ChromePermissionsClient::ObserveAndroidTabModel(\n    tabs::TabInterface* tab,\n    base::RepeatingCallback<void(bool)> callback) {\n  auto* model =\n      TabModelList::GetTabModelForTabAndroid(TabAndroid::FromTabInterface(tab));\n  if (!model) {\n    return {};\n  }\n  auto observer = std::make_unique<AndroidPermissionModelObserver>(\n      model, std::move(callback));\n  return base::ScopedClosureRunner(\n      base::BindOnce([](std::unique_ptr<AndroidPermissionModelObserver>) {},\n                     std::move(observer)));\n}\n\nbool ChromePermissionsClient::IsDseOrigin(\n    content::BrowserContext* browser_context,\n"
+
+- description: 'Android concrete AI source/provider removal: chrome/browser/permissions/chrome_permissions_client.cc'
+  regex:
+    re_pattern: '//\ found\ in\ the\ LICENSE\ file\.\
+
+      \
+
+      \#include\ "chrome/browser/permissions/chrome_permissions_client\.h"\
+
+      \
+
+      \#include\ <algorithm>\
+
+      \#include\ <optional>\
+
+      '
+    replace: '// found in the LICENSE file.
+
+
+      #include "chrome/browser/permissions/chrome_permissions_client.h"
+
+      #include "build/build_config.h"
+
+
+      #include <algorithm>
+
+      #include <optional>
+
+      '
+- description: 'Android concrete AI source/provider removal: chrome/browser/permissions/chrome_permissions_client.cc'
+  regex:
+    re_pattern: '\#include\ "base/no_destructor\.h"\
+
+      \#include\ "base/strings/string_util\.h"\
+
+      \#include\ "base/time/time\.h"\
+
+      \#include\ "build/build_config\.h"\
+
+      \#include\ "chrome/browser/actor/actor_keyed_service\.h"\
+
+      \#include\ "chrome/browser/app_mode/app_mode_utils\.h"\
+
+      \#include\ "chrome/browser/bluetooth/bluetooth_chooser_context_factory\.h"\
+
+      \#include\ "chrome/browser/browser_process\.h"\
+
+      '
+    replace: '#include "base/no_destructor.h"
+
+      #include "base/strings/string_util.h"
+
+      #include "base/time/time.h"
+
+      #if !BUILDFLAG(IS_ANDROID)
+
+      #include "chrome/browser/actor/actor_keyed_service.h"
+
+      #endif  // !BUILDFLAG(IS_ANDROID)
+
+      #include "chrome/browser/app_mode/app_mode_utils.h"
+
+      #include "chrome/browser/bluetooth/bluetooth_chooser_context_factory.h"
+
+      #include "chrome/browser/browser_process.h"
+
+      '
+- description: 'Android concrete AI source/provider removal: chrome/browser/permissions/chrome_permissions_client.cc'
+  regex:
+    re_pattern: '\#endif\
+
+      \
+
+      \#if\ BUILDFLAG\(ENABLE_EXTENSIONS_CORE\)\
+
+      \#include\ "components/contextual_tasks/public/features\.h"\
+
+      \#include\ "extensions/common/constants\.h"\
+
+      \#include\ "extensions/common/extension_features\.h"\
+
+      \#endif\
+
+      '
+    replace: '#endif
+
+
+      #if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+
+      #if !BUILDFLAG(IS_ANDROID)
+
+      #include "components/contextual_tasks/public/features.h"
+
+      #endif  // !BUILDFLAG(IS_ANDROID)
+
+      #include "extensions/common/constants.h"
+
+      #include "extensions/common/extension_features.h"
+
+      #endif
+
+      '
+- description: 'Android concrete AI source/provider removal: chrome/browser/permissions/chrome_permissions_client.cc'
+  regex:
+    re_pattern: '\ \ return\ \*origin;\
+
+      \}\
+
+      \
+
+      const\ url::Origin\&\ GetContextualTasksOrigin\(\)\ \{\
+
+      \ \ static\ const\ base::NoDestructor<url::Origin>\ origin\(\
+
+      \ \ \ \ \ \ url::Origin::Create\(GURL\(chrome::kChromeUIContextualTasksURL\)\)\);\
+
+      \ \ return\ \*origin;\
+
+      \}\
+
+      \
+
+      \#if\ BUILDFLAG\(IS_ANDROID\)\
+
+      class\ AndroidPermissionModelObserver\ :\ public\ TabModelObserver\ \{\
+
+      '
+    replace: "  return *origin;\n}\n\n#if !BUILDFLAG(IS_ANDROID)\nconst url::Origin& GetContextualTasksOrigin() {\n  static const base::NoDestructor<url::Origin> origin(\n      url::Origin::Create(GURL(chrome::kChromeUIContextualTasksURL)));\n  return *origin;\n}\n#endif  // !BUILDFLAG(IS_ANDROID)\n\n\n#if BUILDFLAG(IS_ANDROID)\nclass AndroidPermissionModelObserver : public TabModelObserver {\n"
+- description: 'Android concrete AI source/provider removal: chrome/browser/permissions/chrome_permissions_client.cc'
+  regex:
+    re_pattern: '\ \ //\ Omnibox\ Popup,\ Omnibox\ Everywhere,\ and\ Contextual\ Tasks:\
+
+      \ \ //\ Bypass\ embedding\ origin\ check\ as\ the\ `requesting_origin`\ will\ later\ be\
+
+      \ \ //\ transformed\ to\ the\ DSE\ origin\ in\ `GetCanonicalOriginOverride\(\)`\.\
+
+      \ \ if\ \(embedder\ ==\ GetContextualTasksOrigin\(\)\ \|\|\
+
+      \ \ \ \ \ \ embedder\ ==\ GetOmniboxPopupOrigin\(\)\ \|\|\
+
+      \ \ \ \ \ \ embedder\ ==\ GetOmniboxEverywhereOrigin\(\)\)\ \{\
+
+      \ \ \ \ return\ true;\
+
+      '
+    replace: "  // Omnibox Popup, Omnibox Everywhere, and Contextual Tasks:\n  // Bypass embedding origin check as the `requesting_origin` will later be\n  // transformed to the DSE origin in `GetCanonicalOriginOverride()`.\n  if (\n#if !BUILDFLAG(IS_ANDROID)\nembedder == GetContextualTasksOrigin() ||\n#endif  // !BUILDFLAG(IS_ANDROID)\n      embedder == GetOmniboxPopupOrigin() ||\n      embedder == GetOmniboxEverywhereOrigin()) {\n    return true;\n"
+- description: 'Android concrete AI source/provider removal: chrome/browser/permissions/chrome_permissions_client.cc'
+  regex:
+    re_pattern: '\ \ \ \ return\ requesting_origin;\
+
+      \ \ \}\
+
+      \
+
+      \ \ bool\ requester_is_delegatable_extension\ =\ false;\
+
+      \#if\ BUILDFLAG\(ENABLE_EXTENSIONS_CORE\)\
+
+      \ \ requester_is_delegatable_extension\ =\
+
+      '
+    replace: "    return requesting_origin;\n  }\n\n#if !BUILDFLAG(IS_ANDROID)\n  bool requester_is_delegatable_extension = false;\n#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)\n  requester_is_delegatable_extension =\n"
+- description: 'Android concrete AI source/provider removal: chrome/browser/permissions/chrome_permissions_client.cc'
+  regex:
+    re_pattern: '\ \ \ \ return\ GURL\(UIThreadSearchTermsData\(\)\.GoogleBaseURLValue\(\)\)\
+
+      \ \ \ \ \ \ \ \ \.DeprecatedGetOriginAsURL\(\);\
+
+      \ \ \}\
+
+      \
+
+      \ \ //\ Omnibox:\
+
+      \ \ //\ Transform\ chrome://\ origins\ to\ the\ DSE\ origin\ so\ that\ permissions\ are\
+
+      '
+    replace: "    return GURL(UIThreadSearchTermsData().GoogleBaseURLValue())\n        .DeprecatedGetOriginAsURL();\n  }\n\n#endif  // !BUILDFLAG(IS_ANDROID)\n\n  // Omnibox:\n  // Transform chrome:// origins to the DSE origin so that permissions are\n"
+- description: 'Android concrete AI source/provider removal: chrome/browser/permissions/chrome_permissions_client.cc'
+  regex:
+    re_pattern: '\ \ \ \ //\ microphone\ for\ voice\ search\)\ are\ shared\ with\ the\ embedder\ \(e\.g\.\ Google\
+
+      \ \ \ \ //\ Search\)\ when\ both\ kApiContextualTasksPrivate\ and\
+
+      \ \ \ \ //\ kContextualTasksRearchitecture\ are\ enabled\.\
+
+      \ \ \ \ if\ \(requester_is_delegatable_extension\)\ \{\
+
+      \ \ \ \ \ \ return\ std::nullopt;\
+
+      \ \ \ \ \}\
+
+      \ \ \ \ return\ requesting_origin;\
+
+      \ \ \}\
+
+      \#endif\
+
+      '
+    replace: "    // microphone for voice search) are shared with the embedder (e.g. Google\n    // Search) when both kApiContextualTasksPrivate and\n    // kContextualTasksRearchitecture are enabled.\n#if !BUILDFLAG(IS_ANDROID)\n    if (requester_is_delegatable_extension) {\n      return std::nullopt;\n    }\n#endif  // !BUILDFLAG(IS_ANDROID)\n    return requesting_origin;\n  }\n#endif\n"
+- description: 'Android concrete AI source/provider removal: chrome/browser/permissions/chrome_permissions_client.cc'
+  regex:
+    re_pattern: '\ \ \ \ return\ embedder\.GetURL\(\);\
+
+      \ \ \}\
+
+      \
+
+      \ \ if\ \(embedder\ ==\ GetContextualTasksOrigin\(\)\ \|\|\
+
+      \ \ \ \ \ \ embedder\ ==\ GetOmniboxPopupOrigin\(\)\ \|\|\
+
+      \ \ \ \ \ \ embedder\ ==\ GetOmniboxEverywhereOrigin\(\)\)\ \{\
+
+      \ \ \ \ //\ Omnibox\ Popup,\ Omnibox\ Everywhere,\ and\ Contextual\ Tasks:\
+
+      '
+    replace: "    return embedder.GetURL();\n  }\n\n  if (\n#if !BUILDFLAG(IS_ANDROID)\nembedder == GetContextualTasksOrigin() ||\n#endif  // !BUILDFLAG(IS_ANDROID)\n      embedder == GetOmniboxPopupOrigin() ||\n      embedder == GetOmniboxEverywhereOrigin()) {\n    // Omnibox Popup, Omnibox Everywhere, and Contextual Tasks:\n"
+- description: 'Android concrete AI source/provider removal: chrome/browser/permissions/chrome_permissions_client.cc'
+  regex:
+    re_pattern: 'bool\ ChromePermissionsClient::\
+
+      \ \ \ \ IsPrivilegedInternalWebUIForUIRouting\(\ \ //\ overloaded\ private\ version\
+
+      \ \ \ \ \ \ \ \ const\ url::Origin\&\ embedding_origin\)\ \{\
+
+      \ \ return\ embedding_origin\ ==\ GetContextualTasksOrigin\(\)\ \|\|\
+
+      \ \ \ \ \ \ \ \ \ embedding_origin\ ==\ GetOmniboxPopupOrigin\(\)\ \|\|\
+
+      \ \ \ \ \ \ \ \ \ embedding_origin\ ==\ GetOmniboxEverywhereOrigin\(\);\
+
+      \}\
+
+      '
+    replace: "bool ChromePermissionsClient::\n    IsPrivilegedInternalWebUIForUIRouting(  // overloaded private version\n        const url::Origin& embedding_origin) {\n  return\n#if !BUILDFLAG(IS_ANDROID)\nembedding_origin == GetContextualTasksOrigin() ||\n#endif  // !BUILDFLAG(IS_ANDROID)\n         embedding_origin == GetOmniboxPopupOrigin() ||\n         embedding_origin == GetOmniboxEverywhereOrigin();\n}\n"
+- description: 'Android concrete AI source/provider removal: chrome/browser/permissions/chrome_permissions_client.cc'
+  regex:
+    re_pattern: '\
+
+      bool\ ChromePermissionsClient::IsActorOperatingOnWebContents\(\
+
+      \ \ \ \ content::WebContents\*\ web_contents\)\ const\ \{\
+
+      \ \ auto\*\ actor_service\ =\
+
+      \ \ \ \ \ \ actor::ActorKeyedService::Get\(web_contents\->GetBrowserContext\(\)\);\
+
+      \ \ if\ \(!actor_service\)\ \{\
+
+      '
+    replace: "\nbool ChromePermissionsClient::IsActorOperatingOnWebContents(\n    content::WebContents* web_contents) const {\n#if !BUILDFLAG(IS_ANDROID)\n  auto* actor_service =\n      actor::ActorKeyedService::Get(web_contents->GetBrowserContext());\n  if (!actor_service) {\n"
+- description: 'Android concrete AI source/provider removal: chrome/browser/permissions/chrome_permissions_client.cc'
+  regex:
+    re_pattern: '\ \ const\ auto\*\ tab_interface\ =\
+
+      \ \ \ \ \ \ tabs::TabInterface::MaybeGetFromContents\(web_contents\);\
+
+      \ \ return\ tab_interface\ \&\&\ actor_service\->IsActiveOnTab\(\*tab_interface\);\
+
+      \}\
+
+      \
+
+      url::Origin\ ChromePermissionsClient::GetEmbeddingOrigin\(\
+
+      '
+    replace: "  const auto* tab_interface =\n      tabs::TabInterface::MaybeGetFromContents(web_contents);\n  return tab_interface && actor_service->IsActiveOnTab(*tab_interface);\n#else\n  return false;\n#endif  // !BUILDFLAG(IS_ANDROID)\n}\n\nurl::Origin ChromePermissionsClient::GetEmbeddingOrigin(\n"
+- description: Keep the AI selector header outside the Android permission client.
+  regex:
+    pattern: '#include "chrome/browser/permissions/prediction_service/permissions_ai_ui_selector.h"
+
+      '
+    replace: '#if !BUILDFLAG(IS_ANDROID)
+
+      #include "chrome/browser/permissions/prediction_service/permissions_ai_ui_selector.h"
+
+      #endif  // !BUILDFLAG(IS_ANDROID)
+
+      '
+  count: 1
+- description: Retain contextual SafeBrowsing and preference selectors while retiring Android AI selector registration.
+  regex:
+    pattern: "  selectors.emplace_back(std::make_unique<PermissionsAiUiSelector>(\n      Profile::FromBrowserContext(browser_context)));\n"
+    replace: "#if !BUILDFLAG(IS_ANDROID)\n  selectors.emplace_back(std::make_unique<PermissionsAiUiSelector>(\n      Profile::FromBrowserContext(browser_context)));\n\
+      #endif  // !BUILDFLAG(IS_ANDROID)\n"
+  count: 1
+- description: Exclude Android survey-only include chrome/browser/ui/hats/hats_service_factory.h
+  regex:
+    pattern: '#include "chrome/browser/ui/hats/hats_service_factory.h"
+
+      '
+    replace: '#if !BUILDFLAG(IS_ANDROID)
+
+      #include "chrome/browser/ui/hats/hats_service_factory.h"
+
+      #endif  // !BUILDFLAG(IS_ANDROID)
+
+      '
+  count: 1
+- description: Exclude Android survey-only include components/permissions/permission_hats_trigger_helper.h
+  regex:
+    pattern: '#include "components/permissions/permission_hats_trigger_helper.h"
+
+      '
+    replace: '#if !BUILDFLAG(IS_ANDROID)
+
+      #include "components/permissions/permission_hats_trigger_helper.h"
+
+      #endif  // !BUILDFLAG(IS_ANDROID)
+
+      '
+  count: 1
+- description: 'Compile survey-only function only outside Android: void ChromePermissionsClient::TriggerPromptHatsSurveyIfEnabled('
+  regex:
+    pattern: "void ChromePermissionsClient::TriggerPromptHatsSurveyIfEnabled(\n    content::WebContents* web_contents,\n \
+      \   permissions::RequestType request_type,\n    std::optional<permissions::PermissionAction> action,\n    PermissionPromptDisposition\
+      \ prompt_disposition,\n    PermissionPromptDispositionReason prompt_disposition_reason,\n    PermissionRequestGestureType\
+      \ gesture_type,\n    std::optional<base::TimeDelta> prompt_display_duration,\n    bool is_post_prompt,\n    const GURL&\
+      \ gurl,\n    std::optional<permissions::feature_params::PermissionElementPromptPosition>\n        pepc_prompt_position,\n\
+      \    ContentSetting initial_permission_status,\n    base::OnceCallback<void()> hats_shown_callback,\n    PromptOptions\
+      \ prompt_options) {\n  Profile* profile =\n      Profile::FromBrowserContext(web_contents->GetBrowserContext());\n \
+      \ std::optional<GURL> recorded_gurl =\n      profile->GetPrefs()->GetBoolean(\n          unified_consent::prefs::kUrlKeyedAnonymizedDataCollectionEnabled)\n\
+      \          ? std::make_optional(gurl)\n          : std::nullopt;\n\n  auto prompt_parameters =\n      permissions::PermissionHatsTriggerHelper::PromptParametersForHats(\n\
+      \          request_type, action, prompt_disposition, prompt_disposition_reason,\n          gesture_type,\n         \
+      \ std::string(version_info::GetChannelString(chrome::GetChannel())),\n          is_post_prompt ? permissions::kOnPromptResolved\n\
+      \                         : permissions::kOnPromptAppearing,\n          prompt_display_duration,\n          permissions::PermissionHatsTriggerHelper::\n\
+      \              GetOneTimePromptsDecidedBucket(profile->GetPrefs()),\n          recorded_gurl, pepc_prompt_position,\
+      \ initial_permission_status,\n          prompt_options);\n\n  if (!permissions::PermissionHatsTriggerHelper::\n    \
+      \      ArePromptTriggerCriteriaSatisfied(prompt_parameters)) {\n    return;\n  }\n\n  std::optional<\n      permissions::PermissionHatsTriggerHelper::SurveyParametersForHats>\n\
+      \      survey_parameters = permissions::PermissionHatsTriggerHelper::\n          GetSurveyParametersForRequestType(request_type);\n\
+      \n  auto* hats_service =\n      HatsServiceFactory::GetForProfile(profile,\n                                       \
+      \ /*create_if_necessary=*/true);\n  if (!hats_service || !survey_parameters.has_value()) {\n    return;\n  }\n\n  auto\
+      \ survey_data = permissions::PermissionHatsTriggerHelper::\n      SurveyProductSpecificData::PopulateFrom(prompt_parameters);\n\
+      \n#if !BUILDFLAG(IS_ANDROID)\n  hats_service->LaunchSurvey(\n      kHatsSurveyTriggerPermissionsPrompt, std::move(hats_shown_callback),\n\
+      \      base::DoNothing(), survey_data.survey_bits_data,\n      survey_data.survey_string_data, survey_parameters->supplied_trigger_id,\n\
+      #else\n  // Launching surveys on android requires an active web contents.\n  hats_service->LaunchSurveyForWebContents(\n\
+      \      kHatsSurveyTriggerPermissionsPrompt, web_contents,\n      survey_data.survey_bits_data, survey_data.survey_string_data,\n\
+      \      std::move(hats_shown_callback), base::DoNothing(),\n      survey_parameters->supplied_trigger_id,\n#endif\n \
+      \     HatsService::SurveyOptions(survey_parameters->custom_survey_invitation,\n                                 survey_parameters->message_identifier));\n\
+      }"
+    replace: "#if !BUILDFLAG(IS_ANDROID)\nvoid ChromePermissionsClient::TriggerPromptHatsSurveyIfEnabled(\n    content::WebContents*\
+      \ web_contents,\n    permissions::RequestType request_type,\n    std::optional<permissions::PermissionAction> action,\n\
+      \    PermissionPromptDisposition prompt_disposition,\n    PermissionPromptDispositionReason prompt_disposition_reason,\n\
+      \    PermissionRequestGestureType gesture_type,\n    std::optional<base::TimeDelta> prompt_display_duration,\n    bool\
+      \ is_post_prompt,\n    const GURL& gurl,\n    std::optional<permissions::feature_params::PermissionElementPromptPosition>\n\
+      \        pepc_prompt_position,\n    ContentSetting initial_permission_status,\n    base::OnceCallback<void()> hats_shown_callback,\n\
+      \    PromptOptions prompt_options) {\n  Profile* profile =\n      Profile::FromBrowserContext(web_contents->GetBrowserContext());\n\
+      \  std::optional<GURL> recorded_gurl =\n      profile->GetPrefs()->GetBoolean(\n          unified_consent::prefs::kUrlKeyedAnonymizedDataCollectionEnabled)\n\
+      \          ? std::make_optional(gurl)\n          : std::nullopt;\n\n  auto prompt_parameters =\n      permissions::PermissionHatsTriggerHelper::PromptParametersForHats(\n\
+      \          request_type, action, prompt_disposition, prompt_disposition_reason,\n          gesture_type,\n         \
+      \ std::string(version_info::GetChannelString(chrome::GetChannel())),\n          is_post_prompt ? permissions::kOnPromptResolved\n\
+      \                         : permissions::kOnPromptAppearing,\n          prompt_display_duration,\n          permissions::PermissionHatsTriggerHelper::\n\
+      \              GetOneTimePromptsDecidedBucket(profile->GetPrefs()),\n          recorded_gurl, pepc_prompt_position,\
+      \ initial_permission_status,\n          prompt_options);\n\n  if (!permissions::PermissionHatsTriggerHelper::\n    \
+      \      ArePromptTriggerCriteriaSatisfied(prompt_parameters)) {\n    return;\n  }\n\n  std::optional<\n      permissions::PermissionHatsTriggerHelper::SurveyParametersForHats>\n\
+      \      survey_parameters = permissions::PermissionHatsTriggerHelper::\n          GetSurveyParametersForRequestType(request_type);\n\
+      \n  auto* hats_service =\n      HatsServiceFactory::GetForProfile(profile,\n                                       \
+      \ /*create_if_necessary=*/true);\n  if (!hats_service || !survey_parameters.has_value()) {\n    return;\n  }\n\n  auto\
+      \ survey_data = permissions::PermissionHatsTriggerHelper::\n      SurveyProductSpecificData::PopulateFrom(prompt_parameters);\n\
+      \n#if !BUILDFLAG(IS_ANDROID)\n  hats_service->LaunchSurvey(\n      kHatsSurveyTriggerPermissionsPrompt, std::move(hats_shown_callback),\n\
+      \      base::DoNothing(), survey_data.survey_bits_data,\n      survey_data.survey_string_data, survey_parameters->supplied_trigger_id,\n\
+      #else\n  // Launching surveys on android requires an active web contents.\n  hats_service->LaunchSurveyForWebContents(\n\
+      \      kHatsSurveyTriggerPermissionsPrompt, web_contents,\n      survey_data.survey_bits_data, survey_data.survey_string_data,\n\
+      \      std::move(hats_shown_callback), base::DoNothing(),\n      survey_parameters->supplied_trigger_id,\n#endif\n \
+      \     HatsService::SurveyOptions(survey_parameters->custom_survey_invitation,\n                                 survey_parameters->message_identifier));\n\
+      }\n#endif  // !BUILDFLAG(IS_ANDROID)"
+  count: 1
+- description: Compile permission survey counter/launch only outside Android
+  regex:
+    pattern: "  auto content_setting_type = RequestTypeToContentSettingsType(request_type);\n  if (content_setting_type.has_value())\
+      \ {\n    permissions::PermissionHatsTriggerHelper::\n        IncrementOneTimePermissionPromptsDecidedIfApplicable(\n\
+      \            content_setting_type.value(), profile->GetPrefs());\n  }\n\n  TriggerPromptHatsSurveyIfEnabled(\n     \
+      \ web_contents, request_type, std::make_optional(action),\n      prompt_disposition, prompt_disposition_reason, gesture_type,\n\
+      \      std::make_optional(prompt_display_duration), /*is_post_prompt=*/true,\n      web_contents->GetPrimaryMainFrame()->GetLastCommittedOrigin().GetURL(),\n\
+      \      pepc_prompt_position, initial_permission_status, base::DoNothing(),\n      prompt_options);"
+    replace: "#if !BUILDFLAG(IS_ANDROID)\n  auto content_setting_type = RequestTypeToContentSettingsType(request_type);\n\
+      \  if (content_setting_type.has_value()) {\n    permissions::PermissionHatsTriggerHelper::\n        IncrementOneTimePermissionPromptsDecidedIfApplicable(\n\
+      \            content_setting_type.value(), profile->GetPrefs());\n  }\n\n  TriggerPromptHatsSurveyIfEnabled(\n     \
+      \ web_contents, request_type, std::make_optional(action),\n      prompt_disposition, prompt_disposition_reason, gesture_type,\n\
+      \      std::make_optional(prompt_display_duration), /*is_post_prompt=*/true,\n      web_contents->GetPrimaryMainFrame()->GetLastCommittedOrigin().GetURL(),\n\
+      \      pepc_prompt_position, initial_permission_status, base::DoNothing(),\n      prompt_options);\n#endif  // !BUILDFLAG(IS_ANDROID)"
+  count: 1
+- description: Exclude survey-only gesture query/local from Android permission resolution
+  regex:
+    pattern: '  PermissionRequestGestureType gesture_type = request->GetGestureType();'
+    replace: "#if !BUILDFLAG(IS_ANDROID)\n  PermissionRequestGestureType gesture_type = request->GetGestureType();\n#endif\
+      \  // !BUILDFLAG(IS_ANDROID)"
+  count: 1
+- description: Supply the complete local PermissionActionsHistory type directly in the existing Android include block
+  regex:
+    pattern: '#include "components/permissions/android/permissions_android_feature_map.h"
+
+      #include "components/permissions/permission_request_manager.h"
+
+      '
+    replace: '#include "components/permissions/android/permissions_android_feature_map.h"
+
+      #include "components/permissions/permission_actions_history.h"
+
+      #include "components/permissions/permission_request_manager.h"
+
+      '
+  count: 1
